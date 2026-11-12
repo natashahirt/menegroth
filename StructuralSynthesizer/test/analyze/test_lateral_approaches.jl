@@ -8,7 +8,8 @@ using StructuralSynthesizer
 function _girder_struc(; release_start=:default, with_wall=true)
     girder = Beam([1], 4.0u"m"; role=:girder)
     joist = Beam([2], 4.0u"m"; role=:joist)
-    segs = [Segment(1, 4.0u"m"; release_start=release_start), Segment(2, 4.0u"m")]
+    segs = [StructuralSynthesizer.Segment(1, 4.0u"m"; release_start=release_start),
+            StructuralSynthesizer.Segment(2, 4.0u"m")]
     walls = with_wall ? [Wall([3], 4.0u"m"; thickness=0.3u"m", x2=5.0)] : Wall{typeof(1.0u"m")}[]
     return (beams=[girder, joist], segments=segs, walls=walls)
 end
@@ -18,6 +19,8 @@ end
     @test_throws ArgumentError WallsSeismicSystem()
     @test_throws ArgumentError WallsSeismicSystem(:F)
     @test WallsSeismicSystem(:B6).row === :B6
+    @test WallsSeismicSystem(:A1).row === :A1
+    @test WallsSeismicSystem(:B4).row === :B4
     design = LateralDesign(; system=WallsSeismicSystem(:A3), assignment=BuildingUnit())
     @test DesignParameters(lateral=design).lateral.system isa WallsSeismicSystem
     @test design.system_x.row === :A3 && design.system_y.row === :A3
@@ -31,6 +34,18 @@ end
     @test_throws ArgumentError LateralDesign(; system_x=WallsSeismicSystem(:A3),
                                             system_y=WallsSeismicSystem(:B6),
                                             assignment=BuildingUnit())
+    @test_throws ArgumentError LateralDesign(; system_x=WallsSeismicSystem(:A1),
+                                            system_y=WallsSeismicSystem(:B4),
+                                            assignment=BuildingUnit())
+    both_bearing = LateralDesign(; system_x=WallsSeismicSystem(:A1),
+                                 system_y=WallsSeismicSystem(:A3),
+                                 assignment=BuildingUnit())
+    @test both_bearing.system_x.row === :A1
+    @test both_bearing.system_y.row === :A3
+    both_frames = LateralDesign(; system_x=WallsSeismicSystem(:B4),
+                                system_y=WallsSeismicSystem(:B6),
+                                assignment=BuildingUnit())
+    @test both_frames.system_x.row === :B4
     @test_throws ArgumentError StructuralSynthesizer._elf_direction_factors(
         :y, 4.0, 4.0, 2.5, 5.0, nothing, 2.5)
     Ry, Cy, Ωy = StructuralSynthesizer._elf_direction_factors(
@@ -68,8 +83,7 @@ end
                                                       WallsSeismicSystem(:A3))
 
     @test isempty(system_checks(struc, WallsSeismicSystem(:A3); seismic_design_category=:C))
-    @test_throws ArgumentError system_checks(struc, WallsSeismicSystem(:A3);
-                                             seismic_design_category=:D)
+    @test isempty(system_checks(struc, WallsSeismicSystem(:A3); seismic_design_category=:D))
     @test_throws ArgumentError system_checks(struc, WallsSeismicSystem(:A3);
                                              seismic_design_category=:G)
 

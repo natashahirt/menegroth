@@ -1028,3 +1028,31 @@ end
                                        beam_shear=12.0u"kip")
     @test held.Ve ≈ 15.0u"kip"
 end
+
+# §18.2.5 through §20.2.2.5, required by §18.14.3.3(a).
+@testset "Special-moment-frame materials are Grade 60 or 80 and at least 3000 psi" begin
+    ok = special_moment_frame_materials(4000.0u"psi", 60.0u"ksi")
+    @test ok.ok
+    @test !special_moment_frame_materials(2500.0u"psi", 60.0u"ksi").ok
+    @test !special_moment_frame_materials(4000.0u"psi", 40.0u"ksi").ok
+    @test special_moment_frame_materials(4000.0u"psi", 80.0u"ksi").ok
+    @test !special_moment_frame_materials(4000.0u"psi", 100.0u"ksi").ok
+    @test special_moment_frame_materials(5000.0u"psi", 60.0u"ksi"; lightweight = true).ok
+    @test !special_moment_frame_materials(6000.0u"psi", 60.0u"ksi"; lightweight = true).ok
+end
+
+# §18.14.3.3(b): the beam stirrups follow §18.6.5 and stay within d/2.
+@testset "A gravity beam in a high category is designed for its probable shear" begin
+    sec = RCBeamSection(; b = 12.0u"inch", h = 24.0u"inch", bar_size = 8, n_bars = 4,
+                        cover = 1.5u"inch", stirrup_size = 3)
+    md = detail_beam(sec; span = 360.0u"inch", supports = (20.0u"inch", 20.0u"inch"),
+                     exterior = (true, true), Vu = 40.0u"kip",
+                     fc = 4000.0u"psi", fy = 60_000.0u"psi", fyt = 60_000.0u"psi",
+                     gravity_seismic = true)
+    stirrups = only(g for g in md.groups if g.role === :stirrup)
+    @test occursin("18.6.5", stirrups.note)
+    @test any(n -> occursin("18.14.3.2", n), md.notes)
+    gaps = diff(stirrups.x_positions)
+    @test maximum(gaps) <= ustrip(u"m", sec.d / 2) + 1e-6
+    @test !any(w -> occursin("20.2.2.5", w), md.warnings)
+end

@@ -55,7 +55,8 @@ function detail_beam(sec::Union{RCBeamSection, RCTBeamSection}; span::Length,
                      supports::Tuple, exterior::Tuple{Bool, Bool}, fc, fy, fyt,
                      Vu, λ::Real = 1.0, coating::Symbol = :uncoated, Nu = nothing,
                      top_bars = nothing, stock::Length = 60.0u"ft",
-                     first_stirrup::Length = 2.0u"inch")
+                     first_stirrup::Length = 2.0u"inch",
+                     gravity_seismic::Bool = false)
     md = MemberDetail(:beam)
     m(x) = ustrip(u"m", x)
     lam = _detailing_λ(λ)
@@ -160,6 +161,32 @@ function detail_beam(sec::Union{RCBeamSection, RCTBeamSection}; span::Length,
     sd = design_beam_shear(uconvert(u"lbf", Vu), _beam_web(sec), sec.d, fc, fyt;
                            λ = λ, stirrup_bar = sec.stirrup_size,
                            Nu = Nu, Ag = isnothing(Nu) ? nothing : Ag)
+    shear_clause = ""
+    if gravity_seismic
+        limit = gravity_beam_transverse_limit(sec.d, bar_diameter(sec.bar_size);
+                                              Pu = Nu === nothing ? 0.0u"N" : Nu,
+                                              Ag = Ag, fc = fc)
+        seismic = gravity_beam_seismic_shear(sec, ℓn * u"m", Vu, fc, fy;
+                                            Nu = Nu === nothing ? 0.0u"N" : Nu)
+        if seismic.ok
+            sd = design_beam_shear(seismic.Ve, _beam_web(sec), sec.d, fc, fyt;
+                                   λ = λ, stirrup_bar = sec.stirrup_size,
+                                   Nu = Nu, Ag = Ag,
+                                   omit_concrete = seismic.concrete_omitted)
+            s_seis = min(sd.s_design, limit.spacing)
+            sd = merge(sd, (s_design = s_seis,))
+            vc = seismic.concrete_omitted ? "Vc = 0" : "Vc counted"
+            shear_clause = ", Ve $(round(ustrip(u"kip", seismic.Ve); digits = 1)) kip, $vc (§18.6.5)"
+        else
+            push!(md.warnings, "probable moment did not converge; stirrups use the factored shear (§18.6.5)")
+            sd = merge(sd, (s_design = min(sd.s_design, limit.spacing),))
+        end
+        mats = special_moment_frame_materials(fc, fy; lightweight = λ < 1)
+        append!(md.warnings, mats.warnings)
+        append!(md.notes, mats.notes)
+        append!(md.notes, special_frame_splice_notes())
+        push!(md.notes, "transverse reinforcement throughout at no more than d/2 (§18.14.3.2(a))")
+    end
     sd.section_adequate || push!(md.warnings,
         "shear: Vs required exceeds 8√f′c·bw·d; the section is too small (§22.5.1.2)")
     s = m(sd.s_design)
@@ -185,7 +212,7 @@ function detail_beam(sec::Union{RCBeamSection, RCTBeamSection}; span::Length,
                                   length = len * u"m", shape = :closed_stirrup,
                                   path = [(0.0, cov + ds / 2), (0.0, h - cov - ds / 2)],
                                   x_positions = xs,
-                                  note = "closed, 135-degree hooks, at $(round(s / 0.0254; digits = 1)) in."))
+                                  note = "closed, 135-degree hooks, at $(round(s / 0.0254; digits = 1)) in.$(shear_clause)"))
     end
 
     # Beam carried past a continuous support as far as its bars run; supports

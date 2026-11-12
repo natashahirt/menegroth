@@ -56,6 +56,188 @@ function _face_crossties(positions::Vector{Float64}, db::Float64)
 end
 
 """
+Lap the continuing bars in the center half of the clear height.
+
+# Citation
+ACI 318-19 §18.7.4.4 (corpus: aci-318-19, PDF page 309).
+"""
+function _gravity_center_lap!(md, sec, H, hs, cs, z_bar, bs, n, fc, fy; continues, λ, coating)
+    m(x) = ustrip(u"m", x)
+    clear = H - hs
+    if bs > 11
+        push!(md.warnings, "No. $(bs) column bars cannot be lap spliced (§25.5.1.1); " *
+                           "a mechanical splice is needed and is not detailed")
+        push!(md.groups, BarGroup(; mark = "C1", role = :longitudinal, direction = :along,
+                                  bar_size = bs, count = n, length = H * u"m",
+                                  path = [(0.0, z_bar), (H, z_bar)],
+                                  note = "no lap; a mechanical splice is required"))
+        return nothing
+    end
+    lap = m(column_lap_length(sec, fc, fy; λ = λ, coating = coating))
+    # §18.7.4.4 (corpus: aci-318-19, PDF page 309): the lap is a tension lap
+    # and it lies in the center half of the member.
+    zone0, zone1 = clear / 4, 3 * clear / 4
+    if lap > clear / 2 + 1e-6
+        push!(md.warnings, "the tension lap of $(round(lap / 0.0254; digits = 1)) in. " *
+                           "is longer than the center half of the clear height (§18.7.4.4)")
+    end
+    lap_end = min(zone0 + lap, zone1)
+    db = m(bar_diameter(bs))
+    if continues
+        path = [(zone0, z_bar), (H, z_bar)]
+        shape = :straight
+        story = H - zone0
+        note = "story bars, lapped in the center half (§18.7.4.4)"
+    else
+        top = H - cs - db / 2
+        tail = m(standard_hook(bs; angle = 90).extension)
+        path = [(zone0, z_bar), (top, z_bar), (top, z_bar - tail)]
+        shape = :hook_end
+        story = (top - zone0) + m(hook_centerline_length(bs; angle = 90))
+        note = "story bars, lapped in the center half and hooked into the roof (§18.7.4.4)"
+    end
+    push!(md.groups, BarGroup(; mark = "C1", role = :longitudinal, direction = :along,
+                              bar_size = bs, count = n, length = story * u"m",
+                              shape = shape, path = path, laps = 1, note = note))
+    push!(md.groups, BarGroup(; mark = "C1b", role = :longitudinal, direction = :along,
+                              bar_size = bs, count = n, length = (lap_end - zone0) * u"m",
+                              path = [(zone0, z_bar), (lap_end, z_bar)],
+                              note = "lap from the story below, $(round((lap_end - zone0) / 0.0254; digits = 1)) in."))
+    return nothing
+end
+
+"""
+Hoops over ℓo at each joint face, through the middle of the column, and
+through the joint.
+
+# Citation
+ACI 318-19 §18.7.5.1 and §18.7.5.3–§18.7.5.5 (corpus: aci-318-19, PDF pages 309–312).
+ACI 318-19 §18.4.4.4 and §15.3.1.3 (PDF pages 297 and 159).
+"""
+function _detail_gravity_hoops!(md, sec, H, hs, s_ordinary, bs, tie_bar, cov, dt, fc, fy, fyt;
+                               Pu, beam_depth, shear_end = nothing, shear_mid = nothing)
+    m(x) = ustrip(u"m", x)
+    Ag = sec.b * sec.h
+    ratio = ustrip(u"inch^2", sec.As_total) / ustrip(u"inch^2", Ag)
+    (0.01 - 1e-9 <= ratio <= 0.06 + 1e-9) || push!(md.warnings,
+        "longitudinal ratio $(round(ratio; digits = 4)) is outside 0.01Ag to 0.06Ag (§18.7.4.1)")
+    clear = H - hs
+    ℓd = m(tension_development_length(bs, fc, fy, _detailing_λ(1.0); ψt = 1.0))
+    1.25 * ℓd <= clear / 2 + 1e-6 || push!(md.warnings,
+        "1.25ℓd = $(round(1.25 * ℓd / 0.0254; digits = 1)) in. exceeds half the clear height (§18.7.4.3)")
+    least = min(m(sec.b), m(sec.h))
+    db = bar_diameter(bs)
+    hx = _column_face_hx(sec)
+    hx_in = ustrip(u"inch", hx)
+    if hx_in > 14
+        push!(md.warnings, "hx = $(round(hx_in; digits = 1)) in. exceeds 14 in. (§18.7.5.2)")
+    end
+    ℓo = min(m(special_column_hoop_length(least * u"m", clear * u"m")), clear)
+    # Shear spacing can only close the hoops. It does not relax §18.7.5.3.
+    s_end = min(m(_special_hoop_spacing(sec, least * u"m", db, fy, hx, fc, fyt, Pu)), s_ordinary)
+    shear_end === nothing || (s_end = min(s_end, m(shear_end)))
+    grade = coupling_beam_grade(fy)
+    from_bar = (grade == 60 ? 6 : 5) * db
+    s_mid = m(min(s_ordinary * u"m", 6.0u"inch", from_bar))
+    shear_mid === nothing || (s_mid = min(s_mid, m(shear_mid)))
+    # §18.4.3.3(a)–(c), which §18.4.4.4 applies inside the joint (PDF page 296).
+    joint_bar = grade == 60 ? min(8 * db, 8.0u"inch") : min(6 * db, 6.0u"inch")
+    s_joint = m(min(joint_bar, least * u"m" / 2))
+    w_cl = m(sec.b) - 2cov - dt
+    h_cl = m(sec.h) - 2cov - dt
+    len = _closed_loop_length(w_cl, h_cl, tie_bar; hook_angle = 135)
+    path = [(0.0, -m(sec.b) / 2 + cov + dt / 2), (0.0, m(sec.b) / 2 - cov - dt / 2)]
+    function place(mark, xs, note)
+        isempty(xs) && return
+        push!(md.groups, BarGroup(; mark = mark, role = :tie, direction = :transverse,
+                                  bar_size = tie_bar, count = length(xs), length = len * u"m",
+                                  shape = :closed_tie, path = path, x_positions = xs, note = note))
+        _add_crossties!(md, sec, xs, tie_bar, cov, dt; mark_base = mark)
+    end
+    bot = _spaced_positions(0.0, ℓo, s_end)
+    top0 = clear - ℓo
+    top = top0 <= ℓo + 1e-9 ? Float64[] : _spaced_positions(top0, clear, s_end)
+    place("C2", bot, "hoops over ℓo above the lower joint, $(round(s_end / 0.0254; digits = 1)) in. (§18.7.5.3)")
+    place("C2t", top, "hoops over ℓo below the upper joint, $(round(s_end / 0.0254; digits = 1)) in. (§18.7.5.3)")
+    mid0 = isempty(bot) ? 0.0 : bot[end]
+    mid1 = isempty(top) ? clear : top[1]
+    mid = mid1 > mid0 + s_mid ? _spaced_positions(mid0 + s_mid, mid1 - s_mid, s_mid) : Float64[]
+    place("C3", mid, "hoops between the ℓo zones, $(round(s_mid / 0.0254; digits = 1)) in. (§18.7.5.5)")
+    depth = m(beam_depth)
+    joint0 = H - hs
+    joint1 = joint0 + min(depth, hs)
+    joint = _spaced_positions(joint0, joint1, s_joint)
+    if length(joint) < 2 && joint1 > joint0
+        joint = [joint0, joint1]
+        push!(md.warnings, "the joint is shallower than the §18.4.4.4 spacing; " *
+                           "two hoop layers are placed at its faces (§15.3.1.3)")
+    end
+    place("J1", joint, "joint hoops, $(round(s_joint / 0.0254; digits = 1)) in. (§18.4.4.4, §15.3.1.3)")
+    return nothing
+end
+
+"Largest center-to-center gap of bars on one column face."
+function _column_face_hx(sec::RCColumnSection)
+    pts = section_rebar_positions(sec)
+    isempty(pts) && return max(sec.b, sec.h)
+    ys = [p[1] for p in pts]
+    zs = [p[2] for p in pts]
+    ymin, ymax = extrema(zs)
+    xmin, xmax = extrema(ys)
+    tol = 1e-4
+    function gap(sel, coord)
+        xs = sort(Float64[coord[i] for i in eachindex(coord) if sel(i)])
+        length(xs) < 2 && return 0.0
+        return maximum(xs[i + 1] - xs[i] for i in 1:(length(xs) - 1))
+    end
+    hx = maximum((
+        gap(i -> abs(zs[i] - ymin) <= tol, ys),
+        gap(i -> abs(zs[i] - ymax) <= tol, ys),
+        gap(i -> abs(ys[i] - xmin) <= tol, zs),
+        gap(i -> abs(ys[i] - xmax) <= tol, zs),
+    ))
+    return max(hx, 1e-6) * u"m"
+end
+
+"""
+Spacing of special-column hoops over ℓo. The least of §18.7.5.3 and the
+spacing that supplies Table 18.7.5.4.
+"""
+function _special_hoop_spacing(sec, least, db, fy, hx, fc, fyt, Pu)
+    grade = coupling_beam_grade(fy)
+    from_bar = (grade == 60 ? 6 : 5) * db
+    so = transverse_spacing_so(hx).so
+    # §18.7.5.3 (corpus: aci-318-19, PDF pages 310–311).
+    s = min(least / 4, from_bar, so)
+    cover = sec.cover
+    core_x = sec.b - 2 * cover
+    core_y = sec.h - 2 * cover
+    Ag = sec.b * sec.h
+    Ach = core_x * core_y
+    amount = boundary_transverse_amount(Ag, Ach, fc, fyt)
+    ratio = amount.required
+    fc_psi = ustrip(u"psi", fc)
+    pu = Pu === nothing ? 0.0 : ustrip(u"lbf", Pu)
+    ag = ustrip(u"inch^2", Ag)
+    if pu > 0.3 * ag * fc_psi || fc_psi > 10_000
+        kf = max(fc_psi / 25_000 + 0.6, 1.0)
+        nl = length(sec.bars)
+        if nl > 2 && Pu !== nothing
+            kn = nl / (nl - 2)
+            # Table 18.7.5.4(c) (corpus: aci-318-19, PDF page 311).
+            extra = 0.2 * kf * kn * ustrip(u"N", Pu) /
+                    (ustrip(u"Pa", fyt) * ustrip(u"m^2", Ach))
+            ratio = max(ratio, extra)
+        end
+    end
+    legs = column_tie_legs(sec)
+    Ash = min(legs.x, legs.y) * bar_area(sec.tie_bar_size)
+    bc = max(core_x, core_y)
+    s_ash = Ash / (ratio * bc)
+    return min(s, s_ash)
+end
+
+"""
     detail_column(sec; height, slab_above, fc, fy, kwargs...) -> MemberDetail
 
 Bars of one story of a rectangular or circular RC column.
@@ -70,6 +252,16 @@ Bars of one story of a rectangular or circular RC column.
 - `tie_spacing`: shear spacing from [`design_column_shear`](@ref). The ties
   are placed at the lesser of this and §25.7.2.1. A larger value does not
   relax the code spacing.
+- `gravity_seismic`: the column is outside the seismic force-resisting
+  system in Seismic Design Category D, E, or F, and the moments from the
+  design displacement are not calculated, so §18.14.3.3 applies. Hoops follow
+  §18.7.5 over ℓo and through the middle, the lap sits in the center half,
+  and the joint is hooped under §18.4.4.
+- `Pu`: largest factored compression, including earthquake, for the
+  §18.7.5.4 amount. Omitted, it is taken as zero.
+- `material` and `axials`: with these, the hoops are spaced for the
+  probable-moment shear of §18.7.6. `Vu_x` and `Vu_y` are the factored
+  shears from analysis. `beam_shear` is the cap from the beams at the joint.
 
 # Bars
 - Longitudinal: from the floor to the floor above plus a lap when the column
@@ -89,7 +281,14 @@ function detail_column(sec::Union{RCColumnSection, RCCircularSection}; height::L
                        slab_above::Length, slab_cover::Length = 0.75u"inch",
                        continues::Bool = true, fc, fy, fyt = fy, λ::Real = 1.0,
                        coating::Symbol = :uncoated, stock::Length = 60.0u"ft",
-                       tie_spacing::Union{Nothing, Length} = nothing)
+                       tie_spacing::Union{Nothing, Length} = nothing,
+                       gravity_seismic::Bool = false,
+                       Pu::Union{Nothing, Force} = nothing,
+                       beam_depth::Union{Nothing, Length} = nothing,
+                       material::Union{Nothing, ReinforcedConcreteMaterial} = nothing,
+                       axials = (),
+                       Vu_x = 0.0u"N", Vu_y = 0.0u"N",
+                       beam_shear = nothing)
     md = MemberDetail(:column)
     m(x) = ustrip(u"m", x)
     lam = _detailing_λ(λ)
@@ -106,9 +305,18 @@ function detail_column(sec::Union{RCColumnSection, RCCircularSection}; height::L
     tie_bar = circular ? (bs >= 11 ? 4 : 3) : sec.tie_bar_size   # §25.7.2.2
     dt = m(bar_diameter(tie_bar))
 
+    if gravity_seismic && circular
+        push!(md.warnings, "gravity seismic detailing is placed for a rectangular column; " *
+                           "this circular column keeps the ordinary spiral")
+    end
+    seismic = gravity_seismic && !circular
+
     # ── Longitudinal bars ──────────────────────────────────────────────────
     z_bar = width / 2 - cov - dt - db / 2
-    if continues
+    if seismic
+        _gravity_center_lap!(md, sec, H, hs, cs, z_bar, bs, n, fc, fy;
+                             continues = continues, λ = λ, coating = coating)
+    elseif continues
         if bs > 11
             push!(md.warnings, "No. $(bs) column bars cannot be lap spliced (§25.5.1.1); " *
                                "a mechanical splice is needed and is not detailed")
@@ -136,8 +344,10 @@ function detail_column(sec::Union{RCColumnSection, RCCircularSection}; height::L
             "and the slab gives $(round((hs - cs) / 0.0254; digits = 1)) in. (§25.4.9)")
     end
     stock_m = m(stock)
-    md.groups[end].length > stock && push!(md.warnings,
-        "column bars of $(round(m(md.groups[end].length); digits = 2)) m exceed the " *
+    story = findfirst(g -> g.mark == "C1", md.groups)
+    checked = story === nothing ? md.groups[end] : md.groups[story]
+    checked.length > stock && push!(md.warnings,
+        "column bars of $(round(m(checked.length); digits = 2)) m exceed the " *
         "$(round(stock_m; digits = 2)) m stock length")
 
     # ── Transverse bars ────────────────────────────────────────────────────
@@ -154,6 +364,27 @@ function detail_column(sec::Union{RCColumnSection, RCCircularSection}; height::L
             s_shear = m(tie_spacing)
             s_shear > 1e-9 && (s = min(s, s_shear))
         end
+        shear_end = shear_mid = nothing
+        if seismic && material !== nothing
+            range = isempty(axials) && Pu !== nothing ? (Pu,) : axials
+            designed = special_column_shear_design(sec, material, (H - hs) * u"m";
+                                                   axials = range, Vu_x = Vu_x, Vu_y = Vu_y,
+                                                   beam_shear = beam_shear)
+            shear_end = designed.spacing
+            shear_mid = designed.spacing_middle
+            ve = round(ustrip(u"kip", max(designed.Ve_x, designed.Ve_y)); digits = 1)
+            vc = designed.concrete_omitted ? "Vc = 0 over ℓo" : "Vc counted"
+            push!(md.notes, "design shear $(ve) kip, $vc (§18.7.6)")
+            designed.ok || push!(md.warnings,
+                "the section cannot provide the §18.7.6 shear; the hoops are at the closest spacing")
+        elseif seismic
+            push!(md.warnings, "§18.7.6 shear is not computed until the column material is passed")
+        end
+        if seismic
+            _detail_gravity_hoops!(md, sec, H, hs, s, bs, tie_bar, cov, dt, fc, fy, fyt;
+                                   Pu = Pu, beam_depth = beam_depth === nothing ? slab_above : beam_depth,
+                                   shear_end = shear_end, shear_mid = shear_mid)
+        else
         xs = _spaced_positions(s / 2, top_limit - s / 2, s)
         if circular
             dcl = width - 2cov - dt
@@ -176,6 +407,7 @@ function detail_column(sec::Union{RCColumnSection, RCCircularSection}; height::L
         if !circular
             _add_crossties!(md, sec, xs, tie_bar, cov, dt)
         end
+        end
     end
 
     # Column to the underside of the slab, the slab (drawn one column width past
@@ -187,12 +419,152 @@ function detail_column(sec::Union{RCColumnSection, RCCircularSection}; height::L
         push!(md.outline, (H, ext[2] + cov, -width / 2, width / 2))
     # Ties and spirals are a spacing, not one area. The longitudinal pair is
     # the section's As against the bars placed.
+    placed = seismic ? _placed_area_in2(md, :longitudinal; mark = "C1") :
+                       _placed_area_in2(md, :longitudinal)
     record_steel_area!(md, "longitudinal", ustrip(u"inch^2", sec.As_total),
-                       _placed_area_in2(md, :longitudinal); source = "the section As")
+                       placed; source = "the section As")
+    _locate_column!(md, sec, cov, dt)
+    if gravity_seismic
+        mats = special_moment_frame_materials(fc, fy; lightweight = λ < 1)
+        append!(md.warnings, mats.warnings)
+        append!(md.notes, mats.notes)
+        append!(md.notes, special_frame_splice_notes())
+    end
     return md
 end
 
-function _add_crossties!(md, sec::RCColumnSection, xs, tie_bar, cov, dt)
+"""
+Centerlines in the section frame: `x` up from the floor, `y` and `z` the
+centroid axes of the section (`y` across `b`). A hooked bar turns toward the
+centroid by the same tail the elevation draws. Ties are the closed loop at
+each station. Crossties cross the section at the bars §25.7.2.3 supports
+between the corners.
+"""
+function _locate_column!(md::MemberDetail, sec, cov::Float64, dt::Float64)
+    m(x) = ustrip(u"m", x)
+    circular = sec isa RCCircularSection
+    b = circular ? m(sec.D) : m(sec.b)
+    h = circular ? m(sec.D) : m(sec.h)
+    positions = section_rebar_positions(sec)
+    for i in eachindex(md.groups)
+        g = md.groups[i]
+        if g.role === :longitudinal
+            md.groups[i] = _with_centerlines(g, _column_long_wires(g.path, positions))
+        elseif g.role === :spiral
+            md.groups[i] = _with_centerlines(g, [_spiral_wire(g.path, g.x_positions)])
+        elseif g.role === :tie
+            loop = circular ? _circle_loop(b / 2 - cov - dt / 2) : _column_tie_loop(sec)
+            md.groups[i] = _with_centerlines(g, _wires_at_x(loop, g.x_positions))
+        end
+    end
+    _locate_crossties!(md, sec, cov, dt)
+    shaft = md.outline[1]
+    md.solid = (shaft[1], shaft[2], -b / 2, b / 2, -h / 2, h / 2)
+    return nothing
+end
+
+function _column_long_wires(path, positions)
+    length(path) >= 2 || return Vector{NTuple{3, Float64}}[]
+    hooked = length(path) >= 3 && abs(path[end][1] - path[end - 1][1]) < 1e-9
+    x0 = path[1][1]
+    x1 = hooked ? path[end - 1][1] : path[end][1]
+    tail = hooked ? abs(path[end][2] - path[end - 1][2]) : 0.0
+    wires = Vector{NTuple{3, Float64}}[]
+    for (y, z) in positions
+        if !hooked
+            push!(wires, [(x0, y, z), (x1, y, z)])
+            continue
+        end
+        r = hypot(y, z)
+        tip = r < 1e-8 ? (x1, y, z) : (x1, y * max(r - tail, 0.0) / r, z * max(r - tail, 0.0) / r)
+        push!(wires, [(x0, y, z), (x1, y, z), tip])
+    end
+    return wires
+end
+
+function _column_tie_loop(sec::RCColumnSection)
+    tr = section_transverse(sec)
+    tr === nothing && return NTuple{2, Float64}[]
+    return tr.loop
+end
+
+function _circle_loop(radius::Float64)
+    return [(radius * cos(t), radius * sin(t)) for t in range(0, 2π; length = 25)]
+end
+
+function _spiral_wire(path, xs)
+    isempty(path) && return NTuple{3, Float64}[]
+    R = maximum(abs(p[2]) for p in path)
+    x1 = maximum(p[1] for p in path)
+    pitch = length(xs) >= 2 ? abs(xs[2] - xs[1]) : max(x1, 1e-6)
+    turns = x1 / pitch
+    n = max(16, round(Int, turns * 16))
+    return [(x1 * i / n, R * sin(2π * turns * i / n), R * cos(2π * turns * i / n)) for i in 0:n]
+end
+
+"Supported bars strictly between the two corners, at the same stations §25.7.2.3 uses."
+function _interior_supported(positions::Vector{Float64}, db::Float64, limit::Float64)
+    n = length(positions)
+    n <= 2 && return Float64[]
+    supported = falses(n)
+    supported[1] = supported[n] = true
+    for i in 3:2:(n - 1)
+        supported[i] = true
+    end
+    for i in 2:(n - 1)
+        supported[i] && continue
+        gap = minimum(abs(positions[i] - positions[k]) for k in 1:n if supported[k]) - db
+        gap > limit + 1e-9 && (supported[i] = true)
+    end
+    return [positions[i] for i in 2:(n - 1) if supported[i]]
+end
+
+function _locate_crossties!(md::MemberDetail, sec::RCCircularSection, cov, dt)
+    return nothing
+end
+
+function _locate_crossties!(md::MemberDetail, sec::RCColumnSection, cov::Float64, dt::Float64)
+    m(x) = ustrip(u"m", x)
+    pts = section_rebar_positions(sec)
+    isempty(pts) && return nothing
+    ys = [p[1] for p in pts]
+    zs = [p[2] for p in pts]
+    ymin, ymax = extrema(ys)
+    zmin, zmax = extrema(zs)
+    tol = 1e-4
+    face(sel, coord) = sort(Float64[coord[i] for i in eachindex(coord) if sel(i)])
+    bottom = face(i -> abs(zs[i] - zmin) <= tol, ys)
+    top = face(i -> abs(zs[i] - zmax) <= tol, ys)
+    left = face(i -> abs(ys[i] - ymin) <= tol, zs)
+    right = face(i -> abs(ys[i] - ymax) <= tol, zs)
+    bs = _column_bar_size(sec)
+    db = m(bar_diameter(bs))
+    limit = m(6.0u"inch")
+    across_y = length(_interior_supported(bottom, db, limit)) >= length(_interior_supported(top, db, limit)) ?
+               _interior_supported(bottom, db, limit) : _interior_supported(top, db, limit)
+    across_z = length(_interior_supported(left, db, limit)) >= length(_interior_supported(right, db, limit)) ?
+               _interior_supported(left, db, limit) : _interior_supported(right, db, limit)
+    half_y = m(sec.b) / 2 - cov - dt / 2
+    half_z = m(sec.h) / 2 - cov - dt / 2
+    specs = Tuple{Symbol, Vector{Float64}, Float64}[]
+    length(across_y) > 0 && push!(specs, (:z, across_y, half_z))
+    length(across_z) > 0 && push!(specs, (:y, across_z, half_y))
+    groups = findall(g -> g.role === :crosstie, md.groups)
+    length(groups) == length(specs) || throw(ArgumentError(
+        "$(length(groups)) crosstie groups and $(length(specs)) supported faces"))
+    for (i, (along, coords, half)) in zip(groups, specs)
+        g = md.groups[i]
+        wires = Vector{NTuple{3, Float64}}[]
+        for x in g.x_positions, c in coords
+            push!(wires, along === :z ? [(x, c, -half), (x, c, half)] :
+                                        [(x, -half, c), (x, half, c)])
+        end
+        md.groups[i] = _with_centerlines(g, wires)
+    end
+    return nothing
+end
+
+function _add_crossties!(md, sec::RCColumnSection, xs, tie_bar, cov, dt; mark_base = "C")
     m(x) = ustrip(u"m", x)
     hook = m(hook_centerline_length(tie_bar; angle = 135, role = :stirrup))
     # The same leg count design_column_shear used for Av.
@@ -201,7 +573,8 @@ function _add_crossties!(md, sec::RCColumnSection, xs, tie_bar, cov, dt)
     n_h = legs.x - 2
     for (k, (nct, across)) in enumerate(((n_v, m(sec.h) - 2cov - dt), (n_h, m(sec.b) - 2cov - dt)))
         nct > 0 || continue
-        push!(md.groups, BarGroup(; mark = "C$(2 + k)", role = :crosstie, direction = :transverse,
+        mark = mark_base == "C" ? "C$(2 + k)" : "$(mark_base)$(k == 1 ? "v" : "h")"
+        push!(md.groups, BarGroup(; mark = mark, role = :crosstie, direction = :transverse,
                                   bar_size = tie_bar, count = nct * length(xs),
                                   length = (across + 2hook) * u"m", shape = :crosstie,
                                   x_positions = xs,

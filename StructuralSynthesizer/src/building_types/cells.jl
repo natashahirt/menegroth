@@ -22,6 +22,8 @@ Base.@kwdef mutable struct SiteConditions
     S1::Union{Float64, Nothing} = nothing
     site_class::Symbol = :D
     risk_category::Symbol = :II
+    # Set by the lateral stage. Nothing until that stage has run.
+    sdc::Union{Symbol, Nothing} = nothing
     
     # Snow / Rain
     ground_snow_load::Union{typeof(1.0u"kN/m^2"), Nothing} = nothing

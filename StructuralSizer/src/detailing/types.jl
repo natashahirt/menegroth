@@ -24,7 +24,11 @@ const _M = typeof(1.0u"m")
 - `shape`: `:straight`, `:hook_start`, `:hook_end`, `:hook_both`,
   `:closed_stirrup`, `:closed_tie`, `:crosstie`, or `:spiral`.
 - `path`: centerline of one bar in the elevation plane `(x, z)`, meters.
-  Bends are drawn as corners.
+  Bends are drawn as corners. Kept for the schedule drawings; the cage is
+  `centerlines`.
+- `centerlines`: one polyline per bar, `(x, y, z)` meters in the member frame.
+  `x` runs along the member, `y` across it, `z` up. Empty only when a group
+  was built without a location. Length equals `count` when present.
 - `x_positions`: stations along the member, meters, for bars whose `path` is
   drawn at `x = 0` (stirrups, ties, wall verticals). Empty when `path` is
   already in place.
@@ -46,19 +50,24 @@ struct BarGroup
     z_positions::Vector{Float64}
     laps::Int
     note::String
+    centerlines::Vector{Vector{NTuple{3, Float64}}}
 end
 
 function BarGroup(; mark::AbstractString, role::Symbol, direction::Symbol, bar_size::Int,
                   count::Int, length, shape::Symbol = :straight,
                   path = NTuple{2, Float64}[], x_positions = Float64[],
                   z_positions = Float64[], laps::Int = 0,
-                  note::AbstractString = "")
+                  note::AbstractString = "",
+                  centerlines = Vector{NTuple{3, Float64}}[])
     count >= 0 || throw(ArgumentError("bar count must be ≥ 0 (got $count)"))
     L = uconvert(u"m", length)
     ustrip(u"m", L) >= 0 || throw(ArgumentError("bar length must be ≥ 0 (got $L)"))
+    wires = Vector{Vector{NTuple{3, Float64}}}(centerlines)
+    isempty(wires) || Base.length(wires) == count || throw(ArgumentError(
+        "$mark: $(Base.length(wires)) centerlines for $count bars"))
     return BarGroup(String(mark), role, direction, bar_size, count, L, shape,
                     collect(NTuple{2, Float64}, path), collect(Float64, x_positions),
-                    collect(Float64, z_positions), laps, String(note))
+                    collect(Float64, z_positions), laps, String(note), wires)
 end
 
 """The group as a [`BarSet`](@ref) for mass and carbon."""
@@ -78,8 +87,10 @@ holes in that elevation (wall openings), same `(x0, x1, z0, z1)` order.
 meters, `y` through the thickness. None of the three enters a quantity.
 `areas` holds reported steel areas in square inches. Each quantity is a pair,
 `"<name>_ideal_in2"` from the design and `"<name>_placed_in2"` from the bars.
+`solid` is the member concrete in the same frame as `centerlines`,
+`(x0, x1, y0, y1, z0, z1)` in meters, or `nothing` when the member was not located.
 """
-struct MemberDetail
+mutable struct MemberDetail
     kind::Symbol
     groups::Vector{BarGroup}
     warnings::Vector{String}
@@ -88,12 +99,43 @@ struct MemberDetail
     voids::Vector{NTuple{4, Float64}}
     section_dots::Vector{NTuple{3, Float64}}
     areas::Dict{String, Float64}
+    solid::Union{Nothing, NTuple{6, Float64}}
 end
 
 MemberDetail(kind::Symbol) =
     MemberDetail(kind, BarGroup[], String[], String[],
                  NTuple{4, Float64}[], NTuple{4, Float64}[], NTuple{3, Float64}[],
-                 Dict{String, Float64}())
+                 Dict{String, Float64}(), nothing)
+
+"""Replace `g` with the same group located on `wires`, one polyline per bar."""
+function _with_centerlines(g::BarGroup, wires)
+    return BarGroup(; mark = g.mark, role = g.role, direction = g.direction,
+                    bar_size = g.bar_size, count = g.count, length = g.length,
+                    shape = g.shape, path = g.path, x_positions = g.x_positions,
+                    z_positions = g.z_positions, laps = g.laps, note = g.note,
+                    centerlines = wires)
+end
+
+"""`n` centers from `a` to `b`. One bar sits in the middle."""
+function _spread(n::Int, a::Float64, b::Float64)
+    n <= 0 && return Float64[]
+    n == 1 && return [(a + b) / 2]
+    b + 1e-9 < a && return fill((a + b) / 2, n)
+    return collect(range(a, b; length = n))
+end
+
+"""The elevation path `(x, z)` copied onto each across-width station `y`."""
+function _wires_at_y(path, ys::Vector{Float64})
+    return [[(p[1], y, p[2]) for p in path] for y in ys]
+end
+
+"""A section loop `(y, z)`, closed, placed at each station along the member."""
+function _wires_at_x(loop, xs::Vector{Float64})
+    pts = collect(NTuple{2, Float64}, loop)
+    isempty(pts) && return Vector{NTuple{3, Float64}}[]
+    pts[1] == pts[end] || push!(pts, pts[1])
+    return [[(x, y, z) for (y, z) in pts] for x in xs]
+end
 
 # Words used to turn an area key such as `primary_column_pos` into a note.
 const _AREA_WORDS = Dict(
@@ -166,10 +208,12 @@ Placed area, in in², of groups with one of `roles`. `direction` limits the
 sum to one bar direction when a member places the same role both ways.
 """
 function _placed_area_in2(md::MemberDetail, roles::Symbol...;
-                          direction::Union{Symbol, Nothing} = nothing)
+                          direction::Union{Symbol, Nothing} = nothing,
+                          mark::Union{Nothing, String} = nothing)
     total = 0.0
     for g in md.groups
         g.role in roles || continue
+        mark === nothing || g.mark == mark || continue
         direction === nothing || g.direction === direction || continue
         total += g.count * ustrip(u"inch^2", bar_area(g.bar_size))
     end

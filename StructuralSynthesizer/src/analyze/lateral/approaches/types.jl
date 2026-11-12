@@ -21,9 +21,11 @@ abstract type DemandAssignment end
 """
     WallsSeismicSystem(row) -> WallsSeismicSystem
 
-Walls are the seismic force-resisting system. `row` is Table 12.2-1 `:A3`
-(bearing wall) or `:B6` (building frame). There is no default: the two rows
-do not carry the same `R` and `Cd`.
+Walls are the seismic force-resisting system. `row` is Table 12.2-1 `:A1` or
+`:A3` (bearing wall, special or ordinary) or `:B4` or `:B6` (building frame,
+special or ordinary). There is no default: the rows do not carry the same `R`
+and `Cd`. Categories D, E, and F are accepted. Induced moments are not
+calculated, so the gravity frame is detailed to ACI 318-19 §18.14.3.3.
 
 A row that includes a moment frame is not this type. `:F` is
 [`InteractiveShearWallFrameSystem`](@ref). `:C7` and `:E8` are not ordinary-wall
@@ -38,10 +40,10 @@ ASCE 7-22 Table 12.2-1 (corpus: asce-7-22, PDF page 173).
 struct WallsSeismicSystem <: LateralSystem
     row::Symbol
     function WallsSeismicSystem(row::Symbol)
-        row in (:A3, :B6) || throw(ArgumentError(
+        row in (:A1, :A3, :B4, :B6) || throw(ArgumentError(
             "WallsSeismicSystem: :$row is not a walls-only row of Table 12.2-1. " *
-            "Use :A3 (bearing wall, ordinary reinforced concrete shear walls) or " *
-            ":B6 (building frame, ordinary reinforced concrete shear walls). " *
+            "Use :A1 or :A3 (bearing wall, special or ordinary reinforced concrete " *
+            "shear walls) or :B4 or :B6 (building frame, special or ordinary). " *
             ":F is InteractiveShearWallFrameSystem. ASCE 7-22 Table 12.2-1 " *
             "(corpus: asce-7-22, PDF page 173)."))
         return new(row)
@@ -49,8 +51,8 @@ struct WallsSeismicSystem <: LateralSystem
 end
 
 WallsSeismicSystem() = throw(ArgumentError(
-    "WallsSeismicSystem needs a Table 12.2-1 row, :A3 or :B6. There is no default. " *
-    "ASCE 7-22 Table 12.2-1 (corpus: asce-7-22, PDF page 173)."))
+    "WallsSeismicSystem needs a Table 12.2-1 row, :A1, :A3, :B4, or :B6. " *
+    "There is no default. ASCE 7-22 Table 12.2-1 (corpus: asce-7-22, PDF page 173)."))
 
 """
 Shear wall–frame interactive system, Table 12.2-1 row F.
@@ -176,18 +178,22 @@ function plan_axis_vector(axis::NTuple{2, Float64}, direction::Symbol)
 end
 
 """
-`:A3` and `:B6` are two statements about gravity. One building does not
-carry both.
+A bearing-wall row and a building-frame row are two statements about gravity.
+One building does not carry both. `:A1` and `:A3` are bearing walls. `:B4`
+and `:B6` are building frames. Two bearing rows, or two building-frame rows,
+may be the two directions.
 """
 function _refuse_bearing_and_building_frame(x::LateralSystem, y::LateralSystem)
     rows = Symbol[]
     x isa WallsSeismicSystem && push!(rows, x.row)
     y isa WallsSeismicSystem && push!(rows, y.row)
-    (:A3 in rows && :B6 in rows) || return nothing
+    bearing = (:A1, :A3)
+    frame = (:B4, :B6)
+    (any(r -> r in bearing, rows) && any(r -> r in frame, rows)) || return nothing
     throw(ArgumentError(
-        "LateralDesign: :A3 is a bearing-wall system and :B6 is a building-frame " *
-        "system. They are different statements about which elements carry the " *
-        "vertical load, so they are not the two directions of one building. " *
+        "LateralDesign: a bearing-wall row (:A1 or :A3) and a building-frame " *
+        "row (:B4 or :B6) are different statements about which elements carry " *
+        "the vertical load, so they are not the two directions of one building. " *
         "ASCE 7-22 Table 12.2-1 (corpus: asce-7-22, PDF page 173) and C12.2.1 " *
         "(PDF page 708)."))
 end

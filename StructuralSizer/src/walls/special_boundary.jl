@@ -675,6 +675,87 @@ function gravity_beam_transverse_limit(d::Length, db::Length; Pu, Ag, fc)
 end
 
 """
+    special_moment_frame_materials(fc, fy; lightweight=false) -> NamedTuple
+
+Concrete and longitudinal reinforcement for a special moment frame, which
+§18.14.3.3(a) requires of a gravity member when induced forces are not
+calculated. `ok` is false when a limit is missed. `warnings` names each miss.
+`notes` records the mill-test limit the stored grade cannot show.
+
+# Citation
+ACI 318-19 §18.2.5.1 and Table 19.2.1.1, §19.2.1.1(d), and §20.2.2.5
+(corpus: aci-318-19, PDF pages 290 and 378, and the table on PDF page 358).
+"""
+function special_moment_frame_materials(fc, fy; lightweight::Bool = false)
+    warnings = String[]
+    notes = String[]
+    fc_psi = ustrip(u"psi", fc)
+    fy_ksi = ustrip(u"ksi", fy)
+    # Table 19.2.1.1: special moment frames, minimum 3000 psi.
+    fc_psi + 1e-6 >= 3000 || push!(warnings,
+        "f′c = $(round(fc_psi; digits = 0)) psi is below the 3000 psi minimum " *
+        "for a special moment frame (Table 19.2.1.1)")
+    # §19.2.1.1(d): lightweight shall not exceed 5000 psi. Equality passes.
+    if lightweight && fc_psi > 5000 + 1e-6
+        push!(warnings,
+            "lightweight f′c = $(round(fc_psi; digits = 0)) psi exceeds 5000 psi (§19.2.1.1(d))")
+    end
+    # §20.2.2.5(a): special moment frames use Grade 60 or Grade 80.
+    near60 = abs(fy_ksi - 60) <= 0.5
+    near80 = abs(fy_ksi - 80) <= 0.5
+    near60 || near80 || push!(warnings,
+        "fy = $(round(fy_ksi; digits = 1)) ksi is not Grade 60 or Grade 80, " *
+        "which §20.2.2.5 permits in a special moment frame")
+    push!(notes, "Grade 60 satisfies §20.2.2.5(b) only when the mill tests meet " *
+                 "the 18 ksi overstrength, 1.25 tensile ratio, and elongation limits; " *
+                 "mill tests are not stored")
+    return (ok = isempty(warnings), warnings = warnings, notes = notes)
+end
+
+"""
+Notes for §18.2.7 and §18.2.8. The details place lap splices. Mechanical and
+welded splices are not drawn, and stirrups are not welded to longitudinal bars.
+"""
+function special_frame_splice_notes()
+    return ["mechanical splices are not placed; other than a Type 2 splice on " *
+            "Grade 60, one must stay twice the member depth from the joint face (§18.2.7.2)",
+            "welded splices are not placed and must stay twice the member depth " *
+            "from the joint face (§18.2.8.1)",
+            "stirrups and ties are not welded to the longitudinal bars (§18.2.8.2)"]
+end
+
+"""
+    gravity_beam_seismic_shear(sec, ℓn, Vg, fc, fy; Nu=0) -> NamedTuple
+
+Design shear of a gravity beam under §18.6.5. The probable moment uses the
+larger face area at both `d` and `d′`, so a beam with less compression steel
+is not given a smaller shear. `Vg` is the factored gravity and vertical
+earthquake shear on the span.
+
+# Citation
+ACI 318-19 §18.6.5.1 and §18.6.5.2 (corpus: aci-318-19, PDF pages 305–306).
+§18.14.3.3(b) requires this of a gravity beam (PDF page 354).
+"""
+function gravity_beam_seismic_shear(sec::Union{RCBeamSection, RCTBeamSection},
+                                   ℓn::Length, Vg, fc, fy; Nu = 0.0u"N")
+    As = max(sec.As, sec.As_prime)
+    ustrip(u"m^2", As) > 0 || throw(ArgumentError(
+        "gravity beam shear: the section has no longitudinal steel"))
+    dp = sec.d_prime
+    if !(ustrip(u"m", sec.d) > ustrip(u"m", dp) > 0)
+        dp = sec.cover + bar_diameter(sec.stirrup_size) + bar_diameter(sec.bar_size) / 2
+    end
+    moment = coupling_beam_section_moment(sec.b, sec.h, sec.d, dp, As, fc, fy,
+                                          29000.0u"ksi", Nu; stress_factor = 1.25)
+    moment.converged || return (ok = false, Ve = Vg, Mpr = 0.0u"N*m", concrete_omitted = false)
+    shear = coupling_beam_design_shear(moment.Mn, moment.Mn, ℓn, abs(Vg))
+    Ag = sec.b * sec.h
+    Pu = max(Nu, 0.0u"N")
+    omitted = coupling_beam_concrete_omitted(shear.V_eq, shear.Ve, Pu, Ag, fc)
+    return (ok = true, Ve = shear.Ve, Mpr = moment.Mn, concrete_omitted = omitted)
+end
+
+"""
     gravity_slab_column_shear(drift_ratio, shear_ratio, fc; prestressed=false,
                               fpc_meets_8_6_2_1=false) -> NamedTuple
 
@@ -775,6 +856,96 @@ function special_column_design_shear(Mpr_top, Mpr_bottom, ℓu::Length, Vu; beam
     return (Ve = max(from_probable, Vu),
             from_column = from_column,
             Vu = Vu)
+end
+
+"""
+Longitudinal steel for a probable moment: the same bar with Fy replaced by
+1.25 Fy. The stress-strain curve already caps the stress at Fy.
+
+# Citation
+ACI 318-19 R18.7.6.1.1 (corpus: aci-318-19, PDF page 312).
+"""
+function _probable_rebar(steel::RebarSteel)
+    fy = 1.25 * steel.Fy
+    return RebarSteel(steel.E, steel.G, fy, max(steel.Fu, fy), steel.ρ, steel.ν, steel.ecc;
+                      cost = steel.cost, color = steel.color, coating = steel.coating)
+end
+
+"Largest nominal moment on a diagram, or at the supplied axial forces."
+function _moment_over_axials(diagram, axials)
+    curve = get_nominal_curve(diagram)
+    isempty(axials) && return maximum(curve.Mn) * u"kip*ft"
+    best = 0.0
+    for axial in axials
+        best = max(best, _interpolate_moment_at_P(curve.Pn, curve.Mn, ustrip(u"kip", axial)))
+    end
+    return best * u"kip*ft"
+end
+
+"""
+    special_column_probable_moments(section, material; axials=()) -> NamedTuple
+
+Probable moments about the strong and weak axes. The diagram is built at
+1.25 times the longitudinal yield strength and the moment is the nominal
+value, so the strength-reduction factor is 1. `axials` is the range of
+factored axial force. With none supplied, the moment is the largest on that
+diagram.
+
+# Citation
+ACI 318-19 §18.7.6.1.1 and R18.7.6.1.1 (corpus: aci-318-19, PDF page 312).
+"""
+function special_column_probable_moments(section::Union{RCColumnSection, RCCircularSection},
+                                        material::ReinforcedConcreteMaterial; axials = ())
+    probable = ReinforcedConcreteMaterial(material.concrete, _probable_rebar(material.rebar),
+                                         material.transverse)
+    strong = _moment_over_axials(generate_PM_diagram(section, probable), axials)
+    weak = section isa RCCircularSection ? strong :
+           _moment_over_axials(generate_PM_diagram(section, probable, WeakAxis()), axials)
+    return (strong = strong, weak = weak)
+end
+
+"""
+    special_column_shear_design(section, material, ℓu; axials, Vu_x, Vu_y, beam_shear)
+        -> NamedTuple
+
+Design shear about each axis from the probable moments, then the tie spacing
+that provides it. Concrete is omitted over ℓo only when §18.7.6.2.1 says so.
+`Vu_x` is parallel to the section width and `Vu_y` is parallel to the depth,
+matching [`design_column_shear`](@ref). `spacing_middle` counts Vc.
+`spacing` is the ℓo spacing.
+
+# Citation
+ACI 318-19 §18.7.6.1.1 and §18.7.6.2.1 (corpus: aci-318-19, PDF page 312).
+"""
+function special_column_shear_design(section::Union{RCColumnSection, RCCircularSection},
+                                     material::ReinforcedConcreteMaterial, ℓu::Length;
+                                     axials = (), Vu_x = 0.0u"N", Vu_y = 0.0u"N",
+                                     beam_shear = nothing)
+    moments = special_column_probable_moments(section, material; axials = axials)
+    about_h = special_column_design_shear(moments.strong, moments.strong, ℓu, abs(Vu_y);
+                                          beam_shear = beam_shear)
+    about_b = special_column_design_shear(moments.weak, moments.weak, ℓu, abs(Vu_x);
+                                          beam_shear = beam_shear)
+    Ag = section isa RCCircularSection ? π * section.D^2 / 4 : section.b * section.h
+    lowest = isempty(axials) ? 0.0u"N" : minimum(axial -> uconvert(u"N", axial), axials)
+    # The hoops have to cover the combination with the smallest compression.
+    Pu = max(lowest, 0.0u"N")
+    omitted = coupling_beam_concrete_omitted(about_h.from_column, about_h.Ve, Pu, Ag,
+                                             material.concrete.fc′) ||
+              coupling_beam_concrete_omitted(about_b.from_column, about_b.Ve, Pu, Ag,
+                                             material.concrete.fc′)
+    over_lo = design_column_shear(section, about_b.Ve, about_h.Ve, Pu, material;
+                                  omit_concrete = omitted)
+    middle = omitted ? design_column_shear(section, about_b.Ve, about_h.Ve, Pu, material) :
+             over_lo
+    return (spacing = over_lo.spacing,
+            spacing_middle = middle.spacing,
+            ok = over_lo.ok && middle.ok,
+            Ve_x = about_b.Ve,
+            Ve_y = about_h.Ve,
+            Mpr_strong = moments.strong,
+            Mpr_weak = moments.weak,
+            concrete_omitted = omitted)
 end
 
 """

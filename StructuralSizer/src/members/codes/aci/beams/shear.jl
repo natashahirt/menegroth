@@ -284,11 +284,12 @@ Named tuple:
 function design_beam_shear(Vu::Force, bw::Length, d::Length,
                            fc::Pressure, fyt::Pressure;
                            λ::Real=1.0, stirrup_bar::Int=3,
-                           Nu=nothing, Ag=nothing)
+                           Nu=nothing, Ag=nothing,
+                           omit_concrete::Bool=false)
     φ = 0.75
 
-    # Concrete capacity (with optional axial compression modifier)
-    Vc = Vc_beam(bw, d, fc; λ=λ, Nu=Nu, Ag=Ag)
+    # §18.6.5.2 sets Vc = 0 when its two conditions both occur.
+    Vc = omit_concrete ? 0.0u"lbf" : Vc_beam(bw, d, fc; λ=λ, Nu=Nu, Ag=Ag)
     φVc = φ * Vc
 
     # Required steel shear

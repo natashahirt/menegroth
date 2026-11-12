@@ -126,8 +126,8 @@ When lateral design was requested:
   as well. θ > θmax is refused by the ELF analysis. The factor is 1 where
   θ ≤ 0.10. A flexible floor's member forces are first-order, so θ > 0.10
   there is refused by [`require_seismic_wall_demand_provisions`](@ref).
-- Seismic Design Categories D, E, and F still throw from
-  [`system_checks`](@ref): deformation compatibility is not built.
+- Seismic Design Categories D, E, and F do not calculate the moments induced
+  by δu. The gravity frame is detailed to ACI 318-19 §18.14.3.3.
 - "X" and "Y" are the plan axes of `params.lateral.plan_axis`. A wall or a
   row F beam on neither axis is a Type 5 nonparallel system irregularity
   (Table 12.3-1, corpus: asce-7-22, PDF page 180), whatever the caller stated.
@@ -218,8 +218,13 @@ function _analyze_lateral_walls!(struc::BuildingStructure, params::DesignParamet
             "asce-7-22, PDF page 188). Set the flag to false."))
     end
     # R, Cd, and Ω0 are each direction's row. A category a row marks NP stops here.
-    sysx = concrete_shear_wall_system(table_12_2_1_row(sx), inputs.sdc)
-    sysy = concrete_shear_wall_system(table_12_2_1_row(sy), inputs.sdc)
+    # hn is the highest story above the lowest. stories_z starts at the base,
+    # so this is the height from the base to the roof.
+    elevs = _elf_story_elevations(struc.skeleton)
+    hn = isempty(elevs) ? nothing : (maximum(elevs) - minimum(elevs)) * u"m"
+    sysx = concrete_shear_wall_system(table_12_2_1_row(sx), inputs.sdc; hn = hn)
+    sysy = concrete_shear_wall_system(table_12_2_1_row(sy), inputs.sdc; hn = hn)
+    struc.site.sdc = inputs.sdc
 
     prepare_lateral_model!(struc, params.lateral)
     isempty(struc.wall_mesh.piers) && throw(ArgumentError(

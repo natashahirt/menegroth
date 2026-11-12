@@ -43,6 +43,21 @@ const _RC_BEAM = Union{StructuralSizer.RCBeamSection, StructuralSizer.RCTBeamSec
 
 # ── Materials ──────────────────────────────────────────────────────────────
 
+"True in Seismic Design Category D, E, or F, once the lateral stage has stored it."
+_high_sdc(design) = something(design.structure.site.sdc, :B) in (:D, :E, :F)
+
+"A concrete-and-rebar bundle the column shear diagram can read, or nothing."
+function _rc_bundle(conc, rebar, transverse)
+    base = conc isa StructuralSizer.ReinforcedConcreteMaterial ? conc.concrete :
+           conc isa StructuralSizer.Concrete ? conc : nothing
+    steel = rebar isa StructuralSizer.RebarSteel ? rebar : nothing
+    if base === nothing || steel === nothing
+        return nothing
+    end
+    ties = transverse isa StructuralSizer.RebarSteel ? transverse : steel
+    return StructuralSizer.ReinforcedConcreteMaterial(base, steel, ties)
+end
+
 """Concrete, longitudinal rebar, and transverse rebar of the column sizer."""
 function _column_materials(params::DesignParameters, col)
     opts = params.columns
@@ -205,12 +220,16 @@ function _detail_column(design::BuildingDesign, geo, idx::Int)
     _, top = _column_end_vertices(struc, col)
     depth = _column_top_depth(design, geo, col, top)
     _, slab_cover = _slab_materials(design.params)
+    seismic = _high_sdc(design)
     md = StructuralSizer.detail_column(sec; height = cr.height, slab_above = depth * u"m",
         slab_cover = depth > 0 ? slab_cover : 0.0u"m",
         continues = !isnothing(col.column_above),
         fc = conc.fc′, fy = rebar.Fy, fyt = transverse.Fy, λ = conc.λ,
         coating = rebar.coating,
-        tie_spacing = cr.tie_spacing > 0u"m" ? cr.tie_spacing : nothing)
+        tie_spacing = cr.tie_spacing > 0u"m" ? cr.tie_spacing : nothing,
+        gravity_seismic = seismic,
+        material = seismic ? _rc_bundle(conc, rebar, transverse) : nothing,
+        axials = (cr.Pu,), Vu_x = cr.Vu_x, Vu_y = cr.Vu_y, Pu = cr.Pu)
     depth > 0 || push!(md.notes, "No slab or beam found at the column top; ties run to the top.")
     return md
 end
@@ -236,7 +255,8 @@ function _detail_beam(design::BuildingDesign, geo, idx::Int)
     md = StructuralSizer.detail_beam(sec; span = br.member_length,
         supports = (ca * u"m", cb * u"m"), exterior = exterior,
         fc = conc.fc′, fy = rebar.Fy, fyt = transverse.Fy, λ = conc.λ,
-        coating = rebar.coating, Vu = br.Vu)
+        coating = rebar.coating, Vu = br.Vu,
+        gravity_seismic = _high_sdc(design))
     all(exterior) || push!(md.warnings,
         "hogging steel over the continuous support is not part of the sizing result; " *
         "the top bars shown are hangers or compression bars only")

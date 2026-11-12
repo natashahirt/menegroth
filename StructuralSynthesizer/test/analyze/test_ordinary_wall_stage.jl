@@ -958,9 +958,11 @@ function _stage_shear_demands(result, pred)
 end
 
 @testset "A1 and A3 move only the seismic coefficient each row owns" begin
-    # The row lookup runs before the mesh. Category D is refused with no solve.
+    # The row lookup runs before the mesh. A short building in D is not refused.
+    # The table height is enforced from the story elevations.
     bare = BuildingStructure(gen_medium_office(10.0u"m", 6.0u"m", 4.0u"m", 1, 1, 1))
-    function refuse(row, sdc)
+    tall = BuildingStructure(gen_medium_office(10.0u"m", 6.0u"m", 4.0u"m", 1, 1, 20))
+    function refuse(struc, row, sdc)
         params = DesignParameters(
             lateral=LateralDesign(; system=WallsSeismicSystem(row),
                                    assignment=BuildingUnit()),
@@ -968,25 +970,23 @@ end
             skip_visualization=true,
             jump_wall_thickness=false)
         try
-            design_ordinary_walls!(bare, params)
+            design_ordinary_walls!(struc, params)
             nothing
         catch e
             e
         end
     end
     for row in (:A1, :B4)
-        err = refuse(row, :D)
+        err = refuse(tall, row, :D)
         @test err isa ArgumentError
         msg = sprint(showerror, err)
         @test occursin("160", msg)
-        @test occursin("12.12.4", msg)
         @test !occursin("NP", msg)
     end
-    msgF = sprint(showerror, refuse(:A1, :F))
+    msgF = sprint(showerror, refuse(tall, :A1, :F))
     @test occursin("100", msgF)
-    @test occursin("12.12.4", msgF)
     @test !occursin("NP", msgF)
-    @test occursin("NP", sprint(showerror, refuse(:A3, :D)))
+    @test occursin("NP", sprint(showerror, refuse(bare, :A3, :D)))
 
     # One story, so qz is one value. SDS = 0.20 sits above the Eq. 12.8-6
     # floor for both R = 4 and R = 5. SDS = 0.03 sits on that floor for both,

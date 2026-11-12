@@ -123,17 +123,16 @@ Table 12.2-1 row for a reinforced-concrete shear wall.
 
 Ordinary rows `:A3`, `:B6`, `:C7`, `:E8`, and `:F` are
 [`ordinary_concrete_seismic_system`](@ref). Special rows `:A1` and `:B4`
-are returned for Seismic Design Categories B and C. In D, E, or F the table
-permits those two rows up to the stored `hn`. The lookup still throws:
-§12.12.4 sends a concrete frame member outside the system to ACI 318-19
-§18.14, and the induced moments are not calculated, so §18.14.3.3 is
-required and is not applied.
+are returned for every category in which the table permits them. In D, E,
+or F the stored `hn` is the height limit. Pass `hn` to enforce it. The
+gravity frame is detailed to §18.14.3.3 because the induced moments are
+not calculated.
 
 # Citation
 ASCE 7-22 Table 12.2-1 (corpus: asce-7-22, PDF page 173), read from the
 rendered page.
 """
-function concrete_shear_wall_system(row::Symbol, sdc::Symbol)
+function concrete_shear_wall_system(row::Symbol, sdc::Symbol; hn = nothing)
     haskey(_ORDINARY_CONCRETE_SYSTEMS, row) &&
         return ordinary_concrete_seismic_system(row, sdc)
     system = get(_SPECIAL_CONCRETE_WALLS, row, nothing)
@@ -150,14 +149,12 @@ function concrete_shear_wall_system(row::Symbol, sdc::Symbol)
     sdc in (:B, :C) && return system
     limits = (; D = system.height_limit_ft[1], E = system.height_limit_ft[2],
               F = system.height_limit_ft[3])
-    hn = getfield(limits, sdc)
-    throw(ArgumentError(
-        "concrete shear wall: Table 12.2-1 row $(system.row) is permitted in " *
-        "Seismic Design Category $sdc up to hn = $(hn) ft (corpus: asce-7-22, " *
-        "PDF page $(system.page)). ASCE 7-22 §12.12.4 (PDF page 195) requires " *
-        "components outside the seismic force-resisting system to carry gravity " *
-        "and the forces from δDE. A reinforced concrete frame member follows " *
-        "ACI 318-19 §18.14. Induced moments from δu are not calculated, so " *
-        "§18.14.3.1 requires §18.14.3.3 (corpus: aci-318-19, page 353). " *
-        "That member design is not applied."))
+    limit = getfield(limits, sdc)
+    if hn !== nothing && ustrip(u"ft", hn) > limit + 1e-6
+        throw(ArgumentError(
+            "concrete shear wall: Table 12.2-1 row $(system.row) is permitted in " *
+            "Seismic Design Category $sdc up to hn = $(limit) ft (corpus: asce-7-22, " *
+            "PDF page $(system.page)). The building height is $(ustrip(u"ft", hn)) ft."))
+    end
+    return system
 end

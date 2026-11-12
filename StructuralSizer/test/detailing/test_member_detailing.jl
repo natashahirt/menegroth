@@ -511,4 +511,62 @@ end
         @test any(n -> occursin("two layers", n), thin.notes)
         @test any(n -> occursin("raised to 0.0025", n), thin.notes)
     end
+
+    # ── Gravity column outside the seismic system, SDC D–F ────────────────
+    @testset "gravity column and joint (§18.14.3.3)" begin
+        mats = (fc = 4000.0u"psi", fy = 60_000.0u"psi", fyt = 60_000.0u"psi")
+        sec = RCColumnSection(; b = 16.0u"inch", h = 16.0u"inch", bar_size = 8, n_bars = 8,
+                              cover = 1.5u"inch", tie_bar_size = 3)
+        height = 120.0u"inch"
+        slab = 8.0u"inch"
+        md = detail_column(sec; height = height, slab_above = slab, mats...,
+                           gravity_seismic = true)
+        clear = ustrip(u"m", height - slab)
+        lap = only(_groups(md, :longitudinal, "center half"))
+        @test lap.path[1][1] ≈ clear / 4
+        partner = only(_groups(md, :longitudinal, "story below"))
+        @test partner.path[1][1] ≈ lap.path[1][1]
+        @test partner.path[end][1] <= 3 * clear / 4 + 1e-6
+        @test length(lap.centerlines) == lap.count
+        ends = _groups(md, :tie, "18.7.5.3")
+        @test length(ends) == 2
+        mid = only(_groups(md, :tie, "18.7.5.5"))
+        joint = only(_groups(md, :tie, "18.4.4.4"))
+        @test joint.count >= 2
+        for g in vcat(ends, [mid, joint])
+            @test length(g.centerlines) == g.count
+            @test all(w -> length(w) >= 4, g.centerlines)
+        end
+        # ℓo is the clear height over six, 18.67 in., and §18.7.5.3(a) is 4 in.
+        bottom = ends[1].x_positions
+        @test bottom[1] ≈ 0.0
+        @test bottom[end] ≈ ustrip(u"m", special_column_hoop_length(16.0u"inch", clear * u"m"))
+        @test maximum(diff(bottom)) <= ustrip(u"m", 4.0u"inch") + 1e-6
+        ordinary = detail_column(sec; height = height, slab_above = slab, mats...)
+        @test isempty(_groups(ordinary, :tie, "18.7.5.3"))
+        tight = detail_column(sec; height = height, slab_above = slab, mats...,
+                              gravity_seismic = true, tie_spacing = 2.0u"inch")
+        tight_bottom = _groups(tight, :tie, "18.7.5.3")[1].x_positions
+        @test maximum(diff(tight_bottom)) <= ustrip(u"m", 2.0u"inch") + 1e-6
+
+        # §18.7.6: probable moment at 1.25 fy, then the shear, then the hoops.
+        mpr = special_column_probable_moments(sec, RC_4000_60)
+        at_fy = maximum(get_nominal_curve(generate_PM_diagram(sec, RC_4000_60)).Mn)
+        @test ustrip(u"kip*ft", mpr.strong) > at_fy
+        clear_in = ustrip(u"inch", height - slab)
+        low = special_column_shear_design(sec, RC_4000_60, clear_in * u"inch";
+                                          axials = (0.0u"kip",))
+        @test low.concrete_omitted
+        @test low.Ve_y ≈ 2 * low.Mpr_strong / (clear_in * u"inch")
+        at_cut = 16.0u"inch" * 16.0u"inch" * 4000.0u"psi" / 20
+        high = special_column_shear_design(sec, RC_4000_60, clear_in * u"inch";
+                                           axials = (at_cut,))
+        @test !high.concrete_omitted
+        sheared = detail_column(sec; height = height, slab_above = slab, mats...,
+                                gravity_seismic = true, material = RC_4000_60,
+                                axials = (0.0u"kip",))
+        @test any(n -> occursin("18.7.6", n), sheared.notes)
+        sheared_bottom = _groups(sheared, :tie, "18.7.5.3")[1].x_positions
+        @test maximum(diff(sheared_bottom)) <= ustrip(u"m", low.spacing) + 1e-6
+    end
 end

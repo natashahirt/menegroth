@@ -313,7 +313,8 @@ half, `(ratio_x + ratio_y) / 1.5`. `clause` names the tie size and the
 spacing, in inches, so a later note can quote it.
 """
 function design_column_shear(section::Union{RCColumnSection, RCCircularSection},
-                              Vu_x, Vu_y, Nu, material::ReinforcedConcreteMaterial)
+                              Vu_x, Vu_y, Nu, material::ReinforcedConcreteMaterial;
+                              omit_concrete::Bool = false)
     isempty(section.bars) && throw(ArgumentError(
         "column shear: the section has no longitudinal bars."))
     fc_psi = ustrip(u"psi", material.concrete.fc′)
@@ -372,6 +373,11 @@ function design_column_shear(section::Union{RCColumnSection, RCCircularSection},
     function axis(bw, d, Av, along, Vu)
         Vc_a = column_equation_a_pounds(bw, d, Ag, fc_psi, Nu_lb; λ = λ).Vc_lb
         Vc_c = _vc_equation_c(bw, d, λ, _rho_w(section, along, bw, d), caps)
+        # §18.7.6.2.1 sets Vc = 0 over ℓo when its two conditions both occur.
+        if omit_concrete
+            Vc_a = 0.0
+            Vc_c = 0.0
+        end
         av_s = max(0.75 * caps.sqrt_raw, 50.0) * bw / fyt_vs
         Vs_max = 8.0 * caps.sqrt_raw * bw * d
         return _ColShearAxis(bw, d, Av, av_s, Vc_a, Vc_c, Av * fyt_vs * d, Vs_max,

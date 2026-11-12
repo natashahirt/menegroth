@@ -158,6 +158,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
     @testset "Foundations" begin
         include("foundations/test_spread_footing.jl")
         include("foundations/test_spread_aci.jl")
+        include("foundations/test_foundation_combinations.jl")
         include("foundations/test_strip_aci.jl")
         include("foundations/test_strip_unequal_c_across.jl")
         include("foundations/test_mat_aci.jl")

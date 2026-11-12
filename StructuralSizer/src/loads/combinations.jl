@@ -163,6 +163,76 @@ const strength_0_9D_1_0E = LoadCombination(
     Ev = -1.0
 )
 
+# =============================================================================
+# Allowable-stress combinations for foundation soil pressure (ASCE 7-22 §2.4)
+# =============================================================================
+# §12.13.6 uses these when the geotechnical capacity is an allowable pressure.
+# The 0.5 factor on L, the 25% overturning reduction (§12.13.4), and Ev = 0
+# at the soil interface (§12.4.2.2 exception 2(b)) are permissions. They are
+# not applied. §2.4.1 does not increase the allowable pressure.
+
+"""ASCE 7-22 §2.4.1 combination 1a: D. PDF page 69."""
+const asd_D = LoadCombination(name=:asd_D, D=1.0, L=0.0)
+
+"""ASCE 7-22 §2.4.1 combination 2a: D + L. PDF page 69."""
+const asd_D_L = LoadCombination(name=:asd_D_L, D=1.0, L=1.0)
+
+"""
+ASCE 7-22 §2.4.1 combination 3a: D + (Lr or 0.7S or R).
+
+One roof companion is passed. PDF page 69.
+"""
+const asd_D_roof = LoadCombination(
+    name=:asd_D_roof, D=1.0, L=0.0, Lr=1.0, S=0.7, R=1.0)
+
+"""
+ASCE 7-22 §2.4.1 combination 4a: D + 0.75L + 0.75(Lr or 0.7S or R).
+
+PDF page 69. The snow companion factor is 0.75 × 0.7.
+"""
+const asd_D_075L = LoadCombination(
+    name=:asd_D_075L, D=1.0, L=0.75, Lr=0.75, S=0.75 * 0.7, R=0.75)
+
+"""ASCE 7-22 §2.4.1 combination 5a: D + 0.6W. PDF page 69."""
+const asd_D_06W = LoadCombination(name=:asd_D_06W, D=1.0, L=0.0, W=0.6)
+
+"""
+ASCE 7-22 §2.4.1 combination 6a:
+D + 0.75L + 0.75(0.6W) + 0.75(Lr or 0.7S or R).
+
+The wind factor is 0.75 × 0.6 = 0.45. PDF page 69.
+"""
+const asd_D_075L_W = LoadCombination(
+    name=:asd_D_075L_W, D=1.0, L=0.75, Lr=0.75, S=0.75 * 0.7, R=0.75, W=0.45)
+
+"""ASCE 7-22 §2.4.1 combination 7a: 0.6D + 0.6W. PDF page 69."""
+const asd_06D_06W = LoadCombination(name=:asd_06D_06W, D=0.6, L=0.0, W=0.6)
+
+"""
+ASCE 7-22 §2.4.5 combination 8: 1.0D + 0.7Ev + 0.7Eh.
+
+`E` multiplies Eh. `Ev` multiplies the vertical effect 0.2 SDS D.
+PDF page 70.
+"""
+const asd_D_E = LoadCombination(name=:asd_D_E, D=1.0, L=0.0, E=0.7, Ev=0.7)
+
+"""
+ASCE 7-22 §2.4.5 combination 9:
+1.0D + 0.525Ev + 0.525Eh + 0.75L + 0.1S.
+
+The 0.1 factor is on snow, not on roof live or rain. PDF page 70.
+"""
+const asd_D_E_L = LoadCombination(
+    name=:asd_D_E_L, D=1.0, L=0.75, S=0.1, E=0.525, Ev=0.525)
+
+"""
+ASCE 7-22 §2.4.5 combination 10: 0.6D − 0.7Ev + 0.7Eh.
+
+`Ev = -0.7` subtracts the vertical effect. PDF page 70.
+"""
+const asd_06D_E = LoadCombination(
+    name=:asd_06D_E, D=0.6, L=0.0, E=0.7, Ev=-0.7)
+
 """Allowable Stress Design: 1.0D + 1.0L."""
 const ASD = LoadCombination(
     name = :asd,
@@ -286,6 +356,28 @@ const asce7_strength_combinations = [
     strength_1_2D_1_0E,
     strength_0_9D_1_0W,
     strength_0_9D_1_0E
+]
+
+"""
+    asce7_asd_foundation_combinations
+
+ASCE 7-22 §2.4.1 combinations 1a–7a and §2.4.5 combinations 8–10, for
+foundation soil pressure checked against an allowable pressure.
+
+§12.13.6 (corpus: asce-7-22, PDF page 196). Flood, tornado, ice, and
+overstrength are not in this list.
+"""
+const asce7_asd_foundation_combinations = [
+    asd_D,
+    asd_D_L,
+    asd_D_roof,
+    asd_D_075L,
+    asd_D_06W,
+    asd_D_075L_W,
+    asd_06D_06W,
+    asd_D_E,
+    asd_D_E_L,
+    asd_06D_E,
 ]
 
 """

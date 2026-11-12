@@ -166,7 +166,8 @@ export strength_1_4D, strength_1_2D_1_6L, strength_1_2D_1_6Lr
 export strength_1_2D_1_0W, strength_1_2D_1_0E
 export strength_0_9D_1_0W, strength_0_9D_1_0E
 export ASD, service, default_combo
-export asce7_strength_combinations, gravity_combinations
+export asce7_strength_combinations, asce7_asd_foundation_combinations, gravity_combinations
+export FootingAction, combine_foundation_action, foundation_combination_actions
 
 # --- Gravity loads ---
 export GravityLoads, load_map

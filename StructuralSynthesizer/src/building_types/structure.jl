@@ -90,6 +90,10 @@ mutable struct BuildingStructure{T, A, P} <: AbstractBuildingStructure
     # `to_asap!`. ELF and the unfactored dead case read this. The line loads
     # on the model are the factored copy.
     cladding_SDL::P
+    # Unfactored support reactions for D, L, wind, and QE. `nothing` until
+    # the ordinary-wall stage stores them. Foundation sizing reads this.
+    # Not a snapshot: the lateral stage rebuilds it.
+    foundation_lateral::Any
 
     # ─── Design Snapshots (for parametric studies) ───
     _snapshots::Dict{Symbol, DesignSnapshot{T, P}}
@@ -127,6 +131,7 @@ function BuildingStructure(skel::BuildingSkeleton{T}) where T
         Dict{UInt64, Any}(),
         Dict{UInt64, Vector{Tuple{String, Any}}}(),
         zero(P),
+        nothing,
         Dict{Symbol, DesignSnapshot{T, P}}(),
     )
 end
@@ -157,6 +162,7 @@ function BuildingStructure{T, A, P}(skel::BuildingSkeleton{T}) where {T, A, P}
         Dict{UInt64, Any}(),
         Dict{UInt64, Vector{Tuple{String, Any}}}(),
         zero(P),
+        nothing,
         Dict{Symbol, DesignSnapshot{T, P}}(),
     )
 end

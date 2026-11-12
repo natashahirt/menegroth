@@ -182,6 +182,33 @@ function _foundation_demand_from_signed(i::Int, Fz, Fz_s, Fx, Fy, Mx, My;
         c1=c1, c2=c2, shape=shape, uplift=uplift)
 end
 
+"""
+One strength combination's `(Pu, Mux, Muy)` and the heaviest allowable
+vertical force as `Ps`, for a strip or mat that still takes one demand.
+
+The pair `(Pu, Mux, Muy)` is one strength combination: the compressive
+one with the largest moment. `Ps` is the largest compressive allowable-stress
+vertical force. Spread footings do not use this. They check every combination.
+
+No stored lateral cases returns `demand` unchanged.
+"""
+function _lateral_column_demand(struc::BuildingStructure, demand)
+    actions = foundation_actions_at(struc, demand.group_idx)
+    actions === nothing && return demand
+    strength = [a for a in actions.strength if a.P > 0]
+    isempty(strength) && return demand
+    gov = strength[argmax(hypot(a.Mx, a.My) for a in strength)]
+    service = [a for a in actions.service if a.P > 0]
+    Ps = isempty(service) ? demand.Ps :
+         uconvert(unit(demand.Ps), maximum(a.P for a in service) * u"N")
+    return StructuralSizer.FoundationDemand(demand.group_idx;
+        Pu=uconvert(unit(demand.Pu), gov.P * u"N"),
+        Mux=uconvert(unit(demand.Mux), gov.Mx * u"N*m"),
+        Muy=uconvert(unit(demand.Muy), gov.My * u"N*m"),
+        Vux=demand.Vux, Vuy=demand.Vuy, Ps=Ps,
+        c1=demand.c1, c2=demand.c2, shape=demand.shape, uplift=false)
+end
+
 """True when every support in `idxs` has factored uplift."""
 _all_uplift(demands, idxs) = all(demands[i].uplift for i in idxs)
 
@@ -442,7 +469,7 @@ function _size_fnd_aci!(struc, f_idx, fnd, n_supp, demands, soil, opts;
             "interface steel; form a strip or refuse (ACI 318-11 §15.8.1.2(b), " *
             "corpus: aci-318-11, page 275).")
         # Mat foundation — all supports in one slab
-        mat_demands = [demands[i] for i in fnd.support_indices]
+        mat_demands = [_lateral_column_demand(struc, demands[i]) for i in fnd.support_indices]
         positions = _support_positions_xy(struc, fnd.support_indices)
         result = StructuralSizer.design_footing(StructuralSizer.MatFoundation(), 
             mat_demands, positions, soil; opts=opts.mat_params, tc=tc)
@@ -450,14 +477,18 @@ function _size_fnd_aci!(struc, f_idx, fnd, n_supp, demands, soil, opts;
 
     elseif fnd.foundation_type == :spread && n_supp == 1
         demand = demands[fnd.support_indices[1]]
-        result = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), demand, soil; opts=opts.spread_params, tc=tc)
+        actions = foundation_actions_at(struc, demand.group_idx)
+        result = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), demand, soil;
+            opts=opts.spread_params, tc=tc,
+            service_actions = actions === nothing ? StructuralSizer.FootingAction[] : actions.service,
+            strength_actions = actions === nothing ? StructuralSizer.FootingAction[] : actions.strength)
         _assign_foundation!(struc, f_idx, fnd, result, :spread, mat)
 
     elseif fnd.foundation_type in (:combined, :strip) || n_supp > 1
         # ACI 318-11 §15.8.1.2(b) (corpus: aci-318-11, page 275): a mixed-sign
         # couple must be a strip so tensile interface steel is designed, not
         # omitted by an isolated spread.
-        strip_demands = [demands[i] for i in fnd.support_indices]
+        strip_demands = [_lateral_column_demand(struc, demands[i]) for i in fnd.support_indices]
         axes = _support_strip_axes(struc, fnd.support_indices)
         results = map(axes) do axis
             positions = _support_positions_along_axis(struc, fnd.support_indices, axis)

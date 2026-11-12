@@ -441,33 +441,127 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
-    design_footing(::SpreadFooting, demand, soil; opts) → SpreadFootingResult
+    _spread_plan_for_actions(service, strength, qa, min_B, si, c1, c2)
+        -> (B, L, cases)
+
+Square plan on which every allowable-stress action has `q_max ≤ qa` and
+`q_min ≥ 0`, and every compressive strength action stays in the kern.
+
+Each case keeps that combination's own axial force and moment. The peak
+pressure is ACI 336.2R §3.2.1 Eq. (3-1). A resultant outside the kern is
+not converted to a partial-contact block.
+
+# Citations
+ASCE 7-22 §2.4.1 and §12.13.6 (corpus: asce-7-22, PDF pages 69 and 196):
+the allowable pressure is not increased. ACI 336.2R §3.2.1 (corpus:
+aci-336-combined-footings-mats, page 6).
+"""
+function _spread_plan_for_actions(service_actions, strength_actions, qa,
+                                  min_B, si, c1, c2)
+    any(a.P > 0 for a in strength_actions) || throw(ArgumentError(
+        "spread footing: every strength combination is in uplift, so there " *
+        "is no compressive contact pressure to size. ACI 336.2R §3.2.1 " *
+        "Eq. (3-1) applies while the contact area is in compression " *
+        "(corpus: aci-336-combined-footings-mats, page 6)."))
+    B = min_B
+    for a in service_actions
+        a.P <= 0 && continue
+        P = a.P * u"N"
+        B = max(B, sqrt(P / qa))
+        B = max(B, _kern_min_square_side(P, a.Mx * u"N*m", a.My * u"N*m"))
+    end
+    for a in strength_actions
+        a.P <= 0 && continue
+        P = a.P * u"N"
+        B = max(B, _kern_min_square_side(P, a.Mx * u"N*m", a.My * u"N*m"))
+    end
+    B = ceil(ustrip(u"inch", B) / ustrip(u"inch", si)) * si
+    B = max(B, min_B)
+    Lf = B
+    cases = nothing
+    for _ in 1:80
+        built = _spread_action_cases(strength_actions, B, Lf, c1, c2)
+        service_ok = all(_service_action_ok(a, B, Lf, qa) for a in service_actions)
+        strength_ok = all(c.in_kern for c in built)
+        if service_ok && strength_ok && !isempty(built)
+            cases = built
+            break
+        end
+        B += si
+        Lf = B
+    end
+    cases === nothing && error(
+        "Spread footing plan did not keep every ASCE 7-22 combination in the " *
+        "ACI 336.2R §3.2.1 kern with service q_max ≤ qa after 80 size " *
+        "increments (B=$B). Eq. (3-1) is not applied as full contact when " *
+        "q_min < 0 (corpus: aci-336-combined-footings-mats, page 6; " *
+        "asce-7-22, PDF pages 69–70).")
+    return B, Lf, cases
+end
+
+function _spread_action_cases(actions, B, Lf, c1, c2)
+    out = NamedTuple[]
+    for a in actions
+        a.P <= 0 && continue
+        P = a.P * u"N"
+        Mx = a.Mx * u"N*m"
+        My = a.My * u"N*m"
+        qe = _eccentric_soil_pressure(P, Mx, My, B, Lf)
+        arm_x = (Lf - c1) / 2
+        arm_y = (B - c2) / 2
+        push!(out, (
+            qu = qe.q_max,
+            in_kern = _eccentric_in_kern(qe),
+            Mux = Mx,
+            Muy = My,
+            Mu_x = qe.q_max * B * arm_x^2 / 2,
+            Mu_y = qe.q_max * Lf * arm_y^2 / 2,
+            Pu = P,
+        ))
+    end
+    return out
+end
+
+"""True when this allowable-stress action is inside the kern and at most `qa`."""
+function _service_action_ok(a::FootingAction, B, Lf, qa)
+    a.P <= 0 && return true
+    P = a.P * u"N"
+    qe = _eccentric_soil_pressure(P, a.Mx * u"N*m", a.My * u"N*m", B, Lf)
+    return _eccentric_in_kern(qe) && qe.q_max ≤ qa
+end
+
+"""`q_max / qa` for one allowable-stress action. Uplift contributes nothing."""
+function _service_pressure_ratio(a::FootingAction, B, Lf, qa)
+    a.P <= 0 && return 0.0
+    P = a.P * u"N"
+    qe = _eccentric_soil_pressure(P, a.Mx * u"N*m", a.My * u"N*m", B, Lf)
+    return ustrip(u"kPa", qe.q_max) / ustrip(u"kPa", qa)
+end
+
+"""
+    design_footing(::SpreadFooting, demand, soil; opts,
+                   service_actions, strength_actions) → SpreadFootingResult
 
 Design a spread (isolated) footing per ACI 318-11. Unbalanced-moment
 punching transfer is §11.11.7.2 (corpus: aci-318-11, page 210).
 ACI 318-19 §8.4.4.2 is the later number for the same stress.
 
-Uses the StructurePoint 7-step workflow:
-1. Preliminary sizing from service loads and net allowable soil pressure
-2. Two-way (punching) shear with biaxial Mux/Muy → governs thickness
-3. One-way (beam) shear → thickness check
-4. Flexural reinforcement at face of column
-5. Development length verification
-6. Column-footing bearing check (ACI 22.8)
-7. Dowel design (if bearing insufficient)
+Empty `service_actions` keeps the single `(Pu, Ps, Mux, Muy)` on `demand`.
+A filled list sizes the plan from every allowable-stress action and the
+concrete from every strength action. ASCE 7-22 §2.3 and §2.4 (corpus:
+asce-7-22, PDF pages 68–70). The allowable pressure is not increased.
 
 # Arguments
-- `demand::FoundationDemand`: Must include `Pu` (factored), `Ps` (service), and column
-  geometry `c1`, `c2`, `shape` (used for punching, shear, bearing). `Mux`/`Muy` used for
-  eccentric punching shear.
-- `soil::Soil`: `qa` = net allowable bearing pressure.
+- `demand::FoundationDemand`: `Pu`, `Ps`, and column geometry `c1`, `c2`,
+  `shape`. `Mux` and `Muy` are the punching moments when the action lists
+  are empty.
+- `soil::Soil`: `qa` is the net allowable bearing pressure.
 
 # Keyword Arguments
-- `opts::SpreadParams`: Material, cover, depth/size increments, and checks.
-  Column dimensions are taken from `demand`, not from `opts`.
-
-# Returns
-`SpreadFootingResult` with SI output quantities.
+- `opts::SpreadParams`: Material, cover, depth and size increments.
+  Column dimensions come from `demand`.
+- `service_actions`, `strength_actions`: one [`FootingAction`](@ref) per
+  combination. Both empty, or both filled.
 
 # Example
 ```julia
@@ -482,6 +576,12 @@ function design_footing(::SpreadFooting,
     soil::Soil;
     opts::SpreadParams = SpreadParams(),
     tc::Union{Nothing, TraceCollector} = nothing,
+    # Empty: the single (Pu, Ps, Mux, Muy) on `demand` is used.
+    # Filled: every allowable-stress action sizes the plan against qa, and
+    # every strength action sizes the concrete. ASCE 7-22 §2.4 / §2.3
+    # (corpus: asce-7-22, PDF pages 68–70) and §12.13.6 (PDF page 196).
+    service_actions::Vector{FootingAction}=FootingAction[],
+    strength_actions::Vector{FootingAction}=FootingAction[],
 )
     demand.Pu isa Unitful.Quantity ||
         throw(ArgumentError("ACI spread footing Pu must be Unitful; bare Real is rejected"))
@@ -525,65 +625,67 @@ function design_footing(::SpreadFooting,
     # uses |e| so q_max is the peak corner:
     #   q_max,min = P/(B L) (1 ± 6 |ex|/L ± 6 |ey|/B)
     # with ex = Mux/P, ey = Muy/P.  Size the plan from q_max ≤ qa (service).
-    A_req = Ps / qa
-    B = sqrt(A_req)
-
-    # Round up to size increment
     si = opts.size_increment
-    B = ceil(ustrip(u"inch", B) / ustrip(u"inch", si)) * si
-
     # Minimum projection each side (6")
     min_B = max(c1, c2) + 2 * 6.0u"inch"
-    B = max(B, min_B)
-    Lf = B   # square footing
-
-    # Grow the square plan until service q_max ≤ qa AND q_min ≥ 0
-    # (resultant in the kern).  ACI 336.2R §3.2.1 Eq. (3-1) (corpus:
-    # aci-336-combined-footings-mats, page 6) applies only while all of
-    # the contact area is in compression; do not size from q_max while
-    # q_min < 0.  Eccentricity is Mux/Pu (load factors cancel when
-    # Ms/Ps = Mux/Pu).  §4.1 (page 7): establish B, L so the maximum
-    # contact pressure does not exceed qa.
-    P_abs = abs(Pu)
-    plan_ok = true
-    if P_abs > zero(P_abs)
-        B = max(B, _kern_min_square_side(Pu, demand.Mux, demand.Muy))
+    action_cases = nothing
+    if isempty(service_actions)
+        # One (Pu, Ps, Mux, Muy). Eccentricity is Mux/Pu. That equals the
+        # service eccentricity only when Ms/Ps = Mux/Pu.
+        A_req = Ps / qa
+        B = sqrt(A_req)
         B = ceil(ustrip(u"inch", B) / ustrip(u"inch", si)) * si
         B = max(B, min_B)
         Lf = B
-        plan_ok = false
-        for _ in 1:80
-            qe = _eccentric_soil_pressure(Pu, demand.Mux, demand.Muy, B, Lf)
-            q_max_s = (Ps / (B * Lf)) * (qe.q_max / qe.qu)
-            if _eccentric_in_kern(qe) && q_max_s ≤ qa
-                plan_ok = true
-                break
-            end
-            B += si
+        P_abs = abs(Pu)
+        plan_ok = true
+        if P_abs > zero(P_abs)
+            B = max(B, _kern_min_square_side(Pu, demand.Mux, demand.Muy))
+            B = ceil(ustrip(u"inch", B) / ustrip(u"inch", si)) * si
+            B = max(B, min_B)
             Lf = B
+            plan_ok = false
+            for _ in 1:80
+                qe = _eccentric_soil_pressure(Pu, demand.Mux, demand.Muy, B, Lf)
+                q_max_s = (Ps / (B * Lf)) * (qe.q_max / qe.qu)
+                if _eccentric_in_kern(qe) && q_max_s ≤ qa
+                    plan_ok = true
+                    break
+                end
+                B += si
+                Lf = B
+            end
+            if !plan_ok
+                StructuralSizer.emit!(tc, :checker, "design_footing_spread_aci", "foundation_group_$(demand.group_idx)", :failure;
+                                      reason="kern_or_bearing_plan_nonconvergence",
+                                      B_in=Float64(ustrip(u"inch", B)))
+                error("Spread footing plan did not stay in the ACI 336.2R §3.2.1 kern " *
+                      "(q_min ≥ 0) with q_max ≤ qa after 80 size increments (B=$B). " *
+                      "Increase size_increment budget or reduce eccentricity; Eq. (3-1) " *
+                      "is not applied as full contact when q_min < 0 (corpus: " *
+                      "aci-336-combined-footings-mats, page 6).")
+            end
         end
-        if !plan_ok
-            StructuralSizer.emit!(tc, :checker, "design_footing_spread_aci", "foundation_group_$(demand.group_idx)", :failure;
-                                  reason="kern_or_bearing_plan_nonconvergence",
-                                  B_in=Float64(ustrip(u"inch", B)))
-            error("Spread footing plan did not stay in the ACI 336.2R §3.2.1 kern " *
-                  "(q_min ≥ 0) with q_max ≤ qa after 80 size increments (B=$B). " *
-                  "Increase size_increment budget or reduce eccentricity; Eq. (3-1) " *
-                  "is not applied as full contact when q_min < 0 (corpus: " *
-                  "aci-336-combined-footings-mats, page 6).")
+        # Factored net soil pressure — size structural checks from q_max
+        # only after the plan is in the kern (ACI 336.2R §3.2.1 / §4.1).
+        q_u = _eccentric_soil_pressure(Pu, demand.Mux, demand.Muy, B, Lf)
+        if P_abs > zero(P_abs) && !_eccentric_in_kern(q_u)
+            error("Spread footing Eq. (3-1) q_min < 0 at B=$B (ACI 336.2R §3.2.1, " *
+                  "corpus: aci-336-combined-footings-mats, page 6); refuse rather than " *
+                  "treat partial uplift as full-contact pressure.")
         end
+        qu = q_u.q_max
+    else
+        # Each combination keeps its own axial force and moment. Wind and
+        # earthquake factors do not cancel between service and strength.
+        isempty(strength_actions) && throw(ArgumentError(
+            "spread footing: service combinations were passed without the " *
+            "strength combinations. ASCE 7-22 §2.3 sizes the concrete and " *
+            "§2.4 sizes the soil pressure (corpus: asce-7-22, PDF pages 68–70)."))
+        B, Lf, action_cases = _spread_plan_for_actions(
+            service_actions, strength_actions, qa, min_B, si, c1, c2)
+        qu = maximum(c.qu for c in action_cases)
     end
-
-    # Factored net soil pressure — size structural checks from q_max
-    # only after the plan is in the kern (ACI 336.2R §3.2.1 / §4.1).
-    # Mux/Muy also go to punching_check.
-    q_u = _eccentric_soil_pressure(Pu, demand.Mux, demand.Muy, B, Lf)
-    if P_abs > zero(P_abs) && !_eccentric_in_kern(q_u)
-        error("Spread footing Eq. (3-1) q_min < 0 at B=$B (ACI 336.2R §3.2.1, " *
-              "corpus: aci-336-combined-footings-mats, page 6); refuse rather than " *
-              "treat partial uplift as full-contact pressure.")
-    end
-    qu = q_u.q_max
 
     # =====================================================================
     # Step 2 & 3: Thickness (Punching + One-Way Shear)
@@ -606,17 +708,17 @@ function design_footing(::SpreadFooting,
     Mu_x = qu * B  * arm_x^2 / 2
     Mu_y = qu * Lf * arm_y^2 / 2
 
-    function _depth_passes(h)
+    function _case_depth_ok(h, qu_c, Mux_c, Muy_c, Mu_x_c, Mu_y_c)
         d_try = h - cover - db / 2
         d_try < 4.0u"inch" && return (ok = false, punch = nothing, ow_ok = false)
-        _footing_flexure_ok(((Mu_x, B), (Mu_y, Lf)), d_try, fc, fy, ϕf) ||
+        _footing_flexure_ok(((Mu_x_c, B), (Mu_y_c, Lf)), d_try, fc, fy, ϕf) ||
             return (ok = false, punch = nothing, ow_ok = false)
 
         # Two-way (punching) shear with biaxial moments
         Ac = col_shape == :circular ?
              π * (c1 + d_try)^2 / 4 : (c1 + d_try) * (c2 + d_try)
-        Vu_p = qu * (B * Lf - Ac)
-        punch_try = punching_check(Vu_p, demand.Mux, demand.Muy, d_try, fc, c1, c2;
+        Vu_p = qu_c * (B * Lf - Ac)
+        punch_try = punching_check(Vu_p, Mux_c, Muy_c, d_try, fc, c1, c2;
                                     position = :interior, shape = col_shape,
                                     λ = λ, ϕ = ϕv)
 
@@ -626,15 +728,33 @@ function design_footing(::SpreadFooting,
         cant_y = (B  - c2) / 2 - d_try
         ow_ok = true
         if cant_x > 0u"inch"
-            Vu_x = uconvert(u"lbf", qu * B * cant_x)
+            Vu_x = uconvert(u"lbf", qu_c * B * cant_x)
             ow_ok = ow_ok && Vu_x ≤ ϕVc
         end
         if cant_y > 0u"inch"
-            Vu_y = uconvert(u"lbf", qu * Lf * cant_y)
+            Vu_y = uconvert(u"lbf", qu_c * Lf * cant_y)
             ow_ok = ow_ok && Vu_y ≤ ϕVc
         end
 
         return (ok = punch_try.ok && ow_ok, punch = punch_try, ow_ok = ow_ok)
+    end
+
+    function _depth_passes(h)
+        # One gravity demand: the factored pressure and its end moments.
+        # Several combinations: each strength combination, with its own
+        # pressure and moment. ASCE 7-22 §2.3.1 (corpus: asce-7-22, PDF page 68).
+        if action_cases === nothing
+            return _case_depth_ok(h, qu, demand.Mux, demand.Muy, Mu_x, Mu_y)
+        end
+        punch = nothing
+        ow_ok = true
+        for c in action_cases
+            r = _case_depth_ok(h, c.qu, c.Mux, c.Muy, c.Mu_x, c.Mu_y)
+            r.punch === nothing || (punch = r.punch)
+            ow_ok = ow_ok && r.ow_ok
+            r.ok || return (ok = false, punch = punch, ow_ok = ow_ok)
+        end
+        return (ok = true, punch = punch, ow_ok = ow_ok)
     end
 
     h_seed = _spread_punching_depth_seed(qu, B, Lf, c1, c2, col_shape, fc, λ, ϕv, cover, db)
@@ -661,10 +781,17 @@ function design_footing(::SpreadFooting,
     # =====================================================================
     # Step 4: Flexural Reinforcement (ACI 7.5)
     # =====================================================================
-    As_x = max(_flexural_steel_footing(Mu_x, B,  d, fc, fy, ϕf),
-               _min_steel_footing(B, h, fy))
-    As_y = max(_flexural_steel_footing(Mu_y, Lf, d, fc, fy, ϕf),
-               _min_steel_footing(Lf, h, fy))
+    if action_cases === nothing
+        As_x = max(_flexural_steel_footing(Mu_x, B,  d, fc, fy, ϕf),
+                   _min_steel_footing(B, h, fy))
+        As_y = max(_flexural_steel_footing(Mu_y, Lf, d, fc, fy, ϕf),
+                   _min_steel_footing(Lf, h, fy))
+    else
+        As_x = maximum(max(_flexural_steel_footing(c.Mu_x, B, d, fc, fy, ϕf),
+                           _min_steel_footing(B, h, fy)) for c in action_cases)
+        As_y = maximum(max(_flexural_steel_footing(c.Mu_y, Lf, d, fc, fy, ϕf),
+                           _min_steel_footing(Lf, h, fy)) for c in action_cases)
+    end
     As_gov = max(As_x, As_y)
 
     # Bar selection — n_bars is the larger of (As / A_bar) and the count
@@ -689,7 +816,8 @@ function design_footing(::SpreadFooting,
     # Step 6 & 7: Bearing & Dowels (ACI 22.8)
     # =====================================================================
     if opts.check_bearing
-        bearing = _bearing_check_footing(Pu, c1, c2, B, Lf, h,
+        Pu_col = action_cases === nothing ? Pu : maximum(c.Pu for c in action_cases)
+        bearing = _bearing_check_footing(Pu_col, c1, c2, B, Lf, h,
                                           fc, fc_col, fy, ϕb, col_shape)
         bearing.need_dowels && opts.check_dowels &&
             @info "Dowels required: As_dowels = $(bearing.As_dowels)"
@@ -698,7 +826,11 @@ function design_footing(::SpreadFooting,
     # =====================================================================
     # Utilization
     # =====================================================================
-    util_bearing = to_kip(Ps) / to_kip(qa * B * Lf)
+    util_bearing = if action_cases === nothing
+        to_kip(Ps) / to_kip(qa * B * Lf)
+    else
+        maximum(_service_pressure_ratio(a, B, Lf, qa) for a in service_actions)
+    end
     utilization  = max(punch.utilization, util_bearing)
 
     # =====================================================================

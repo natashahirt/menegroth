@@ -159,7 +159,8 @@ function _walls_with_member_recheck!(struc::BuildingStructure, params::DesignPar
     for round in 1:max_rounds
         f_before = floors()
         result = design_ordinary_walls!(struc, params; tc=tc)
-        floors_same(f_before, floors()) && return result
+        floors_same(f_before, floors()) &&
+            (_resize_foundations_for_lateral!(struc, params; tc=tc); return result)
         before = member_sections()
         if flat
             _reconcile_columns!(struc, params; tc=tc)
@@ -169,10 +170,27 @@ function _walls_with_member_recheck!(struc::BuildingStructure, params::DesignPar
         held = all(_sections_identical(a, b) for (a, b) in zip(before, member_sections()))
         StructuralSizer.emit!(tc, :workflow, "_walls_with_member_recheck!", "", :decision;
                               round = round, members_changed = !held)
-        held && return result
+        held && (_resize_foundations_for_lateral!(struc, params; tc=tc); return result)
     end
+    _resize_foundations_for_lateral!(struc, params; tc=tc)
     struc.stage_diagnostics[:wall_members] =
         "Walls and members were still changing each other after $max_rounds rounds " *
         "of row F frame resizing; the last analysis stands."
     return struc.ordinary_wall_result
+end
+
+"""
+Size the footings again once wind and earthquake reactions exist.
+
+The foundation stage runs before the ordinary-wall stage, so its first pass
+sees gravity only. §2.3 and §2.4 require the lateral combinations as well
+(corpus: asce-7-22, PDF pages 68–70). A building without foundation options,
+or without stored lateral cases, is left as the first pass sized it.
+"""
+function _resize_foundations_for_lateral!(struc::BuildingStructure, params::DesignParameters;
+                                          tc::Union{Nothing, StructuralSizer.TraceCollector}=nothing)
+    params.foundation_options === nothing && return struc
+    struc.foundation_lateral === nothing && return struc
+    _size_foundations!(struc, params.foundation_options; tc=tc)
+    return struc
 end

@@ -140,6 +140,9 @@ function _unfactored_DL_loads(struc::BuildingStructure)
     for ld in model.loads
         ld isa Asap.GravityLoad && push!(loads, ld)
     end
+    # Curtain wall is dead load. The model copies are factored, so the service
+    # case rebuilds them at wall_SDL.
+    append!(loads, unfactored_cladding_loads(struc, els))
     return loads
 end
 

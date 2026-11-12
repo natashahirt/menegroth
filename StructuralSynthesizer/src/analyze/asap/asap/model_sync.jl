@@ -165,6 +165,7 @@ function sync_asap!(struc::BuildingStructure;
     _sync_edge_eccentricity!(struc, params)
     _sync_shell_area_pressures!(struc, params)
     _sync_wall_self_weight!(struc, params)
+    _sync_cladding_line_loads!(struc, params)
     _sync_vault_thrust_line_loads!(struc, params)
 
     # 3. Re-process stiffness and loads (topology unchanged). When the caller

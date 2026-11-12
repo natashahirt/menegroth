@@ -80,6 +80,8 @@ function solve_gravity_basic_cases(struc::BuildingStructure;
     for ld in model.loads
         ld isa Asap.GravityLoad && push!(dead, ld)
     end
+    # Curtain wall, unfactored. The copies on model.loads carry the dead factor.
+    append!(dead, unfactored_cladding_loads(struc, elements))
 
     symbols = Symbol[:D, :L, roof]
     cases = Vector{Asap.AbstractLoad}[dead, live, roof_loads]

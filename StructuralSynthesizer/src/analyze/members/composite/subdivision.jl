@@ -234,7 +234,7 @@ function _clear_unshored_stage!(mesh)
     return mesh
 end
 
-"""Cell-dead, self-weight, and wall weight stay on the steel section.
+"""Cell-dead, self-weight, wall weight, and curtain-wall line loads stay on the steel section.
 
 A patterned live load is everything else in the case. ACI 318-11 §13.7.6.3
 reduces that live load to three-quarters on the alternate-span cases
@@ -254,6 +254,7 @@ end
 function _is_pattern_dead_load(ld, dead_ids::Set{UInt})
     objectid(ld) in dead_ids && return true
     ld isa Asap.GravityLoad && return true
+    ld isa Asap.LineLoad && ld.id === :cladding && return true
     return ld isa Asap.AreaLoad && ld.id === :wall_self_weight
 end
 

@@ -194,9 +194,9 @@ const PIPELINE_PROVENANCE = Dict{NodeKey, @NamedTuple{
         reads        = Symbol[:columns, :beams, :slabs, :asap_model,
                               :frame_section_floors, :frame_floor_demands],
         writes       = Symbol[:columns, :beams, :asap_model],
-        # v4: column NLP constrains the stored row F cases with magnification
-        # off, and beam NLP constrains one shear row per load case.
-        code_version = :members_v4,
+        # v5: perimeter curtain-wall dead load is on the analysis model, so
+        # member forces change at an unchanged GravityLoads.
+        code_version = :members_v5,
     ),
     NODE_FOUNDATIONS => (
         param_slice  = Symbol[:foundation_options],
@@ -212,9 +212,8 @@ const PIPELINE_PROVENANCE = Dict{NodeKey, @NamedTuple{
                               :frame_floor_demands],
         writes       = Symbol[:ordinary_wall_result, :diaphragm_layout,
                               :frame_section_floors, :frame_floor_demands],
-        # v4: a failing frame group stores the demand rows that set its
-        # section floor, beside the section itself.
-        code_version = :ordinary_walls_v4,
+        # v5: seismic weight includes the curtain-wall dead load.
+        code_version = :ordinary_walls_v5,
     ),
 )
 

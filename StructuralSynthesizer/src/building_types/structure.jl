@@ -86,6 +86,10 @@ mutable struct BuildingStructure{T, A, P} <: AbstractBuildingStructure
     # pass. Each entry is `(label, RCColumnDemand or RCBeamDemand)`, the union
     # of that group's members. Column and beam NLP read these later.
     frame_floor_demands::Dict{UInt64, Vector{Tuple{String, Any}}}
+    # Unfactored curtain-wall pressure (`GravityLoads.wall_SDL`). Zero until
+    # `to_asap!`. ELF and the unfactored dead case read this. The line loads
+    # on the model are the factored copy.
+    cladding_SDL::P
 
     # ─── Design Snapshots (for parametric studies) ───
     _snapshots::Dict{Symbol, DesignSnapshot{T, P}}
@@ -122,6 +126,7 @@ function BuildingStructure(skel::BuildingSkeleton{T}) where T
         Dict{Symbol, String}(),
         Dict{UInt64, Any}(),
         Dict{UInt64, Vector{Tuple{String, Any}}}(),
+        zero(P),
         Dict{Symbol, DesignSnapshot{T, P}}(),
     )
 end
@@ -151,6 +156,7 @@ function BuildingStructure{T, A, P}(skel::BuildingSkeleton{T}) where {T, A, P}
         Dict{Symbol, String}(),
         Dict{UInt64, Any}(),
         Dict{UInt64, Vector{Tuple{String, Any}}}(),
+        zero(P),
         Dict{Symbol, DesignSnapshot{T, P}}(),
     )
 end

@@ -7,12 +7,12 @@ title: Ipopt Jacobian cache and discrete beam caller alignment
 node_label: Jacobian cache and beam caller
 tags: nlp,ipopt,beams,deflection,memoization
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-10593559
 created_at: '2026-11-12T00:49:08.554917+00:00'
-updated_at: '2026-11-12T00:49:08.554917+00:00'
+updated_at: '2026-11-12T01:44:12.366037+00:00'
 has_child_rationale: 'The constraint-vector cache is already recorded in chec-03a1299d.
   This entry is the uncommitted follow-up: objective and Jacobian reuse, plus the
   discrete beam API the building caller already uses.'

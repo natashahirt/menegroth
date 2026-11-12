@@ -312,8 +312,10 @@ function _shukla_flexure_pairs(M_x_f, M_y_f, plan, demands)
     # multi-bay grids (corpus: aci-336-combined-footings-mats Chapter 6
     # §6.1.2 Step 3).
     qu_rigid = sum(d.Pu for d in demands) / (B * Lm)
-    mom_x_rigid = _rigid_mat_strip_moments(qu_rigid, Lm, plan.x_spans)
-    mom_y_rigid = _rigid_mat_strip_moments(qu_rigid, B,  plan.y_spans)
+    # Column loads only: this qu does not include wall weight.
+    x_sta, y_sta, P_sta = _mat_line_loads(plan, demands, WallLineDemand[])
+    mom_x_rigid = _rigid_mat_strip_moments(qu_rigid, B, Lm, x_sta, P_sta)
+    mom_y_rigid = _rigid_mat_strip_moments(qu_rigid, Lm, B, y_sta, P_sta)
 
     return ((max(Mx_pos * Lm, mom_x_rigid.M_pos), Lm),   # sagging → As_bot
             (max(Mx_neg * Lm, mom_x_rigid.M_neg), Lm),   # hogging → As_top

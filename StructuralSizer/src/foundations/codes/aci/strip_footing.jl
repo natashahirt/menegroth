@@ -35,7 +35,8 @@ loop, then re-tags the output (legitimate boundary per Asap convention).
 function _strip_VM_diagram(L::Length, B::Length, qu::Pressure,
                             col_pos::Vector{<:Length},
                             col_Pu::Vector{<:Force};
-                            n_pts::Int = 500)
+                            n_pts::Int = 500,
+                            include_stations::Bool = false)
     # Strip to common units for the numerical loop
     L_ft  = ustrip(u"ft", L)
     B_ft  = ustrip(u"ft", B)
@@ -45,10 +46,14 @@ function _strip_VM_diagram(L::Length, B::Length, qu::Pressure,
 
     w = qu_ksf * B_ft  # kip/ft upward
     xs  = collect(range(0.0, L_ft, length = n_pts))
-    Vv  = zeros(n_pts)
-    Mv  = zeros(n_pts)
+    # The positive peak sits at a column. A uniform grid can step over it.
+    if include_stations
+        xs = sort(unique(vcat(xs, [p for p in pos_ft if 0.0 <= p <= L_ft])))
+    end
+    Vv  = zeros(length(xs))
+    Mv  = zeros(length(xs))
 
-    for i in 1:n_pts
+    for i in eachindex(xs)
         x = xs[i]
         V_soil = w * x
         V_cols = 0.0

@@ -45,7 +45,7 @@ catalog = standard_rc_tbeams(flange_width=bf, flange_thickness=5u"inch")
 ```
 """
 function standard_rc_tbeams(;
-    flange_width::Length,
+    flange_width,
     flange_thickness::Length,
     web_widths = [10, 12, 14, 16, 18, 20, 24],
     depths = [16, 18, 20, 22, 24, 28, 30, 36],
@@ -55,19 +55,23 @@ function standard_rc_tbeams(;
     stirrup_size::Int = 3,
 )
     catalog = RCTBeamSection[]
-    bf = flange_width
+    # A function returns the flange width of one web. The caller applies
+    # ACI 318-11 §8.12.2 (corpus: aci-318-11, PDF p. 119) to that web.
+    flange_of = flange_width isa Function ? flange_width : (_ -> flange_width)
     hf = flange_thickness
 
     cover_in  = ustrip(u"inch", cover)
     d_stir_in = ustrip(u"inch", rebar(stirrup_size).diameter)
     d_agg_in  = 0.75  # 3/4" typical aggregate
-    bf_in     = ustrip(u"inch", bf)
     hf_in     = ustrip(u"inch", hf)
 
     for bw_val in web_widths
         bw_in = Float64(bw_val)
-        bw_in ≤ bf_in || continue   # bw must be ≤ bf
         bw = bw_in * u"inch"
+        bf = flange_of(bw)
+        bf isa Length || throw(ArgumentError("T-beam flange width must be a length"))
+        bf_in = ustrip(u"inch", bf)
+        bw_in ≤ bf_in || continue   # bw must be ≤ bf
 
         for h_val in depths
             h_in = Float64(h_val)
@@ -108,7 +112,7 @@ end
 Compact T-beam catalog for light-load applications.
 """
 function small_rc_tbeams(;
-    flange_width::Length,
+    flange_width,
     flange_thickness::Length,
     cover::Length = 1.5u"inch",
     stirrup_size::Int = 3,
@@ -129,7 +133,7 @@ end
 Extended T-beam catalog for heavy-load applications.
 """
 function large_rc_tbeams(;
-    flange_width::Length,
+    flange_width,
     flange_thickness::Length,
     cover::Length = 1.5u"inch",
     stirrup_size::Int = 3,

@@ -725,6 +725,14 @@ result = size_beams(Mu, Vu, geoms, ConcreteBeamOptions(); Tu=Tu)
 """
 function size_beams end
 
+"""One span list per demand, or none. `nothing` and an empty list both skip the check."""
+function _beam_shell_spans(shell_spans, n::Int)
+    shell_spans === nothing && return Vector{RCShellSpan}[]
+    length(shell_spans) == n ||
+        throw(ArgumentError("shell_spans must have one list per demand"))
+    return shell_spans
+end
+
 function size_beams(
     Mu::Vector,
     Vu::Vector,
@@ -738,6 +746,7 @@ function size_beams(
     output_flag::Integer = 0,
     tc::Union{Nothing, TraceCollector} = nothing,
     feasible::Union{Nothing, Vector{Vector{Int}}} = nothing,
+    shell_spans = nothing,
 )
     n = length(Mu)
     n == length(Vu)          || throw(ArgumentError("Mu and Vu must have same length"))
@@ -776,6 +785,7 @@ function size_beams(
     demands = [RCBeamDemand(i; Mu=Mu_kipft[i], Mu_neg=Mu_neg_kipft[i],
                             Vu=Vu_kip[i], Nu=Nu_kip[i], Tu=Tu_kipin[i]) for i in 1:n]
 
+    spans = _beam_shell_spans(shell_spans, n)
     # Create checker
     checker = ACIBeamChecker(;
         fy_ksi  = ustrip(ksi, opts.rebar_material.Fy),
@@ -783,6 +793,7 @@ function size_beams(
         Es_ksi  = ustrip(ksi, opts.rebar_material.E),
         λ       = opts.material.λ,       # Lightweight factor from Concrete type
         max_depth = opts.max_depth,
+        shell_spans = spans,
     )
 
     # Optimize — multi-material if grades vector is provided
@@ -2505,7 +2516,8 @@ section satisfying ACI 318-11 requirements.
 - `opts`: `ConcreteBeamOptions`
 
 # Keyword Arguments
-- `flange_width`: Effective flange width (bf) — Length unit
+- `flange_width`: Effective flange width (bf). A length, or a function
+  of web width that returns a length.
 - `flange_thickness`: Slab thickness (hf) — Length unit
 - `Nu`: Vector of factored axial compressions (default: zeros). When > 0,
   the shear checker increases Vc per ACI §22.5.6.1.
@@ -2533,7 +2545,7 @@ function size_tbeams(
     Vu::Vector,
     geometries::Vector,
     opts::ConcreteBeamOptions;
-    flange_width::Length,
+    flange_width,
     flange_thickness::Length,
     Mu_neg::Vector = Mu,
     Nu::Vector = zeros_like(Vu),
@@ -2546,6 +2558,9 @@ function size_tbeams(
     w_live = nothing,
     defl_support::Symbol = :simply_supported,
     defl_ξ::Real = 2.0,
+    sustained_live_fraction::Real = 0.0,
+    shell_spans = nothing,
+    joist_spacing = nothing,
 )
     n = length(Mu)
     n == length(Vu)          || throw(ArgumentError("Mu and Vu must have same length"))
@@ -2606,6 +2621,10 @@ function size_tbeams(
         Float64(w_live)
     end
 
+    # `joist_spacing` is accepted from the rib caller. This checker applies
+    # ordinary Vc. The ACI 318-11 §8.13.8 joist increase is not in this checker.
+    _ = joist_spacing
+    spans = _beam_shell_spans(shell_spans, n)
     # Create checker (with optional deflection)
     checker = ACIBeamChecker(;
         fy_ksi  = ustrip(ksi, opts.rebar_material.Fy),
@@ -2617,6 +2636,8 @@ function size_tbeams(
         w_live_kplf = wl_kplf,
         defl_support = defl_support,
         defl_ξ = Float64(defl_ξ),
+        defl_sustained_live = sustained_live_fraction,
+        shell_spans = spans,
     )
 
     return optimize_discrete(
@@ -2701,6 +2722,14 @@ function size_rc_tbeam_nlp(
     )
 
     result = build_rc_tbeam_nlp_result(problem, opt_result)
+    # Ceil-to-bar can drop the built section below the NLP's εt ≥ 0.005 target.
+    # ACI 318-11 §10.3.5 (corpus: aci-318-11, PDF p. 142) requires εt ≥ 0.004.
+    εt_built = _compute_εt(result.section, problem.fc_psi, problem.fy_psi)
+    if εt_built < 0.004
+        return RCTBeamNLPResult(result.section, result.bw_opt, result.h_opt, result.ρ_opt,
+                                result.bw_final, result.h_final, result.bf, result.hf,
+                                result.area_web, :infeasible, result.iterations)
+    end
     # Post-NLP hogging adequacy (top steel is not an NLP design variable).
     # The NLP therefore cannot deepen for Mu_neg; it may return :infeasible.
     # Public default Mu_neg = Mu is unchanged.

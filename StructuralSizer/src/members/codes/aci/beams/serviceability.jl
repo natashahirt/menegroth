@@ -234,6 +234,9 @@ Follows the same ACI §9.5.2 methodology as `design_beam_deflection` but uses:
 - `wc_pcf`: Concrete unit weight in pcf (default 150)
 - `As_prime`: Compression steel area for long-term factor (default 0)
 - `ξ`: Time-dependent factor (default 2.0)
+- `sustained_live_fraction`: Share of live load in the sustained load of
+  ACI 318-11 §9.5.2.5 (corpus: aci-318-11, PDF p. 132). Default 0, so only
+  dead load is sustained.
 - `limits`: Deflection limit types to check (default `[:immediate_ll, :total]`)
 
 # Returns
@@ -248,9 +251,11 @@ function design_tbeam_deflection(
     wc_pcf::Union{Real, Nothing} = 150,
     As_prime::Area   = 0.0u"inch^2",
     ξ::Float64       = 2.0,
+    sustained_live_fraction::Real = 0.0,
     limits::Vector{Symbol} = [:immediate_ll, :total]
 )
     # --- Material properties ---
+    ψ = _as_sustained_live_fraction(sustained_live_fraction)
     Ec_val = wc_pcf === nothing ? Ec(fc) : Ec(fc, wc_pcf)
     fr_val = fr(fc)
 
@@ -284,11 +289,17 @@ function design_tbeam_deflection(
     Δ_DL = _beam_deflection(w_dead + w_live, L, Ec_val, Ie_DL, support)
     Δ_LL = Δ_DL - Δ_D
 
-    # --- Long-term ---
+    # --- Long-term (ACI 318-11 §9.5.2.5, Eq. 9-11) ---
+    # λΔ multiplies the immediate deflection from the sustained load.
+    # ψ = 0 keeps that load equal to dead load, matching the dead-only total.
+    w_sus = w_dead + ψ * w_live
+    Ma_sus = _beam_moment(w_sus, L, support)
+    Ie_sus = effective_moment_of_inertia(Mcr, Ma_sus, Ig, Icr)
+    Δ_sus = _beam_deflection(w_sus, L, Ec_val, Ie_sus, support)
     ρ_prime = ustrip(As_prime / (bw * d))
     λΔ = long_term_deflection_factor(ξ, ρ_prime)
-    Δ_lt_dead = λΔ * Δ_D
-    Δ_total   = Δ_lt_dead + Δ_LL
+    Δ_lt_dead = λΔ * Δ_sus
+    Δ_total   = Δ_lt_dead + (Δ_DL - Δ_sus)
 
     # --- Limit checks ---
     checks = Dict{Symbol, NamedTuple}()

@@ -149,24 +149,55 @@ function _numeric_gradient(f, x::Vector{Float64}; ε::Float64=1e-6)
 end
 
 """
-    _constraint_cache(problem, n_vars) -> Function
+    _memo_points(f, n_keep) -> Function
 
-Memoized `constraint_fns(problem, x)`. Each JuMP constraint operator needs one
-row, so without the cache every row recomputes the whole vector and an
-iteration costs O(n_constraints²) row evaluations. Keys are copies because
-[`_numeric_gradient`](@ref) perturbs `x` in place. The cache holds a base
-point plus its central-difference points, then starts over.
+Memoized `f(x)`. Keys are copies, because [`_numeric_gradient`](@ref) and the
+Jacobian below perturb `x` in place. The cache keeps the current point, its
+central-difference neighbors, and a few trial points, then starts over.
 """
-function _constraint_cache(problem, n_vars::Int)
-    cache = Dict{Vector{Float64}, Vector{Float64}}()
-    cap = 4 * n_vars + 4
+function _memo_points(f, n_keep::Int)
+    cache = Dict{Vector{Float64}, Any}()
     return function (xv::Vector{Float64})
         hit = get(cache, xv, nothing)
         hit === nothing || return hit
-        length(cache) >= cap && empty!(cache)
-        c = constraint_fns(problem, xv)
-        cache[copy(xv)] = c
-        return c
+        length(cache) >= n_keep && empty!(cache)
+        y = f(xv)
+        cache[copy(xv)] = y
+        return y
+    end
+end
+
+"""
+    _memo_jacobian(constraints, n_vars) -> Function
+
+`(j, x) ->` row `j` of the central-difference Jacobian of `constraints(x)`.
+
+One evaluation of the full constraint vector fills every row, so the `n`
+constraint gradients at one point cost `2 n_vars` vector evaluations instead
+of `2 n_vars · n`.
+"""
+function _memo_jacobian(constraints, n_vars::Int; ε::Float64=1e-6)
+    cache = Dict{Vector{Float64}, Matrix{Float64}}()
+    return function (j::Int, x::Vector{Float64})
+        J = get(cache, x, nothing)
+        if J === nothing
+            length(cache) >= 4 && empty!(cache)
+            g0 = constraints(x)
+            J = Matrix{Float64}(undef, length(g0), n_vars)
+            for i in 1:n_vars
+                xi = x[i]
+                x[i] = xi + ε
+                gp = constraints(x)
+                x[i] = xi - ε
+                gm = constraints(x)
+                x[i] = xi
+                for r in eachindex(g0)
+                    J[r, i] = (gp[r] - gm[r]) / (2ε)
+                end
+            end
+            cache[copy(x)] = J
+        end
+        return @view J[j, :]
     end
 end
 
@@ -205,9 +236,13 @@ function _optimize_ipopt(problem::AbstractNLPProblem, objective::AbstractObjecti
     # Decision variables with bounds
     JuMP.@variable(model, lb[i] <= x[i=1:n_vars] <= ub[i], start = x0[i])
     
-    # Objective function (Float64 vector input)
-    _obj_f(xv::Vector{Float64}) = objective_fn(problem, xv)
-    
+    # Objective and the full constraint vector, each memoized per point.
+    # A gradient reuses the value Ipopt just asked for at the same x.
+    _obj_f = _memo_points(xv -> objective_fn(problem, xv), 4 * n_vars + 4)
+    _cons = nc > 0 ? _memo_points(xv -> constraint_fns(problem, xv), 4 * n_vars + 4) :
+                     nothing
+    _jac = nc > 0 ? _memo_jacobian(_cons, n_vars) : nothing
+
     # Register objective operator - different signatures for 1D vs nD
     obj_op = if n_vars == 1
         # Univariate: f(x) -> y, ∇f(x) -> dy/dx
@@ -236,41 +271,36 @@ function _optimize_ipopt(problem::AbstractNLPProblem, objective::AbstractObjecti
     # Register and add constraint functions
     if nc > 0
         c_lb, c_ub = constraint_bounds(problem)
-        all_cons = _constraint_cache(problem, n_vars)
-        
+
         for j in 1:nc
-            # Constraint j function (Float64 vector input)
-            _con_f(xv::Vector{Float64}) = all_cons(xv)[j]
-            
-            # Register constraint operator - different signatures for 1D vs nD
-            con_op = if n_vars == 1
-                # Univariate
-                _con_1d(x::Float64) = _con_f([x])
-                _con_grad_1d(x::Float64) = _numeric_gradient(_con_f, [x])[1]
-                JuMP.add_nonlinear_operator(model, 1, _con_1d, _con_grad_1d; name = Symbol("con_$j"))
-            else
-                # Multivariate
-                function _con_grad!(g::AbstractVector{T}, xv...) where {T}
-                    x_vec = collect(Float64, xv)
-                    grad = _numeric_gradient(_con_f, x_vec)
-                    for i in eachindex(g)
-                        g[i] = grad[i]
+            # `let` gives this iteration its own index. A bare `j` is one
+            # binding, so every operator would read the last row.
+            let j = j
+                _con_f(xv::Vector{Float64}) = _cons(xv)[j]
+                con_op = if n_vars == 1
+                    _con_1d(x::Float64) = _con_f([x])
+                    _con_grad_1d(x::Float64) = _jac(j, [x])[1]
+                    JuMP.add_nonlinear_operator(model, 1, _con_1d, _con_grad_1d;
+                                                name = Symbol("con_$j"))
+                else
+                    function _con_grad!(g::AbstractVector{T}, xv...) where {T}
+                        row = _jac(j, collect(Float64, xv))
+                        for i in eachindex(g)
+                            g[i] = row[i]
+                        end
+                        return
                     end
-                    return
+                    JuMP.add_nonlinear_operator(
+                        model, n_vars, (xv...) -> _con_f(collect(Float64, xv)), _con_grad!;
+                        name = Symbol("con_$j"))
                 end
-                JuMP.add_nonlinear_operator(
-                    model, n_vars, (xv...) -> _con_f(collect(Float64, xv)), _con_grad!;
-                    name = Symbol("con_$j")
-                )
-            end
-            
-            # Add constraint with bounds using modern JuMP API
-            if c_lb[j] == -Inf
-                JuMP.@constraint(model, con_op(x...) <= c_ub[j])
-            elseif c_ub[j] == Inf
-                JuMP.@constraint(model, con_op(x...) >= c_lb[j])
-            else
-                JuMP.@constraint(model, c_lb[j] <= con_op(x...) <= c_ub[j])
+                if c_lb[j] == -Inf
+                    JuMP.@constraint(model, con_op(x...) <= c_ub[j])
+                elseif c_ub[j] == Inf
+                    JuMP.@constraint(model, con_op(x...) >= c_lb[j])
+                else
+                    JuMP.@constraint(model, c_lb[j] <= con_op(x...) <= c_ub[j])
+                end
             end
         end
     end

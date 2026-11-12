@@ -186,6 +186,20 @@ function long_term_deflection_factor(ξ::Float64=2.0, ρ_prime::Float64=0.0)
 end
 
 """
+    _as_sustained_live_fraction(ψ) -> Float64
+
+Share of service live load counted with dead load as the sustained load of
+ACI 318-11 §9.5.2.5 (corpus: aci-318-11, PDF p. 132). The clause multiplies
+the immediate deflection from "the sustained load considered" by λΔ and
+leaves that split to the design. `0` is dead load alone.
+"""
+function _as_sustained_live_fraction(ψ::Real)
+    0 <= ψ <= 1 || throw(ArgumentError(
+        "sustained live fraction must be between 0 and 1; got $ψ"))
+    return Float64(ψ)
+end
+
+"""
     deflection_limit(l, limit_type::Symbol) -> Length
 
 Allowable deflection per ACI Table 24.2.2.

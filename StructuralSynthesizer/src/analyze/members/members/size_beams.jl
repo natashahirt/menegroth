@@ -1374,15 +1374,13 @@ function _size_beams_impl!(
                                        StructuralSizer.RCShellSpan)
 
     # Build demand vectors with Unitful SI units.
-    # Mu = sagging (Mux_pos); Mu_neg = hogging. Nu is signed: tension
-    # (Pu_t > 0) is negative so ACI 318-11 §11.2.2.3 Eq. (11-8) reduces Vc;
-    # otherwise compression Pu_c uses §11.2.1.2 Eq. (11-4).
-    # ENGINEERING JUDGMENT: compression/shear concurrency is not tracked —
-    # the group envelope Pu is applied to the group envelope Vu.
+    # Mu = sagging (Mux_pos); Mu_neg = hogging. The discrete checker takes one
+    # Nu. Tension uses Eq. (11-8). Compression is not credited: the envelope
+    # Pu_c is not concurrent with the envelope Vu, and Eq. (11-4) would raise Vc.
     Mu = [d.Mux_pos * u"N*m"  for d in demands]
     Mu_neg = [d.Mux_neg * u"N*m" for d in demands]
     Vu = [d.Vu_strong * u"N"   for d in demands]
-    Nu = [d.Pu_t > 0 ? -d.Pu_t * u"N" : d.Pu_c * u"N" for d in demands]
+    Nu = [d.Pu_t > 0 ? -d.Pu_t * u"N" : 0.0u"N" for d in demands]
 
     # Build geometries (L_totals are Float64 in meters)
     geoms = [StructuralSizer.ConcreteMemberGeometry(L) for L in L_totals]

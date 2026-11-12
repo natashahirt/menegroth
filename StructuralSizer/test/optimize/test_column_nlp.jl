@@ -553,8 +553,8 @@ end
     end
 
     @testset "Placeable-steel constraint and bar cap" begin
-        # The constraint is ρ·b·h / (N_MAX·A_bar), dimensionless, last row,
-        # with b, h in inches and A_bar in in².
+        # The constraint is ρ·b·h / (n_fit·A_bar). n_fit is the bars that
+        # fit the faces, capped at N_MAX, not N_MAX itself.
         geometry = ConcreteMemberGeometry(4.0; k=1.0, braced=true)
         @test N_MAX_BARS == 32
         for (bar_size, Muy) in ((8, 0.0), (6, 0.0), (10, 150.0))
@@ -564,44 +564,60 @@ end
             A_bar = ustrip(u"inch^2", StructuralSizer.rebar(bar_size).A)
             for x in ([20.0, 20.0, 0.08], [14.0, 22.0, 0.025], [30.0, 30.0, 0.01])
                 g = constraint_fns(problem, x)
+                n_fit = StructuralSizer._rc_column_nlp_fit_bars(x[1], x[2], opts)
                 @test length(g) == n_constraints(problem)
-                @test g[end] ≈ x[3] * x[1] * x[2] / (N_MAX_BARS * A_bar) rtol=1e-12
+                @test g[end] ≈ x[3] * x[1] * x[2] / (n_fit * A_bar) rtol=1e-12
             end
         end
-        # #8 = 0.79 in²: 20×20 at ρ=0.08 asks for 32 in² against 25.28 in²
-        # placeable — the continuous point the old gate accepted.
+        # #8 at 20×20: ρ·Ag over the steel the faces can hold is 1 at that area.
         p8 = RCColumnNLPProblem(
             RCColumnDemand(1; Pu=600.0, Mux=500.0, βdns=0.6), geometry,
             NLPColumnOptions(bar_size=8, max_dim=20.0u"inch", ρ_max=0.08))
-        @test constraint_fns(p8, [20.0, 20.0, 0.08])[end] ≈ 32.0 / 25.28 rtol=1e-12
-        @test constraint_fns(p8, [20.0, 20.0, 0.0632])[end] ≈ 1.0 rtol=1e-12
+        opts8 = NLPColumnOptions(bar_size=8, max_dim=20.0u"inch", ρ_max=0.08)
+        n_fit = StructuralSizer._rc_column_nlp_fit_bars(20.0, 20.0, opts8)
+        A_bar = ustrip(u"inch^2", StructuralSizer.rebar(8).A)
+        @test constraint_fns(p8, [20.0, 20.0, 0.08])[end] ≈
+              (0.08 * 400.0) / (n_fit * A_bar) rtol=1e-12
+        ρ_full = n_fit * A_bar / 400.0
+        @test constraint_fns(p8, [20.0, 20.0, ρ_full])[end] ≈ 1.0 rtol=1e-12
 
-        # The builder never exceeds N_MAX bars, at any ρ or size.
+        # The builder never exceeds the bars that fit, and that count is at most N_MAX.
+        # A section too small for the tie-type minimum returns nothing.
         for bar_size in (6, 8, 10), tie in (:tied, :spiral)
             opts = NLPColumnOptions(bar_size=bar_size, tie_type=tie)
             for b in (10.0, 20.0, 36.0, 48.0), h in (10.0, 24.0, 48.0),
                     ρ in (0.01, 0.04, 0.08, 0.2)
                 sec = StructuralSizer._build_nlp_trial_section(b, h, ρ, opts)
-                @test !isnothing(sec)
-                @test length(sec.bars) <= N_MAX_BARS
-                @test length(sec.bars) ==
-                      StructuralSizer._nlp_trial_bar_count(b, h, ρ, opts)
+                n = StructuralSizer._nlp_trial_bar_count(b, h, ρ, opts)
+                if n < StructuralSizer._nlp_min_bars(opts)
+                    @test isnothing(sec)
+                else
+                    @test !isnothing(sec)
+                    @test length(sec.bars) == n
+                    @test length(sec.bars) <= N_MAX_BARS
+                end
             end
             @test isnothing(StructuralSizer._build_nlp_column_section(
                 20.0, 20.0, N_MAX_BARS + 2, opts))
         end
-        # Critic's case: 40 #8 wanted, capped at 32 (ρg = 25.28/400 = 0.0632).
+        # 20×20 #8 at ρ = 0.08 wants more bars than the faces can hold.
+        # The built count is that fit, and ρg is the steel actually placed.
         sec_cap = StructuralSizer._build_nlp_trial_section(
             20.0, 20.0, 0.08, NLPColumnOptions(bar_size=8))
-        @test length(sec_cap.bars) == 32
-        @test sec_cap.ρg ≈ 0.0632 rtol=1e-12
+        n_cap = StructuralSizer._nlp_trial_bar_count(
+            20.0, 20.0, 0.08, NLPColumnOptions(bar_size=8))
+        wanted = ceil(Int, 0.08 * 400.0 / A_bar)
+        wanted = iseven(wanted) ? wanted : wanted + 1
+        @test n_cap < wanted
+        @test n_cap <= N_MAX_BARS
+        @test length(sec_cap.bars) == n_cap
+        @test sec_cap.ρg ≈ n_cap * A_bar / 400.0 rtol=1e-12
     end
 
     @testset "Regression: 20×20 #8 high-ρ case is checked as built" begin
-        # Bounds force Ipopt toward ρ ≈ 0.08 at 20×20. The bar cap places only
-        # 32 #8 (ρg = 0.0632), so the continuous-ρ check used to accept a
-        # section with less steel than the solver assumed. Any acceptable
-        # result must now pass the real checker as built.
+        # Bounds force Ipopt toward ρ ≈ 0.08 at 20×20. The faces hold 24 #8
+        # (ρg ≈ 0.0474), less steel than that ratio. Any acceptable result
+        # must pass the real checker as built.
         geometry = ConcreteMemberGeometry(4.0; k=1.0, braced=true)
         opts = NLPColumnOptions(max_dim=20.0u"inch", ρ_max=0.08, bar_size=8)
         result = size_rc_column_nlp(600.0kip, 500.0kip * u"ft", geometry, opts)
@@ -778,9 +794,9 @@ end
 
     @testset "Repair lowers a ρ_max start instead of skipping the size" begin
         # Ipopt stops at ρ_opt = ρ_max = 0.06 on 8 × 13.1 in. Snapped to
-        # 8 × 14 in, the even count is 10 #8 (ρg ≈ 0.0705 > ρ_max). Repair
-        # used to skip every size until the 32-bar cap held ρg under 0.06,
-        # returning 18 × 24 in with 32 #8.
+        # 8 × 14 in, the continuous ratio asks for 10 #8, and the faces hold
+        # fewer. Repair must still return a section whose placed steel is
+        # within ρ_max.
         geometry = ConcreteMemberGeometry(4.0; k=1.0, braced=true)
         opts = NLPColumnOptions(
             material=NWC_4000, rebar_material=Rebar_60,
@@ -788,8 +804,11 @@ end
         problem = RCColumnNLPProblem(
             RCColumnDemand(1; Pu=180.0, Mux=74.0, βdns=opts.βdns), geometry, opts)
         sec = StructuralSizer._build_nlp_trial_section(8.0, 14.0, 0.06, opts)
-        @test length(sec.bars) == 10
-        @test sec.ρg > opts.ρ_max
+        # 10 bars is the even round-up of ρ = 0.06, and 8×14 cannot hold them.
+        # The builder places the largest even count that fits.
+        @test length(sec.bars) ==
+              StructuralSizer._nlp_trial_bar_count(8.0, 14.0, 0.06, opts)
+        @test length(sec.bars) < 10
         start = RCColumnNLPResult(sec, 8.0, 13.1, 0.06, 8.0, 14.0, 112.0, :optimal, 1)
         checker = StructuralSizer._rc_column_nlp_checker(opts)
         repaired = StructuralSizer._rc_column_nlp_repair(problem, checker, start)

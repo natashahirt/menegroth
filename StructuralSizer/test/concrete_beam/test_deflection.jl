@@ -233,6 +233,12 @@ import JuMP
         r1 = design_tbeam_deflection(bw, bf, hf, h, d, As,
             fc′, fy, Es, L, w_dead, w_live; ξ=2.0)
         @test isapprox(r1.λΔ, 2.0; atol=1e-6)
+        # ψ = 0 sustains dead load only: Δ_total = λΔ·Δ_D + Δ_LL.
+        @test r1.Δ_total ≈ r1.λΔ * r1.Δ_D + r1.Δ_LL rtol=1e-12
+        # ψ = 1 sustains dead plus live, so λΔ multiplies Δ_DL.
+        r_all = design_tbeam_deflection(bw, bf, hf, h, d, As,
+            fc′, fy, Es, L, w_dead, w_live; ξ=2.0, sustained_live_fraction=1.0)
+        @test r_all.Δ_total ≈ r_all.λΔ * r_all.Δ_DL rtol=1e-12
 
         # With compression steel → smaller λΔ
         As_prime = 1.5u"inch^2"

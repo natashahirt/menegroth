@@ -63,6 +63,9 @@ struct ACIBeamChecker <: AbstractCapacityChecker
     w_live_kplf::Float64    # Service live load (kip/ft)
     defl_support::Symbol    # :simply_supported, :cantilever, etc.
     defl_ξ::Float64         # Time-dependent factor (2.0 = 5+ years)
+    # Share of service live load in the sustained load (ACI 318-11 §9.5.2.5).
+    # 0 means the sustained load is dead load alone.
+    defl_sustained_live::Float64
 
     # ── Optional story-shell deflection (ACI 318-11 §9.5.2) ──
     # `shell_spans[i]` are the spans of demand `i`. Empty means no shell check.
@@ -80,6 +83,7 @@ function ACIBeamChecker(;
     w_live_kplf::Real = 0.0,
     defl_support::Symbol = :simply_supported,
     defl_ξ::Real = 2.0,
+    defl_sustained_live::Real = 0.0,
     shell_spans::AbstractVector = Vector{RCShellSpan}[],
     shell_limits::AbstractVector{Symbol} = [:immediate_ll, :total],
 )
@@ -88,6 +92,7 @@ function ACIBeamChecker(;
                    Float64(λ), max_d,
                    Float64(w_dead_kplf), Float64(w_live_kplf),
                    defl_support, Float64(defl_ξ),
+                   _as_sustained_live_fraction(defl_sustained_live),
                    Vector{RCShellSpan}[collect(RCShellSpan, s) for s in shell_spans],
                    collect(Symbol, shell_limits))
 end

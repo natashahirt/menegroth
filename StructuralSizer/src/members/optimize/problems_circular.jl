@@ -196,18 +196,32 @@ Evaluate smooth P-M utilization for circular column at design point `x`.
 Includes optional ACI 318 slenderness magnification (moment magnifier δns).
 """
 function constraint_fns(p::RCCircularNLPProblem, x::Vector{Float64})
-    return [_rc_circular_nlp_util(p, x, d) for d in p.cases]
+    db = ustrip(u"inch", rebar(p.opts.bar_size).diameter)
+    shared = (
+        cover = 1.5 + (p.opts.tie_type == :spiral ? 0.375 : 0.5) + db / 2.0,
+        Ec_ksi = 57.0 * sqrt(p.mat.fc * 1000.0),
+        Lu_in = ustrip(u"inch", p.geometry.Lu),
+    )
+    return [_rc_circular_nlp_util(p, x, d; shared) for d in p.cases]
 end
 
 """Smooth P-M utilization of one circular-column load case."""
-function _rc_circular_nlp_util(p::RCCircularNLPProblem, x::Vector{Float64}, demand::RCColumnDemand)
+function _rc_circular_nlp_util(p::RCCircularNLPProblem, x::Vector{Float64}, demand::RCColumnDemand;
+                              shared=nothing)
     D, ρ = x
     Pu_kip = Float64(to_kip(demand.Pu))
     Mux_kipft = Float64(to_kipft(demand.Mux))
 
     # Effective cover to bar centroid (inches)
-    db = ustrip(u"inch", rebar(p.opts.bar_size).diameter)
-    cover = 1.5 + (p.opts.tie_type == :spiral ? 0.375 : 0.5) + db / 2.0
+    if shared === nothing
+        db = ustrip(u"inch", rebar(p.opts.bar_size).diameter)
+        shared = (
+            cover = 1.5 + (p.opts.tie_type == :spiral ? 0.375 : 0.5) + db / 2.0,
+            Ec_ksi = 57.0 * sqrt(p.mat.fc * 1000.0),
+            Lu_in = ustrip(u"inch", p.geometry.Lu),
+        )
+    end
+    cover = shared.cover
 
     # Number of bars for smooth P-M (match typical circular arrangement)
     n_bars = p.opts.tie_type == :spiral ? 12 : 8
@@ -223,11 +237,11 @@ function _rc_circular_nlp_util(p::RCCircularNLPProblem, x::Vector{Float64}, dema
     if p.opts.include_slenderness && demand.magnify
         R = D / 2.0
         Ig = π * R^4 / 4.0   # in⁴
-        Ec_ksi = 57.0 * sqrt(p.mat.fc * 1000.0)
+        Ec_ksi = shared.Ec_ksi
         # ACI 318-19 §6.6.4.4.4(a) (corpus: aci-318-19, printed page 79).
         EI = 0.4 * Ec_ksi * Ig / (1.0 + p.opts.βdns)
 
-        Lu_in = ustrip(u"inch", p.geometry.Lu)
+        Lu_in = shared.Lu_in
         k = max(Float64(p.geometry.kx), Float64(p.geometry.ky), 1e-6)
         Pc = π^2 * EI / (k * Lu_in)^2
 

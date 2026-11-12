@@ -384,6 +384,11 @@ opts = ConcreteBeamOptions(
   for interior/edge classification.  (default: `false`)
 - `catalog_size_tbeam`: T-beam catalog density when `include_flange=true`
   and method=`:discrete`.  `:standard`, `:small`, `:large` (default: `:standard`)
+- `sustained_live_fraction`: Share of service live load treated as sustained
+  in ACI 318-11 §9.5.2.5 (default: 0)
+- `uniform_geometry`: Size the floor's ribs as one section (default: `false`)
+- `rib_form`: `:mip` uses the T-beam catalog. `:standard_pan` is refused
+  (default: `:mip`)
 
 ## Optimization
 - `n_max_sections`: Limit unique sections, 0 = no limit (default: 0)
@@ -407,6 +412,13 @@ Base.@kwdef struct ConcreteBeamOptions
     deflection_limit::Union{Nothing, Float64} = 1/360
     include_flange::Bool = false
     catalog_size_tbeam::Symbol = :standard
+    # Share of service live load treated as sustained (ACI 318-11 §9.5.2.5).
+    sustained_live_fraction::Float64 = 0.0
+    # One rib size for the floor when `include_flange` batches ribs together.
+    uniform_geometry::Bool = false
+    # `:mip` sizes ribs from the T-beam catalog. `:standard_pan` is refused
+    # until a pan list exists.
+    rib_form::Symbol = :mip
 
     sizing_strategy::Symbol = :discrete
     n_max_sections::Int = 0

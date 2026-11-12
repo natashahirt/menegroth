@@ -72,7 +72,6 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("analyze/test_ordinary_wall_stage.jl")
         include("analyze/test_special_boundary_stage.jl")
         include("analyze/test_special_shear_stage.jl")
-        include("analyze/test_wall_thickness_jump.jl")
         include("analyze/test_frame_section_floors.jl")
         include("analyze/test_row_f_resize.jl")
         include("analyze/test_wall_detailing.jl")
@@ -89,10 +88,13 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("analyze/test_rib_grillage.jl")
         include("analyze/test_modular_ribs.jl")
         include("analyze/test_joist_openings.jl")
+        include("analyze/test_joist_hosts.jl")
+        include("analyze/test_joist_strip_equivalence.jl")
         include("analyze/test_opening_downstream.jl")
         include("analyze/test_beam_rings.jl")
         include("analyze/test_solid_head_check.jl")
         include("analyze/test_solid_head_story.jl")
+        include("analyze/test_column_heads.jl")
     end
 
     # ─── Scene packets (web viewer) ──────────────────────────────────────

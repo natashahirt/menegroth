@@ -8,14 +8,14 @@ title: 'Irregular slabs: general-polygon rib networks, demand-grown solid heads,
 node_label: Irregular rib floors
 tags: waffle,grillage,solid-head,openings,irregular-geometry,load-routing,plan
 status: active
-open_threads: 8
+open_threads: 10
 success: 'null'
 files: StructuralSynthesizer/src/analyze/slabs/slabs/rib_grillage.jl@7da1320, StructuralSizer/src/slabs/codes/concrete/waffle/rib_network.jl@7da1320,
   StructuralSizer/src/slabs/codes/concrete/waffle/rib_tributary.jl@7da1320, StructuralSynthesizer/src/analyze/framing/joist_geometry.jl@7da1320,
   StructuralSynthesizer/src/analyze/asap/asap/load_routing.jl@7da1320, StructuralSynthesizer/src/core/utils_building_skeleton.jl@7da1320
 session_id: sess-474b9583
 created_at: '2026-11-10T00:41:49.711325+00:00'
-updated_at: '2026-11-12T01:06:14.631987+00:00'
+updated_at: '2026-11-12T12:00:36.815623+00:00'
 ---
 Gap review (2026-11-09): waffle rib layout, grillage, and solid-head cut stop at quadrilaterals (grillage already handles skewed quads via per-bay isotropic skeleton; only the solid-head fallback check is rectangle-only). Per-cell tributaries already handle any polygon, holes, one-way axis.
 
@@ -24,7 +24,7 @@ User decisions:
 - Partial bays: a cut bay smaller than half a module stays a ribbed void unless a column head claims it (form it with a smaller pan). Larger cut bays stay ribbed and are checked per bay against ACI 318-11 §8.13 (corpus check at implementation).
 - Solid heads: demand-driven growth of whole modules around each column, only in the direction where a check fails (rib one-way shear at head face, punching at d/2 outside head outline with gamma_v, rib hogging compression just outside head). Monotone growth, frame re-solved each step. Not tied to panel corners.
 - Openings in joist/ribbed floors: opening edges become trimmer/header members; joists and ribs clipped to them.
-- One-way strip routing (rectangle-only shortcut in load_routing.jl): compare to per-cell path on rectangles; delete if identical.
+- One-way strip routing: on a joist-aligned rectangle the uniform strip and the joist cut match (member force, girder-end shear, column-base reaction), including a 1 m remainder bay and a rectangle turned 20°. Locked in `test_joist_strip_equivalence.jl`. The strip shortcut is redundant and can be removed once the smoke runner and probes that call it are moved onto the joist cut.
 
 Phases:
 0. Probe find_faces! with a dangling beam stub and a disconnected inner beam ring; fix confirmed issues (inner ring -> hole of outer face; stub splitting nothing -> clear error). Delete unused validate_and_split_slab/decompose_to_rectangles; fix API/chat strings misstating shape limits.

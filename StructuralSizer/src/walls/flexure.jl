@@ -34,8 +34,8 @@
 # OUT OF SCOPE — this module computes IN-PLANE axial-flexure CAPACITY only. The
 # following are deliberately NOT covered here (no false sense of safety): a
 # caller must not treat a passing P–M check as sufficient on its own.
-#   - Special boundary-element trigger + detailing (ACI 318-19 §18.10.6):
-#     canon ABSENT from corpus → HARD STOP, deferred to todo-w0000010.
+#   - Special boundary-element detailing (ACI 318-19 §18.10.6.4). The
+#     displacement trigger, Eq. (18.10.6.2a), is `displacement_boundary_element`.
 #   - Out-of-plane / slender-wall design incl. P-Δ (ACI 318-19 §11.8):
 #     deferred to todo-w0000008.
 #   - Bar development / lap splices, and reinforcement detailing.
@@ -45,8 +45,6 @@
 
 using Unitful
 
-# 1 ksi = 6.894757e6 Pa; 1 kip = 4.4482216e3 N; 1 in = 0.0254 m.
-const _KSI_TO_PA = 6.894757e6
 
 # ------------------------------------------------------------------------------
 # φ for wall axial–flexure (ACI 318-19 Table 21.2.2)
@@ -104,7 +102,7 @@ loads use the strain-compatibility diagram instead (see `wall_pm_at_c_si`).
 function wall_axial_flexure_capacity_si(fc::Real, fy::Real, Es::Real,
                                         lw::Real, t::Real, ρl::Real, Nu::Real;
                                         εcu::Real=0.003)
-    β1  = _beta1_from_fc_psi(fc / _KSI_TO_PA * 1000.0)  # f'c psi → β1 (Table 22.2.2.4.3)
+    β1  = _beta1_from_fc_psi(fc / Asap.PSI_TO_PA)  # f'c psi → β1 (Table 22.2.2.4.3)
     Ast = ρl * lw * t
     ω   = ρl * fy / fc
     α   = Nu / (lw * t * fc)
@@ -160,7 +158,7 @@ in N·m about the section mid-length, `εt` the extreme-tension layer strain.
 """
 function wall_pm_at_c_si(fc::Real, fy::Real, Es::Real, lw::Real, t::Real,
                          Ast::Real, c::Real; εcu::Real=0.003, nlayers::Int=40)
-    β1 = _beta1_from_fc_psi(fc / _KSI_TO_PA * 1000.0)
+    β1 = _beta1_from_fc_psi(fc / Asap.PSI_TO_PA)
     a  = min(β1 * c, lw)
     Cc = 0.85 * fc * t * a                     # concrete compression resultant (N)
     y_Cc  = a / 2                              # from compression face (x = lw end)
@@ -186,8 +184,55 @@ function wall_pm_at_c_si(fc::Real, fy::Real, Es::Real, lw::Real, t::Real,
         end
     end
     Pn = Cc + Fs
-    Mn = Cc * (mid - y_Cc) + Ms
-    return (Pn = Pn, Mn = abs(Mn), εt = εt, c = c)
+    moment = Cc * (mid - y_Cc) + Ms
+    return (Pn = Pn, Mn = abs(moment), moment = moment, εt = εt, c = c)
+end
+
+"""
+    wall_pm_end_bars_at_c_si(fc, fy, Es, lw, t, Ast, As_end, inset, c;
+                            εcu=0.003, nlayers=40) -> NamedTuple
+
+`wall_pm_at_c_si` plus the same area of added bars at each end.
+
+`Ast` is the distributed web steel. `As_end` is the added area at one end,
+and the other end gets the same area. `inset` is the distance from each
+end to the centroid of that end's added bars. `y` is measured from the
+compression face, so one group sits at `inset` and the other at `lw − inset`.
+The steel law, the Whitney block, and the displaced-concrete correction are
+the ones in `wall_pm_at_c_si`.
+
+# Citation
+ACI 318-19 §22.2 (corpus: aci-318-19), the same idealization as
+`wall_pm_at_c_si`.
+"""
+function wall_pm_end_bars_at_c_si(fc::Real, fy::Real, Es::Real, lw::Real, t::Real,
+                                 Ast::Real, As_end::Real, inset::Real, c::Real;
+                                 εcu::Real=0.003, nlayers::Int=40)
+    (lw > 0 && t > 0 && c > 0 && Ast >= 0 && As_end >= 0) || throw(ArgumentError(
+        "end-bar wall capacity: lengths and c must be positive, and the steel areas non-negative"))
+    inset > 0 || throw(ArgumentError(
+        "end-bar wall capacity: the bar centroid is inset from the wall end"))
+    2 * inset < lw || throw(ArgumentError(
+        "end-bar wall capacity: the two end groups overlap (inset $inset on ℓw $lw)"))
+    base = wall_pm_at_c_si(fc, fy, Es, lw, t, Ast, c; εcu=εcu, nlayers=nlayers)
+    As_end == 0 && return base
+    β1 = _beta1_from_fc_psi(fc / Asap.PSI_TO_PA)
+    a = min(β1 * c, lw)
+    mid = lw / 2
+    fc_st = 0.85 * fc
+    Fs = 0.0
+    Ms = 0.0
+    εt = base.εt
+    for y in (inset, lw - inset)
+        εs = εcu * (y - c) / c
+        fs = clamp(Es * εs, -fy, fy)
+        Fi = y < a ? -As_end * (fs + fc_st) : -fs * As_end
+        Fs += Fi
+        Ms += Fi * (mid - y)
+        y > c && (εt = max(εt, εs))
+    end
+    return (Pn = base.Pn + Fs, Mn = abs(base.moment + Ms), moment = base.moment + Ms,
+            εt = εt, c = c)
 end
 
 """
@@ -238,6 +283,58 @@ function wall_moment_capacity_at_axial_si(fc::Real, fy::Real, Es::Real,
     end
     res = wall_pm_at_c_si(fc, fy, Es, lw, t, Ast, c; εcu=εcu, nlayers=nlayers)
     φ   = wall_phi_flexure(res.εt, εty)
+    return (c = res.c, Pn = res.Pn, Mn = res.Mn, εt = res.εt, εty = εty,
+            φ = φ, φMn = φ * res.Mn, tension_controlled = res.εt ≥ εty + 0.003,
+            converged = true)
+end
+
+"""
+    wall_end_bar_capacity_si(fc, fy, Es, lw, t, Ast, As_end, inset, Nu;
+                            εcu=0.003, nlayers=40, tol=1e-6) -> NamedTuple
+
+Factored moment capacity at axial `Nu` for a wall with distributed web steel
+`Ast` and added end bars. The bisection and the fail-safe are the ones in
+`wall_moment_capacity_at_axial_si`. `Mn` is nominal. `φMn` applies Table 21.2.2.
+Pass `1.25 fy` and read `Mn` for a probable moment at φ = 1.
+
+# Citation
+ACI 318-19 §22.2 and Table 21.2.2 (corpus: aci-318-19).
+"""
+function wall_end_bar_capacity_si(fc::Real, fy::Real, Es::Real, lw::Real, t::Real,
+                                 Ast::Real, As_end::Real, inset::Real, Nu::Real;
+                                 εcu::Real=0.003, nlayers::Int=40, tol::Real=1e-6)
+    Pn(c) = wall_pm_end_bars_at_c_si(fc, fy, Es, lw, t, Ast, As_end, inset, c;
+                                    εcu=εcu, nlayers=nlayers).Pn
+    c_lo = 1e-4 * lw
+    c_hi = 2.0 * lw
+    P_lo = Pn(c_lo)
+    P_hi = Pn(c_hi)
+    nexp = 0
+    while (P_hi - Nu) < 0 && nexp < 40
+        c_hi *= 2
+        P_hi = Pn(c_hi)
+        nexp += 1
+    end
+    εty = fy / Es
+    if (P_lo - Nu) * (P_hi - Nu) > 0
+        return (c = NaN, Pn = Nu, Mn = 0.0, εt = 0.0, εty = εty,
+                φ = 0.65, φMn = 0.0, tension_controlled = false, converged = false)
+    end
+    c = 0.5 * (c_lo + c_hi)
+    for _ in 1:100
+        c = 0.5 * (c_lo + c_hi)
+        Pc = Pn(c)
+        if abs(Pc - Nu) < tol * max(abs(Nu), 1.0)
+            break
+        elseif (Pc - Nu) > 0
+            c_hi = c
+        else
+            c_lo = c
+        end
+    end
+    res = wall_pm_end_bars_at_c_si(fc, fy, Es, lw, t, Ast, As_end, inset, c;
+                                  εcu=εcu, nlayers=nlayers)
+    φ = wall_phi_flexure(res.εt, εty)
     return (c = res.c, Pn = res.Pn, Mn = res.Mn, εt = res.εt, εty = εty,
             φ = φ, φMn = φ * res.Mn, tension_controlled = res.εt ≥ εty + 0.003,
             converged = true)

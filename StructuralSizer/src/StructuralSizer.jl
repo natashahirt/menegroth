@@ -188,6 +188,8 @@ export allowable_story_drift, story_drift_is_allowed, vertical_seismic_load_effe
 export drift_live_load_factor, drift_expected_gravity_load
 export stability_coefficient, stability_coefficient_limit
 export pdelta_displacement_multiplier
+export OrdinaryConcreteSeismicSystem, ordinary_concrete_seismic_system
+export SpecialConcreteShearWallSystem, concrete_shear_wall_system
 
 # --- Directional-procedure MWFRS wind (ASCE 7-22 Chapter 27) ---
 export wind_figure_2731_roof, wind_wall_cp, wind_design_pressure, wind_surface
@@ -457,6 +459,36 @@ export monolithic_shear_friction_si, check_monolithic_shear_friction
 export wall_phi_flexure, wall_axial_flexure_capacity_si, wall_pure_axial_capacity_si
 export wall_pm_at_c_si, wall_moment_capacity_at_axial_si
 export check_wall_inplane_flexure, wall_pm_diagram
+export displacement_boundary_element
+export boundary_transverse_extension, boundary_element_horizontal_length
+export compression_zone_width, boundary_drift_capacity
+export stress_boundary_element, boundary_transverse_amount
+export effective_flange_overhang, flanged_boundary_element, boundary_transverse_spacing
+export transverse_spacing_so, wall_boundary_tie_spacing, boundary_element_vertical_spacing
+export floor_concrete_at_boundary, web_vertical_support_spacing
+export boundary_support_extension, boundary_bar_development, horizontal_web_termination
+export web_end_within_six_inches
+export boundary_zone_width_minimum, boundary_width_or_drift, lambda_sqrt_fc_Acv
+export horizontal_edge_anchorage, boundary_longitudinal_ratio, boundary_ratio_ties
+export boundary_hoop_spacing
+export boundary_tie_bar_size, boundary_hoop_arrangement
+export special_end_reinforcement_ratio, special_end_minimum_area, special_end_zone
+export special_end_bar_extension, boundary_end_bar_layout, boundary_end_area_si
+export wall_pm_end_bars_at_c_si, wall_end_bar_capacity_si, check_wall_end_bar_flexure
+export coupling_beam_route, coupling_beam_diagonal_strength
+export COUPLING_BEAM_DIAGONAL_PHI, COUPLING_BEAM_SHEAR_PHI
+export coupling_beam_grade, coupling_beam_dimensions, coupling_beam_hoop_spacing
+export coupling_beam_section_moment, coupling_beam_design_shear
+export coupling_beam_concrete_omitted, design_special_coupling_beam
+export design_diagonal_coupling_beam
+export gravity_frame_seismic_section, gravity_beam_transverse_limit
+export gravity_slab_column_shear, special_column_hoop_length
+export special_column_design_shear
+export special_wall_overstrength, special_wall_dynamic_amplification
+export special_wall_design_shear, special_wall_shear_limit, wall_gross_fiber_stress
+export special_boundary_composer, boundary_minimum_thickness
+export wall_flanged_gross_section, wall_flanged_fiber_stress
+export wall_flanged_pm_at_c_si, wall_flanged_c_at_axial_si
 
 # --- Structural walls: ACI out-of-plane / slender wall §11.8 (S1) ---
 export oop_slender_wall_strength_si, oop_service_deflection_si

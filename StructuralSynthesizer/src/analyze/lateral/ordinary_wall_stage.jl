@@ -25,6 +25,12 @@ struct OrdinaryWallResult
     nonparallel_elements::Vector{String}
     "True when the §12.5.1.2(a) 100% + 30% effects were used instead of one direction at a time."
     orthogonal_combination::Bool
+    "Special-boundary decisions for piers on row A.1 or B.4. Empty otherwise."
+    boundary::Dict{Int, SpecialBoundaryDecision}
+    "One decision per vertical segment beside an opening. Empty for a solid pier."
+    opening_edges::Dict{Int, Vector{SpecialBoundaryDecision}}
+    "Added end bars on special piers. Empty when the web steel is enough and §18.10.2.4 does not apply."
+    end_bars::Dict{Int, BoundaryEndReinforcement}
 end
 
 """
@@ -49,8 +55,21 @@ When lateral design was requested:
 - `wall_inputs` is required. Pressures, `ρ`, and the seismic statements are
   not assumed. `R`, `Cd`, and `Ω0` come from the Table 12.2-1 row of each
   direction. A Seismic Design Category that a row marks NP is refused.
-- Each direction is [`WallsSeismicSystem`](@ref) (`:A3` or `:B6`) or
-  [`InteractiveShearWallFrameSystem`](@ref) (row F). The assignment is
+- Each direction is [`WallsSeismicSystem`](@ref) (`:A1`, `:A3`, `:B4`, or
+  `:B6`) or [`InteractiveShearWallFrameSystem`](@ref) (row F). `:A1` and
+  `:B4` supply the special-wall `R`, `Cd`, and `Ω0` for Seismic Design
+  Categories B and C. The pier strength checks stay the ordinary checks.
+  On those rows each solid pier records a §18.10.6.3 boundary decision.
+  Continuity is taken from the stack. A single critical section is the base
+  of a continuous line on the §18.10.6.2 route. Shear is Ve, and end bars are
+  added where §18.10.2.4 or the boundary element needs them. When the thickness jump is on, a
+  pier whose web is short of the §18.10.6.4 compression-zone width grows
+  by itself to the next inch that covers that shortfall. A flange in
+  compression does not resize the web. When an element is required and
+  `params.floor` states a concrete strength, §18.10.6.4(h) is recorded.
+  A design that does not state one records nothing. Ordinary rows record
+  nothing, so this floor does not move them.
+  The assignment is
   [`BuildingUnit`](@ref). [`OutriggerSystem`](@ref) and
   [`IsolatedWallShare`](@ref) are refused rather than given a pier fallback.
   §12.2.5.8 runs only in a direction whose system is row F.
@@ -62,7 +81,8 @@ When lateral design was requested:
   solved without the wall shells at 25% of the story shear. A frame member
   with no reinforced-concrete section is recorded as failing.
 - A joined assembly is checked leg by leg on the clear length. The corner is
-  shear friction. The special-wall flange width is not applied.
+  shear friction. The ordinary check does not use a flange. The special-boundary
+  stress does, when one perpendicular wall meets an end (§18.10.5.2).
 - A rigid diaphragm puts story forces on the masters. A flexible diaphragm
   sends each `(Fx, Fy)` to the lines of seismic-system walls the declared
   systems name ([`flexible_diaphragm_layout!`](@ref)): simple spans between
@@ -81,11 +101,17 @@ When lateral design was requested:
   wind, and ELF strength cases. Each strength combination is applied once per
   group (gravity with wind and earthquake omitted, each wind case, each `QE`
   case). Wind cases are not crossed with `QE` cases.
-- Thickness and length are not changed. `ρt` is set from the largest
-  shear, then `ρl` walks up the grid until axial-flexure passes. A ratio
-  already on the wall is not reduced. This function does not scale shell
-  `E`. When `wall_inputs` states cracked stiffness, `to_asap!` has already
-  applied it.
+- Thickness starts as the given pier thickness. When a strength check or
+  story drift fails and `params.jump_wall_thickness` is true, each group
+  named by `params.wall_thickness_grouping` moves to the thinnest inch the
+  proxy accepts, then this stage remeshes and checks again. `:all` is one
+  group and one confirm. A finer grouping can change relative stiffness,
+  so the stage re-solves until those groups stop growing. Length is not
+  changed. `ρt` is set from the largest shear, then `ρl` walks up the
+  grid until axial-flexure passes. A ratio
+  already on the wall is not reduced at a given thickness. This function
+  does not scale shell `E`. When `wall_inputs` states cracked stiffness,
+  `to_asap!` has already applied it.
 - With rigid masters, member forces include second-order story sway. Each
   distinct factored gravity `(D, L, roof)` builds one story stiffness from
   the vertical forces of that gravity, and the unfactored cases are solved
@@ -123,9 +149,39 @@ is called with `rho_applied_to_eh = true`.
 """
 function design_ordinary_walls!(struc::BuildingStructure, params::DesignParameters;
                                 tc::Union{Nothing, StructuralSizer.TraceCollector}=nothing)
-    if params.lateral === nothing
-        return _design_gravity_walls!(struc, params; tc)
+    isempty(struc.walls) || _require_wall_thickness_grouping(params)
+    analyze! = params.lateral === nothing ? _analyze_gravity_walls! : _analyze_lateral_walls!
+    grouping = params.wall_thickness_grouping
+    budget = params.jump_wall_thickness ? _wall_thickness_pass_cap(grouping) + 1 : 1
+    result = nothing
+    run = StructuralSizer.settle!(; budget) do pass
+        out = analyze!(struc, params; tc)
+        out === nothing && return false
+        result = out.result
+        params.jump_wall_thickness || return false
+        targets = propose_wall_thicknesses(struc.walls, out.trials, result;
+                                           grouping, SDS=out.SDS)
+        any(_thickness_grows(w.thickness, t) for (w, t) in zip(struc.walls, targets)) ||
+            return false
+        # The last analysis stands: a jump now would leave walls no pass checked.
+        pass < budget || return true
+        @info "Ordinary wall thickness jump" grouping pass targets
+        apply_wall_thickness!(struc, params, targets; tc)
+        return true
     end
+    if run.converged
+        delete!(struc.stage_diagnostics, :walls)
+    else
+        struc.stage_diagnostics[:walls] =
+            "Wall thickness was still growing after $(run.steps) analyses " *
+            "(wall_thickness_grouping = :$grouping); the last analysis stands."
+    end
+    return result
+end
+
+"""One lateral wall analysis at the current thickness: `(result, trials, SDS)`."""
+function _analyze_lateral_walls!(struc::BuildingStructure, params::DesignParameters;
+                                 tc::Union{Nothing, StructuralSizer.TraceCollector}=nothing)
     StructuralSizer.emit!(tc, :pipeline, "design_ordinary_walls!", "stage_ordinary_walls", :enter)
     # A throw below must not leave a previous run's checks in place.
     struc.ordinary_wall_result = nothing
@@ -162,8 +218,8 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
             "asce-7-22, PDF page 188). Set the flag to false."))
     end
     # R, Cd, and Ω0 are each direction's row. A category a row marks NP stops here.
-    sysx = ordinary_concrete_seismic_system(table_12_2_1_row(sx), inputs.sdc)
-    sysy = ordinary_concrete_seismic_system(table_12_2_1_row(sy), inputs.sdc)
+    sysx = concrete_shear_wall_system(table_12_2_1_row(sx), inputs.sdc)
+    sysy = concrete_shear_wall_system(table_12_2_1_row(sy), inputs.sdc)
 
     prepare_lateral_model!(struc, params.lateral)
     isempty(struc.wall_mesh.piers) && throw(ArgumentError(
@@ -264,7 +320,13 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
     second = flexible ? nothing :
              _build_second_order(struc, basic; wind, elf, effects)
     shares = _wall_dead_load_shares(struc, basic, elf)
-    gravity_row = sysx.row === :B6 || sysy.row === :B6 ? :B6 : sysx.row
+    gravity_row = if sysx.row === :B6 || sysy.row === :B6
+        :B6
+    elseif sysx.row === :B4 || sysy.row === :B4
+        :B4
+    else
+        sysx.row
+    end
     _refuse_building_frame_gravity!(gravity_row, shares)
     prepared = Tuple{Int, Any, Vector{CombinedWallAction}, Any, Vector, Any}[]
     grown_by_wall = Dict{Int, Vector{CombinedWallAction}}()
@@ -308,27 +370,69 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
         interactive = _enforce_interactive_wall_shear!(
             struc, elf, inputs.material, grown_by_wall, ρt_by_wall, directions)
         frame_members = _check_interactive_frames!(
-            struc, basic, elf, second, inputs, frame_system, directions, effects)
+            struc, basic, elf, second, inputs, frame_system, directions, effects;
+            member_opts = (columns = params.columns, beams = params.beams),
+            beam_opts_by_group = _beam_opts_by_group(struc, params.beams),
+            uniform_columns = params.uniform_column_sizing)
+    end
+    # The boundary route is fixed by geometry and δu, not by the steel, so it
+    # can be read before the special shear raises ρl. The decisions recorded
+    # below are taken again with the final steel.
+    special = Int[]
+    displacement = Set{Int}()
+    for (wall_index, assembly, grown, _, _, _) in prepared
+        wall = struc.walls[wall_index]
+        direction = _pier_axis_direction(wall, axis)
+        _pier_on_special_row(direction, sysx.row, sysy.row) || continue
+        push!(special, wall_index)
+        route = special_boundary_decision(
+            wall, struc.walls, wall_index, assembly, grown, inputs.material;
+            elf=elf, pier_direction=direction).route
+        route === :displacement && push!(displacement, wall_index)
+    end
+    end_bars = Dict{Int, BoundaryEndReinforcement}()
+    shear_terms = Dict{Int, SpecialShearTerms}()
+    for _pass in 1:12
+        shear_terms = design_special_wall_shear!(
+            struc, special, grown_by_wall, lw_by_wall, ρt_by_wall, inputs.material;
+            displacement, end_bars)
+        fresh = design_boundary_end_bars(
+            struc, special, grown_by_wall, lw_by_wall, inputs.material;
+            placed = end_bars, elf, plan_axis = axis)
+        _same_end_bars(fresh, end_bars) && break
+        end_bars = fresh
+        _pass == 12 && throw(ArgumentError(
+            "special wall: the end bars and the shear steel were still moving after 12 passes."))
     end
     checks = Dict{Int, Vector{WallCheckRecord}}()
-    for (wall_index, assembly, _, ρt_strength, batches, Moop) in prepared
+    for (wall_index, assembly, _, _, batches, Moop) in prepared
         wall = struc.walls[wall_index]
+        ρt_strength = ρt_by_wall[wall_index]
         max_ρl = max(max_ρl, wall.ρl)
         max_ρt = max(max_ρt, wall.ρt)
         records = WallCheckRecord[]
+        ends = get(end_bars, wall_index, nothing)
         for (case, firsts, growns, what) in batches
             _each_second_order(records, wall, firsts, growns;
                 material=inputs.material, wall_index, case,
                 boundary=inputs.boundary, assembly, what, ρt_strength,
-                plan_axis=axis, lw=lw_by_wall[wall_index], Moop=Moop)
+                plan_axis=axis, lw=lw_by_wall[wall_index], Moop=Moop, ends)
+        end
+        if haskey(shear_terms, wall_index)
+            append!(records, special_shear_records(
+                wall, wall_index, _pier_axis_direction(wall, axis),
+                shear_terms[wall_index], batches, inputs.material))
         end
         checks[wall_index] = records
     end
+    opening_edges = Dict{Int, Vector{SpecialBoundaryDecision}}()
     n_open, max_ρl, max_ρt = _design_pierced_segments!(
         checks, struc, basic, second;
         material_of=(_, _) -> inputs.material,
         boundary=inputs.boundary, plan_axis=axis,
-        max_ρl, max_ρt, wind, elf, effects, rho=inputs.rho, SDS=inputs.SDS)
+        max_ρl, max_ρt, wind, elf, effects, rho=inputs.rho, SDS=inputs.SDS,
+        opening_edges, fc_floor=_boundary_floor_fc(params),
+        row_x=sysx.row, row_y=sysy.row)
     n_raised += n_open
     joint_sets = second
     if joint_sets === nothing && any(a -> a.joined, struc.wall_mesh.assemblies)
@@ -339,19 +443,40 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
     _record_frame_members!(checks, struc, frame_members, axis)
     @info "Ordinary wall reinforcement" n_piers=length(checks) n_raised max_ρl max_ρt type5 orthogonal
 
+    boundary = Dict{Int, SpecialBoundaryDecision}()
+    for (wall_index, assembly, grown, _, _, _) in prepared
+        wall = struc.walls[wall_index]
+        direction = _pier_axis_direction(wall, axis)
+        _pier_on_special_row(direction, sysx.row, sysy.row) || continue
+        bars = get(end_bars, wall_index, nothing)
+        boundary[wall_index] = special_boundary_decision(
+            wall, struc.walls, wall_index, assembly, grown, inputs.material;
+            fc_floor=_boundary_floor_fc(params), elf=elf, pier_direction=direction,
+            end_area = bars === nothing ? nothing : bars.area_m2,
+            end_inset = bars === nothing ? nothing : bars.inset_m)
+    end
     result = OrdinaryWallResult(checks, drift, θmax, pdelta_multipliers,
                                 shares, interactive, frame_members,
-                                type5, nonparallel, orthogonal)
+                                type5, nonparallel, orthogonal, boundary, opening_edges,
+                                end_bars)
     struc.ordinary_wall_result = result
+    trials = WallThicknessTrial[]
+    for (wall_index, assembly, grown, _, _, Moop) in prepared
+        push!(trials, _trial_for_pier(
+            struc, wall_index, grown, lw_by_wall[wall_index], Moop,
+            inputs.material, inputs.boundary, assembly,
+            get(shear_terms, wall_index, nothing)))
+    end
     StructuralSizer.emit!(tc, :pipeline, "design_ordinary_walls!", "stage_ordinary_walls", :exit;
                           n_walls=length(checks), n_drift=length(drift))
-    return result
+    return (result = result, trials = trials, SDS = inputs.SDS)
 end
 
 """
-    _design_gravity_walls!(struc, params; tc=nothing) -> OrdinaryWallResult or nothing
+    _analyze_gravity_walls!(struc, params; tc=nothing) -> (result, trials, SDS) or nothing
 
-Size every pier from the gravity strength combinations.
+Size every pier from the gravity strength combinations, at the current
+thickness. [`design_ordinary_walls!`](@ref) runs the thickness jumps.
 
 No wind case and no earthquake case are built. The roof pressure already
 stored on the building is the `:Lr` companion, the same default
@@ -367,13 +492,14 @@ Without those masters the combinations stay first-order. The pier cut is
 the shell and frame solution. Tributary area that was assigned to a column
 is not added again.
 
-A building with no walls returns `nothing`. Thickness is not changed. `ρl`
-and `ρt` are raised on the same grid the lateral stage uses, and a ratio
-already on the wall is not reduced. Concrete comes from the wall when it
-has one, otherwise from the column material cascade. Rebar is that cascade.
+A building with no walls returns `nothing`. `ρl` and `ρt` are raised on the same
+grid the lateral stage uses, and a ratio
+already on the wall is not reduced at a given thickness. Concrete comes
+from the wall when it has one, otherwise from the column material cascade.
+Rebar is that cascade.
 """
-function _design_gravity_walls!(struc::BuildingStructure, params::DesignParameters;
-                               tc::Union{Nothing, StructuralSizer.TraceCollector}=nothing)
+function _analyze_gravity_walls!(struc::BuildingStructure, params::DesignParameters;
+                                 tc::Union{Nothing, StructuralSizer.TraceCollector}=nothing)
     if isempty(struc.walls)
         struc.ordinary_wall_result = nothing
         return nothing
@@ -403,6 +529,7 @@ function _design_gravity_walls!(struc::BuildingStructure, params::DesignParamete
     n_raised = 0
     max_ρl = 0.0
     max_ρt = 0.0
+    trials = WallThicknessTrial[]
     for pier in _solid_piers(struc)
         wall_index = pier.wall_index
         wall = struc.walls[wall_index]
@@ -423,6 +550,8 @@ function _design_gravity_walls!(struc::BuildingStructure, params::DesignParamete
             material, wall_index, case=:D, boundary=:restrained, assembly,
             what="gravity", ρt_strength, lw=lw, Moop=Moop)
         checks[wall_index] = records
+        push!(trials, _trial_for_pier(
+            struc, wall_index, growns, lw, Moop, material, :restrained, assembly))
     end
     n_open, max_ρl, max_ρt = _design_pierced_segments!(
         checks, struc, basic, second;
@@ -434,11 +563,13 @@ function _design_gravity_walls!(struc::BuildingStructure, params::DesignParamete
     result = OrdinaryWallResult(
         checks, SeismicStoryDriftCheck[], 0.0, Float64[],
         WallGravityShare[], InteractiveStoryShearCheck[], FrameMemberCheck[],
-        false, String[], false)
+        false, String[], false, Dict{Int, SpecialBoundaryDecision}(),
+        Dict{Int, Vector{SpecialBoundaryDecision}}(),
+        Dict{Int, BoundaryEndReinforcement}())
     struc.ordinary_wall_result = result
     StructuralSizer.emit!(tc, :pipeline, "design_ordinary_walls!", "stage_ordinary_walls", :exit;
                           n_walls=length(checks), n_drift=0)
-    return result
+    return (result = result, trials = trials, SDS = 0.0)
 end
 
 """
@@ -884,14 +1015,14 @@ function _each_second_order(records, wall, first_actions, second_actions;
                              material, wall_index, case, boundary, assembly, what,
                              ρt_strength=nothing, plan_axis=(1.0, 0.0),
                              lw::Union{Nothing,Unitful.Length}=nothing,
-                             Moop=0.0u"N*m")
+                             Moop=0.0u"N*m", ends=nothing)
     length(first_actions) == length(second_actions) || throw(ArgumentError(
         "ordinary wall stage: $what has $(length(first_actions)) first-order " *
         "combinations and $(length(second_actions)) second-order combinations."))
     for (first, grown) in zip(first_actions, second_actions)
         _accept_second_order!(records, wall, first, grown;
                               material, wall_index, case, boundary, assembly,
-                              ρt_strength, plan_axis, lw, Moop)
+                              ρt_strength, plan_axis, lw, Moop, ends)
     end
     return records
 end
@@ -901,7 +1032,7 @@ function _accept_second_order!(records, wall, first::CombinedWallAction,
                                material, wall_index, case, boundary, assembly,
                                ρt_strength=nothing, plan_axis=(1.0, 0.0),
                                lw::Union{Nothing,Unitful.Length}=nothing,
-                               Moop=0.0u"N*m")
+                               Moop=0.0u"N*m", ends=nothing)
     (first.combination === grown.combination && first.alternative === grown.alternative) ||
         throw(ArgumentError(
             "ordinary wall stage: first-order $(first.combination)/$(first.alternative) " *
@@ -909,7 +1040,7 @@ function _accept_second_order!(records, wall, first::CombinedWallAction,
     _record_second_order_moment!(records, wall, first, grown; wall_index, case, plan_axis)
     append!(records, check_ordinary_wall(wall, CombinedWallAction[grown];
                                          material, wall_index, case, boundary, assembly,
-                                         ρt_strength, plan_axis, lw, Moop))
+                                         ρt_strength, plan_axis, lw, Moop, ends))
     return records
 end
 

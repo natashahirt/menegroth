@@ -94,3 +94,28 @@ end
         wall, [modest]; wall_index=1, material=RC_4000_60, case=:D,
         boundary=:restrained, assembly=WallAssembly(0, [1, 2], true))
 end
+
+@testset "slab moment outside the middle third" begin
+    # h = 0.30 m, h/6 = 0.05 m. N = 500 kN holds a moment of 25 kN·m at the edge
+    # of the middle third. ACI 318-19 §11.5.3.1. Past that edge the empirical
+    # method is not the strength check; §6.6.4.5 and §22.2 are.
+    wall = _pier(; length=8.0, height=3.6, thickness=0.30)
+    axial = _action(:strength_1_4D, 500e3, 1.0e3, 1.0e3)
+    inside = _check(wall, [axial]; Moop=20e3u"N*m")
+    @test any(occursin("bearing", r.check) for r in inside)
+    @test !any(occursin("out-of-plane", r.check) for r in inside)
+
+    outside = _check(wall, [axial]; Moop=200e3u"N*m")
+    @test !any(occursin("bearing", r.check) for r in outside)
+    oop = only(filter(r -> occursin("out-of-plane", r.check), outside))
+    @test occursin("22.2", oop.clause)
+
+    huge = _check(wall, [axial]; Moop=5.0e6u"N*m")
+    failed = only(filter(r -> occursin("out-of-plane", r.check), huge))
+    @test failed.passed == false
+
+    thin = _pier(; length=4.0, height=4.0, thickness=0.20)
+    StructuralSynthesizer.select_ordinary_wall_reinforcement!(
+        thin, [axial], RC_4000_60; hw=4.0u"m", Moop=5.0e6u"N*m")
+    @test thin.ρl > 0.0025
+end

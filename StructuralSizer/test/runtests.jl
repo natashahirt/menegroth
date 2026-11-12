@@ -218,6 +218,8 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
     @testset "Walls" begin
         include("walls/test_walls.jl")
         include("walls/test_special_boundary.jl")
+        include("walls/test_boundary_bars.jl")
+        include("walls/test_coupling_beams.jl")
         include("walls/test_special_wall.jl")
         include("walls/test_flanged_section.jl")
         include("walls/test_fem_rigid_diaphragm.jl")

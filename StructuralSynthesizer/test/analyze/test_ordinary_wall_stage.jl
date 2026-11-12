@@ -34,22 +34,23 @@ using StructuralSizer
 const _STAGE_VAULT = VaultOptions(rise=1.0u"m", thickness=0.05u"m")
 
 function _stage_inputs(; cracked::Bool=true, pdelta::Bool=false, sdc::Symbol=:B,
-                       material=RC_4000_60)
+                       material=RC_4000_60, SDS=0.05, S1=0.02, SD1=0.02,
+                       qz=[1.0, 1.5, 2.0])
     return OrdinaryWallInputs(;
         directions=((1.0, 0.0), (0.0, 1.0)),
-        qz=[1.0, 1.5, 2.0],
+        qz=qz,
         qh=2.0,
         Kd=1.0,
         G=0.85,
         GCpi=0.18,
         roof=:Lr,
         method=:sds,
-        SDS=0.05,
-        S1=0.02,
+        SDS=SDS,
+        S1=S1,
         Ie=1.0,
         T=0.4,
         β=1.0,
-        SD1=0.02,
+        SD1=SD1,
         TL=8.0,
         rho=1.0,
         sdc=sdc,
@@ -194,7 +195,7 @@ function _stage_office_pdelta()
                   (10.0, 0.0, 10.0, 6.0)))
 end
 
-"""10×6 m, three stories, one wall line along X. Y has no wall, so θ exceeds θmax."""
+"""10×6 m, three stories, one wall line along X. Y has no wall."""
 function _stage_office_unstable()
     skel = gen_medium_office(10.0u"m", 6.0u"m", 4.0u"m", 1, 2, 3)
     beams = Set(get(skel.groups_edges, :beams, Int[]))
@@ -223,6 +224,33 @@ function _stage_office_unstable()
     return struc
 end
 
+"""One story, 10×6 m, a wall on each long side. No wall above a lintel."""
+function _stage_office_one_story()
+    skel = gen_medium_office(10.0u"m", 6.0u"m", 4.0u"m", 1, 2, 1)
+    beams = Set(get(skel.groups_edges, :beams, Int[]))
+    ground = [e for e in skel.stories[0].edges if e in beams && _stage_horizontal(skel, e)]
+    longest = maximum(_stage_plan_length(skel, e) for e in ground)
+    long = [e for e in ground if _stage_plan_length(skel, e) >= longest - 1e-6]
+    ordered = sort(long; by=e -> _stage_across(skel, e))
+    length(ordered) >= 2 || error("ordinary-wall fixture: expected two long sides")
+    for e0 in ordered
+        v1, v2 = skel.edge_indices[e0]
+        x1, y1 = _stage_xy(skel, v1)
+        x2, y2 = _stage_xy(skel, v2)
+        _stage_claim_stacked_wall!(skel, 0, beams, x1, y1, x2, y2)
+    end
+    struc = BuildingStructure(skel)
+    initialize!(struc;
+        floor_type=:vault,
+        material=NWC_4000,
+        floor_opts=_STAGE_VAULT,
+        wall_thickness=0.3u"m")
+    for wall in struc.walls
+        wall.concrete = RC_4000_60.concrete
+    end
+    return struc
+end
+
 function _stage_wall_shells(struc)
     return [sh for sh in struc.asap_model.shell_elements
             if sh isa Asap.ShellTri3 && sh.id === :wall]
@@ -232,8 +260,9 @@ end
 Multiply E of piers whose plan line runs in Y by `extra`, then reprocess.
 
 Fixture knob for the P-delta office. `0.001` after the 0.35 crack takes the
-Y pier out of the story. Paired with [`_stage_put_weak_axis_in_y!`](@ref),
-θ lands in (0.10, θmax]. It is not an ACI cracked-section factor.
+Y pier out of the story. The X piers are then scaled by `0.4`: a fixed grade
+base lets them brace Y out of plane, and that factor puts θ back in
+(0.10, θmax]. It is not an ACI cracked-section factor.
 """
 function _stage_soften_y_piers!(struc, extra)
     n = 0
@@ -246,6 +275,22 @@ function _stage_soften_y_piers!(struc, extra)
         end
     end
     n > 0 || error("ordinary-wall fixture: no Y pier to soften")
+    Asap.process!(struc.asap_model)
+    return n
+end
+
+"""Multiply E of piers whose plan line runs in X by `extra`, then reprocess."""
+function _stage_soften_x_piers!(struc, extra)
+    n = 0
+    for pier in struc.wall_mesh.piers
+        wall = struc.walls[pier.wall_index]
+        abs(wall.x2 - wall.x1) > abs(wall.y2 - wall.y1) || continue
+        for sh in pier.shells
+            sh.E *= extra
+            n += 1
+        end
+    end
+    n > 0 || error("ordinary-wall fixture: no X pier to soften")
     Asap.process!(struc.asap_model)
     return n
 end
@@ -280,17 +325,36 @@ end
     gravity = DesignParameters()
     @test gravity.lateral === nothing
     @test gravity.wall_inputs === nothing
-    @test length(build_pipeline(gravity)) == 2
+    @test length(build_pipeline(gravity)) == 3
     @test design_ordinary_walls!(bare, gravity) === nothing
     @test bare.ordinary_wall_result === nothing
     g0 = build_design_graph(bare, gravity)
-    @test NODE_ORDINARY_WALLS ∉ [node_key(n) for n in g0.nodes]
+    wall_gravity = only(n for n in g0.nodes if node_key(n) == NODE_ORDINARY_WALLS)
+    @test dependencies(wall_gravity) == [NODE_MEMBERS]
+    @test needs_sync(wall_gravity) == false
+    # The footing is sized after the wall stage. A thickness jump remeshes
+    # inside that stage; ACI 318-11 §15.2.2 sizes the base from the force
+    # on the thickness that remains. Foundations also depend on members:
+    # the wall hash is thickness, and a force change that does not change
+    # thickness must still recompute the footing.
+    with_fdn = DesignParameters(
+        foundation_options = FoundationParameters(
+            soil = medium_sand,
+            options = FoundationOptions(strategy = :all_spread),
+        ),
+    )
+    g_fdn = build_design_graph(bare, with_fdn)
+    wall_fdn = only(n for n in g_fdn.nodes if node_key(n) == NODE_ORDINARY_WALLS)
+    fdn_node = only(n for n in g_fdn.nodes if node_key(n) == NODE_FOUNDATIONS)
+    @test dependencies(wall_fdn) == [NODE_MEMBERS]
+    @test dependencies(fdn_node) == [NODE_MEMBERS, NODE_ORDINARY_WALLS]
 
     inputs = _stage_inputs()
     lateral = DesignParameters(
         lateral=LateralDesign(; system=WallsSeismicSystem(:A3), assignment=BuildingUnit()),
         wall_inputs=inputs,
         skip_visualization=true,
+        jump_wall_thickness=false,
     )
     @test length(build_pipeline(lateral)) == 3
     g1 = build_design_graph(bare, lateral)
@@ -318,6 +382,7 @@ end
                                assignment=BuildingUnit()),
         wall_inputs=_stage_inputs(; sdc=:C),
         skip_visualization=true,
+        jump_wall_thickness=false,
     )
     err = try
         design_ordinary_walls!(bare, refused)
@@ -434,7 +499,8 @@ end
         e
     end
     @test err isa ArgumentError
-    @test occursin("diaphragm_mode", sprint(showerror, err))
+    # The model has not been meshed, so the stage stops there.
+    @test occursin("wall mesh is empty", sprint(showerror, err))
     @test struc.ordinary_wall_result === nothing
 
     to_asap!(struc; params=lateral, diaphragms=:rigid)
@@ -483,7 +549,13 @@ end
     @test length(design.seismic_story_drift) == length(result.drift)
     any_fail = any(!r.passed for records in values(result.checks) for r in records) ||
                any(!c.passes for c in result.drift)
-    @test design.summary.all_checks_pass == !any_fail
+    # The summary covers every element group. The 50 mm stage vault fails its kern check.
+    others_ok = all(StructuralSynthesizer._slab_design_ok, values(design.slabs)) &&
+                all(c -> c.ok, values(design.columns)) &&
+                all(b -> b.ok, values(design.beams)) &&
+                all(f -> f.ok, values(design.foundations))
+    @test !others_ok
+    @test design.summary.all_checks_pass == (!any_fail && others_ok)
     payload = design_to_json(design)
     @test length(payload.walls) == sum(length, values(result.checks); init=0)
     @test length(payload.seismic_story_drift) == length(result.drift)
@@ -500,11 +572,14 @@ end
         lateral=LateralDesign(; system=WallsSeismicSystem(:A3), assignment=BuildingUnit()),
         wall_inputs=_stage_inputs(),
         skip_visualization=true,
+        jump_wall_thickness=false,
     )
     to_asap!(struc; params=lateral, diaphragms=:rigid)
-    # Fixture knobs, not ACI factors. The Y pier is softened, and the
+    # Fixture knobs, not ACI factors. The Y pier is taken out, the X piers
+    # are softened so their out-of-plane stiffness does not brace Y, and the
     # placeholder's weak axis is put in Y. See the helpers above.
     _stage_soften_y_piers!(struc, 0.001)
+    _stage_soften_x_piers!(struc, 0.4)
     _stage_put_weak_axis_in_y!(struc)
     sections = [(w.thickness, w.ρl, w.ρt) for w in struc.walls]
     result = design_ordinary_walls!(struc, lateral)
@@ -543,6 +618,7 @@ function _stage_joined_l(fy_ksi)
         lateral=LateralDesign(; system=WallsSeismicSystem(:A3), assignment=BuildingUnit()),
         wall_inputs=_stage_inputs(; material),
         skip_visualization=true,
+        jump_wall_thickness=false,
     )
     to_asap!(struc; params=lateral, diaphragms=:rigid)
     result = design_ordinary_walls!(struc, lateral)
@@ -599,8 +675,13 @@ end
         lateral=LateralDesign(; system=WallsSeismicSystem(:A3), assignment=BuildingUnit()),
         wall_inputs=_stage_inputs(),
         skip_visualization=true,
+        jump_wall_thickness=false,
     )
     to_asap!(struc; params=lateral, diaphragms=:rigid)
+    # The fixed grade base lets the X wall brace Y out of plane, so θ stays
+    # under θmax until the frames' weak axis is put in Y. Fixture, not an
+    # ACI factor.
+    _stage_put_weak_axis_in_y!(struc)
     err = try
         design_ordinary_walls!(struc, lateral)
         nothing
@@ -625,17 +706,10 @@ function _stage_node_above(model, bn)
     return above
 end
 
-@testset "wall shells share offset column joints" begin
+@testset "wall shells share the column centerline joint" begin
+    # The column centerline is the skeleton vertex. structural_offset stays
+    # (0, 0), so the shell reuses that frame node rather than a shifted one.
     struc = _stage_office()
-    for col in struc.columns
-        # The story above is smaller, so the shared floor joint is not a
-        # vertical extrusion of the grid line.
-        c = col.story == 0 ? 0.8u"m" : 0.4u"m"
-        col.c1 = c
-        col.c2 = c
-    end
-    update_structural_offsets!(struc; input_is_centerline=false)
-    @test any(c -> hypot(c.structural_offset...) > 0.05, struc.columns)
     to_asap!(struc; params=DesignParameters(diaphragm_mode=:rigid), diaphragms=:rigid)
     model = struc.asap_model
     @test maximum(abs, model.u) < 1.0
@@ -650,7 +724,7 @@ end
                           ustrip(u"m", nd.position[2]) - wall.y1),
                     hypot(ustrip(u"m", nd.position[1]) - wall.x2,
                           ustrip(u"m", nd.position[2]) - wall.y2))
-            @test 1e-3 < d < 1.0
+            @test d <= 1e-3
             top = _stage_node_above(model, nd)
             @test top !== nothing
             @test objectid(top) in owned
@@ -659,10 +733,11 @@ end
 end
 
 @testset "design_building publishes ordinary-wall records" begin
-    # Three bays each way. ACI 318-11 §13.6.1.1 requires three continuous
-    # spans for the direct design method.
+    # The walls end slab spans. Direct design is not used there: the support
+    # stiffness at the wall is not defined (ACI 318-11 R13.1, corpus:
+    # aci-318-11, page 243). The floor is analyzed by FEA.
     struc = _stage_office(; x_bays=3, y_bays=3, segments=_STAGE_THREE_BAY)
-    floor = FlatPlateOptions(method=DDM())
+    floor = FlatPlateOptions(method=FEA())
     materials = MaterialOptions(concrete=RC_4000_60.concrete, rebar=Rebar_60)
     # Concrete framing stays fixed. Column centerline offsets stay on.
     beams = ConcreteBeamOptions(material=RC_4000_60.concrete, rebar_material=Rebar_60)
@@ -675,19 +750,23 @@ end
         columns=columns,
         wall_thickness=0.3u"m",
         diaphragm_mode=:rigid,
-        max_iterations=3,
+        max_iterations=10,
         skip_visualization=true,
+        jump_wall_thickness=false,
     )
     gdesign = design_building(struc, gravity)
-    @test isempty(gdesign.walls)
+    # Gravity axial sizes the piers. There is no wind or earthquake, so no drift.
+    @test sort(collect(keys(gdesign.walls))) == collect(1:length(struc.walls))
+    @test all(records -> !isempty(records), values(gdesign.walls))
+    @test all(records -> all(r -> r.case === :D, records), values(gdesign.walls))
     @test isempty(gdesign.seismic_story_drift)
     gjson = design_to_json(gdesign)
-    @test isempty(gjson.walls)
+    @test !isempty(gjson.walls)
     @test isempty(gjson.seismic_story_drift)
     gbuf = IOBuffer()
     engineering_report(gdesign; io=gbuf, report_units=:metric)
     greport = String(take!(gbuf))
-    @test !occursin("ORDINARY WALLS", greport)
+    @test occursin("ORDINARY WALLS", greport)
     @test !occursin("SEISMIC STORY DRIFT", greport)
 
     lateral = DesignParameters(
@@ -698,8 +777,9 @@ end
         columns=columns,
         wall_thickness=0.3u"m",
         diaphragm_mode=:rigid,
-        max_iterations=3,
+        max_iterations=10,
         skip_visualization=true,
+        jump_wall_thickness=false,
         lateral=LateralDesign(; system=WallsSeismicSystem(:A3), assignment=BuildingUnit()),
         wall_inputs=_stage_inputs(),
     )
@@ -842,7 +922,9 @@ end
 @testset "Building frame gravity share" begin
     ok = [StructuralSynthesizer.WallGravityShare(1, 10.0, 100.0, 0.10)]
     @test StructuralSynthesizer._refuse_building_frame_gravity!(:A3, ok) === ok
+    @test StructuralSynthesizer._refuse_building_frame_gravity!(:A1, ok) === ok
     @test StructuralSynthesizer._refuse_building_frame_gravity!(:B6, ok) === ok
+    @test StructuralSynthesizer._refuse_building_frame_gravity!(:B4, ok) === ok
     at = [StructuralSynthesizer.WallGravityShare(1, 20.0, 100.0, 0.20)]
     @test StructuralSynthesizer._refuse_building_frame_gravity!(:B6, at) === at
     over = [StructuralSynthesizer.WallGravityShare(2, 30.0, 100.0, 0.30)]
@@ -855,6 +937,126 @@ end
     @test err isa ArgumentError
     @test occursin("20%", sprint(showerror, err))
     @test occursin("C12.2.1", sprint(showerror, err))
+    @test occursin(":A3", sprint(showerror, err))
+    err4 = try
+        StructuralSynthesizer._refuse_building_frame_gravity!(:B4, over)
+        nothing
+    catch e
+        e
+    end
+    @test err4 isa ArgumentError
+    @test occursin("20%", sprint(showerror, err4))
+    @test occursin("C12.2.1", sprint(showerror, err4))
+    @test occursin(":A1", sprint(showerror, err4))
+end
+
+"""In-plane shear demands for one check family, sorted, one vector per wall."""
+function _stage_shear_demands(result, pred)
+    return Dict(idx => sort(collect(r.demand for r in records
+                                    if r.check == "in-plane shear" && pred(r)))
+                for (idx, records) in result.checks)
+end
+
+@testset "A1 and A3 move only the seismic coefficient each row owns" begin
+    # The row lookup runs before the mesh. Category D is refused with no solve.
+    bare = BuildingStructure(gen_medium_office(10.0u"m", 6.0u"m", 4.0u"m", 1, 1, 1))
+    function refuse(row, sdc)
+        params = DesignParameters(
+            lateral=LateralDesign(; system=WallsSeismicSystem(row),
+                                   assignment=BuildingUnit()),
+            wall_inputs=_stage_inputs(; sdc=sdc),
+            skip_visualization=true,
+            jump_wall_thickness=false)
+        try
+            design_ordinary_walls!(bare, params)
+            nothing
+        catch e
+            e
+        end
+    end
+    for row in (:A1, :B4)
+        err = refuse(row, :D)
+        @test err isa ArgumentError
+        msg = sprint(showerror, err)
+        @test occursin("160", msg)
+        @test occursin("12.12.4", msg)
+        @test !occursin("NP", msg)
+    end
+    msgF = sprint(showerror, refuse(:A1, :F))
+    @test occursin("100", msgF)
+    @test occursin("12.12.4", msgF)
+    @test !occursin("NP", msgF)
+    @test occursin("NP", sprint(showerror, refuse(:A3, :D)))
+
+    # One story, so qz is one value. SDS = 0.20 sits above the Eq. 12.8-6
+    # floor for both R = 4 and R = 5. SDS = 0.03 sits on that floor for both,
+    # so strength shear no longer reads R. Drift drops the floor. A1 and A3
+    # both have Cd/R = 1, so the design drift matches at either SDS.
+    function design_row(row, SDS, SD1)
+        struc = _stage_office_one_story()
+        params = DesignParameters(
+            lateral=LateralDesign(; system=WallsSeismicSystem(row),
+                                   assignment=BuildingUnit()),
+            wall_inputs=_stage_inputs(; SDS=SDS, S1=0.02, SD1=SD1, qz=[1.5]),
+            skip_visualization=true,
+            jump_wall_thickness=false)
+        to_asap!(struc; params=params, diaphragms=:rigid)
+        return struc, design_ordinary_walls!(struc, params)
+    end
+    function same_demands(a, b)
+        @test collect(keys(a)) == collect(keys(b))
+        for idx in keys(a)
+            @test a[idx] ≈ b[idx]
+        end
+    end
+    for (SDS, SD1, strength_follows_R) in ((0.20, 0.08, true), (0.03, 0.02, false))
+        sa3, a3 = design_row(:A3, SDS, SD1)
+        sa1, a1 = design_row(:A1, SDS, SD1)
+        @test [w.thickness for w in sa3.walls] == [w.thickness for w in sa1.walls]
+        for (i, w) in enumerate(sa1.walls)
+            @test w.ρl <= sa3.walls[i].ρl + 1e-12
+            @test w.ρt <= sa3.walls[i].ρt + 1e-12
+        end
+        @test length(a3.drift) == length(a1.drift)
+        for i in eachindex(a3.drift)
+            @test a3.drift[i].drift_m ≈ a1.drift[i].drift_m rtol = 1e-5
+            @test a3.drift[i].story == a1.drift[i].story
+            @test a3.drift[i].direction == a1.drift[i].direction
+        end
+        # θ reads the drift, so the §12.8.7 factor matches too. It is not
+        # required to be 1: a larger SDS can push θ past 0.10.
+        @test a3.pdelta_multipliers ≈ a1.pdelta_multipliers
+        dead(r) = r.case === :D
+        wind(r) = startswith(string(r.case), "W")
+        seismic(r) = startswith(string(r.case), "QE")
+        same_demands(_stage_shear_demands(a3, dead), _stage_shear_demands(a1, dead))
+        same_demands(_stage_shear_demands(a3, wind), _stage_shear_demands(a1, wind))
+        d3 = _stage_shear_demands(a3, seismic)
+        d1 = _stage_shear_demands(a1, seismic)
+        @test sort(collect(keys(d3))) == sort(collect(keys(d1)))
+        # A pier's in-plane shear reads the earthquake along the pier.
+        # The other direction leaves that shear at the gravity combination,
+        # so those records match. The loaded direction scales with R above
+        # the Eq. 12.8-6 floor and matches on the floor.
+        seismic_scaled = false
+        for idx in keys(d3)
+            @test length(d3[idx]) == length(d1[idx])
+            @test !isempty(d3[idx])
+            for (v3, v1) in zip(d3[idx], d1[idx])
+                if strength_follows_R && !isapprox(v1, v3; rtol=1e-6)
+                    @test v1 ≈ v3 * (4 / 5) rtol = 0.02
+                    seismic_scaled = true
+                else
+                    @test v1 ≈ v3 rtol = 0.02
+                end
+            end
+        end
+        @test seismic_scaled == strength_follows_R
+        for records in values(a1.checks)
+            @test !any(r -> occursin("18.10.6", r.check) || occursin("18.10.6", r.clause),
+                       records)
+        end
+    end
 end
 
 @testset "Interactive system, row F" begin
@@ -863,7 +1065,8 @@ end
         lateral=LateralDesign(; system=InteractiveShearWallFrameSystem(),
                                assignment=BuildingUnit()),
         wall_inputs=_stage_inputs(),
-        skip_visualization=true)
+        skip_visualization=true,
+        jump_wall_thickness=false)
     to_asap!(struc; params=params, diaphragms=:rigid)
     # The unsized vault frame, without the wall shells, drifts far enough that
     # story-1 θ/(1+θ) exceeds θmax. §12.8.7 requires a redesign, so the stage
@@ -879,4 +1082,214 @@ end
     @test occursin("redesigned", msg)
     @test occursin("12.2.5.8", msg)
     @test occursin("12.8.7", msg)
+end
+
+@testset "Gravity axial sizes the piers" begin
+    struc = _stage_office_unstable()
+    @test !isempty(struc.walls)
+    for wall in struc.walls
+        wall.ρl = 0.001
+        wall.ρt = 0.001
+    end
+    params = DesignParameters(diaphragm_mode=:rigid, skip_visualization=true,
+                              jump_wall_thickness=false)
+    to_asap!(struc; params=params, diaphragms=:rigid)
+    result = design_ordinary_walls!(struc, params)
+    @test result isa OrdinaryWallResult
+    @test struc.ordinary_wall_result === result
+    @test isempty(result.drift)
+    @test isempty(result.interactive_shear)
+    @test isempty(result.frame_members)
+    @test sort(collect(keys(result.checks))) == collect(eachindex(struc.walls))
+    for (idx, records) in result.checks
+        @test any(r -> r.case === :D && occursin("bearing wall", r.check), records)
+        @test any(r -> r.case === :D && r.check == "in-plane shear", records)
+        @test !any(r -> startswith(string(r.case), "W") ||
+                       startswith(string(r.case), "QE"), records)
+        @test all(r -> r.wall_index == idx, records)
+    end
+    @test all(w -> w.ρl >= 0.0025 - 1e-12 && w.ρt >= 0.0025 - 1e-12, struc.walls)
+    @test all(w -> w.thickness == 0.3u"m", struc.walls)
+end
+
+@testset "A pierced wall is checked with the building" begin
+    # One story, so the lintel is not merged with a wall above it.
+    struc = _stage_office_one_story()
+    @test length(struc.walls) >= 2
+    wall = first(struc.walls)
+    L = hypot(wall.x2 - wall.x1, wall.y2 - wall.y1)
+    width = min(3.0, 0.5 * L)
+    s0 = 0.5 * (L - width)
+    # Bands 0.4 m deep. The clear span is longer than four times that depth,
+    # so each band is an ordinary beam.
+    wall.openings = [WallOpening(s0, 0.4, width, 3.2, :window)]
+    params = DesignParameters(diaphragm_mode=:rigid, skip_visualization=true,
+                              jump_wall_thickness=false)
+    to_asap!(struc; params=params, diaphragms=:rigid)
+    result = design_ordinary_walls!(struc, params)
+    idx = findfirst(w -> w === wall, struc.walls)
+    records = result.checks[idx]
+    @test any(r -> r.check == "spandrel flexure" && r.passed, records)
+    @test any(r -> r.check == "spandrel shear" && r.passed, records)
+    # A vertical pier is a wall segment. Its shear record carries the cut face.
+    @test any(r -> occursin("in-plane shear", r.check), records)
+    @test !any(r -> r.check == "horizontal segment unchecked", records)
+    for (j, other) in enumerate(struc.walls)
+        j == idx && continue
+        @test any(r -> r.case === :D && occursin("bearing wall", r.check), result.checks[j])
+        @test any(r -> r.check == "in-plane shear", result.checks[j])
+        @test !any(r -> r.check == "spandrel flexure", result.checks[j])
+        @test isempty(other.openings)
+    end
+end
+
+@testset "A window on the ground story leaves the stories above solid" begin
+    struc = _stage_office_unstable()
+    wall = only(w for w in struc.walls if w.story == 0)
+    L = hypot(wall.x2 - wall.x1, wall.y2 - wall.y1)
+    width = min(3.0, 0.5 * L)
+    s0 = 0.5 * (L - width)
+    wall.openings = [WallOpening(s0, 0.4, width, 3.2, :window)]
+    params = DesignParameters(diaphragm_mode=:rigid, skip_visualization=true,
+                              jump_wall_thickness=false)
+    to_asap!(struc; params=params, diaphragms=:rigid)
+    result = design_ordinary_walls!(struc, params)
+    idx = findfirst(w -> w === wall, struc.walls)
+    records = result.checks[idx]
+    @test any(r -> r.check == "spandrel flexure" && r.passed, records)
+    @test any(r -> r.check == "spandrel shear" && r.passed, records)
+    @test !any(r -> r.check == "horizontal segment unchecked", records)
+    above = 0
+    for (j, other) in enumerate(struc.walls)
+        other.story == 0 && continue
+        above += 1
+        @test isempty(other.openings)
+        @test any(r -> r.case === :D && occursin("bearing wall", r.check), result.checks[j])
+        @test any(r -> r.check == "in-plane shear", result.checks[j])
+        @test !any(r -> r.check == "spandrel flexure", result.checks[j])
+        @test !any(r -> r.check == "horizontal segment unchecked", result.checks[j])
+    end
+    @test above >= 2
+end
+
+@testset "Wall tributaries without columns; a flexible floor refuses a strut" begin
+    # With the columns removed, every wall that bounds a cell keeps that
+    # cell's complement. Corner columns otherwise keep the larger Voronoi
+    # region and the complement on the upper floors is empty.
+    bare = _stage_office_unstable()
+    empty!(bare.columns)
+    StructuralSynthesizer.compute_column_tributaries!(bare)
+    @test all(w -> StructuralSynthesizer.wall_tributary_area(w) > 0, bare.walls)
+
+    struc = _stage_office_unstable()
+    params = DesignParameters(diaphragm_mode=:flexible, skip_visualization=true,
+                              jump_wall_thickness=false)
+    to_asap!(struc; params=params, diaphragms=:flexible)
+    @test isempty(struc.asap_rigid_links)
+    push!(struc.struts, Strut([1], 4.0u"m"))
+    err = try
+        to_asap!(struc; params=params, diaphragms=:flexible)
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    msg = sprint(showerror, err)
+    @test occursin("strut", msg)
+    @test !occursin("walls or struts", msg)
+end
+
+"""Thickness and reinforcement, ordered by plan so the grouping runs can be compared."""
+function _stage_wall_rows(struc)
+    rows = [(story=w.story, x1=w.x1, y1=w.y1, x2=w.x2, y2=w.y2,
+             t=ustrip(u"m", w.thickness), ρl=w.ρl, ρt=w.ρt) for w in struc.walls]
+    return sort(rows; by=r -> (r.story, r.y1, r.x1, r.y2, r.x2))
+end
+
+@testset "Symmetric walls agree under every thickness grouping" begin
+    function sized(grouping)
+        struc = _stage_office_one_story()
+        for wall in struc.walls
+            wall.thickness = 0.10u"m"
+        end
+        params = DesignParameters(
+            diaphragm_mode=:rigid, skip_visualization=true,
+            jump_wall_thickness=true, wall_thickness_grouping=grouping,
+            wall_thickness=0.10u"m")
+        to_asap!(struc; params=params, diaphragms=:rigid)
+        result = design_ordinary_walls!(struc, params)
+        passed = all(r -> r.passed, Iterators.flatten(values(result.checks)))
+        return (rows=_stage_wall_rows(struc), passed=passed,
+                settled=!haskey(struc.stage_diagnostics, :walls),
+                t_param=ustrip(u"m", params.wall_thickness))
+    end
+    runs = Dict(g => sized(g) for g in WALL_THICKNESS_GROUPINGS)
+    @test all(run.passed for run in values(runs))
+    @test all(run.settled for run in values(runs))
+    @test all(row.t > 0.10 + 1e-4 for row in runs[:all].rows)
+    for grouping in WALL_THICKNESS_GROUPINGS
+        @testset "$grouping" begin
+            @test length(runs[grouping].rows) == length(runs[:all].rows)
+            for (got, ref) in zip(runs[grouping].rows, runs[:all].rows)
+                @test got.t ≈ ref.t atol=1e-9
+                @test got.ρl ≈ ref.ρl atol=1e-9
+                @test got.ρt ≈ ref.ρt atol=1e-9
+            end
+            @test runs[grouping].t_param ≈ runs[:all].t_param atol=1e-9
+        end
+    end
+end
+
+"""One story, the first wall thin and the others already thick."""
+function _stage_mixed_office()
+    struc = _stage_office_one_story()
+    length(struc.walls) >= 2 || error("one-story office has one wall")
+    struc.walls[1].thickness = 0.10u"m"
+    for wall in struc.walls[2:end]
+        wall.thickness = 0.30u"m"
+    end
+    return struc
+end
+
+function _stage_design_grouping(struc, grouping)
+    params = DesignParameters(
+        diaphragm_mode=:rigid, skip_visualization=true,
+        jump_wall_thickness=true, wall_thickness_grouping=grouping,
+        wall_thickness=0.10u"m")
+    to_asap!(struc; params=params, diaphragms=:rigid)
+    return params, design_ordinary_walls!(struc, params)
+end
+
+@testset "A thin wall thickens alone when the grouping splits it off" begin
+    probe = _stage_mixed_office()
+    thin = 1
+    for grouping in WALL_THICKNESS_GROUPINGS
+        @testset "$grouping" begin
+            ids = wall_thickness_groups(probe.walls; grouping)
+            shares = any(i -> i != thin && ids[i] == ids[thin], eachindex(probe.walls))
+            struc = _stage_mixed_office()
+            if shares && grouping !== :all
+                err = try
+                    _stage_design_grouping(struc, grouping)
+                    nothing
+                catch e
+                    e
+                end
+                @test err isa ArgumentError
+                @test occursin("more than one thickness", sprint(showerror, err))
+            elseif grouping === :all
+                _, result = _stage_design_grouping(struc, grouping)
+                @test ustrip(u"m", struc.walls[thin].thickness) ≈ 0.10 atol=1e-6
+                @test all(w -> ustrip(u"m", w.thickness) ≈ 0.30, struc.walls[2:end])
+                @test !all(r -> r.passed, Iterators.flatten(values(result.checks)))
+            else
+                _, result = _stage_design_grouping(struc, grouping)
+                @test ustrip(u"m", struc.walls[thin].thickness) > 0.10 + 1e-4
+                @test all(w -> ustrip(u"m", w.thickness) ≈ 0.30, struc.walls[2:end])
+                @test all(r -> r.passed, Iterators.flatten(values(result.checks)))
+                @test all(w -> w.ρl >= 0.0025 - 1e-12 && w.ρt >= 0.0025 - 1e-12,
+                          struc.walls)
+            end
+        end
+    end
 end

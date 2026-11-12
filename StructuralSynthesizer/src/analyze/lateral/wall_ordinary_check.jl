@@ -34,10 +34,12 @@ reinforcement checks. When omitted, the height is this pier plus every
 floors brace the pier, and `boundary` supplies `k`.
 
 The empirical method's eccentricity is out of plane (the resultant within the
-middle third of the thickness, §11.5.3.1). This action does not carry an
-out-of-plane moment, so the resultant is taken through the thickness (`e = 0`).
-The in-plane moment is the axial-flexure check. A tensile axial force makes
-the bearing method inapplicable; that result is recorded as a failure.
+middle third of the thickness, §11.5.3.1). `Moop` is the slab's factored
+moment about the wall's weak axis. `e = Moop / N`. Inside the middle third
+the empirical method is the axial check. Outside it, that method does not
+apply and the pier is checked for the magnified out-of-plane moment
+(§6.6.4.5 and §22.2). A tensile axial force makes the bearing method
+inapplicable; that result is recorded as a failure.
 
 `ρt_strength`, when passed, is the transverse ratio required for shear
 strength. §11.6.2(a) says the vertical minimum need not exceed it. The
@@ -59,7 +61,9 @@ function check_ordinary_wall(wall::Wall, actions::AbstractVector{CombinedWallAct
                              hw::Union{Nothing,Unitful.Length}=nothing,
                              ρt_strength::Union{Nothing,Real}=nothing,
                              plan_axis::NTuple{2, Float64}=(1.0, 0.0),
-                             lw::Union{Nothing,Unitful.Length}=nothing)
+                             lw::Union{Nothing,Unitful.Length}=nothing,
+                             Moop::Unitful.Quantity=0.0u"N*m",
+                             ends=nothing)
     material isa ReinforcedConcreteMaterial || throw(ArgumentError(
         "ordinary wall check: material must be a ReinforcedConcreteMaterial " *
         "(concrete plus rebar). A plain concrete has no fy or fyt, and this " *
@@ -94,14 +98,24 @@ function check_ordinary_wall(wall::Wall, actions::AbstractVector{CombinedWallAct
         for reinf in check_wall_min_reinforcement(section; hw=height, ρt_strength)
             push!(records, _ordinary_record(wall_index, wall.story, direction, case, action, reinf))
         end
-        flexure = check_wall_inplane_flexure(section, material, action.N, action.M)
+        flexure = ends === nothing ? check_wall_inplane_flexure(section, material, action.N, action.M) :
+                  check_wall_end_bar_flexure(lw, wall.thickness, wall.ρl,
+                                            ends.area_m2 * u"m^2", ends.inset_m * u"m",
+                                            material, action.N, action.M)
         push!(records, _ordinary_record(wall_index, wall.story, direction, case, action, flexure))
-        # e = 0: no out-of-plane eccentricity is in this action. lu is the plan
-        # length; a shorter unsupported length is not known here.
-        bearing = check_wall_bearing_empirical(section, material.concrete, action.N;
-                                               e=0.0u"m", lc=story_height, lu=lw,
-                                               boundary=boundary, foundation=false)
-        push!(records, _ordinary_record(wall_index, wall.story, direction, case, action, bearing))
+        e = _out_of_plane_eccentricity(action.N, Moop)
+        # Inside h/6 the simplified method applies with this eccentricity.
+        # Outside it, §11.5.3.1 does not, and the magnified weak-axis moment does.
+        if e <= section.t / 6
+            bearing = check_wall_bearing_empirical(section, material.concrete, action.N;
+                                                   e=e, lc=story_height, lu=lw,
+                                                   boundary=boundary, foundation=false)
+            push!(records, _ordinary_record(wall_index, wall.story, direction, case, action, bearing))
+        else
+            push!(records, _ordinary_record(
+                wall_index, wall.story, direction, case, action,
+                _out_of_plane_strength(section, material, action.N, Moop, story_height)))
+        end
         if assembly !== nothing && assembly.joined
             # Reported only. ratio 0 keeps a passing design from treating
             # this as the governing strength check.
@@ -120,6 +134,36 @@ function check_ordinary_wall(wall::Wall, actions::AbstractVector{CombinedWallAct
         end
     end
     return records
+end
+
+"""e = M/N. No moment is concentric. Moment with no compression is outside the wall."""
+function _out_of_plane_eccentricity(N, Moop)
+    M = abs(Moop)
+    M <= 1.0u"N*m" && return 0.0u"m"
+    N_N = N isa Unitful.Quantity ? ustrip(u"N", N) : Float64(N)
+    N_N > 1.0 || return M / 1.0u"N"
+    return M / (N_N * u"N")
+end
+
+"""
+Magnified weak-axis strength. Instability of §6.6.4.5.2 is a failure.
+Ig is the pier bent through its thickness.
+"""
+function _out_of_plane_strength(section::WallSection, material, N, Moop, lu)
+    lw = ustrip(u"m", section.lw)
+    t = ustrip(u"m", section.t)
+    Ig = lw * t^3 / 12
+    fc = ustrip(u"Pa", material.concrete.fc′)
+    Ec = StructuralSizer.wall_modulus_si(fc)
+    Pu = N isa Unitful.Quantity ? ustrip(u"N", N) : Float64(N)
+    M = ustrip(u"N*m", Moop)
+    mag = StructuralSizer.nonsway_slenderness_moment(Pu, M, Ec, Ig, ustrip(u"m", lu))
+    if !mag.stable
+        return CheckResult("out-of-plane slenderness: Pu ≥ 0.75 Pc", false,
+                           Inf, Pu, 0.75 * mag.Pc, "ACI 318-19 6.6.4.5.2")
+    end
+    return StructuralSizer.check_wall_out_of_plane_axial_flexure(
+        section, material, N, mag.Mc * u"N*m")
 end
 
 function _ordinary_record(wall_index, story, direction, case, action, result::CheckResult)
@@ -305,6 +349,16 @@ function _flexure_passes!(lw, t, ρl, material, actions)
     return true
 end
 
+function _out_of_plane_passes(lw, t, ρl, ρt, material, actions, Moop, hw)
+    ustrip(u"N*m", Moop) <= 1.0 && return true
+    section = WallSection(lw * u"m", t * u"m"; ρl=ρl, ρt=ρt)
+    for a in actions
+        _out_of_plane_eccentricity(a.N, Moop) <= section.t / 6 && continue
+        _out_of_plane_strength(section, material, a.N, Moop, hw).passed || return false
+    end
+    return true
+end
+
 """
     select_ordinary_wall_reinforcement!(wall, actions, material; hw, lw=nothing) -> ρt_strength
 
@@ -322,7 +376,9 @@ A ratio the wall already carries is not reduced. A demand the grid cannot
 cover leaves the wall at the top of the grid.
 """
 function select_ordinary_wall_reinforcement!(wall::Wall, actions, material; hw::Unitful.Length,
-                                              lw::Union{Nothing,Unitful.Length}=nothing)
+                             lw::Union{Nothing,Unitful.Length}=nothing,
+                             Moop::Unitful.Quantity=0.0u"N*m",
+                             ends=nothing)
     material isa ReinforcedConcreteMaterial || throw(ArgumentError(
         "ordinary wall reinforcement: material must be a ReinforcedConcreteMaterial."))
     isempty(actions) && throw(ArgumentError(
@@ -351,7 +407,8 @@ function select_ordinary_wall_reinforcement!(wall::Wall, actions, material; hw::
     chosen_l = floor_l
     for ρl in _rho_l_candidates(floor_l)
         chosen_l = ρl
-        _flexure_passes!(lw, t, ρl, material, order) && break
+        _flexure_passes!(lw, t, ρl, material, order) || continue
+        _out_of_plane_passes(lw, t, ρl, wall.ρt, material, order, Moop, hw) && break
     end
     wall.ρl = chosen_l
     return ρt_strength

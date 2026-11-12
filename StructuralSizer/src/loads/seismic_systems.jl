@@ -29,8 +29,9 @@ end
 # extraction. Height cells on these rows are NL or NP; there is no numeric hn.
 # R and the B/C permissions of A.3 and B.6 agree with the text of Table
 # 12.14-1 rows A.2 and B.5 (PDF page 201: R = 4 and 5, P in B and C, NP in
-# D and E). That table has no Ω0, Cd, moment-frame, dual, or row F entries,
-# so those values rest on the rendered pages alone.
+# D and E). Ω0, Cd, and rows C.7, E.8, and F were read from the rendered
+# table (PDF pages 173–175, printed pages 112–114) on 2026-11-02. The
+# numbers below are that reading.
 const _ORDINARY_CONCRETE_SYSTEMS = Dict{Symbol, OrdinaryConcreteSeismicSystem}(
     # PDF page 173, bearing-wall systems, row A.3.
     :A3 => OrdinaryConcreteSeismicSystem(
@@ -86,4 +87,77 @@ function ordinary_concrete_seismic_system(row::Symbol, sdc::Symbol)
             "ASCE 7-22 Table 12.2-1 (corpus: asce-7-22, PDF page $(system.page))."))
     end
     return system
+end
+
+"""One special reinforced-concrete shear-wall row of ASCE 7-22 Table 12.2-1."""
+struct SpecialConcreteShearWallSystem
+    row::Symbol
+    title::String
+    detailing::String
+    R::Float64
+    Ω0::Float64
+    Cd::Float64
+    "hn in feet for Seismic Design Categories D, E, and F, in that order."
+    height_limit_ft::NTuple{3, Float64}
+    page::Int
+end
+
+# PDF page 173, read from the rendered table on 2026-11-10. A.3 and B.6 on
+# that same page are the ordinary rows already stored above (R 4 and 5,
+# Ω0 2½, Cd 4 and 4.5). A.1 and B.4 are the special rows on the same page.
+# B and C are NL. D, E, and F are numeric heights, not NP. Footnotes on the
+# rows are not applied.
+const _SPECIAL_CONCRETE_WALLS = Dict{Symbol, SpecialConcreteShearWallSystem}(
+    :A1 => SpecialConcreteShearWallSystem(
+        :A1, "bearing wall, special reinforced concrete shear walls", "14.2",
+        5.0, 2.5, 5.0, (160.0, 160.0, 100.0), 173),
+    :B4 => SpecialConcreteShearWallSystem(
+        :B4, "building frame, special reinforced concrete shear walls", "14.2",
+        6.0, 2.5, 5.0, (160.0, 160.0, 100.0), 173),
+)
+
+"""
+    concrete_shear_wall_system(row, sdc) -> system
+
+Table 12.2-1 row for a reinforced-concrete shear wall.
+
+Ordinary rows `:A3`, `:B6`, `:C7`, `:E8`, and `:F` are
+[`ordinary_concrete_seismic_system`](@ref). Special rows `:A1` and `:B4`
+are returned for Seismic Design Categories B and C. In D, E, or F the table
+permits those two rows up to the stored `hn`. The lookup still throws:
+§12.12.4 sends a concrete frame member outside the system to ACI 318-19
+§18.14, and the induced moments are not calculated, so §18.14.3.3 is
+required and is not applied.
+
+# Citation
+ASCE 7-22 Table 12.2-1 (corpus: asce-7-22, PDF page 173), read from the
+rendered page.
+"""
+function concrete_shear_wall_system(row::Symbol, sdc::Symbol)
+    haskey(_ORDINARY_CONCRETE_SYSTEMS, row) &&
+        return ordinary_concrete_seismic_system(row, sdc)
+    system = get(_SPECIAL_CONCRETE_WALLS, row, nothing)
+    if system === nothing
+        throw(ArgumentError(
+            "concrete shear wall: $row is not a Table 12.2-1 shear-wall row " *
+            "carried here. ASCE 7-22 Table 12.2-1 (corpus: asce-7-22, PDF " *
+            "pages 173-175)."))
+    end
+    sdc in (:B, :C, :D, :E, :F) || throw(ArgumentError(
+        "concrete shear wall: Seismic Design Category $sdc is not a column " *
+        "of Table 12.2-1. The columns are B, C, D, E, and F " *
+        "(corpus: asce-7-22, PDF page $(system.page))."))
+    sdc in (:B, :C) && return system
+    limits = (; D = system.height_limit_ft[1], E = system.height_limit_ft[2],
+              F = system.height_limit_ft[3])
+    hn = getfield(limits, sdc)
+    throw(ArgumentError(
+        "concrete shear wall: Table 12.2-1 row $(system.row) is permitted in " *
+        "Seismic Design Category $sdc up to hn = $(hn) ft (corpus: asce-7-22, " *
+        "PDF page $(system.page)). ASCE 7-22 §12.12.4 (PDF page 195) requires " *
+        "components outside the seismic force-resisting system to carry gravity " *
+        "and the forces from δDE. A reinforced concrete frame member follows " *
+        "ACI 318-19 §18.14. Induced moments from δu are not calculated, so " *
+        "§18.14.3.1 requires §18.14.3.3 (corpus: aci-318-19, page 353). " *
+        "That member design is not applied."))
 end

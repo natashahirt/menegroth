@@ -284,14 +284,18 @@ end
     resolve_arrangement_heads(arr, columns, pressure; kwargs...) -> NamedTuple
 
 Seed a head at each column, cast those bays solid, solve, and grow.
+`heads` starts from those bays instead of the seed.
 
 Each step grows the worst failing head and solves again: one bay toward a
 named direction, or one ring all the way around when the check names none
 ([`grow_checked_column_head`](@ref)). The step is kept when its ratio
-falls. A step that meets another head or the slab edge, or does not lower
-the ratio, is not taken, and that head is left where it is. `stop` is
-`:passed` when every head passes, and `:stopped` when a failing head cannot
-take another useful step.
+falls. A step that meets another head or the slab edge, whose outline is not
+one critical section, or that does not lower the ratio, is not taken,
+and that head is left where it is. Another head
+growing changes the frame, so a head that could not grow is tried again.
+`stop` is `:passed` when every head passes, and `:stopped` when every
+failing head has been tried on the final frame and cannot take another
+useful step.
 
 `outline` and `holes` are the free edges of the slab. The critical section
 stops on them. A second call with the same arguments returns the same heads
@@ -306,8 +310,14 @@ function resolve_arrangement_heads(arr::StructuralSizer.RibArrangement, columns,
                                   fy::Pressure,
                                   topping::Union{Nothing, Length} = nothing,
                                   column_size::Length = 0.40u"m",
-                                  column_height::Length = 3.0u"m")
-    heads = StructuralSizer.ColumnSolidHead[StructuralSizer.seed_column_head(arr, xy) for xy in columns]
+                                  column_height::Length = 3.0u"m",
+                                  heads::Union{Nothing, AbstractVector{<:StructuralSizer.ColumnSolidHead}} = nothing)
+    if heads === nothing
+        heads = StructuralSizer.ColumnSolidHead[
+            StructuralSizer.seed_column_head(arr, xy) for xy in columns]
+    else
+        columns = [h.column for h in heads]
+    end
     free_loops = isempty(outline) ? () : (outline, holes...)
     steps = 0
     stuck = falses(length(heads))
@@ -342,14 +352,27 @@ function resolve_arrangement_heads(arr::StructuralSizer.RibArrangement, columns,
         end
         trial = copy(heads)
         trial[i] = grown
-        _, trial_checks = _solve_arrangement_heads(arr, trial, columns, pressure;
-            concrete = concrete, depth = depth, d_head = d_head,
-            bw = bw, d_rib = d_rib, h_rib = h_rib, fy = fy, topping = topping,
-            column_size = column_size, column_height = column_height,
-            free_loops = free_loops)
+        # A step whose outline is not one critical section is not a head.
+        trial_solved = try
+            _solve_arrangement_heads(arr, trial, columns, pressure;
+                concrete = concrete, depth = depth, d_head = d_head,
+                bw = bw, d_rib = d_rib, h_rib = h_rib, fy = fy, topping = topping,
+                column_size = column_size, column_height = column_height,
+                free_loops = free_loops)
+        catch err
+            err isa ArgumentError || rethrow()
+            nothing
+        end
+        if trial_solved === nothing
+            stuck[i] = true
+            continue
+        end
+        _, trial_checks = trial_solved
         if trial_checks[i].ratio < checks[i].ratio - 1e-9
             heads = trial
             steps += 1
+            # The other heads were judged on the previous frame.
+            stuck .= false
             steps <= length(arr.bays) || throw(ArgumentError(
                 "the solid heads grew once for every bay and have not passed"))
         else

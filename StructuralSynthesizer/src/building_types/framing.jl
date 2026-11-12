@@ -72,14 +72,66 @@ ribs run along lines of constant ξ and constant η, dividing the panel into
 # Fields
 - `n_xi::Int`: number of rib modules in the first (ξ) isoparametric direction.
 - `n_eta::Int`: number of rib modules in the second (η) isoparametric direction.
+- `solid_head::Float64`: fraction of the panel, measured from each corner in
+  both directions, that is cast solid. `0` is an open rib grid. The fraction
+  is in `[0, 1/2)` so the four corner heads do not meet. A positive value is
+  snapped up to a whole rib module by [`snapped_solid_head`](@ref) before the
+  beams are cut.
 
-Mirrors `StructuralSizer.WaffleRibGrid` (`nξ`, `nη`); Phase 5 fills these from
-the panel's actual rib grid.
+Mirrors `StructuralSizer.WaffleRibGrid` (`nξ`, `nη`, `solid_head`).
 """
 struct IsoparametricPattern <: StructuralSizer.AbstractJoistPattern
     n_xi::Int
     n_eta::Int
+    solid_head::Float64
+
+    function IsoparametricPattern(n_xi::Integer, n_eta::Integer, solid_head::Real = 0.0)
+        s = Float64(solid_head)
+        0 <= s < 0.5 || throw(ArgumentError(
+            "solid_head is the fraction of the panel from each corner and must be " *
+            "in [0, 1/2), got $s"))
+        return new(Int(n_xi), Int(n_eta), s)
+    end
 end
+
+"""
+    ModularRibPattern <: AbstractJoistPattern
+
+Two orthogonal families of straight ribs at a fixed module, laid over any slab
+outline and clipped to it and to its holes. This is the waffle form grid at an
+angle: the slab boundary cuts the edge modules, and those cut bays carry their
+load by their own isotropic skeleton.
+
+# Fields
+- `angle::Float64`: direction of family 1, radians from the slab-local x axis.
+  Family 2 runs at `angle + π/2`.
+- `spacing::NTuple{2, Float64}`: center-to-center rib spacing of family 1 and
+  family 2, metres.
+- `origin::Union{Nothing, NTuple{2, Float64}}`: a plan point, metres, that one
+  rib of each family passes through. `nothing` centers each family on the slab
+  so its two end gaps are equal and in `(s/2, s]`.
+
+Both families are regularly spaced and orthogonal, which is the layout ACI
+318-11 §8.13.1 (corpus: aci-318-11, page 120) describes as joist construction.
+A modular level is analyzed as a grillage.
+"""
+struct ModularRibPattern <: StructuralSizer.AbstractJoistPattern
+    angle::Float64
+    spacing::NTuple{2, Float64}
+    origin::Union{Nothing, NTuple{2, Float64}}
+
+    function ModularRibPattern(angle::Real, spacing, origin = nothing)
+        s = (Float64(spacing[1]), Float64(spacing[2]))
+        (s[1] > 0 && s[2] > 0 && all(isfinite, s)) || throw(ArgumentError(
+            "rib spacing must be positive and finite, got $s"))
+        isfinite(angle) || throw(ArgumentError("rib angle must be finite, got $angle"))
+        o = origin === nothing ? nothing : (Float64(origin[1]), Float64(origin[2]))
+        return new(Float64(angle), s, o)
+    end
+end
+
+"""Plan area of one full module, m²."""
+module_area(p::ModularRibPattern) = p.spacing[1] * p.spacing[2]
 
 """
     RadialPattern{T} <: AbstractJoistPattern
@@ -107,13 +159,20 @@ slab, produces joist polylines directly.
 # Fields
 - `generator::F`: a callable `slab -> Vector{Vector{NTuple{2, Float64}}}` — one
   inner vector of slab-local 2D points per joist polyline.
+- `sagitta`: tolerance, in the same length unit as the polyline. `0` keeps the
+  chord through the ends. A positive value cuts the polyline with
+  [`curved_rib_polyline`](@ref) and materializes that finite chain.
 
 Parameterized on the callable type `F` so any function/closure is stored without
 boxing (no `::Function` field indirection).
 """
 struct CustomPattern{F} <: StructuralSizer.AbstractJoistPattern
     generator::F
+    sagitta::Float64
 end
+
+CustomPattern(generator) = CustomPattern{typeof(generator)}(generator, 0.0)
+CustomPattern(generator, sagitta::Real) = CustomPattern{typeof(generator)}(generator, Float64(sagitta))
 
 # -----------------------------------------------------------------------------
 # FramingLevel
@@ -147,10 +206,34 @@ store `section::Union{AbstractSection, Nothing}` non-parametrically).
   the [`Beam`](@ref) docstring for the naming caveat.
 - `group_id::Union{UInt64, Nothing}` (= `nothing`): optimization group hash,
   assigned at materialization.
-- `catalog_override::Any` (= `nothing`): per-level section catalog override
-  (Phase 6); `nothing` ⇒ the material's standard catalog.
 - `supports::Vector{Int}` (= `Int[]`): indices of the host members this level
   lands on; populated by Phase 5's `materialize_level!`.
+- `beam_options::Union{Nothing, BeamOptions}` (= `nothing`): sizing options for
+  this level's member group. `nothing` ⇒ the building-wide `params.beams`.
+  Nothing is merged: the object is used whole. Set it when the level differs
+  from the girders in material, composite action, catalog, depth, or deflection
+  limit. A catalog goes on `custom_catalog` (steel) or the concrete catalog
+  fields. `n_max_sections` applies inside this level's pass, not across levels.
+  See [`size_beams!`](@ref).
+- `edge_group_id::Union{UInt64, Nothing}` (= `nothing`): second member group
+  holding the two outermost joists of a concrete `LinearAxisPattern` level. Their
+  T-beam flange is cut short by the edge of the bay, so they are sized on their
+  own rather than setting the flange of every rib. `nothing` when the level has
+  one group. Read the level's members with [`level_member_indices`](@ref).
+- `analysis::Symbol` (= `:tributary`): who carries this level's panel load.
+  `:tributary` is the uniform joist strip. `:grillage` is the rib frame: every
+  bay enclosed by the ribs and the slab boundary puts its isotropic skeleton on
+  the ribs around it ([`rib_analysis`](@ref)). A [`ModularRibPattern`](@ref)
+  level must be `:grillage`. Any other symbol is an error.
+- `solid_group_id::Union{UInt64, Nothing}` (= `nothing`): members cut out of
+  the ribs and the perimeter girders where a solid head starts. They are not
+  catalog-sized with the joists. [`assign_solid_head_sections!`](@ref) gives
+  each one the gross rectangle for stiffness and weighs only the concrete
+  below the topping. `nothing` when the level has no solid head.
+- `solid_heads`: the bays cast solid around each column. Empty until
+  [`grow_building_solid_heads!`](@ref) resolves them. While it is empty, a
+  positive `solid_head` fraction is those corner bays.
+- `solid_head_report`: the resolver's ratios, or `nothing` before it runs.
 """
 @kwdef mutable struct FramingLevel{T}
     slab_idx::Int
@@ -161,8 +244,57 @@ store `section::Union{AbstractSection, Nothing}` non-parametrically).
     end_fixity::NTuple{2, Symbol} = (:default, :default)
     torsion_released::Union{Nothing, Bool} = nothing
     group_id::Union{UInt64, Nothing} = nothing
-    catalog_override::Any = nothing
     supports::Vector{Int} = Int[]
+    beam_options::Union{Nothing, StructuralSizer.BeamOptions} = nothing
+    edge_group_id::Union{UInt64, Nothing} = nothing
+    analysis::Symbol = :tributary
+    solid_group_id::Union{UInt64, Nothing} = nothing
+    solid_heads::Vector{StructuralSizer.ColumnSolidHead} = StructuralSizer.ColumnSolidHead[]
+    solid_head_report::Union{Nothing, NamedTuple} = nothing
+end
+
+"""`:tributary` or `:grillage`. Anything else is an error."""
+const RIB_ANALYSES = (:tributary, :grillage)
+
+"""
+    rib_analysis(level) -> Symbol
+    rib_analysis(name) -> Symbol
+
+The panel-load owner of a framing level. `name` is a `Symbol` or a string.
+`:tributary` keeps the uniform joist strip. `:grillage` puts each rib bay's
+straight skeleton on the frame and does not also design those ribs with the story
+shell.
+"""
+function rib_analysis(name::Symbol)
+    name in RIB_ANALYSES || throw(ArgumentError(
+        "unknown rib analysis :$name. A framing level uses :tributary or :grillage."))
+    return name
+end
+rib_analysis(name::AbstractString) = rib_analysis(Symbol(lowercase(strip(name))))
+rib_analysis(fl::FramingLevel) = rib_analysis(fl.analysis)
+
+"""Member-group ids of a materialized framing level (empty when unmaterialized)."""
+level_group_ids(fl::FramingLevel) =
+    UInt64[g for g in (fl.group_id, fl.edge_group_id, fl.solid_group_id) if g !== nothing]
+
+"""Groups the beam catalog sizes. The solid-head group is claimed, not sized."""
+level_sizing_group_ids(fl::FramingLevel) =
+    UInt64[g for g in (fl.group_id, fl.edge_group_id) if g !== nothing]
+
+"""
+    level_member_indices(struc, fl) -> Vector{Int}
+
+Indices into `struc.beams` of every member of framing level `fl`, across its
+interior, edge, and solid-head groups, in ascending order.
+
+Read from each beam's `group_id`. `struc.member_groups` only holds the member
+type last passed to `build_member_groups!`, so after column sizing it no longer
+contains these beam groups.
+"""
+function level_member_indices(struc, fl::FramingLevel)
+    gids = Set(level_group_ids(fl))
+    isempty(gids) && return Int[]
+    return sort!(Int[i for (i, b) in enumerate(struc.beams) if group_id(b) in gids])
 end
 
 # -----------------------------------------------------------------------------
@@ -196,7 +328,7 @@ Waffle rib grid → two-family [`IsoparametricPattern`](@ref) at level 1
 `WaffleRibGrid`); levels ≥ 2 own no pattern (`nothing`).
 """
 StructuralSizer.joist_geometry(grid::StructuralSizer.WaffleRibGrid, level_idx::Int) =
-    level_idx == 1 ? IsoparametricPattern(grid.nξ, grid.nη) : nothing
+    level_idx == 1 ? IsoparametricPattern(grid.nξ, grid.nη, grid.solid_head) : nothing
 
 """
     joist_geometry(result::StructuralSizer.TimberJoistResult, spans::SpanInfo, level_idx::Int)

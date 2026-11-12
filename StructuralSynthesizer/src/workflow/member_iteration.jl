@@ -13,8 +13,10 @@ the governing (largest) member.  Groups are defined by `params.uniform_column_si
 
 Returns the number of columns that were enlarged.
 
-**Conservative guarantee:** A larger column never degrades axial, flexural, or
-punching capacity vs the individually-sized result — only improves it.
+A larger column has at least the axial and flexural capacity of the smaller
+one. Its stiffness also changes the unbalanced moment each slab joint sends
+into it, so punching and the full-load column check are not assumed to hold;
+the caller re-checks them.
 
 For **RC columns** (`c1`/`c2` dimensions), the maximum `c1` and `c2` within
 each group are propagated.  For **steel columns** (catalog sections), the
@@ -52,11 +54,7 @@ function harmonize_uniform_column_sizes!(struc::BuildingStructure, params::Desig
 
     if changed > 0
         update_structural_offsets!(struc; input_is_centerline=params.geometry_is_centerline)
-        if struc.asap_model.processed
-            Asap.update!(struc.asap_model; values_only=true)
-            Asap.solve!(struc.asap_model)
-            _refresh_pattern_solve_cache!(struc)
-        end
+        _resolve_after_column_change!(struc)
         @info "Uniform column harmonization: $changed columns enlarged" mode=string(mode)
     end
 
@@ -73,14 +71,6 @@ function _harmonize_rc_group!(struc::BuildingStructure, params::DesignParameters
 
     gov_c1 = maximum(c.c1 for c in sized)
     gov_c2 = maximum(c.c2 for c in sized)
-
-    # Resolve concrete properties for ASAP section
-    conc = resolve_column_concrete(params.materials)
-    E_Pa  = ustrip(u"Pa", conc.E)
-    ν_c   = conc.ν
-    G_Pa  = E_Pa / (2.0 * (1.0 + ν_c))
-    ρ_kg  = ustrip(u"kg/m^3", conc.ρ)
-    I_factor = params.column_I_factor
 
     changed = 0
     for i in indices
@@ -106,40 +96,11 @@ function _harmonize_rc_group!(struc::BuildingStructure, params::DesignParameters
         # volume at the concrete coefficient and left rebar carbon at zero.
         _set_rc_column_volumes!(
             col,
-            something(col.concrete, resolve_column_concrete(params.materials)),
-            resolve_column_rebar(params.materials),
+            something(col.concrete, column_concrete(params)),
+            column_rebar(params),
         )
         already && continue
-
-        # Rebuild ASAP element section
-        b_m = ustrip(u"m", col.c1)
-        h_m = ustrip(u"m", col.c2)
-        asap_sec = if col.shape == :circular
-            D_m = b_m
-            A = π * D_m^2 / 4
-            I = π * D_m^4 / 64
-            J = π * D_m^4 / 32
-            Asap.Section(
-                A * u"m^2", E_Pa * u"Pa", G_Pa * u"Pa",
-                I_factor * I * u"m^4", I_factor * I * u"m^4",
-                I_factor * J * u"m^4", ρ_kg * u"kg/m^3")
-        else
-            A    = b_m * h_m
-            Ig_x = b_m * h_m^3 / 12
-            Ig_y = h_m * b_m^3 / 12
-            a_dim = max(b_m, h_m); b_dim = min(b_m, h_m)
-            β = 1/3 - 0.21 * (b_dim / a_dim) * (1 - (b_dim / a_dim)^4 / 12)
-            Asap.Section(
-                A * u"m^2", E_Pa * u"Pa", G_Pa * u"Pa",
-                I_factor * Ig_x * u"m^4", I_factor * Ig_y * u"m^4",
-                I_factor * β * a_dim * b_dim^3 * u"m^4", ρ_kg * u"kg/m^3")
-        end
-
-        for seg_idx in segment_indices(col)
-            edge_idx = struc.segments[seg_idx].edge_idx
-            (edge_idx < 1 || edge_idx > length(struc.asap_model.frame_elements)) && continue
-            struc.asap_model.frame_elements[edge_idx].section = asap_sec
-        end
+        _install_column_frame_section!(struc, col, _rc_column_frame_section(col, params))
     end
 
     return changed
@@ -182,11 +143,7 @@ function _harmonize_steel_group!(struc::BuildingStructure, indices::Vector{Int})
         !isnothing(gov_vols) && !isempty(gov_vols) && set_volumes!(col, copy(gov_vols))
         changed += 1
 
-        for seg_idx in segment_indices(col)
-            edge_idx = struc.segments[seg_idx].edge_idx
-            (edge_idx < 1 || edge_idx > length(struc.asap_model.frame_elements)) && continue
-            struc.asap_model.frame_elements[edge_idx].section = asap_sec
-        end
+        _install_column_frame_section!(struc, col, asap_sec)
     end
 
     return changed
@@ -215,30 +172,31 @@ end
 
 """Rebuild K, re-solve, and refresh pattern `(u, loads)` after a section change."""
 function _reanalyze_after_section_change!(struc::BuildingStructure)
+    # The solid head weighs only the projection below the topping, and that
+    # depth is the rib section this solve is about to read.
+    apply_solid_head_frame_sections!(struc)
     if struc.asap_model.processed
         Asap.update!(struc.asap_model)
     else
         Asap.process!(struc.asap_model)
     end
-    Asap.solve!(struc.asap_model)
+    _solve_struc_model!(struc)
     _refresh_pattern_solve_cache!(struc)
     return struc
 end
 
 """Columns for a floor with no beam edges.
 
-A wall-supported two-way slab is concrete, and its columns are that floor's
-concrete. Any other beamless floor keeps the steel default. An explicit
-`params.columns` is applied by the caller and never reaches here.
+A wall-supported two-way slab is concrete, and its columns are concrete in the
+cascade's column materials ([`concrete_column_options`](@ref)). Any other
+beamless floor keeps the steel default. An explicit `params.columns` is
+applied by the caller and never reaches here.
 """
 function _beamless_column_options(struc::BuildingStructure, params::DesignParameters)
     floor_types = Set(s.floor_type for s in struc.slabs)
     if :two_way in floor_types &&
        all(ft -> ft in (:two_way, :grade, :roof), floor_types)
-        return StructuralSizer.ConcreteColumnOptions(
-            material = resolve_slab_concrete(params.materials),
-            rebar_material = resolve_slab_rebar(params.materials),
-        )
+        return concrete_column_options(params)
     end
     return StructuralSizer.SteelColumnOptions()
 end
@@ -280,7 +238,7 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
             StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
                                   outcome="skipped", reason="slab_only_system",
                                   floor_types=collect(string.(collect(floor_types))))
-            _reconcile_columns!(struc, params; tc=tc)
+            _design_flat_plate_members!(struc, params; tc=tc)
             StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :exit;
                                   outcome="skipped")
             return struc
@@ -315,21 +273,25 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
         @warn "Skipping beam sizing: no beam edges in geometry. Sizing columns only."
         StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
                               outcome="skipped_beams", reason="no_beam_edges")
-        size_columns!(struc, column_opts; reanalyze=false, tc=tc,
-                      I_factor=params.column_I_factor)  # ACI 318-11 §10.10.4.1
-        _reanalyze_after_section_change!(struc)
-        _run_p_delta_if_needed!(struc, column_opts; verbose=false, tc=tc,
-                                I_factor=params.column_I_factor)  # ACI 318-11 §10.10.4.1
-        if has_fire_rating(params)
-            n_col = add_coating_loads!(struc, params; member_edge_group=:columns, resolve=false)
-            if n_col > 0
-                Asap.process!(struc.asap_model)
-                Asap.solve!(struc.asap_model)
-                _refresh_pattern_solve_cache!(struc)
+        # Self-weight, coating, and stiffness follow the section, so columns
+        # are re-sized until a pass changes none of them.
+        converged = false
+        for _ in 1:max(1, params.max_iterations)
+            before = [section(c) for c in struc.columns]
+            size_columns!(struc, column_opts; reanalyze=false, tc=tc,
+                          I_factor=params.column_I_factor,  # ACI 318-11 §10.10.4.1
+                          gravity_factor=member_self_weight_acceleration(params))
+            _harmonize_columns!(struc, params)
+            _sync_fire_coating_loads!(struc, params)
+            update_analysis!(struc, :stiffness; tc)
+            if all(_sections_identical(a, section(c)) for (a, c) in zip(before, struc.columns))
+                converged = true
+                break
             end
         end
+        _record_member_convergence!(struc, converged)
         StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :exit;
-                              outcome="columns_only")
+                              outcome="columns_only", converged=converged)
         return struc
     end
 
@@ -345,42 +307,24 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
     mgo = isempty(params.member_group_overrides) ? nothing : params.member_group_overrides
     beam_kwargs = (; reanalyze = false, tc = tc, member_group_overrides = mgo,
                    I_factor = params.beam_I_factor,
+                   gravity_factor = member_self_weight_acceleration(params),
                    composite_concrete = resolve_slab_concrete(params.materials),
                    composite_option_kwargs(beam_opts)...)
 
-    shell_levels = _story_shell_design_levels(struc)
+    # A grillage story is the rib frame. The story shell does not also size
+    # those ribs. A story that mixes the two throws.
+    shell_levels = setdiff(_story_shell_design_levels(struc), exclusive_grillage_stories(struc))
     if isempty(shell_levels)
         _clear_story_shell_wall_axials!(struc)
         converged, iters_used = _iterate_beams_columns!(struc, params, beam_opts,
                                                         column_opts, beam_kwargs; tc = tc)
-        # ─── P-Δ second-order analysis (ACI 318-11 §10.10) ───
-        # After first-order sizing converges, check if any story has δs > 1.5.
-        # If so, run iterative P-Δ to capture second-order effects, then re-size
-        # columns with the updated forces.
-        _run_p_delta_if_needed!(struc, column_opts; verbose=false, tc=tc,
-                                I_factor=params.column_I_factor)  # ACI 318-11 §10.10.4.1
     else
         converged, iters_used = _size_with_story_shell!(struc, params, beam_opts,
                                                         column_opts, beam_kwargs,
                                                         shell_levels; tc = tc)
     end
-    
-    # ─── Fire protection coating loads (steel members only) ───
-    # After sizing, add SFRM/intumescent self-weight and re-solve.
-    if has_fire_rating(params)
-        n_beam = add_coating_loads!(struc, params; member_edge_group=:beams, resolve=false)
-    # Also add for other beam-like groups if present
-    for g in (:joists, :secondary, :girder)
-        n_beam += add_coating_loads!(struc, params; member_edge_group=g, resolve=false)
-    end
-        n_col  = add_coating_loads!(struc, params; member_edge_group=:columns, resolve=false)
-        if (n_beam + n_col) > 0
-            Asap.process!(struc.asap_model)
-            Asap.solve!(struc.asap_model)
-            _refresh_pattern_solve_cache!(struc)
-        end
-    end
-    
+    _record_member_convergence!(struc, converged)
+
     StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :exit;
                           converged=converged,
                           iterations=iters_used)
@@ -388,36 +332,51 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
 end
 
 """
-Size beams, re-solve the frame model, size columns and re-solve, until the
-column demands change by less than 5 % between iterations. `shell_demands`
-and `shell_spans` go to every `size_beams!` call. Returns
+Size beams, re-solve, size columns (then uniform column sizing and fire
+coating) and re-solve, until one pass changes no beam and no column section.
+`shell_demands` and `shell_spans` go to every `size_beams!` call. Returns
 `(converged, iterations)`.
+
+At that fixed point each beam was sized on a model with the final column
+sections, and each column on the final beams, so every member passed its
+sizer's checks on the final analysis. A loop that reaches `max_iterations`
+first returns `converged = false`.
 """
 function _iterate_beams_columns!(struc, params, beam_opts, column_opts, beam_kwargs;
                                  tc = nothing, shell_demands = nothing,
                                  shell_spans = nothing, upward_only::Bool = false)
-    tol = 0.05
     max_iter = params.max_iterations
-    n = length(struc.columns)
-    prev_demands = Vector{Float64}(undef, n)
-    curr_demands = Vector{Float64}(undef, n)
     for iter in 1:max_iter
+        beams_before = [_story_beam_section(struc, b) for b in struc.beams]
+        columns_before = [section(c) for c in struc.columns]
         size_beams!(struc, beam_opts; shell_demands = shell_demands,
                     shell_spans = shell_spans,
                     section_floor = upward_only ? _section_floors(struc) : nothing,
                     beam_kwargs...)
-        _reanalyze_after_section_change!(struc)
+        # The solid head is the bays around each column. A failing check grows
+        # those bays, which adds beams, so the next pass sizes against them.
+        grow_building_solid_heads!(struc, params)
+        _sync_fire_coating_loads!(struc, params)
+        update_analysis!(struc, :stiffness; tc)
         size_columns!(struc, column_opts; reanalyze=false, tc=tc,
-                      I_factor=params.column_I_factor)
-        _reanalyze_after_section_change!(struc)
-        _extract_column_demands!(curr_demands, struc)
-        if iter > 1 && _max_demand_change(prev_demands, curr_demands) < tol
+                      I_factor=params.column_I_factor,
+                      gravity_factor=member_self_weight_acceleration(params))
+        _harmonize_columns!(struc, params)
+        _sync_fire_coating_loads!(struc, params)
+        update_analysis!(struc, :stiffness; tc)
+        held = length(beams_before) == length(struc.beams) &&
+               all(_sections_identical(a, _story_beam_section(struc, b))
+                   for (a, b) in zip(beams_before, struc.beams)) &&
+               all(_sections_identical(a, section(c))
+                   for (a, c) in zip(columns_before, struc.columns))
+        if held
             StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
                                   outcome="converged", iterations=iter)
             return (true, iter)
         end
-        copyto!(prev_demands, curr_demands)
     end
+    StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
+                          outcome="max_iterations", iterations=max_iter)
     return (false, max_iter)
 end
 
@@ -427,7 +386,7 @@ designs (see [`_story_shell_design_levels`](@ref)).
 
 Each round resizes the beams against the story shell
 ([`size_beams_with_story_shell!`](@ref)), then runs the beam and column loop
-and P-Δ with those shell demands held. Columns are rotational springs on the
+with those shell demands held. Columns are rotational springs on the
 shell and beam stiffness sets the shell's beam demands, so a round that
 changed a beam section after the shell, or a column section the shell
 solved with, is followed by another. The next round starts from this one's
@@ -435,12 +394,15 @@ shell demands. Each story is meshed once for all rounds.
 
 When the rounds settle, the slab bars on each story come from a shell solve
 with the final beam and column sections. Each slab on those stories records
-`converged` and, when the rounds did not settle, why.
+`converged` and, when the rounds did not settle, why. Returns
+`(converged, iterations)`, where `converged` requires both the rounds and
+the last beam and column loop to settle.
 """
 function _size_with_story_shell!(struc, params, beam_opts, column_opts, beam_kwargs,
                                  levels; tc = nothing, max_rounds::Int = 3)
     shells = Dict{Int, StoryShell}()
     shell_kwargs = (; concrete = resolve_slab_concrete(params.materials),
+                    column_concrete = column_concrete(params),
                     rebar = resolve_slab_rebar(params.materials))
     seed = (demands = nothing, spans = nothing, regions = nothing)
     converged, iters = false, 0
@@ -465,9 +427,8 @@ function _size_with_story_shell!(struc, params, beam_opts, column_opts, beam_kwa
                                                shell_spans = sb.spans,
                                                upward_only = upward_only)
         iters += n
-        _run_p_delta_if_needed!(struc, column_opts; verbose=false, tc=tc,
-                                I_factor=params.column_I_factor)  # ACI 318-11 §10.10.4.1
-        beams_held = all(_sections_identical(a, _story_beam_section(struc, b))
+        beams_held = length(beams_after_shell) == length(struc.beams) &&
+                     all(_sections_identical(a, _story_beam_section(struc, b))
                          for (a, b) in zip(beams_after_shell, struc.beams))
         columns_held = all(_sections_identical(a, section(c))
                            for (a, c) in zip(columns_before, struc.columns))
@@ -499,7 +460,23 @@ function _size_with_story_shell!(struc, params, beam_opts, column_opts, beam_kwa
     held || @warn "Story-shell sizing did not settle after $max_rounds rounds" levels
     _record_story_shell_wall_axials!(struc, shells)
     _record_story_shell_convergence!(struc, held)
-    return (converged, iters)
+    return (converged && held, iters)
+end
+
+"""
+Record whether beam and column sizing settled. A loop that ran out of
+iterations leaves `struc.stage_diagnostics[:members]`, which `capture_design`
+reports and which marks the design not converged.
+"""
+function _record_member_convergence!(struc, converged::Bool)
+    if converged
+        delete!(struc.stage_diagnostics, :members)
+    else
+        struc.stage_diagnostics[:members] =
+            "Beam and column sizing did not settle within max_iterations; " *
+            "member demands may not match the final sections."
+    end
+    return struc
 end
 
 """
@@ -517,83 +494,3 @@ function _record_story_shell_convergence!(struc, held::Bool)
     end
     return struc
 end
-
-StructuralSizer.TRACE_REGISTRY[(:_run_p_delta_if_needed!, :workflow)] =
-    StructuralSizer.TracedFunctionMeta(
-        :_run_p_delta_if_needed!,
-        :workflow,
-        [:enter, :exit, :decision],
-        nothing,
-        @__FILE__,
-        @__LINE__,
-    )
-
-"""
-    _run_p_delta_if_needed!(struc, column_opts; verbose=false)
-
-Check whether any story requires P-Δ analysis (δs > 1.5 from both Q and ΣPc
-methods).  If so, run `p_delta_iterate!` and re-size columns.
-"""
-function _run_p_delta_if_needed!(
-    struc::BuildingStructure,
-    column_opts;
-    verbose::Bool = false,
-    tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
-    # ACI 318-11 §10.10.4.1 — cracked-stiffness reduction for concrete column sections,
-    # threaded from params.column_I_factor. Default 0.70 keeps any caller that does not
-    # pass it byte-identical (matches to_asap_section's concrete-column default).
-    I_factor::Real = 0.70,
-)
-    StructuralSizer.emit!(tc, :workflow, "_run_p_delta_if_needed!", "", :enter;
-                          n_columns=length(struc.columns))
-    # Compute story properties with the current solved model
-    compute_story_properties!(struc; verbose=false)
-    
-    # Check if any story needs P-Δ
-    # story_properties fields are Float64 in (kip, inch) units
-    needs_pdelta = false
-    for col in struc.columns
-        props = col.story_properties
-        isnothing(props) && continue
-        
-        sp = StructuralSizer.SwayStoryProperties(
-            props.ΣPu, props.ΣPc, props.Vus, props.Δo, props.lc
-        )
-        Q = StructuralSizer.stability_index(sp)
-        δs_Q = Q < 1.0 ? 1.0 / (1.0 - Q) : Inf
-        
-        if δs_Q > 1.5
-            needs_pdelta = true
-            break
-        end
-    end
-    
-    if !needs_pdelta
-        StructuralSizer.emit!(tc, :workflow, "_run_p_delta_if_needed!", "", :decision;
-                              outcome="skipped", reason="delta_s_below_threshold")
-        StructuralSizer.emit!(tc, :workflow, "_run_p_delta_if_needed!", "", :exit;
-                              ran=false)
-        return
-    end
-    
-    verbose && @info "δs > 1.5 detected — running P-Δ second-order analysis (ACI §6.7)"
-    
-    result = p_delta_iterate!(struc; verbose=verbose)
-    
-    if !isempty(result.stories_needing_attention)
-        @warn "P-Δ drift ratio exceeds 1.4× first-order (ACI §6.6.4.6.2)" stories=result.stories_needing_attention ratio=round(result.max_drift_ratio, digits=2)
-    end
-    
-    # Re-size columns with updated second-order forces
-    size_columns!(struc, column_opts; reanalyze=false, tc=tc,
-                  I_factor=I_factor)  # ACI 318-11 §10.10.4.1
-    StructuralSizer.emit!(tc, :workflow, "_run_p_delta_if_needed!", "", :decision;
-                          outcome="ran",
-                          n_stories_attention=length(result.stories_needing_attention),
-                          max_drift_ratio=round(result.max_drift_ratio; digits=3))
-    StructuralSizer.emit!(tc, :workflow, "_run_p_delta_if_needed!", "", :exit;
-                          ran=true)
-    
-    return
-end
-

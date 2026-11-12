@@ -537,20 +537,45 @@ function solid_head_panel_punching(struc, slab, params)
     )
 end
 
+"""The resolver's report, or `nothing` when this level has no solid head."""
+function _stored_solid_head_report(level)
+    level.solid_head_report === nothing && return nothing
+    pat = level.pattern
+    pat isa IsoparametricPattern && pat.solid_head <= 0 && return nothing
+    return level.solid_head_report
+end
+
 """
     record_solid_head_punching!(result, struc, slab, params; frame = nothing) -> SlabDesignResult
 
 Write the solid-head check onto `result` when this slab has one.
 
-`frame` is [`solid_head_frame_punching`](@ref) for the whole building. When
-it covers this slab, the ratio is the worst column at the slab's corners,
-with the frame's shear and unbalanced moments. Otherwise the check is this
-panel's released-corner rectangle, which gives each column one panel's
-reaction and no moment; the analysis note says which was used. A slab that
-already carries a punching ratio keeps the worse of the two.
+A level [`grow_building_solid_heads!`](@ref) has already resolved uses that
+report. Otherwise `frame` is [`solid_head_frame_punching`](@ref) for the
+whole building. When it covers this slab, the ratio is the worst column at
+the slab's corners, with the frame's shear and unbalanced moments. Otherwise
+the check is this panel's released-corner rectangle, which gives each column
+one panel's reaction and no moment; the analysis note says which was used.
+A slab that already carries a punching ratio keeps the worse of the two.
 """
 function record_solid_head_punching!(result::SlabDesignResult, struc, slab, params;
                                      frame = nothing)
+    level = _grillage_level(slab)
+    report = level === nothing ? nothing : _stored_solid_head_report(level)
+    if report !== nothing && !isempty(report.ratios)
+        i = argmax(report.ratios)
+        result.punching_max_ratio = max(result.punching_max_ratio, report.ratios[i])
+        result.punching_ok = result.punching_ok && report.ok
+        result.punching_vu_max_psi = max(result.punching_vu_max_psi, report.vu_psi)
+        note = "Solid-head punching grew the bays around each column on the rib frame " *
+               "($(report.steps) step(s), stop :$(report.stop)); governing $(report.governing[i])."
+        result.analysis_status = isempty(result.analysis_status) ? note :
+            result.analysis_status * " " * note
+        if !result.punching_ok && isempty(result.failing_check)
+            result.failing_check = "punching_shear_slab"
+        end
+        return result
+    end
     slab_idx = findfirst(s -> s === slab, struc.slabs)
     cols = frame === nothing ? nothing : get(frame.by_slab, slab_idx, nothing)
     if cols !== nothing

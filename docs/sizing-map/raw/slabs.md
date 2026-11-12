@@ -276,7 +276,7 @@ TwoWay `:723`, Vault `:778`. Every other system throws `UnsupportedFloorSystemEr
 - cost per pass: full arrangement frame solve (`analyze_arrangement_grillage`) per trial step.
 - size impact: MED — bay-sized steps, per column.
 - speed impact: MED.
-- opportunities: analytic punching scaling with b0 to jump directly to the needed bay count; rib depth/width not varied. The building workflow does not call this loop yet: it checks the input `solid_head` fraction without growing it (`solid_head_panel_punching`, `solid_head_frame_punching`).
+- opportunities: analytic punching scaling with b0 to jump directly to the needed bay count; rib depth/width not varied. The building calls this loop from `grow_building_solid_heads!` after the ribs are sized (`member_iteration.jl`). The corner fraction is only the starting bays on a quad.
 - confidence: verified-by-test (`test_arrangement_heads.jl`, `test_solid_head_check.jl`)
 
 ### Composite deck (depth × gage enumeration)

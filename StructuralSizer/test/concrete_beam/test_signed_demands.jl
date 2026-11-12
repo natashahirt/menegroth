@@ -290,4 +290,49 @@ end
         @test length(trs) == 1
         @test trs[1].status in (:optimal, :feasible, :infeasible)
     end
+
+    @testset "Joist Vc and per-case discrete shear" begin
+        # §8.13.2–§8.13.3 gate the §8.13.8 permission. Clear spacing is
+        # center-to-center minus the rib width.
+        @test StructuralSizer._joist_vc_multiplier(6.0, 18.0, 30.0) == 1.10
+        @test StructuralSizer._joist_vc_multiplier(6.0, 21.0, 30.0) == 1.10
+        @test StructuralSizer._joist_vc_multiplier(6.0, 21.1, 30.0) == 1.0
+        @test StructuralSizer._joist_vc_multiplier(6.0, 18.0, 36.1) == 1.0
+        @test StructuralSizer._joist_vc_multiplier(3.5, 10.0, 20.0) == 1.0
+        @test StructuralSizer._joist_vc_multiplier(6.0, 18.0, 0.0) == 1.0
+
+        sec = RCTBeamSection(bw=12u"inch", h=20u"inch", bf=48u"inch", hf=5u"inch",
+                             bar_size=8, n_bars=3)
+        plain = ACIBeamChecker(; fy_ksi=60.0, fyt_ksi=60.0)
+        # Clear spacing = 32 − 12 = 20 in, within 30. Depth 20 ≤ 3.5×12.
+        joist = ACIBeamChecker(; fy_ksi=60.0, fyt_ksi=60.0, joist_spacing_in=32.0)
+        cache_p = create_cache(plain, 1)
+        cache_j = create_cache(joist, 1)
+        precompute_capacities!(plain, cache_p, [sec], NWC_4000, MinVolume())
+        precompute_capacities!(joist, cache_j, [sec], NWC_4000, MinVolume())
+        # Vc is 2λ√f'c bwd and Vs,max is 8√f'c bwd, so φ(1.10 Vc + Vs) / φ(Vc + Vs) = 1.02.
+        @test cache_j.φVn_max[1] ≈ 1.02 * cache_p.φVn_max[1] rtol=1e-9
+
+        geom = ConcreteMemberGeometry(20.0u"ft")
+        demand = RCBeamDemand(1; Mu=1.0, Mu_neg=1.0, Vu=1.0)
+        @test is_feasible(plain, cache_p, 1, sec, NWC_4000, demand, geom)
+        over = ACIBeamChecker(; fy_ksi=60.0, fyt_ksi=60.0, shear_cases=[[
+            StructuralSizer.RCBeamShearCase(1.0, 0.0, 0.0),
+            StructuralSizer.RCBeamShearCase(cache_p.φVn_max[1] * 1.01, 0.0, 0.0),
+        ]])
+        @test !is_feasible(over, cache_p, 1, sec, NWC_4000, demand, geom)
+        under = ACIBeamChecker(; fy_ksi=60.0, fyt_ksi=60.0, shear_cases=[[
+            StructuralSizer.RCBeamShearCase(cache_p.φVn_max[1] * 0.5, -50.0, 0.0),
+            StructuralSizer.RCBeamShearCase(cache_p.φVn_max[1] * 0.5, 0.0, 0.0),
+        ]])
+        # The tension row uses Eq. (11-8), so half of the no-axial φVn can still fail it.
+        # A small Vu on that row, and a large Vu only on the Nu = 0 row, both pass
+        # when each stays under its own φVn. The envelope would pair them.
+        split = ACIBeamChecker(; fy_ksi=60.0, fyt_ksi=60.0, shear_cases=[[
+            StructuralSizer.RCBeamShearCase(1.0, -80.0, 0.0),
+            StructuralSizer.RCBeamShearCase(cache_p.φVn_max[1] * 0.99, 0.0, 0.0),
+        ]])
+        @test is_feasible(split, cache_p, 1, sec, NWC_4000, demand, geom)
+        @test is_feasible(under, cache_p, 1, sec, NWC_4000, demand, geom)
+    end
 end

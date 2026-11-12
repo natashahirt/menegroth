@@ -733,6 +733,38 @@ function _beam_shell_spans(shell_spans, n::Int)
     return shell_spans
 end
 
+"""Shear rows in kip. `nothing` keeps each demand's envelope Vu, Nu, and Tu."""
+function _checker_shear_cases(shear_cases, n::Int)
+    shear_cases === nothing && return Vector{RCBeamShearCase}[]
+    length(shear_cases) == n ||
+        throw(ArgumentError("shear_cases must have one list per demand"))
+    out = Vector{Vector{RCBeamShearCase}}(undef, n)
+    for i in 1:n
+        rows = shear_cases[i]
+        if rows === nothing
+            out[i] = RCBeamShearCase[]
+            continue
+        end
+        built = RCBeamShearCase[]
+        for c in rows
+            if c isa RCBeamShearCase
+                push!(built, c)
+            elseif c isa RCBeamNLPShearCase
+                push!(built, RCBeamShearCase(c.Vu_kip, c.Nu_kip, c.Tu_kipin))
+            else
+                Vu, Nu, Tu = c
+                push!(built, RCBeamShearCase(
+                    Vu isa Unitful.Quantity ? to_kip(Vu) : Float64(Vu),
+                    Nu isa Unitful.Quantity ? to_kip(Nu) : Float64(Nu),
+                    Tu isa Unitful.Quantity ? abs(ustrip(kip * u"inch", Tu)) : abs(Float64(Tu)),
+                ))
+            end
+        end
+        out[i] = built
+    end
+    return out
+end
+
 function size_beams(
     Mu::Vector,
     Vu::Vector,
@@ -747,6 +779,7 @@ function size_beams(
     tc::Union{Nothing, TraceCollector} = nothing,
     feasible::Union{Nothing, Vector{Vector{Int}}} = nothing,
     shell_spans = nothing,
+    shear_cases = nothing,
 )
     n = length(Mu)
     n == length(Vu)          || throw(ArgumentError("Mu and Vu must have same length"))
@@ -794,6 +827,7 @@ function size_beams(
         λ       = opts.material.λ,       # Lightweight factor from Concrete type
         max_depth = opts.max_depth,
         shell_spans = spans,
+        shear_cases = _checker_shear_cases(shear_cases, n),
     )
 
     # Optimize — multi-material if grades vector is provided
@@ -2561,6 +2595,7 @@ function size_tbeams(
     sustained_live_fraction::Real = 0.0,
     shell_spans = nothing,
     joist_spacing = nothing,
+    shear_cases = nothing,
 )
     n = length(Mu)
     n == length(Vu)          || throw(ArgumentError("Mu and Vu must have same length"))
@@ -2621,9 +2656,9 @@ function size_tbeams(
         Float64(w_live)
     end
 
-    # `joist_spacing` is accepted from the rib caller. This checker applies
-    # ordinary Vc. The ACI 318-11 §8.13.8 joist increase is not in this checker.
-    _ = joist_spacing
+    # Center-to-center spacing. §8.13.8's 10 percent is applied per rib, and
+    # only when that rib also meets §8.13.2 and §8.13.3.
+    joist_in = joist_spacing === nothing ? 0.0 : ustrip(u"inch", joist_spacing)
     spans = _beam_shell_spans(shell_spans, n)
     # Create checker (with optional deflection)
     checker = ACIBeamChecker(;
@@ -2638,6 +2673,8 @@ function size_tbeams(
         defl_ξ = Float64(defl_ξ),
         defl_sustained_live = sustained_live_fraction,
         shell_spans = spans,
+        joist_spacing_in = joist_in,
+        shear_cases = _checker_shear_cases(shear_cases, n),
     )
 
     return optimize_discrete(
@@ -2705,11 +2742,13 @@ function size_rc_tbeam_nlp(
     L_span = nothing,
     defl_support::Symbol = :simply_supported,
     defl_ξ::Float64 = 2.0,
+    sustained_live_fraction::Real = 0.0,
 )
     problem = RCTBeamNLPProblem(Mu, Vu, bf, hf, opts;
                                 w_dead=w_dead, w_live=w_live, L_span=L_span,
-                                support=defl_support, ξ=defl_ξ, Tu=Tu, Nu=Nu,
-                                shear_cases=shear_cases)
+                                support=defl_support, ξ=defl_ξ,
+                                sustained_live_fraction=sustained_live_fraction,
+                                Tu=Tu, Nu=Nu, shear_cases=shear_cases)
 
     opt_result = optimize_continuous(
         problem;
@@ -2770,6 +2809,7 @@ function size_rc_tbeams_nlp(
     L_span = nothing,
     defl_support::Symbol = :simply_supported,
     defl_ξ::Float64 = 2.0,
+    sustained_live_fraction::Real = 0.0,
 )
     n = length(Mu)
     n == length(Vu) || throw(ArgumentError("Mu and Vu must have same length"))
@@ -2798,7 +2838,8 @@ function size_rc_tbeams_nlp(
                                         Mu_neg=Mu_neg[i], Nu=Nu[i], shear_cases=sc,
                                         w_dead=wd_vec[i], w_live=wl_vec[i],
                                         L_span=Ls_vec[i],
-                                        defl_support=defl_support, defl_ξ=defl_ξ)
+                                        defl_support=defl_support, defl_ξ=defl_ξ,
+                                        sustained_live_fraction=sustained_live_fraction)
     end
     return results
 end

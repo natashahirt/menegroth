@@ -74,15 +74,36 @@ end
 Maximum design shear capacity for T-beam section geometry.
 Shear is resisted by the web only (bw × d), per ACI 318-11 §11.2.1.1.
 """
-function _compute_φVn_max(section::RCTBeamSection, fc_psi::Float64, λ::Float64)
+function _compute_φVn_max(section::RCTBeamSection, fc_psi::Float64, λ::Float64;
+                          joist_spacing_in::Float64=0.0)
     bw_in = ustrip(u"inch", section.bw)
     d_in  = ustrip(u"inch", section.d)
 
     sqrt_fc = sqrt(fc_psi)
-    Vc_lb     = 2 * λ * sqrt_fc * bw_in * d_in
+    # §8.13.8 raises Vc only. Vs,max stays the Chapter 11 limit.
+    vc_factor = _joist_vc_multiplier(bw_in, ustrip(u"inch", section.h), joist_spacing_in)
+    Vc_lb     = vc_factor * 2 * λ * sqrt_fc * bw_in * d_in
     Vs_max_lb = 8 * sqrt_fc * bw_in * d_in
 
     return 0.75 * (Vc_lb + Vs_max_lb) / 1000.0  # kip
+end
+
+_φVn_cached(section::RCTBeamSection, fc_psi::Float64, λ::Float64, spacing_in::Real) =
+    _compute_φVn_max(section, fc_psi, λ; joist_spacing_in=Float64(spacing_in))
+
+"""φVn (kip) of one T-beam at one signed axial force, including a joist Vc increase."""
+function _section_φVn(checker::ACIBeamChecker, cache::ACIBeamCapacityCache,
+                      j::Int, section::RCTBeamSection, Nu_kip::Float64)
+    Nu_kip == 0 && return cache.φVn_max[j]
+    fc_psi = cache.fc_ksi * 1000.0
+    bw_in = ustrip(u"inch", section.bw)
+    d_in = ustrip(u"inch", section.d)
+    h_in = ustrip(u"inch", section.h)
+    factor = _joist_vc_multiplier(bw_in, h_in, checker.joist_spacing_in)
+    Ag_comp = ustrip(u"inch^2", section_area(section))
+    Ag_tens = bw_in * h_in
+    return _φVn_with_axial(bw_in, d_in, Ag_comp, Ag_tens, fc_psi, checker.λ, Nu_kip;
+                           vc_factor=factor)
 end
 
 # ==============================================================================
@@ -133,7 +154,6 @@ function is_feasible(
 )::Bool
     Mu = to_kipft(demand.Mu)
     Mu_neg = to_kipft(demand.Mu_neg)
-    Vu = to_kip(demand.Vu)
 
     # 1. Depth check
     cache.depths[j] ≤ checker.max_depth || return false
@@ -147,23 +167,11 @@ function is_feasible(
     #    or ℓn/10; that detailing rule is not modeled in this capacity check.
     cache.φMn_neg[j] ≥ Mu_neg || return false
 
-    # 4. Shear adequacy with signed Nu.
-    #    ENGINEERING JUDGMENT: use the larger gross area (section_area =
-    #    bf·hf + bw·(h−hf)) for the compression modifier so the boost is not
-    #    overstated, and bw·h for the tension reduction (smaller Ag → larger
-    #    |Nu/Ag| reduction). Each is the conservative choice for that sign.
-    Nu_kip = _get_Nu_kip(demand)
-    if Nu_kip != 0
-        fc_psi_s = cache.fc_ksi * 1000.0
-        bw_in_s  = ustrip(u"inch", section.bw)
-        d_in_s   = ustrip(u"inch", section.d)
-        h_in_s   = ustrip(u"inch", section.h)
-        Ag_comp  = ustrip(u"inch^2", section_area(section))
-        Ag_tens  = bw_in_s * h_in_s
-        φVn_kip = _φVn_with_axial(bw_in_s, d_in_s, Ag_comp, Ag_tens, fc_psi_s, checker.λ, Nu_kip)
-        φVn_kip ≥ Vu || return false
-    else
-        cache.φVn_max[j] ≥ Vu || return false
+    # 4. Shear, one row per concurrent case. Ag for compression is the full
+    #    T-section; Ag for tension is bw·h. Each is the smaller Vc for that sign.
+    #    §8.13.8, when the rib qualifies, is inside `_section_φVn`.
+    for row in _demand_shear_rows(checker, demand)
+        _section_φVn(checker, cache, j, section, row.Nu_kip) >= row.Vu_kip || return false
     end
 
     # 4. Net tensile strain (ACI 318-11 §10.3.5) — εt ≥ 0.004 for beams
@@ -195,18 +203,17 @@ function is_feasible(
         defl_result.ok || return false
     end
 
-    # 7. Torsion section adequacy (§11.5.3.1) — when Tu > 0
-    Tu_val = _get_Tu_kipin(demand)
-    if Tu_val > 0.0
+    # 7. Torsion, each concurrent row above the threshold (§11.5.3.1)
+    for row in _demand_shear_rows(checker, demand)
+        row.Tu_kipin > 0 || continue
         d_stir = ustrip(u"inch", rebar(section.stirrup_size).diameter)
         cov_in = ustrip(u"inch", section.cover)
-        c_ctr  = cov_in + d_stir / 2
-
         props = torsion_section_properties_tbeam(
-            section.bw, section.h, section.bf, section.hf, c_ctr * u"inch")
+            section.bw, section.h, section.bf, section.hf,
+            (cov_in + d_stir / 2) * u"inch")
         Tth = threshold_torsion(props.Acp, props.pcp, fc_psi; λ=checker.λ)
-        if Tu_val > Tth
-            torsion_section_adequate(Vu, Tu_val, bw_in, d_in,
+        if row.Tu_kipin > Tth
+            torsion_section_adequate(row.Vu_kip, row.Tu_kipin, bw_in, d_in,
                                      props.Aoh, props.ph, fc_psi;
                                      λ=checker.λ) || return false
         end
@@ -284,8 +291,6 @@ function diagnose_infeasibility(
     sec = catalog[best_j]
     Mu = to_kipft(demand.Mu)
     Mu_neg = to_kipft(demand.Mu_neg)
-    Vu = to_kip(demand.Vu)
-    Nu_kip = _get_Nu_kip(demand)
     if cache.depths[best_j] > checker.max_depth
         return "Depth: h=$(cache.depths[best_j])m > max_depth=$(checker.max_depth)m"
     end
@@ -295,19 +300,11 @@ function diagnose_infeasibility(
     if cache.φMn_neg[best_j] < Mu_neg
         return "Neg. flexure: φMn_neg=$(round(cache.φMn_neg[best_j], digits=1)) < Mu_neg=$(round(Mu_neg, digits=1)) kip·ft"
     end
-    if Nu_kip != 0
-        fc_psi = cache.fc_ksi * 1000.0
-        bw_in = ustrip(u"inch", sec.bw)
-        d_in = ustrip(u"inch", sec.d)
-        Ag_comp = ustrip(u"inch^2", section_area(sec))
-        Ag_tens = bw_in * ustrip(u"inch", sec.h)
-        φVn_kip = _φVn_with_axial(bw_in, d_in, Ag_comp, Ag_tens, fc_psi, checker.λ, Nu_kip)
-        if φVn_kip < Vu
-            tag = Nu_kip < 0 ? "Nu<0" : "Nu>0"
-            return "Shear ($tag): φVn=$(round(φVn_kip, digits=1)) < Vu=$(round(Vu, digits=1)) kip"
-        end
-    elseif cache.φVn_max[best_j] < Vu
-        return "Shear: φVn_max=$(round(cache.φVn_max[best_j], digits=1)) < Vu=$(round(Vu, digits=1)) kip"
+    for row in _demand_shear_rows(checker, demand)
+        φVn_kip = _section_φVn(checker, cache, best_j, sec, row.Nu_kip)
+        φVn_kip >= row.Vu_kip && continue
+        tag = row.Nu_kip < 0 ? "Nu<0" : (row.Nu_kip > 0 ? "Nu>0" : "Nu=0")
+        return "Shear ($tag): φVn=$(round(φVn_kip, digits=1)) < Vu=$(round(row.Vu_kip, digits=1)) kip"
     end
     msg = _shell_deflection_message(checker, demand.member_idx, sec)
     msg === nothing || return msg
@@ -326,7 +323,6 @@ function explain_feasibility(
     checks = CheckResult[]
     Mu = to_kipft(demand.Mu)
     Mu_neg = to_kipft(demand.Mu_neg)
-    Vu = to_kip(demand.Vu)
 
     d_section = cache.depths[j]
     d_limit = checker.max_depth
@@ -342,20 +338,18 @@ function explain_feasibility(
           φMn_neg > 0 ? Mu_neg / φMn_neg : (Mu_neg > 0 ? Inf : 0.0),
           Mu_neg, φMn_neg, "ACI 318-11 10.2"))
 
-    Nu_kip = _get_Nu_kip(demand)
-    if Nu_kip != 0
-        fc_psi_s = cache.fc_ksi * 1000.0
-        bw_in = ustrip(u"inch", section.bw)
-        d_in = ustrip(u"inch", section.d)
-        Ag_comp = ustrip(u"inch^2", section_area(section))
-        Ag_tens = bw_in * ustrip(u"inch", section.h)
-        φVn_kip = _φVn_with_axial(bw_in, d_in, Ag_comp, Ag_tens, fc_psi_s, checker.λ, Nu_kip)
-    else
-        φVn_kip = cache.φVn_max[j]
+    gov = nothing
+    for row in _demand_shear_rows(checker, demand)
+        φVn_row = _section_φVn(checker, cache, j, section, row.Nu_kip)
+        ratio = φVn_row > 0 ? row.Vu_kip / φVn_row : (row.Vu_kip > 0 ? Inf : 0.0)
+        if gov === nothing || ratio > gov.ratio
+            gov = (; row, φVn=φVn_row, ratio)
+        end
     end
-    shear_clause = Nu_kip < 0 ? "ACI 318-11 11.2.2.3" : (Nu_kip > 0 ? "ACI 318-11 11.2.1.2" : "ACI 318-11 11.2.1.1")
-    push!(checks, CheckResult("shear", φVn_kip >= Vu,
-          φVn_kip > 0 ? Vu / φVn_kip : (Vu > 0 ? Inf : 0.0), Vu, φVn_kip, shear_clause))
+    shear_clause = gov.row.Nu_kip < 0 ? "ACI 318-11 11.2.2.3" :
+                   (gov.row.Nu_kip > 0 ? "ACI 318-11 11.2.1.2" : "ACI 318-11 11.2.1.1")
+    push!(checks, CheckResult("shear", gov.φVn >= gov.row.Vu_kip,
+          gov.ratio, gov.row.Vu_kip, gov.φVn, shear_clause))
 
     # Same two checks as `is_feasible`. Bar rounding can pass flexure and
     # still land below εt = 0.004.

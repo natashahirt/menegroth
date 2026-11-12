@@ -19,7 +19,7 @@
 
 """
     design_beam_deflection(b, h, d, As, fc, fy, Es, L, w_dead, w_live;
-                           support, wc_pcf, As_prime, ξ, limits) -> NamedTuple
+                            support, wc_pcf, As_prime, ξ, sustained_live_fraction, limits) -> NamedTuple
 
 Complete immediate + long-term deflection check for a rectangular RC beam.
 
@@ -73,9 +73,14 @@ function design_beam_deflection(
     wc_pcf::Union{Real, Nothing} = 150,
     As_prime::Area   = 0.0u"inch^2",
     ξ::Float64       = 2.0,
+    sustained_live_fraction::Real = 0.0,
     limits::Vector{Symbol} = [:immediate_ll, :total]
 )
     # --- Material properties ---
+    # ACI 318-11 §9.5.2.5 (corpus: aci-318-11, PDF p. 132): λΔ multiplies the
+    # immediate deflection caused by the sustained load. ψ = 0 keeps that
+    # load equal to dead load.
+    ψ = _as_sustained_live_fraction(sustained_live_fraction)
     Ec_val = wc_pcf === nothing ? Ec(fc) : Ec(fc, wc_pcf)
     fr_val = fr(fc)
 
@@ -107,11 +112,15 @@ function design_beam_deflection(
     # Live load by subtraction (standard ACI / StructurePoint approach)
     Δ_LL = Δ_DL - Δ_D
 
-    # --- Long-term deflection (ACI 318-11 §9.5.2.5) ---
+    # --- Long-term deflection (ACI 318-11 §9.5.2.5, Eq. 9-11) ---
     ρ_prime = ustrip(As_prime / (b * d))
     λΔ = long_term_deflection_factor(ξ, ρ_prime)
-    Δ_lt_dead = λΔ * Δ_D
-    Δ_total   = Δ_lt_dead + Δ_LL   # total long-term deflection after attachments
+    w_sus = w_dead + ψ * w_live
+    Ma_sus = _beam_moment(w_sus, L, support)
+    Ie_sus = effective_moment_of_inertia(Mcr, Ma_sus, Ig, Icr)
+    Δ_sus = _beam_deflection(w_sus, L, Ec_val, Ie_sus, support)
+    Δ_lt_dead = λΔ * Δ_sus
+    Δ_total   = Δ_lt_dead + (Δ_DL - Δ_sus)
 
     # --- Limit checks ---
     checks = Dict{Symbol, NamedTuple}()

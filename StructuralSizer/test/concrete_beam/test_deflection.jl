@@ -246,6 +246,12 @@ import JuMP
             fc′, fy, Es, L, w_dead, w_live; ξ=2.0, As_prime=As_prime)
         @test r2.λΔ < r1.λΔ
         @test r2.Δ_total < r1.Δ_total
+
+        rect = design_beam_deflection(bw, h, d, As, fc′, fy, Es, L, w_dead, w_live; ξ=2.0)
+        @test rect.Δ_total ≈ rect.λΔ * rect.Δ_D + rect.Δ_LL rtol=1e-12
+        rect_all = design_beam_deflection(bw, h, d, As, fc′, fy, Es, L, w_dead, w_live;
+                                           ξ=2.0, sustained_live_fraction=1.0)
+        @test rect_all.Δ_total ≈ rect_all.λΔ * rect_all.Δ_DL rtol=1e-12
     end
 
     @testset "design_tbeam_deflection — degenerate bf==bw matches rectangular" begin

@@ -1363,9 +1363,13 @@ function _size_beams_impl!(
 
     _add_gravity_loads!(struc, edge_ids_in_group, gravity_factor)
 
-    # Extract demands from analysis (MemberDemand in SI: N, N·m, m)
+    # Extract demands from analysis (MemberDemand in SI: N, N·m, m).
+    # `beam_shear` is one row per pattern per member. The envelope `Nu` is the
+    # fallback when a group recorded no station row.
+    beam_shear = Vector{Vector{BeamShearCase}}()
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
-        _beam_group_demands(struc, group_filter; resolution, shell_demands)
+        _beam_group_demands(struc, group_filter; resolution, shell_demands,
+                            beam_shear_cases=beam_shear)
 
     isempty(group_ids) && return struc
 
@@ -1373,14 +1377,15 @@ function _size_beams_impl!(
     grouped_spans = _group_shell_spans(struc, group_ids, shell_spans,
                                        StructuralSizer.RCShellSpan)
 
-    # Build demand vectors with Unitful SI units.
-    # Mu = sagging (Mux_pos); Mu_neg = hogging. The discrete checker takes one
-    # Nu. Tension uses Eq. (11-8). Compression is not credited: the envelope
-    # Pu_c is not concurrent with the envelope Vu, and Eq. (11-4) would raise Vc.
+    # Mu = sagging (Mux_pos); Mu_neg = hogging. Shear uses the station rows.
+    # The fallback Nu is envelope tension (Eq. 11-8) and no compression:
+    # Eq. (11-4) would raise Vc if that compression is not the shear's case.
     Mu = [d.Mux_pos * u"N*m"  for d in demands]
     Mu_neg = [d.Mux_neg * u"N*m" for d in demands]
     Vu = [d.Vu_strong * u"N"   for d in demands]
     Nu = [d.Pu_t > 0 ? -d.Pu_t * u"N" : 0.0u"N" for d in demands]
+    shear_arg = [_nlp_shear_arg(rows) for rows in beam_shear]
+    shear_kw = any(!isnothing, shear_arg) ? shear_arg : nothing
 
     # Build geometries (L_totals are Float64 in meters)
     geoms = [StructuralSizer.ConcreteMemberGeometry(L) for L in L_totals]
@@ -1431,6 +1436,7 @@ function _size_beams_impl!(
                     catalog_size     = opts.catalog_size_tbeam,
                     sustained_live_fraction = opts.sustained_live_fraction,
                     shell_spans      = spans,
+                    shear_cases      = shear_kw === nothing ? nothing : shear_kw[idxs],
                 )
                 _apply_beam_results!(struc, result, group_ids[idxs], member_array,
                                      edge_ids_in_group, opts.material; I_factor=I_factor,
@@ -1441,7 +1447,8 @@ function _size_beams_impl!(
                 spans = grouped_spans === nothing ? nothing : grouped_spans[missing]
                 result = StructuralSizer.size_beams(
                     Mu[missing], Vu[missing], geoms[missing], opts;
-                    Mu_neg = Mu_neg[missing], Nu = Nu[missing], shell_spans = spans)
+                    Mu_neg = Mu_neg[missing], Nu = Nu[missing], shell_spans = spans,
+                    shear_cases = shear_kw === nothing ? nothing : shear_kw[missing])
                 _apply_beam_results!(struc, result, group_ids[missing], member_array,
                                      edge_ids_in_group, opts.material; I_factor=I_factor,
                                      rebar=opts.rebar_material)
@@ -1470,7 +1477,8 @@ function _size_beams_impl!(
         floor_kw = (; catalog = cat, feasible = _frame_floor_mask(struc, group_ids, cat, obj))
     end
     result = StructuralSizer.size_beams(Mu, Vu, geoms, opts; Mu_neg=Mu_neg, Nu=Nu,
-                                        shell_spans=grouped_spans, floor_kw...)
+                                        shell_spans=grouped_spans, shear_cases=shear_kw,
+                                        floor_kw...)
 
     _apply_beam_results!(struc, result, group_ids, member_array,
                          edge_ids_in_group, opts.material; I_factor=I_factor,
@@ -1673,7 +1681,8 @@ function _size_beams_impl!(
             t_results = StructuralSizer.size_rc_tbeams_nlp(Mu_t, Vu_t, bf_t, hf_t, nlp_opts;
                                                           Mu_neg=Mu_neg[tbeam_idx],
                                                           Nu=Nu[tbeam_idx],
-                                                          shear_cases=shear_cases[tbeam_idx])
+                                                          shear_cases=shear_cases[tbeam_idx],
+                                                          sustained_live_fraction=opts.sustained_live_fraction)
 
             for (k, g_idx) in enumerate(tbeam_idx)
                 r = t_results[k]

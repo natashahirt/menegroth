@@ -92,6 +92,8 @@ struct RCTBeamNLPProblem <: AbstractNLPProblem
     fr_psi::Float64         # Modulus of rupture (psi)
     defl_support::Symbol    # :simply_supported, :cantilever, etc.
     defl_ξ::Float64         # Long-term factor (2.0 = 5+ years)
+    # Share of live load in the sustained load of ACI 318-11 §9.5.2.5. 0 = dead only.
+    defl_sustained_live::Float64
 
     # ── Torsion constraint (ACI §11.5.3.1) ──
     Tu_kipin::Float64              # Torsion demand (kip·in). 0.0 = no torsion.
@@ -114,6 +116,7 @@ negative (Eq. 11-8). Public default is `Nu = 0`.
 function RCTBeamNLPProblem(Mu, Vu, bf, hf, opts::NLPBeamOptions;
                            w_dead=nothing, w_live=nothing, L_span=nothing,
                            support::Symbol=:simply_supported, ξ::Float64=2.0,
+                           sustained_live_fraction::Real=0.0,
                            Tu=0.0, Nu=0.0, shear_cases=nothing)
     fc = fc_ksi(opts.material)
     fy = fy_ksi(opts.rebar_material)
@@ -173,7 +176,7 @@ function RCTBeamNLPProblem(Mu, Vu, bf, hf, opts::NLPBeamOptions;
         ρ_min_aci,
         bw_min, bw_max, h_min, h_max,
         wd_kiplf, wl_kiplf, L_span_in, Ec_psi_val, fr_psi_val,
-        support, ξ,
+        support, ξ, _as_sustained_live_fraction(sustained_live_fraction),
         Tu_kipin_val, c_ctr,
         Nu_kip_val,
         cases,
@@ -402,10 +405,15 @@ function constraint_fns(p::RCTBeamNLPProblem, x::Vector{Float64})
         # Service moments (kip·in) → convert to lb·in for consistency
         Ma_D_lbin  = _tbeam_nlp_service_moment(w_d, L, p.defl_support) * 1000.0   # kip·in → lb·in
         Ma_DL_lbin = _tbeam_nlp_service_moment(w_d + w_l, L, p.defl_support) * 1000.0
+        # §9.5.2.5: λΔ multiplies the immediate deflection of the sustained load.
+        ψ = p.defl_sustained_live
+        w_s = w_d + ψ * w_l
+        Ma_S_lbin = _tbeam_nlp_service_moment(w_s, L, p.defl_support) * 1000.0
 
         # Effective moment of inertia (Branson)
         Ie_D  = _tbeam_nlp_branson(Mcr_lbin, Ma_D_lbin, Ig, Icr)
         Ie_DL = _tbeam_nlp_branson(Mcr_lbin, Ma_DL_lbin, Ig, Icr)
+        Ie_S  = _tbeam_nlp_branson(Mcr_lbin, Ma_S_lbin, Ig, Icr)
 
         # Deflections (inches): Δ = coeff × w × L⁴ / (E × Ie)
         # w in kip/in, L in inches, E in psi (= lb/in²), Ie in in⁴
@@ -413,15 +421,17 @@ function constraint_fns(p::RCTBeamNLPProblem, x::Vector{Float64})
         # Need to convert w to lb/in: w_lb = w_kip × 1000
         w_d_lbin  = w_d * 1000.0      # lb/in
         w_dl_lbin = (w_d + w_l) * 1000.0
+        w_s_lbin = w_s * 1000.0
 
         coeff = _tbeam_nlp_defl_coeff(p.defl_support)
         Δ_D  = coeff * w_d_lbin * L^4 / max(Ec * Ie_D, 1.0)
         Δ_DL = coeff * w_dl_lbin * L^4 / max(Ec * Ie_DL, 1.0)
+        Δ_S  = coeff * w_s_lbin * L^4 / max(Ec * Ie_S, 1.0)
         Δ_LL = max(Δ_DL - Δ_D, 0.0)
 
-        # Long-term
-        λΔ = p.defl_ξ  # no compression steel assumed in NLP
-        Δ_total = λΔ * Δ_D + Δ_LL
+        # Long-term. ψ = 0 reproduces λΔ·Δ_D + Δ_LL. No compression steel in the NLP.
+        λΔ = p.defl_ξ
+        Δ_total = λΔ * Δ_S + (Δ_DL - Δ_S)
 
         # Deflection limits
         Δ_allow_LL  = L / 360.0

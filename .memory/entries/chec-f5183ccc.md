@@ -7,12 +7,12 @@ title: Steel Cm uses frame curvature and span load
 node_label: Steel Cm curvature
 tags: steel,aisc,cm,b1,appendix-8
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-ad2335c9
 created_at: '2026-11-12T02:36:43.519936+00:00'
-updated_at: '2026-11-12T02:36:43.519936+00:00'
+updated_at: '2026-11-12T02:39:55.063457+00:00'
 ---
 Steel discrete sizing now carries AISC 360-16 Appendix 8 §8.2.1 (corpus: aisc-360-16, PDF page 306) into the checker.
 

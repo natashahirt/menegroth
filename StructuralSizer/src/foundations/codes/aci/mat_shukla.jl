@@ -491,5 +491,6 @@ function _design_mat_shukla(
 
     return _mat_build_result(plan, demands, opts, h, d_eff,
                              As_x_bot, As_x_top, As_y_bot, As_y_top,
-                             utilization)
+                             utilization;
+                             analysis = :shukla)
 end

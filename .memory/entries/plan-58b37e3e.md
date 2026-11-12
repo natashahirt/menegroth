@@ -7,12 +7,12 @@ title: Footing reactions use ASCE 7-22 §2.3 and §2.4
 node_label: Footing combination plan
 tags: foundations,asce,load-combinations
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-12b82aff
 created_at: '2026-11-12T11:36:07.558636+00:00'
-updated_at: '2026-11-12T11:36:07.558636+00:00'
+updated_at: '2026-11-12T11:52:31.189424+00:00'
 ---
 Isolated footings will be designed from the basic load combinations, not from the last gravity solve.
 

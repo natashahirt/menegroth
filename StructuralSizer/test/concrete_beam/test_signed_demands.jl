@@ -280,6 +280,23 @@ end
         @test cm[2] > 1.0
         @test cm[1] < 1.0
 
+        # Rectangular deflection matches design_beam_deflection (ACI 318-11 §9.5.2).
+        pd = RCBeamNLPProblem(50.0kip * u"ft", 10.0kip, opts;
+                              w_dead=1.2kip / u"ft", w_live=0.8kip / u"ft",
+                              L_span=25.0u"ft")
+        @test n_constraints(pd) == n_constraints(p0) + 2
+        @test constraint_names(pd)[end-1] == "deflection LL (L/360)"
+        xd = [12.0, 24.0, 0.010]
+        dd = 24.0 - pd.cover_offset_in
+        Asd = 0.010 * 12.0 * dd
+        cd = constraint_fns(pd, xd)
+        oracle = design_beam_deflection(
+            12.0u"inch", 24.0u"inch", dd * u"inch", Asd * u"inch^2",
+            pd.fc_psi * u"psi", pd.fy_psi * u"psi", pd.Es_ksi * ksi,
+            25.0u"ft", 1.2kip / u"ft", 0.8kip / u"ft")
+        @test cd[end - 1] ≈ oracle.checks[:immediate_ll].ratio rtol=1e-4
+        @test cd[end] ≈ oracle.checks[:total].ratio rtol=1e-4
+
         # Batch API accepts signed Nu; public default Mu_neg = Mu is unchanged.
         rs = size_rc_beams_nlp([1.0kip * u"ft"], [1.0kip], opts;
                                Mu_neg=[0.0], Nu=[-20.0kip])

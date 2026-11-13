@@ -140,11 +140,23 @@ struct RCBeamNLPProblem <: AbstractNLPProblem
     # One sagging moment per load case, kip·ft. The scalar `Mu_kipft` is the
     # first case when the caller passed no vector.
     flexure_cases::Vector{Float64}
+
+    # Uniform-load deflection (ACI 318-11 §9.5.2). `w_dead_kiplf == 0` skips it.
+    w_dead_kiplf::Float64
+    w_live_kiplf::Float64
+    L_in::Float64
+    Ec_psi::Float64
+    fr_psi::Float64
+    defl_support::Symbol
+    defl_ξ::Float64
+    defl_sustained_live::Float64
 end
 
 """
     RCBeamNLPProblem(Mu, Vu, opts; Tu=0.0, Nu=0.0, shear_cases=nothing,
-                     flexure_cases=nothing)
+                     flexure_cases=nothing, w_dead=nothing, w_live=nothing,
+                     L_span=nothing, support=:simply_supported, ξ=2.0,
+                     sustained_live_fraction=0.0)
 
 Construct an RC beam NLP problem from factored demands and options.
 Converts Unitful inputs to bare ACI units (kip, kip-ft, inches, psi).
@@ -153,9 +165,14 @@ negative (Eq. 11-8). Public default is `Nu = 0` (no axial modifier).
 `shear_cases` replaces that one shear row with one row per load case.
 Each case is `(Vu, Nu, Tu)`. `flexure_cases` is one sagging moment per
 load case; omitted, flexure is the single `Mu` envelope.
+`w_dead`, `w_live`, and `L_span` together add the rectangular deflection
+check of [`design_beam_deflection`](@ref). Omitting any one of them skips it.
 """
 function RCBeamNLPProblem(Mu, Vu, opts::NLPBeamOptions; Tu=0.0, Nu=0.0,
-                          shear_cases=nothing, flexure_cases=nothing)
+                          shear_cases=nothing, flexure_cases=nothing,
+                          w_dead=nothing, w_live=nothing, L_span=nothing,
+                          support::Symbol=:simply_supported, ξ::Float64=2.0,
+                          sustained_live_fraction::Real=0.0)
     fc = fc_ksi(opts.material)
     fy = fy_ksi(opts.rebar_material)
     Es = Es_ksi(opts.rebar_material)
@@ -189,6 +206,7 @@ function RCBeamNLPProblem(Mu, Vu, opts::NLPBeamOptions; Tu=0.0, Nu=0.0,
     Nu_kip_val = Nu isa Unitful.Quantity ? to_kip(Nu) : Float64(Nu)
     cases = _beam_nlp_shear_cases(Vu_kip, Nu_kip_val, Tu_kipin_val, shear_cases)
     moments = _beam_nlp_flexure_cases(Mu_kipft, flexure_cases)
+    wd, wl, L_in, Ec_psi, fr_psi = _rect_nlp_service(fc_psi, w_dead, w_live, L_span)
 
     RCBeamNLPProblem(
         Mu_kipft, Vu_kip, opts,
@@ -200,7 +218,69 @@ function RCBeamNLPProblem(Mu, Vu, opts::NLPBeamOptions; Tu=0.0, Nu=0.0,
         Nu_kip_val,
         cases,
         moments,
+        wd, wl, L_in, Ec_psi, fr_psi,
+        support, Float64(ξ), _as_sustained_live_fraction(sustained_live_fraction),
     )
+end
+
+"""
+Service loads for the rectangular NLP deflection check.
+
+All three of `w_dead`, `w_live`, and `L_span` are required. A bare span is
+feet, matching the T-beam NLP. `Ec` uses `wc = 150` pcf, the default of
+[`design_beam_deflection`](@ref) (ACI 318-11 §8.5.1). `fr = 7.5√f'c`
+(§9.5.2.3), the same `fr` that function calls.
+"""
+function _rect_nlp_service(fc_psi, w_dead, w_live, L_span)
+    if isnothing(w_dead) || isnothing(w_live) || isnothing(L_span)
+        return 0.0, 0.0, 0.0, 0.0, 0.0
+    end
+    wd = w_dead isa Unitful.Quantity ? ustrip(kip / u"ft", w_dead) : Float64(w_dead)
+    wl = w_live isa Unitful.Quantity ? ustrip(kip / u"ft", w_live) : Float64(w_live)
+    L_in = L_span isa Unitful.Quantity ? ustrip(u"inch", L_span) : Float64(L_span) * 12.0
+    Ec_psi = 33.0 * 150.0^1.5 * sqrt(fc_psi)
+    fr_psi = 7.5 * sqrt(fc_psi)
+    return wd, wl, L_in, Ec_psi, fr_psi
+end
+
+"""
+Live and total deflection utilizations of a rectangular section.
+
+Same arithmetic as [`design_beam_deflection`](@ref): Ig = bh³/12, transformed
+Icr, Branson Ie at dead, sustained, and dead-plus-live, then Table 9.5(b).
+ACI 318-11 §9.5.2 (corpus: aci-318-11, PDF pp. 131–133). No compression steel,
+so λΔ = ξ (§9.5.2.5, Eq. 9-11).
+"""
+function _rect_nlp_deflection_utils(p::RCBeamNLPProblem, b, h, d, As)
+    Ec = p.Ec_psi
+    Es_psi = p.Es_ksi * 1000.0
+    n_mod = Es_psi / max(Ec, 1.0)
+    L = p.L_in
+    w_d = p.w_dead_kiplf / 12.0
+    w_l = p.w_live_kiplf / 12.0
+
+    Ig = b * h^3 / 12
+    Mcr = p.fr_psi * Ig / max(h / 2, 0.01)
+
+    k1 = 2 * n_mod * As / max(b, 0.01)
+    c = (-k1 + sqrt(max(k1^2 + 4 * k1 * d, 0.0))) / 2
+    Icr = max(b * c^3 / 3 + n_mod * As * (d - c)^2, 1.0)
+
+    Ma_D  = _tbeam_nlp_service_moment(w_d, L, p.defl_support) * 1000.0
+    Ma_DL = _tbeam_nlp_service_moment(w_d + w_l, L, p.defl_support) * 1000.0
+    w_s = w_d + p.defl_sustained_live * w_l
+    Ma_S = _tbeam_nlp_service_moment(w_s, L, p.defl_support) * 1000.0
+    Ie_D  = _tbeam_nlp_branson(Mcr, Ma_D, Ig, Icr)
+    Ie_DL = _tbeam_nlp_branson(Mcr, Ma_DL, Ig, Icr)
+    Ie_S  = _tbeam_nlp_branson(Mcr, Ma_S, Ig, Icr)
+
+    coeff = _tbeam_nlp_defl_coeff(p.defl_support)
+    Δ_D  = coeff * (w_d * 1000.0) * L^4 / max(Ec * Ie_D, 1.0)
+    Δ_DL = coeff * ((w_d + w_l) * 1000.0) * L^4 / max(Ec * Ie_DL, 1.0)
+    Δ_S  = coeff * (w_s * 1000.0) * L^4 / max(Ec * Ie_S, 1.0)
+    Δ_LL = max(Δ_DL - Δ_D, 0.0)
+    Δ_total = p.defl_ξ * Δ_S + (Δ_DL - Δ_S)
+    return (Δ_LL / max(L / 360.0, 1e-6), Δ_total / max(L / 240.0, 1e-6))
 end
 
 # ==============================================================================
@@ -254,10 +334,11 @@ end
 # AbstractNLPProblem Interface: Constraints
 # ==============================================================================
 
-"""Number of constraints: one flexure per case, one shear per case, strain, ρmin, plus torsion per case with Tu > 0."""
+"""Number of constraints: one flexure per case, one shear per case, strain, ρmin, optional deflection, plus torsion per case with Tu > 0."""
 function n_constraints(p::RCBeamNLPProblem)
-    return 2 + length(p.flexure_cases) + length(p.shear_cases) +
-           count(c -> c.Tu_kipin > 0, p.shear_cases)
+    nc = 2 + length(p.flexure_cases) + length(p.shear_cases)
+    p.w_dead_kiplf > 0 && (nc += 2)
+    return nc + count(c -> c.Tu_kipin > 0, p.shear_cases)
 end
 
 """Human-readable constraint names for solver diagnostics."""
@@ -279,6 +360,10 @@ function constraint_names(p::RCBeamNLPProblem)
     end
     push!(names, "net tensile strain (εt ≥ 0.005)")
     push!(names, "min reinforcement (§10.5.1)")
+    if p.w_dead_kiplf > 0
+        push!(names, "deflection LL (L/360)")
+        push!(names, "deflection total (L/240)")
+    end
     for (i, c) in enumerate(p.shear_cases)
         c.Tu_kipin > 0 || continue
         push!(names, length(p.shear_cases) == 1 ?
@@ -353,6 +438,12 @@ function constraint_fns(p::RCBeamNLPProblem, x::Vector{Float64})
     # ρ_min = max(3√f'c / fy, 200 / fy)  (precomputed in constructor)
     util_as_min = p.ρ_min_aci / max(ρ, 1e-8)
     push!(constraints, util_strain, util_as_min)
+
+    # ACI 318-11 §9.5.2. Same check as design_beam_deflection.
+    if p.w_dead_kiplf > 0
+        ll, tot = _rect_nlp_deflection_utils(p, b, h, d, As)
+        push!(constraints, ll, tot)
+    end
 
     # --- Torsion adequacy (ACI 318-11 §11.5.3.1) ---
     # Shear-torsion interaction: √[(Vu/(bw·d))² + (Tu·ph/(1.7·Aoh²))²] ≤ φ·(Vc/(bw·d) + 8·√f'c)

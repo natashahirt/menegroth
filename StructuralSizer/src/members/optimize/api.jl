@@ -2056,9 +2056,18 @@ function size_rc_beam_nlp(Mu, Vu, opts::NLPBeamOptions;
                           Mu_neg = nothing,
                           shear_cases = nothing,
                           flexure_cases = nothing,
+                          w_dead = nothing,
+                          w_live = nothing,
+                          L_span = nothing,
+                          defl_support::Symbol = :simply_supported,
+                          defl_ξ::Float64 = 2.0,
+                          sustained_live_fraction::Real = 0.0,
                           x0::Union{Nothing,Vector{Float64}} = nothing)
     problem = RCBeamNLPProblem(Mu, Vu, opts; Tu=Tu, Nu=Nu, shear_cases=shear_cases,
-                               flexure_cases=flexure_cases)
+                               flexure_cases=flexure_cases,
+                               w_dead=w_dead, w_live=w_live, L_span=L_span,
+                               support=defl_support, ξ=defl_ξ,
+                               sustained_live_fraction=sustained_live_fraction)
 
     opt_result = optimize_continuous(
         problem;
@@ -2080,6 +2089,24 @@ function size_rc_beam_nlp(Mu, Vu, opts::NLPBeamOptions;
                                result.b_final, result.h_final, result.area,
                                :infeasible, result.iterations)
     end
+    # The installed section, after bar rounding, still has to pass the same
+    # deflection check the discrete beam uses (ACI 318-11 §9.5.2).
+    if problem.w_dead_kiplf > 0
+        sec = result.section
+        defl = design_beam_deflection(
+            sec.b, sec.h, sec.d, sec.As,
+            problem.fc_psi * u"psi", problem.fy_psi * u"psi", problem.Es_ksi * ksi,
+            problem.L_in * u"inch",
+            problem.w_dead_kiplf * kip / u"ft",
+            problem.w_live_kiplf * kip / u"ft";
+            support = problem.defl_support,
+            ξ = problem.defl_ξ,
+            sustained_live_fraction = problem.defl_sustained_live,
+        )
+        defl.ok || return RCBeamNLPResult(result.section, result.b_opt, result.h_opt, result.ρ_opt,
+                                          result.b_final, result.h_final, result.area,
+                                          :infeasible, result.iterations)
+    end
     return result
 end
 
@@ -2092,7 +2119,13 @@ function size_rc_beams_nlp(Mu::Vector, Vu::Vector, opts::NLPBeamOptions;
                            Mu_neg::Vector = Mu,
                            Nu::Vector = zeros_like(Vu),
                            shear_cases = nothing,
-                           flexure_cases = nothing)
+                           flexure_cases = nothing,
+                           w_dead = nothing,
+                           w_live = nothing,
+                           L_span = nothing,
+                           defl_support::Symbol = :simply_supported,
+                           defl_ξ::Float64 = 2.0,
+                           sustained_live_fraction::Real = 0.0)
     n = length(Mu)
     n == length(Vu) || throw(ArgumentError("Mu and Vu must have same length"))
     n == length(Mu_neg) || throw(ArgumentError("Mu_neg must have same length as Mu"))
@@ -2110,8 +2143,14 @@ function size_rc_beams_nlp(Mu::Vector, Vu::Vector, opts::NLPBeamOptions;
     for i in 1:n
         sc = shear_cases === nothing ? nothing : shear_cases[i]
         fc = flexure_cases === nothing ? nothing : flexure_cases[i]
+        wd = w_dead isa AbstractVector ? w_dead[i] : w_dead
+        wl = w_live isa AbstractVector ? w_live[i] : w_live
+        Ls = L_span isa AbstractVector ? L_span[i] : L_span
         results[i] = size_rc_beam_nlp(Mu[i], Vu[i], opts; Mu_neg=Mu_neg[i], Nu=Nu[i],
-                                      shear_cases=sc, flexure_cases=fc)
+                                      shear_cases=sc, flexure_cases=fc,
+                                      w_dead=wd, w_live=wl, L_span=Ls,
+                                      defl_support=defl_support, defl_ξ=defl_ξ,
+                                      sustained_live_fraction=sustained_live_fraction)
     end
     return results
 end

@@ -7,12 +7,12 @@ title: Per-case beam NLP and column NLP section floors
 node_label: Beam and column NLP later
 tags: nlp,beams,columns,section-floors,later
 status: active
-open_threads: 3
+open_threads: 4
 success: 'null'
 files: ''
 session_id: sess-d09eb230
 created_at: '2026-11-11T11:25:31.476302+00:00'
-updated_at: '2026-11-12T00:49:08.554917+00:00'
+updated_at: '2026-11-13T14:46:16.858499+00:00'
 has_child_rationale: User asked to keep beam and column NLP in mind for later while
   landing the Row F commit.
 ---

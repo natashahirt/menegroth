@@ -381,7 +381,7 @@ function _beams_objective(struc, opts)
     return total
 end
 
-const _SHELL_BUILD_KEYS = (:target_edge, :concrete, :steel, :support_points)
+const _SHELL_BUILD_KEYS = (:target_edge, :concrete, :column_concrete, :steel, :support_points)
 
 """
 `shell_kwargs` split into the keywords of [`build_story_shell`](@ref) and of

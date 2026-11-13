@@ -179,6 +179,24 @@ end
             @test face_opening_loops(skel, outer) == face_hole_loops(skel, outer)
         end
 
+        @testset "A second face detection does not count a ring twice" begin
+            # Hole side length → expected net area of the 10 m outer bay.
+            # A larger ring removes more slab, and repeating find_faces! must
+            # not remove it again.
+            for (side, net) in ((2.0, 96.0), (4.0, 84.0))
+                skel = BuildingSkeleton{Float64}()
+                _member_square!(skel, 0.0, 0.0, 10.0, z)
+                o = (10.0 - side) / 2
+                _member_square!(skel, o, o, side, z)
+                _faces_of!(skel)
+                find_faces!(skel)
+                outer = argmax(f -> ustrip(u"m^2", face_area(skel, f)), 1:2)
+                @test length(face_hole_loops(skel, outer)) == 1
+                @test length(skel.face_hole_vertices[outer]) == 1
+                @test ustrip(u"m^2", face_net_area(skel, outer)) ≈ net
+            end
+        end
+
         @testset "Nested rings attach to the nearest enclosing face" begin
             skel = _faces_of!(let s = BuildingSkeleton{Float64}()
                 _member_square!(s, 0.0, 0.0, 12.0, z)
@@ -205,6 +223,24 @@ end
             @test ustrip(u"m^2", face_net_area(skel, inner)) ≈ 3.0
         end
 
+        @testset "A grid's own perimeter is not a hole of an interior bay" begin
+            # 4 × 4 bays of 6 × 5 m. The perimeter's interior point lands in
+            # the bay at x 12–18, y 10–15, which shares no vertex with it.
+            skel = BuildingSkeleton{Float64}()
+            xs, ys = 0.0:6.0:24.0, 0.0:5.0:20.0
+            id = Dict((i, j) => add_vertex!(skel, [x, y, z])
+                      for (i, x) in enumerate(xs) for (j, y) in enumerate(ys))
+            for i in eachindex(xs), j in eachindex(ys)
+                i < length(xs) && add_element!(skel, id[(i, j)], id[(i + 1, j)]; group = :beams)
+                j < length(ys) && add_element!(skel, id[(i, j)], id[(i, j + 1)]; group = :beams)
+            end
+            _faces_of!(skel)
+            @test length(skel.face_vertex_indices) == 16
+            @test isempty(skel.face_holes)
+            @test all(f -> ustrip(u"m^2", face_net_area(skel, f)) ≈ 30.0,
+                      eachindex(skel.face_vertex_indices))
+        end
+
         @testset "Walls inside a bay stay line supports" begin
             skel = BuildingSkeleton{Float64}()
             vs = _member_square!(skel, 0.0, 0.0, 6.0, z)
@@ -222,6 +258,51 @@ end
     # =========================================================================
     # FrameLine Tests
     # =========================================================================
+        @testset "A sloped floor edge is refused" begin
+            z = 3.0
+            function square_at(rise)
+                skel = BuildingSkeleton{Float64}()
+                vs = [add_vertex!(skel, [0.0, 0.0, z]), add_vertex!(skel, [6.0, 0.0, z]),
+                      add_vertex!(skel, [6.0, 6.0, z + rise]), add_vertex!(skel, [0.0, 6.0, z])]
+                for i in 1:4
+                    add_element!(skel, vs[i], vs[mod1(i + 1, 4)]; group = :beams)
+                end
+                rebuild_stories!(skel)
+                return skel
+            end
+            err = try
+                find_faces!(square_at(0.02))
+                nothing
+            catch e
+                e
+            end
+            @test err isa ArgumentError
+            @test occursin("sloped", err.msg)
+            @test occursin("0.02", err.msg)
+            @test occursin("(6.0, 0.0) m", err.msg)
+            @test occursin("(6.0, 6.0) m", err.msg)
+            # A column is short in plan, so its height is not a floor slope.
+            skel = BuildingSkeleton{Float64}()
+            top = _member_square!(skel, 0.0, 0.0, 6.0, z)
+            for v in top
+                c = vertex_coords(skel, v)
+                g = add_vertex!(skel, [c.x, c.y, 0.0])
+                add_element!(skel, g, v; group = :columns)
+            end
+            @test length(_faces_of!(skel).face_vertex_indices) == 1
+            # Half a millimetre is still one level face.
+            @test length(_faces_of!(square_at(0.0005)).face_vertex_indices) == 1
+            # A steeper edge is still refused, and says how far it rises.
+            steeper = try
+                find_faces!(square_at(0.05))
+                nothing
+            catch e
+                e
+            end
+            @test steeper isa ArgumentError
+            @test occursin("0.05", steeper.msg)
+        end
+
     @testset "FrameLine Construction" begin
         
         # Mock column type
@@ -353,5 +434,33 @@ end
             end
         end
     end
-    
+
+    @testset "A concave quad keeps its plan area" begin
+        # (0,0), (3,1), (0,2), (1,1). The reflex vertex bites the polygon.
+        # A fan from (0,0) measures 4 m²; the polygon is 2 m². A deeper bite
+        # (reflex at x = 1.5) is 1.5 m². A square stays its own area.
+        function _quad(pts)
+            skel = BuildingSkeleton{Float64}()
+            vs = [add_vertex!(skel, [x, y, 3.0]) for (x, y) in pts]
+            for i in eachindex(vs)
+                add_element!(skel, vs[i], vs[mod1(i + 1, length(vs))]; group = :beams)
+            end
+            _faces_of!(skel)
+            return skel
+        end
+        dent = _quad([(0.0, 0.0), (3.0, 1.0), (0.0, 2.0), (1.0, 1.0)])
+        @test length(dent.faces) == 1
+        a = ustrip(u"m^2", face_area(dent, 1))
+        @test a ≈ 2.0 atol = 1e-9
+        rebuild_geometry_cache!(dent)
+        @test ustrip(u"m^2", face_area(dent, 1)) ≈ a atol = 1e-12
+        deeper = _quad([(0.0, 0.0), (3.0, 1.0), (0.0, 2.0), (1.5, 1.0)])
+        @test ustrip(u"m^2", face_area(deeper, 1)) ≈ 1.5 atol = 1e-9
+        @test ustrip(u"m^2", face_area(deeper, 1)) < a
+        square = BuildingSkeleton{Float64}()
+        _member_square!(square, 0.0, 0.0, 4.0, 3.0)
+        _faces_of!(square)
+        @test ustrip(u"m^2", face_area(square, 1)) ≈ 16.0 atol = 1e-9
+    end
+
 end  # Main testset

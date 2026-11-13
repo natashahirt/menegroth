@@ -182,6 +182,30 @@ function add_face!(skel::BuildingSkeleton{T}, face::Meshes.Polygon;
 end
 
 """
+Throw when a floor edge rises more than 1 mm.
+
+Story assignment rounds elevation to 1 cm, so a sloped edge was either
+flattened onto one story or dropped because its ends landed on different
+stories. No floor system designs that face. A column is short in plan next
+to its height, so it is not a floor edge.
+"""
+function _refuse_sloped_floor_edges(skel::BuildingSkeleton)
+    for (v1, v2) in skel.edge_indices
+        a = _skel_xy_m(skel, v1)
+        b = _skel_xy_m(skel, v2)
+        hypot(b[1] - a[1], b[2] - a[2]) < 0.05 && continue
+        z1 = Float64(ustrip(u"m", Meshes.coords(skel.vertices[v1]).z))
+        z2 = Float64(ustrip(u"m", Meshes.coords(skel.vertices[v2]).z))
+        dz = abs(z2 - z1)
+        dz <= 1e-3 && continue
+        throw(ArgumentError(
+            "a floor edge from $(_fmt_xy(a)) to $(_fmt_xy(b)) rises $(round(dz; digits=3)) m. " *
+            "No floor system designs a sloped face; keep the edge level."))
+    end
+    return nothing
+end
+
+"""
     find_faces!(skel::BuildingSkeleton)
 
 Detect planar faces (slab panels) at each story by traversing directed half-edges
@@ -197,6 +221,7 @@ a bay, a single beam is the only link to an inner ring, or two networks touch
 at one vertex. Such a beam bounds no face, so it would carry no slab load.
 """
 function find_faces!(skel::BuildingSkeleton{T}) where T
+    _refuse_sloped_floor_edges(skel)
     for (level_idx, story) in skel.stories
         v_indices = story.vertices
         length(v_indices) < 3 && continue 
@@ -251,7 +276,7 @@ function find_faces!(skel::BuildingSkeleton{T}) where T
                 end
             end
         end
-        _assign_face_holes!(skel, story_faces, boundaries)
+        _assign_face_holes!(skel, story_faces, boundaries, level_idx)
         @debug "Face detection complete" story=level_idx faces=faces_found
     end
 end
@@ -275,6 +300,34 @@ function _skel_xy_m(skel::BuildingSkeleton, v::Int)
 end
 
 _fmt_xy(p) = "($(round(p[1]; digits = 3)), $(round(p[2]; digits = 3))) m"
+
+"""
+Simple loops of a walk that pinches at a repeated vertex.
+
+A clockwise ring that touches itself is two holes sharing a point. Each
+loop is the walk between the two visits, not including the second visit.
+A tail that never closes is dropped.
+"""
+function _split_pinched_cycle(cycle::Vector{Int})
+    loops = Vector{Vector{Int}}()
+    rest = Int[]
+    seen = Dict{Int, Int}()
+    for v in cycle
+        i = get(seen, v, 0)
+        if i > 0
+            push!(loops, rest[i:end])
+            for u in rest[(i + 1):end]
+                delete!(seen, u)
+            end
+            resize!(rest, i)
+        else
+            push!(rest, v)
+            seen[v] = length(rest)
+        end
+    end
+    length(rest) >= 3 && push!(loops, rest)
+    return loops
+end
 
 """`true` when the skeleton edge between `a` and `b` is a wall."""
 function _is_wall_edge(skel::BuildingSkeleton, walls::Set{Int}, a::Int, b::Int)
@@ -326,38 +379,74 @@ Record each network boundary in `boundaries` as a hole of the smallest face in
 `story_faces` that contains it. A boundary inside no face is the outline of
 the floor and is skipped.
 
+Replaces the hole lists of `story_faces`. [`find_faces!`](@ref) is the only
+writer of those lists, and a second call (the API detects faces, then
+`initialize!` detects them again) must not append a second copy of each ring.
+
 A contained boundary that does not enclose an area, or that walks a member in
 both directions, is a member or a tree of members floating in a bay. Beams
 there throw, because no slab load reaches them. Walls there are skipped: the
 slab takes them as line supports.
 """
 function _assign_face_holes!(skel::BuildingSkeleton, story_faces::Vector{Int},
-                             boundaries::Vector{Vector{Int}})
+                             boundaries::Vector{Vector{Int}}, level_idx::Int)
+    for f in story_faces
+        delete!(skel.face_holes, f)
+        delete!(skel.face_hole_vertices, f)
+    end
     isempty(boundaries) && return skel
     walls = _wall_edge_set(skel)
     loops = Dict(f => [_skel_xy_m(skel, v) for v in skel.face_vertex_indices[f]] for f in story_faces)
     areas = Dict(f => abs(calculate_signed_area(skel, skel.face_vertex_indices[f])) for f in story_faces)
     for cycle in boundaries
         own = Set(cycle)
-        p = _skel_xy_m(skel, cycle[1])
+        # A vertex of the ring can sit on a neighboring bay. The ring belongs
+        # to the face that contains its interior and every one of its vertices.
+        # A network's own outer boundary is inside none of its bays.
+        ring = [_skel_xy_m(skel, v) for v in cycle]
+        p = length(ring) >= 3 ? _interior_point(ring) : ring[1]
         host = nothing
         for f in story_faces
             any(v -> v in own, skel.face_vertex_indices[f]) && continue
             _point_in_polygon_xy(p[1], p[2], loops[f]) || continue
+            all(q -> _frame_contains(q, loops[f]), ring) || continue
             (host === nothing || areas[f] < areas[host]) && (host = f)
         end
         host === nothing && continue
-        area = length(cycle) >= 3 ? calculate_signed_area(skel, cycle) : 0.0
-        if area >= 0 || !allunique(cycle)
-            n = length(cycle)
-            all(i -> _is_wall_edge(skel, walls, cycle[i], cycle[mod1(i + 1, n)]), 1:n) && continue
-            throw(ArgumentError(
-                "beams near $(_fmt_xy(p)) sit inside a slab bay without enclosing an " *
-                "area or touching the bay's boundary, so no slab load reaches them. " *
-                "Connect them to the surrounding members or remove them."))
+        pieces = allunique(cycle) ? [cycle] : _split_pinched_cycle(cycle)
+        for piece in pieces
+            n = length(piece)
+            area = n >= 3 ? calculate_signed_area(skel, piece) : 0.0
+            # A line or a spike encloses nothing. The beams stay in the frame.
+            abs(area) <= 1e-4 && continue
+            if !allunique(piece)
+                all(i -> _is_wall_edge(skel, walls, piece[i], piece[mod1(i + 1, n)]), 1:n) && continue
+                shown = min(n, 8)
+                pts = join((_fmt_xy(_skel_xy_m(skel, piece[i])) for i in 1:shown), " → ")
+                n > shown && (pts *= " → …")
+                throw(ArgumentError(
+                    "beams near $(_fmt_xy(p)) sit inside a slab bay without enclosing an " *
+                    "area or touching the bay's boundary, so no slab load reaches them. " *
+                    "Connect them to the surrounding members or remove them. " *
+                    "The walk has $n vertices, area $(round(area; digits=4)) m², " *
+                    "and a repeated vertex: $pts."))
+            end
+            if area > 0
+                # A pinched boundary walk can hide a slab panel wound the other
+                # way. It encloses area, so it is a face, not a floating beam.
+                polygon = Meshes.Ngon(skel.vertices[piece]...)
+                f = add_face!(skel, polygon; group = :slabs, level_idx = level_idx,
+                              v_indices = piece)
+                push!(story_faces, f)
+                loops[f] = [_skel_xy_m(skel, v) for v in piece]
+                areas[f] = abs(area)
+                continue
+            end
+            ring = reverse(piece)
+            push!(get!(Vector{Vector{NTuple{2, Float64}}}, skel.face_holes, host),
+                  [_skel_xy_m(skel, v) for v in ring])
+            push!(get!(Vector{Vector{Int}}, skel.face_hole_vertices, host), ring)
         end
-        hole = [_skel_xy_m(skel, v) for v in Iterators.reverse(cycle)]
-        push!(get!(Vector{Vector{NTuple{2, Float64}}}, skel.face_holes, host), hole)
     end
     return skel
 end
@@ -480,12 +569,17 @@ function rebuild_geometry_cache!(skel::BuildingSkeleton{T}) where T
     end
 
     # ── Face areas ──
+    # Shoelace of the plan, not Meshes.measure. That measure fans an Ngon from
+    # its first vertex, which counts the bite of a concave quad twice.
+    # The sample is the area of a 1×1 right triangle. `_plan_face_area`
+    # multiplies by that area; the empty cache needs its type.
+    area_unit = Meshes.measure(Meshes.Triangle(Meshes.Point(0, 0, 0),
+                                               Meshes.Point(1, 0, 0),
+                                               Meshes.Point(0, 1, 0)))
     if n_faces > 0
-        face_areas = [Meshes.measure(skel.faces[i]) for i in 1:n_faces]
+        face_areas = [_plan_face_area(skel, i, area_unit) for i in 1:n_faces]
     else
-        face_areas = typeof(Meshes.measure(Meshes.Triangle(Meshes.Point(0,0,0),
-                                                           Meshes.Point(1,0,0),
-                                                           Meshes.Point(0,1,0))))[]
+        face_areas = typeof(area_unit)[]
     end
 
     # ── Edge → face adjacency counts (slab faces only; a void is a slab edge) ──
@@ -545,8 +639,32 @@ end
 Return the precomputed area of a face.
 """
 function face_area(skel::BuildingSkeleton, face_idx::Int)
-    isnothing(skel.geometry) && return Meshes.measure(skel.faces[face_idx])
+    isnothing(skel.geometry) && return _plan_face_area(skel, face_idx)
     return skel.geometry.face_areas[face_idx]
+end
+
+"""
+Plan area of face `face_idx` by shoelace. `unit` is one square of the
+skeleton's area type (a right triangle of legs 1); the shoelace is in m²
+and is scaled into that type. A concave quad keeps the polygon area. The
+`Meshes` fan from the first vertex does not.
+"""
+function _plan_face_area(skel::BuildingSkeleton, face_idx::Int,
+                         unit = Meshes.measure(Meshes.Triangle(Meshes.Point(0, 0, 0),
+                                                               Meshes.Point(1, 0, 0),
+                                                               Meshes.Point(0, 1, 0))))
+    vis = skel.face_vertex_indices[face_idx]
+    n = length(vis)
+    n < 3 && return zero(unit)
+    a = 0.0
+    for i in 1:n
+        p = Meshes.coords(skel.vertices[vis[i]])
+        q = Meshes.coords(skel.vertices[vis[mod1(i + 1, n)]])
+        a += ustrip(u"m", p.x) * ustrip(u"m", q.y) - ustrip(u"m", q.x) * ustrip(u"m", p.y)
+    end
+    square = abs(a) / 2
+    # `unit` is the area of a 1×1 right triangle, half a square metre.
+    return (square / 0.5) * unit
 end
 
 """

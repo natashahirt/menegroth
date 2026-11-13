@@ -24,6 +24,9 @@ include("slab_edge.jl")
 # Slab bars from that shell's moment tensor.
 include("story_shell_bars.jl")
 
+# Ie/Ig scale written onto the service shell.
+include("story_shell_service.jl")
+
 # CIP sizing for all cast-in-place types (FlatPlate, FlatSlab, TwoWay, OneWay, Waffle, PTBanded)
 include("sizing.jl")
 

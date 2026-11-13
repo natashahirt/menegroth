@@ -433,7 +433,8 @@ function precompute_capacities!(
     cache::ACIBeamCapacityCache,
     catalog::AbstractVector{<:AbstractSection},
     material::Concrete,
-    objective::AbstractObjective,
+    objective::AbstractObjective;
+    rebar=nothing,
 )
     n = length(catalog)
 
@@ -446,7 +447,7 @@ function precompute_capacities!(
     fy_psi = checker.fy_ksi * 1000.0
 
     # Determine target unit for objective
-    ref_obj = objective_value(objective, catalog[1], material, 1.0u"m")
+    ref_obj = objective_value(objective, catalog[1], material, 1.0u"m"; rebar=rebar)
     ref_unit = unit(ref_obj)
 
     # Thread-safe: each iteration writes to distinct cache indices
@@ -467,9 +468,21 @@ function precompute_capacities!(
         cache.depths[j] = ustrip(u"m", section.h)
 
         # Objective coefficient (value per meter of beam)
-        val = objective_value(objective, section, material, 1.0u"m")
+        val = objective_value(objective, section, material, 1.0u"m"; rebar=rebar)
         cache.obj_coeffs[j] = ref_unit != Unitful.NoUnits ? ustrip(ref_unit, val) : Float64(val)
     end
+end
+
+"""Longitudinal steel is weighed, costed, and counted in carbon. Flexural fy stays on the checker."""
+function precompute_capacities!(
+    checker::ACIBeamChecker,
+    cache::ACIBeamCapacityCache,
+    catalog::AbstractVector{<:AbstractSection},
+    material::ReinforcedConcreteMaterial,
+    objective::AbstractObjective,
+)
+    precompute_capacities!(checker, cache, catalog, material.concrete, objective;
+                           rebar=material.rebar)
 end
 
 # ==============================================================================
@@ -750,45 +763,51 @@ function objective_value(
     ::MinVolume,
     section::RCBeamSection,
     material::Concrete,
-    length::Length,
+    length::Length;
+    rebar=nothing,
 )
     Ag = section.b * section.h
     uconvert(u"m^3", Ag * length)
 end
 
-"""Objective value: self-weight of the RC beam per unit length."""
+"""Self-weight of the RC beam (kN). With `rebar`, longitudinal steel is at the rebar density."""
 function objective_value(
     ::MinWeight,
     section::RCBeamSection,
     material::Concrete,
-    length::Length,
+    length::Length;
+    rebar=nothing,
 )
     Ag = section.b * section.h
-    uconvert(u"kN", Ag * length * material.ρ * 1u"gn")
+    rebar === nothing && return uconvert(u"kN", Ag * length * material.ρ * 1u"gn")
+    return _rc_objective(MinWeight(), Ag, section.As + section.As_prime, material, rebar, length; as=u"kN")
 end
 
-"""Objective value: cost proxy (volume) for the RC beam per unit length."""
+"""Cost of the RC beam. Without `rebar`, gross volume (m³). With `rebar`, unit costs of concrete and longitudinal steel."""
 function objective_value(
     ::MinCost,
     section::RCBeamSection,
     material::Concrete,
-    length::Length,
+    length::Length;
+    rebar=nothing,
 )
     Ag = section.b * section.h
-    uconvert(u"m^3", Ag * length)
+    rebar === nothing && return uconvert(u"m^3", Ag * length)
+    return _rc_objective(MinCost(), Ag, section.As + section.As_prime, material, rebar, length)
 end
 
-"""Objective value: embodied carbon of the RC beam per unit length, returned
-as a typed `kgCO₂e` quantity (Asap `𝐗` dimension)."""
+"""Embodied carbon of the RC beam, a typed `kgCO₂e` quantity."""
 function objective_value(
     ::MinCarbon,
     section::RCBeamSection,
     material::Concrete,
-    length::Length,
+    length::Length;
+    rebar=nothing,
 )
     Ag = section.b * section.h
-    volume = uconvert(u"m^3", Ag * length)
-    return uconvert(u"kgCO2e", volume * material.ρ * material.ecc)
+    rebar === nothing && return uconvert(u"kgCO2e",
+        uconvert(u"m^3", Ag * length) * material.ρ * material.ecc)
+    return _rc_objective(MinCarbon(), Ag, section.As + section.As_prime, material, rebar, length)
 end
 
 # ==============================================================================

@@ -20,6 +20,12 @@ TRACE_REGISTRY[(:size_members, :sizing)] =
                        [:enter, :exit, :decision, :failure], nothing,
                        @__FILE__, @__LINE__)
 
+"""Concrete plus its longitudinal rebar, so discrete objectives count the steel."""
+function _sizing_material(concrete, rebar)
+    concrete isa ReinforcedConcreteMaterial && return concrete
+    return ReinforcedConcreteMaterial(concrete, rebar)
+end
+
 """Create zero vector matching the units of the input vector."""
 function zeros_like(v::Vector)
     if !isempty(v) && v[1] isa Unitful.Quantity
@@ -447,7 +453,8 @@ function size_columns(
 
     if !isnothing(opts.materials)
         result = optimize_discrete(
-            checker, demands, conc_geoms, cat, opts.materials;
+            checker, demands, conc_geoms, cat,
+            [_sizing_material(m, opts.rebar_material) for m in opts.materials];
             objective = opts.objective,
             n_max_sections = opts.n_max_sections,
             optimizer = opts.solver,
@@ -459,7 +466,7 @@ function size_columns(
         )
     else
         result = optimize_discrete(
-            checker, demands, conc_geoms, cat, opts.material;
+            checker, demands, conc_geoms, cat, _sizing_material(opts.material, opts.rebar_material);
             objective = opts.objective,
             n_max_sections = opts.n_max_sections,
             optimizer = opts.solver,
@@ -567,8 +574,9 @@ function _rc_nlp_export_result(
     end
     obj_val = if ok && n > 0
         concrete = opts.material isa ReinforcedConcreteMaterial ? opts.material.concrete : opts.material
+        rebar = opts.material isa ReinforcedConcreteMaterial ? opts.material.rebar : opts.rebar_material
         ustrip(sum(
-            objective_value(opts.objective, r.section, concrete, conc_geoms[i].L)
+            objective_value(opts.objective, r.section, concrete, conc_geoms[i].L; rebar=rebar)
             for (i, r) in enumerate(nlp_results)
         ))
     else
@@ -902,7 +910,8 @@ function size_beams(
     # Optimize — multi-material if grades vector is provided
     if !isnothing(opts.materials)
         result = optimize_discrete(
-            checker, demands, conc_geoms, cat, opts.materials;
+            checker, demands, conc_geoms, cat,
+            [_sizing_material(m, opts.rebar_material) for m in opts.materials];
             objective      = opts.objective,
             n_max_sections = opts.n_max_sections,
             optimizer      = opts.solver,
@@ -914,7 +923,7 @@ function size_beams(
         )
     else
         result = optimize_discrete(
-            checker, demands, conc_geoms, cat, opts.material;
+            checker, demands, conc_geoms, cat, _sizing_material(opts.material, opts.rebar_material);
             objective      = opts.objective,
             n_max_sections = opts.n_max_sections,
             optimizer      = opts.solver,
@@ -1036,8 +1045,16 @@ function size_beams(
     M1y::Union{Nothing, Vector} = nothing,
     M2y::Union{Nothing, Vector} = nothing,
     transverse_load::Union{Nothing, Bool, AbstractVector} = nothing,
+    shell_spans = nothing,
 )
     length(Pu) == length(Mu) || throw(ArgumentError("Pu and Mu must have same length"))
+    # The story shell passes one span list per group. This checker has no
+    # shell-span slot, so a live-load limit cannot be applied to those spans.
+    if shell_spans !== nothing && opts.deflection_limit !== nothing &&
+            any(!isempty, shell_spans)
+        throw(ArgumentError(
+            "steel beam sizing cannot apply story-shell live-load spans"))
+    end
     length(Pu_t) == length(Mu) || throw(ArgumentError("Pu_t and Mu must have same length"))
     # AISC 360-16 §H1.1 (compression, page 133) and §H1.2 (tension, page 134)
     # — corpus: aisc-360-16. `Pu` is Pu_c; `Pu_t` is the tension magnitude.
@@ -2803,7 +2820,7 @@ function size_tbeams(
     )
 
     return optimize_discrete(
-        checker, demands, conc_geoms, cat, opts.material;
+        checker, demands, conc_geoms, cat, _sizing_material(opts.material, opts.rebar_material);
         objective      = opts.objective,
         n_max_sections = opts.n_max_sections,
         optimizer      = opts.solver,

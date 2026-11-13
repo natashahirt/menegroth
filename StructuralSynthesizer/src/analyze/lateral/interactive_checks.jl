@@ -782,7 +782,8 @@ function _frame_floor_catalog(kind::Symbol, opts)
     else
         StructuralSizer.rc_beam_catalog(opts.catalog)
     end
-    obj = s -> StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
+    obj = s -> StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m";
+                                               rebar=opts.rebar_material)
     return (catalog = cat, objective = obj)
 end
 

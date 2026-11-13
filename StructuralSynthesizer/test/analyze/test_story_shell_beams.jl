@@ -92,9 +92,7 @@ function _one_bay_building(; Lx = 6.0, Ly = 4.0, z = 3.0)
     cell = Cell(fidx, Lx * Ly * u"m^2", spans, 2.0u"kN/m^2", 3.0u"kN/m^2")
     cell.floor_type = :one_way
     push!(struc.cells, cell)
-    push!(struc.slabs, Slab{Float64}([1], CIPSlabResult(0.2, 0.2, 5.0), :one_way, spans,
-                                     :interior, nothing, MaterialVolumes(), nothing, nothing,
-                                     FramingLevel{Float64}[]))
+    push!(struc.slabs, Slab([1], CIPSlabResult(0.2, 0.2, 5.0), spans; floor_type = :one_way))
     for e in sort(collect(skel.groups_edges[:beams]))
         L = ustrip(u"m", skel.geometry.edge_lengths[e])
         push!(struc.segments, StructuralSynthesizer.Segment(e, L))

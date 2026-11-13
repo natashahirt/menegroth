@@ -236,45 +236,51 @@ function objective_value(
     ::MinVolume,
     section::RCTBeamSection,
     material::Concrete,
-    length::Length,
+    length::Length;
+    rebar=nothing,
 )
     Ag = section.bw * section.h
     uconvert(u"m^3", Ag * length)
 end
 
-"""Objective value: self-weight (web only) of the T-beam per unit length."""
+"""Self-weight of the T-beam web (kN). Flange concrete stays with the slab. Longitudinal steel is included when `rebar` is passed."""
 function objective_value(
     ::MinWeight,
     section::RCTBeamSection,
     material::Concrete,
-    length::Length,
+    length::Length;
+    rebar=nothing,
 )
     Ag = section.bw * section.h
-    uconvert(u"kN", Ag * length * material.ρ * 1u"gn")
+    rebar === nothing && return uconvert(u"kN", Ag * length * material.ρ * 1u"gn")
+    return _rc_objective(MinWeight(), Ag, section.As + section.As_prime, material, rebar, length; as=u"kN")
 end
 
-"""Objective value: cost proxy (web volume) for the T-beam per unit length."""
+"""Cost of the T-beam web. Without `rebar`, web volume (m³)."""
 function objective_value(
     ::MinCost,
     section::RCTBeamSection,
     material::Concrete,
-    length::Length,
+    length::Length;
+    rebar=nothing,
 )
     Ag = section.bw * section.h
-    uconvert(u"m^3", Ag * length)
+    rebar === nothing && return uconvert(u"m^3", Ag * length)
+    return _rc_objective(MinCost(), Ag, section.As + section.As_prime, material, rebar, length)
 end
 
-"""Objective value: embodied carbon of the T-beam (web only) per unit length,
-returned as a typed `kgCO₂e` quantity (Asap `𝐗` dimension)."""
+"""Embodied carbon of the T-beam web, a typed `kgCO₂e` quantity."""
 function objective_value(
     ::MinCarbon,
     section::RCTBeamSection,
     material::Concrete,
-    length::Length,
+    length::Length;
+    rebar=nothing,
 )
     Ag = section.bw * section.h
-    volume = uconvert(u"m^3", Ag * length)
-    return uconvert(u"kgCO2e", volume * material.ρ * material.ecc)
+    rebar === nothing && return uconvert(u"kgCO2e",
+        uconvert(u"m^3", Ag * length) * material.ρ * material.ecc)
+    return _rc_objective(MinCarbon(), Ag, section.As + section.As_prime, material, rebar, length)
 end
 
 function diagnose_infeasibility(

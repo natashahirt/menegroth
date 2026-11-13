@@ -172,7 +172,8 @@ function precompute_capacities!(
     # Build material tuple from RC material
     mat = to_material_tuple(material)
     
-    _precompute_diagrams!(checker, cache, catalog, material.concrete, mat, objective, n)
+    _precompute_diagrams!(checker, cache, catalog, material.concrete, mat, objective, n;
+                          rebar=material.rebar)
 end
 
 """
@@ -189,10 +190,11 @@ function _precompute_diagrams!(
     concrete::Concrete,  # For objective_value (needs Concrete, not tuple)
     mat::NamedTuple,     # For P-M calculations
     objective::AbstractObjective,
-    n::Int
+    n::Int;
+    rebar=nothing,
 )
     # Determine target unit for objective
-    ref_obj = objective_value(objective, catalog[1], concrete, 1.0u"m")
+    ref_obj = objective_value(objective, catalog[1], concrete, 1.0u"m"; rebar=rebar)
     ref_unit = unit(ref_obj)
     
     # Thread-safe: each iteration writes to distinct cache indices (no cross-deps)
@@ -211,7 +213,7 @@ function _precompute_diagrams!(
         )
         
         # Objective coefficient (value per meter)
-        val = objective_value(objective, section, concrete, 1.0u"m")
+        val = objective_value(objective, section, concrete, 1.0u"m"; rebar=rebar)
         if ref_unit != Unitful.NoUnits
             cache.obj_coeffs[j] = ustrip(ref_unit, val)
         else
@@ -484,34 +486,46 @@ function objective_value(
     ::MinVolume,
     section::RCColumnSection,
     material::Concrete,
-    length::Length
+    length::Length;
+    rebar=nothing,
 )
-    # Cross-sectional area
+    # Member volume. Steel replaces concrete, so it does not add volume.
     Ag = section.b * section.h
-    # Volume = area × length
     return uconvert(u"m^3", Ag * length)
 end
 
-"""Minimum-weight objective for a rectangular RC column (kg)."""
+"""Minimum-weight objective for a rectangular RC column (kg).
+
+With `rebar`, the steel area is weighed at the rebar density and the
+remaining gross area at the concrete density.
+"""
 function objective_value(
     ::MinWeight,
     section::RCColumnSection,
     material::Concrete,
-    length::Length
+    length::Length;
+    rebar=nothing,
 )
     Ag = section.b * section.h
-    return uconvert(u"kg", Ag * length * material.ρ)
+    rebar === nothing && return uconvert(u"kg", Ag * length * material.ρ)
+    return _rc_objective(MinWeight(), Ag, section.As_total, material, rebar, length)
 end
 
-"""Minimum-cost objective for a rectangular RC column (m³ volume proxy)."""
+"""Minimum-cost objective for a rectangular RC column.
+
+Without `rebar`, gross volume (m³), the historical proxy. With `rebar`,
+concrete and longitudinal steel at their unit costs.
+"""
 function objective_value(
     ::MinCost,
     section::RCColumnSection,
     material::Concrete,
-    length::Length
+    length::Length;
+    rebar=nothing,
 )
     Ag = section.b * section.h
-    return uconvert(u"m^3", Ag * length)
+    rebar === nothing && return uconvert(u"m^3", Ag * length)
+    return _rc_objective(MinCost(), Ag, section.As_total, material, rebar, length)
 end
 
 """Minimum-volume objective for a circular RC column (m³)."""
@@ -519,7 +533,8 @@ function objective_value(
     ::MinVolume,
     section::RCCircularSection,
     material::Concrete,
-    length::Length
+    length::Length;
+    rebar=nothing,
 )
     return uconvert(u"m^3", section.Ag * length)
 end
@@ -529,19 +544,23 @@ function objective_value(
     ::MinWeight,
     section::RCCircularSection,
     material::Concrete,
-    length::Length
+    length::Length;
+    rebar=nothing,
 )
-    return uconvert(u"kg", section.Ag * length * material.ρ)
+    rebar === nothing && return uconvert(u"kg", section.Ag * length * material.ρ)
+    return _rc_objective(MinWeight(), section.Ag, section.As_total, material, rebar, length)
 end
 
-"""Minimum-cost objective for a circular RC column (m³ volume proxy)."""
+"""Minimum-cost objective for a circular RC column."""
 function objective_value(
     ::MinCost,
     section::RCCircularSection,
     material::Concrete,
-    length::Length
+    length::Length;
+    rebar=nothing,
 )
-    return uconvert(u"m^3", section.Ag * length)
+    rebar === nothing && return uconvert(u"m^3", section.Ag * length)
+    return _rc_objective(MinCost(), section.Ag, section.As_total, material, rebar, length)
 end
 
 """Minimum-carbon objective for a rectangular RC column. Returns a typed
@@ -551,11 +570,13 @@ function objective_value(
     ::MinCarbon,
     section::RCColumnSection,
     material::Concrete,
-    length::Length
+    length::Length;
+    rebar=nothing,
 )
     Ag = section.b * section.h
-    volume = uconvert(u"m^3", Ag * length)
-    return uconvert(u"kgCO2e", volume * material.ρ * material.ecc)
+    rebar === nothing && return uconvert(u"kgCO2e",
+        uconvert(u"m^3", Ag * length) * material.ρ * material.ecc)
+    return _rc_objective(MinCarbon(), Ag, section.As_total, material, rebar, length)
 end
 
 """Minimum-carbon objective for a circular RC column. Returns a typed
@@ -564,10 +585,12 @@ function objective_value(
     ::MinCarbon,
     section::RCCircularSection,
     material::Concrete,
-    length::Length
+    length::Length;
+    rebar=nothing,
 )
-    volume = uconvert(u"m^3", section.Ag * length)
-    return uconvert(u"kgCO2e", volume * material.ρ * material.ecc)
+    rebar === nothing && return uconvert(u"kgCO2e",
+        uconvert(u"m^3", section.Ag * length) * material.ρ * material.ecc)
+    return _rc_objective(MinCarbon(), section.Ag, section.As_total, material, rebar, length)
 end
 
 # ==============================================================================

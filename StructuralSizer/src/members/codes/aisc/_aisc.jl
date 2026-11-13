@@ -8,4 +8,5 @@ include("generic/_generic.jl")
 include("composite/_composite.jl")
 
 # Capacity Checker (implements AbstractCapacityChecker interface)
+include("shell_deflection.jl")
 include("checker.jl")

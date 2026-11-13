@@ -75,6 +75,33 @@ function objective_value(::MinCarbon, s::AbstractSection, mat::AbstractMaterial,
 end
 
 """
+Concrete and longitudinal-steel parts of one RC section.
+
+`As` replaces concrete inside `Ag`. Ties and stirrups are not in `As`.
+`cost` on both materials is USD/kg stored as a bare number, so a `MinCost`
+result has mass units and a dollar value, matching
+[`objective_value(::MinCost, ::AbstractSection)`](@ref).
+"""
+function _rc_objective(obj::AbstractObjective, Ag, As, concrete, rebar, L; as=u"kg")
+    Ac = Ag - As
+    Ac < zero(Ac) && (Ac = zero(Ac))
+    mc = uconvert(u"kg", Ac * L * concrete.ρ)
+    ms = uconvert(u"kg", As * L * rebar.ρ)
+    if obj isa MinWeight
+        mass = mc + ms
+        return as == u"kg" ? mass : uconvert(as, mass * 1u"gn")
+    elseif obj isa MinCarbon
+        return uconvert(u"kgCO2e", mc * concrete.ecc + ms * rebar.ecc)
+    elseif obj isa MinCost
+        isnan(concrete.cost) && error("MinCost requires material.cost to be set (concrete has cost=NaN)")
+        isnan(rebar.cost) && error("MinCost requires material.cost to be set (rebar has cost=NaN)")
+        return mc * concrete.cost + ms * rebar.cost
+    else
+        error("$(typeof(obj)) has no rebar split")
+    end
+end
+
+"""
     total_objective(obj, sections, materials, lengths) -> Unitful.Quantity
 
 Sum of [`objective_value`](@ref) over all member groups (one material per

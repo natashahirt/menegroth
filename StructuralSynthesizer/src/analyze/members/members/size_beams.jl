@@ -897,8 +897,12 @@ function _composite_lock_catalog(struc::BuildingStructure, group_ids)
 end
 
 """Objective of `s` per unit length under `opts`, the order the catalog search minimizes."""
-_section_objective(opts, s) =
-    StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
+function _section_objective(opts, s)
+    rebar = hasproperty(opts, :rebar_material) ? opts.rebar_material : nothing
+    rebar === nothing &&
+        return StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
+    return StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m"; rebar=rebar)
+end
 
 """
     _apply_section_floor(opts, group_ids, catalog, feasible, floors) -> (catalog, feasible)

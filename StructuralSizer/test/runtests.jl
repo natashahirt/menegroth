@@ -66,6 +66,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
     # ─── Concrete Beams ──────────────────────────────────────────────────
     @testset "Concrete Beams" begin
         include("concrete_beam/test_beam_section.jl")
+        include("concrete_beam/test_rc_rebar_objective.jl")
         include("concrete_beam/test_beam_flexure.jl")
         include("concrete_beam/test_beam_shear.jl")
         include("concrete_beam/test_beam_design.jl")

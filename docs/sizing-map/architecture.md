@@ -126,6 +126,64 @@ fast. Otherwise the comparison between two layouts is noise from the sizing
 path, which is the main argument for doing this work before layout
 optimisation.
 
+### Two tiers: exploration and verification
+
+The outer level needs sizing in milliseconds to seconds; trust needs the full
+sizer. So every element type gets two fidelities behind the same interface:
+
+- **Fast tier:** cheap demands (closed form where the geometry allows,
+  coarse FEA elsewhere), the same checks, the same owners. Used to explore and
+  rank layouts and systems.
+- **Full tier:** today's sizer (fine FEA, punching, P-Δ, walls, MIPs, joint
+  searches) plus the verifier. Run only on shortlisted options.
+
+Requirement: **a fast version for everything we design**, including
+unconventional layouts (irregular slab outlines, waffles on odd grids,
+setbacks, openings). Tributary rules alone cannot provide that, so the fast
+tier for irregular geometry is coarse FEA, made cheap by:
+
+- **Superposition.** Solve unit cases once per geometry (self-weight per unit
+  thickness, SDL, live, patterns) and combine linearly. For a slab of uniform
+  stiffness, the internal force distribution does not depend on thickness, so
+  demands at any candidate h are exact from one solve. The thickness-jump
+  scaling already uses this. It is approximate where relative stiffness
+  changes (drop panels, solid heads versus ribs, beams), and the error there
+  must be measured.
+- **Reuse.** Geometry is fixed while sizing, so meshes and factorizations are
+  built once per layout; typical bays and repeated floors are fingerprinted
+  and cached.
+- **Smeared models.** Waffles and ribbed slabs as equivalent orthotropic
+  plates in the fast tier; explicit ribs and solid heads in the full tier.
+
+Fidelity ladder (to confirm in the code audit):
+
+| Element | Fast tier | Full tier |
+|---|---|---|
+| Flat plate / flat slab | DDM/EFM where applicable, else coarse FEA by superposition | Fine FEA, punching, joint search |
+| Waffle, ribbed, irregular | Coarse orthotropic plate FEA | Rib frames + shell FEA |
+| Beams, columns (gravity) | Tributary or coarse-frame demands, catalog lookup | Full frame, MIP, P-Δ |
+| Walls, lateral | ELF, rigid diaphragm, analytic wall stiffness, drift sensitivity | Shell model, wall checks, thickness loop |
+| Foundations | Rigid statics | Winkler / Shukla, combinations |
+
+Rules:
+
+1. **Checks and owners are shared.** Only the demand source differs between
+   tiers. Fidelity is a property of the analysis service, not something baked
+   into each designer. Today several designers embed their analysis method
+   (the flat-plate kernel runs DDM/EFM/FEA inside itself); separating the two
+   is the main refactor this needs.
+2. **Code-restricted methods stay within their limits.** DDM and EFM are used
+   only where their applicability checks pass; coarse FEA covers the rest.
+3. **Calibrated, not assumed.** Each fast model has a measured error band
+   against the full tier, per element type and per system. Ranking is safe
+   when the bias is similar across the options being compared; it is not when
+   one system's fast model is conservative and another's is not, so the bands
+   are tracked per system.
+4. **Shortlist by bands.** Every option whose fast-tier carbon band overlaps
+   the best one goes to full verification.
+5. **Only verified designs are reported as designs.** Fast-tier results are
+   labelled estimates.
+
 ## 6. Measures of success
 
 From the Phase 1 baseline onward, every change reports:

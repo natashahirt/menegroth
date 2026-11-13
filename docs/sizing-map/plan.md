@@ -69,6 +69,7 @@ All are signed off (see Decisions) except 0.8.
 | 0.6 | Wall carbon: concrete × column concrete factor, designed ρt/ρl rebar × rebar factor | Wall row in `DesignSummary` and takeoff |
 | 0.7 | Drop panels, shear caps and studs split out of building totals | Per-element takeoff on B3 sums to today's totals |
 | 0.8 | Vertical-floor safety gaps (list below): confirm each by reading code, then bring to the user. **No code until signed off** | One-page note per confirmed gap with code and clause |
+| 0.9 | Grade walls do not reach wall-strip or mat design (reported 2026-11-13). Confirm whether grade-wall load is missing from foundation demands (unconservative) or only designed elsewhere; bring to the user | Note with the load path traced end to end |
 
 Vertical-floor gaps for 0.8 (from `raw/vertical-floor-interaction.md` §11;
 the ones marked inferred need confirming before they go to the user):
@@ -109,6 +110,7 @@ The frame the remaining phases plug into. Lives beside `BuildingStructure`.
 | 2.2 | Owner interface: requirements in; value, utilisation and governing check out. Wrap today's stages as owners without changing their logic | B1–B7 sizes and carbon identical to baseline |
 | 2.3 | Round controller: one building analysis per round, move limits, hybrid cycle rule (a cycling variable becomes grow-only), skip owners whose requirements did not change, per-round audit record | Unit tests on a toy problem: converges, detects a two-cycle, stops at budget |
 | 2.4 | Final verifier as its own module: full analysis plus all checks, no imports from demand models, move limits or clusters | Fails a deliberately undersized design in a test |
+| 2.5 | Rebar in every RC objective (columns, beams, slabs, walls, footings). Owners pick on carbon from Phase 3 on; without rebar a thin, heavily reinforced section looks cheaper than it is | Objective matches the takeoff carbon for each RC element type |
 
 ### Phase 3 — Columns as the first owner (largest size win)
 
@@ -120,6 +122,7 @@ Columns appear in ranks 1, 3, 4, 5 and 9.
 | 3.2 | Drop stacking as a sizing rule; harmonize becomes an optional policy comparing whole sections | O3: no `stacking` drivers |
 | 3.3 | Flat-plate joint search as the first cluster: top-down by story, emits punching requirements instead of writing sizes | Building-level joint-search tests pass; replaces the stored per-column floor work |
 | 3.4 | Seed from axial demand; flat-plate restarts reset columns to their requirements | O3: no `seed` drivers |
+| 3.5 | Section floors (beams and columns, including story-shell floors) become requirements tagged with their source round, and lapse when the source changes. Replaces the story-shell trim that runs only on a finished first call | No `section_floor` driver whose source has changed |
 
 Exit: O1, O2, O3 met on B1–B5; O4 and O5 reported against baseline.
 
@@ -151,7 +154,23 @@ Absorbs the former Workstream V. Source: `raw/vertical-floor-interaction.md`
 | 6.1 | Two-way: size beams, compute αfm, re-check h (Eq. 9-12/9-13), re-size beams once (rank 2); credit wall edges in mixed panels | B4 slab h at or below baseline, verified |
 | 6.2 | Spread footings: rectangular; joint (B, h) minimum volume (rank 15) | Footing carbon at or below baseline, verified |
 | 6.3 | Mat strips: the remaining open items (Decisions) after corpus check (rank 7) | Signed off before code |
-| 6.4 | Policies separated: uniform sizing, grouping and harmonize declared as named, switchable policies; retire the remaining grow-only paths | Policy list in the run JSON |
+| 6.4 | Mat rigidity ratio includes the framed-member (superstructure) stiffness term, after a corpus check of its definition (ACI 336.2R). Changes rigid versus flexible classification | Hand test on a mat with and without framing |
+| 6.5 | Policies separated: uniform sizing, grouping and harmonize declared as named, switchable policies; retire the remaining grow-only paths. Foundation permissions (§12.13.4, Ev = 0, 0.5L) return here as named policies | Policy list in the run JSON |
+
+### Workstream F — Fast tier for exploration (from Phase 2 on)
+
+Design: `architecture.md` "Two tiers". Goal: a fast version of every element
+type, including unconventional layouts, verified by the full tier.
+
+| WP | Work | Acceptance |
+|---|---|---|
+| F.1 | Code-structure audit: per element type, where the analysis method is embedded in the designer, which checks are pure, and what a fast demand source would need. Part of the re-audit after the current feature work lands | Inventory table per element type, with file:line |
+| F.2 | Irregular benchmarks alongside B1–B7: L-shaped flat plate with an opening, waffle on a non-orthogonal grid, a setback building, a wall core off centre | Fixtures run through the full tier |
+| F.3 | Fidelity as a property of the analysis service (fast / full) behind the Phase 2 owner interface; designers stop choosing their own analysis | One owner runs at both fidelities with identical checks |
+| F.4 | Fast slab demands by superposition of unit cases on a coarse mesh, mesh and factorization cached per layout; DDM/EFM only within their limits | Fast and full slab h agree within the measured band on B1–B3 and F.2 |
+| F.5 | Smeared orthotropic waffle/ribbed fast model | Band measured against the rib-frame model |
+| F.6 | Fast models for members, walls/lateral and foundations per the fidelity ladder | Band per element type and per system |
+| F.7 | Exploration runner: sweep layouts and systems in the fast tier, shortlist by overlapping bands, verify the shortlist in the full tier | Fast tier ranks the verified best option within the shortlist on every test sweep |
 
 ### Phase 7 — Speed (parallel track from Phase 1)
 
@@ -169,7 +188,7 @@ and verified) and a measured runtime or analysis-count drop.
 
 ### Later
 
-Drop-panel depth and extent in the joint search; rebar in RC objectives;
+Drop-panel depth and extent in the joint search;
 waffle per-corner heads; one-way per-cell thickness; slab-column frame
 sharing lateral load; `deck_floor_diaphragm` to set the diaphragm
 automatically; wall layout NLP as the first outer-level stage.
@@ -216,6 +235,10 @@ commit pass) are superseded by 3.3.
 - Demand models versus re-analysis decided per element type by measurement
   (7.6).
 - Efficiency is a first-class goal alongside carbon.
+- Two tiers (user, 2026-11-13): fast exploration plus rigorous verification
+  of promising designs. Every designed element type needs a fast version,
+  including unconventional layouts (e.g. irregular slabs with a waffle grid),
+  verified with the FEA. A clear code architecture is a prerequisite.
 - Objectives (user, 2026-11-11): O2 thresholds (≥ 95% identical sizes,
   carbon within 1%) approved. O4 oversize measured against the lightest size
   each element's own final demands allow (one extra sizing run per
@@ -244,6 +267,19 @@ commit pass) are superseded by 3.3.
   friction coefficient is given, flagged otherwise; footing and soil weight
   in D; ±X and ±Y separately (orthogonal combination after §12.5 research);
   pattern live cases enveloped.
+
+### Status from in-flight work (2026-11-13)
+
+Foundation permissions stay out for now: §12.13.4 overturning reduction,
+Ev = 0 at the soil, the 0.5L factor and any allowable bearing increase. The
+first three only lighten footings, so they return later as named policies
+(6.5); the bearing increase stays out unless justified per §2.4.1. Partial
+contact stays out (conservative). Sliding is different: it is a missing
+check, not a permission, and still needs the resistance basis from the user
+(0.4b).
+
+Size-changing items that land before the 1.6 freeze are part of the baseline;
+anything later is measured as its own row against it.
 
 ### Phase 1 sign-offs (user, 2026-11-11)
 

@@ -7,12 +7,12 @@ title: Beam NLP constrains each sagging case; NLP keeps a Row F section floor
 node_label: Per-case beam NLP and section floors
 tags: row-f,nlp,beams,columns,section-floor
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-37be5cf1
 created_at: '2026-11-13T14:46:16.858499+00:00'
-updated_at: '2026-11-13T14:46:16.858499+00:00'
+updated_at: '2026-11-13T14:56:22.634267+00:00'
 has_child_rationale: Both leftovers in the member follow-up are implemented and tested.
 ---
 Worktree /tmp/menegroth-rowf, branch row-f-nlp. Not committed.

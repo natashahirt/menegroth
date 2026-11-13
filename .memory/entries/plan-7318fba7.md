@@ -7,12 +7,12 @@ title: Remaining member and foundation sizing gaps, one verified chunk at a time
 node_label: Open sizing gaps
 tags: nlp,deflection,joist,section-floor,foundations,two-way
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-37be5cf1
 created_at: '2026-11-13T14:56:22.634267+00:00'
-updated_at: '2026-11-13T14:56:22.634267+00:00'
+updated_at: '2026-11-13T15:05:01.717901+00:00'
 has_child_rationale: User asked to walk the remaining open items autonomously.
 ---
 Autonomous pass on row-f-nlp after 3b231dad. Do not take sliding, partial contact, the overturning reduction, Ev = 0, the 0.5 live factor, or a qa increase.

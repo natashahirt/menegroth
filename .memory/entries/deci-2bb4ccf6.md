@@ -7,12 +7,12 @@ title: Slab picture stays on the solver mid-plane
 node_label: Mid-plane slab picture
 tags: viewer,slab,mid-plane,shell,deck,ribs
 status: active
-open_threads: 1
+open_threads: 2
 success: 'null'
 files: ''
 session_id: sess-67f85c6c
 created_at: '2026-11-06T23:18:23.591782+00:00'
-updated_at: '2026-11-06T23:23:30.046618+00:00'
+updated_at: '2026-11-13T15:05:52.833860+00:00'
 has_child_rationale: User chose the picture that matches the shell node rather than
   a floor drawn down from story elevation.
 ---

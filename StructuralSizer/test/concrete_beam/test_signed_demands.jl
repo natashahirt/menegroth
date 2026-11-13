@@ -318,6 +318,15 @@ end
                                  Mu_neg=[0.0], Nu=[-20.0kip])
         @test length(trs) == 1
         @test trs[1].status in (:optimal, :feasible, :infeasible)
+
+        # §8.13.8: a rib that meets §8.13.2 and §8.13.3 gets 1.10 Vc.
+        # bw = 6 in, h = 16 ≤ 3.5×6, clear spacing 20−6 = 14 ≤ 30 in.
+        rib = [6.0, 16.0, 0.012]
+        plain_rib = RCTBeamNLPProblem(1.0kip * u"ft", Vu_mid * kip, bf, hf, opts)
+        joist_rib = RCTBeamNLPProblem(1.0kip * u"ft", Vu_mid * kip, bf, hf, opts;
+                                     joist_spacing=20.0u"inch")
+        @test constraint_fns(joist_rib, rib)[2] < constraint_fns(plain_rib, rib)[2]
+        @test StructuralSizer._joist_vc_multiplier(6.0, 16.0, 20.0) == 1.10
     end
 
     @testset "Joist Vc and per-case discrete shear" begin

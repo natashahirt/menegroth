@@ -105,6 +105,8 @@ struct RCTBeamNLPProblem <: AbstractNLPProblem
     shear_cases::Vector{RCBeamNLPShearCase}
     # One sagging moment per load case, kip·ft.
     flexure_cases::Vector{Float64}
+    # Center-to-center rib spacing, inches. 0 is not joist construction.
+    joist_spacing_in::Float64
 end
 
 """
@@ -120,7 +122,7 @@ function RCTBeamNLPProblem(Mu, Vu, bf, hf, opts::NLPBeamOptions;
                            support::Symbol=:simply_supported, ξ::Float64=2.0,
                            sustained_live_fraction::Real=0.0,
                            Tu=0.0, Nu=0.0, shear_cases=nothing,
-                           flexure_cases=nothing)
+                           flexure_cases=nothing, joist_spacing=nothing)
     fc = fc_ksi(opts.material)
     fy = fy_ksi(opts.rebar_material)
     Es = Es_ksi(opts.rebar_material)
@@ -171,6 +173,8 @@ function RCTBeamNLPProblem(Mu, Vu, bf, hf, opts::NLPBeamOptions;
     Nu_kip_val = Nu isa Unitful.Quantity ? to_kip(Nu) : Float64(Nu)
     cases = _beam_nlp_shear_cases(Vu_kip, Nu_kip_val, Tu_kipin_val, shear_cases)
     moments = _beam_nlp_flexure_cases(Mu_kipft, flexure_cases)
+    joist_in = joist_spacing === nothing ? 0.0 :
+        (joist_spacing isa Unitful.Quantity ? ustrip(u"inch", joist_spacing) : Float64(joist_spacing))
 
     RCTBeamNLPProblem(
         Mu_kipft, Vu_kip, opts,
@@ -185,6 +189,7 @@ function RCTBeamNLPProblem(Mu, Vu, bf, hf, opts::NLPBeamOptions;
         Nu_kip_val,
         cases,
         moments,
+        joist_in,
     )
 end
 
@@ -359,7 +364,11 @@ function constraint_fns(p::RCTBeamNLPProblem, x::Vector{Float64})
     Ag_comp = Af + bw * hw
     Ag_tens = bw * h
     for sc in p.shear_cases
-        φVn_max_kip = _φVn_with_axial(bw, d, Ag_comp, Ag_tens, p.fc_psi, p.λ, sc.Nu_kip)
+        # §8.13.8 raises Vc only while the rib meets §8.13.2 and §8.13.3.
+        # A rib that misses them is a beam (vc factor 1).
+        factor = _joist_vc_multiplier(bw, h, p.joist_spacing_in)
+        φVn_max_kip = _φVn_with_axial(bw, d, Ag_comp, Ag_tens, p.fc_psi, p.λ, sc.Nu_kip;
+                                     vc_factor=factor)
         push!(constraints, sc.Vu_kip / max(φVn_max_kip, 1e-6))
     end
 

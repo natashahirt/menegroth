@@ -1688,9 +1688,8 @@ function _size_beams_impl!(
             "include_flange=true but no slabs found. Size slabs first.")
 
         specs = _compute_flange_params(struc, group_ids)
-        any(s -> s !== nothing && s.joist_spacing !== nothing, specs) && throw(ArgumentError(
-            "NLP T-beam sizing does not cover joist ribs (ACI 318-11 §8.13); " *
-            "use sizing_strategy = :discrete for this framing level"))
+        # §8.13.8's Vc increase is inside the T-beam NLP. A rib that misses
+        # §8.13.2 or §8.13.3 is checked as a beam.
         # The flange widens with the web, so the narrowest web the NLP may pick
         # gives a flange no candidate exceeds (ACI 318-11 §8.12.2).
         bf_vec = [s === nothing ? nothing :
@@ -1712,11 +1711,14 @@ function _size_beams_impl!(
             bf_t  = [bf_vec[i] for i in tbeam_idx]
             hf_t  = [hf_vec[i] for i in tbeam_idx]
 
+            joist_t = [specs[i] === nothing ? nothing : specs[i].joist_spacing
+                       for i in tbeam_idx]
             t_results = StructuralSizer.size_rc_tbeams_nlp(Mu_t, Vu_t, bf_t, hf_t, nlp_opts;
                                                           Mu_neg=Mu_neg[tbeam_idx],
                                                           Nu=Nu[tbeam_idx],
                                                           shear_cases=shear_cases[tbeam_idx],
                                                           flexure_cases=flexure_cases[tbeam_idx],
+                                                          joist_spacing=joist_t,
                                                           sustained_live_fraction=opts.sustained_live_fraction)
 
             for (k, g_idx) in enumerate(tbeam_idx)

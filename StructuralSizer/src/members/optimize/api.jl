@@ -2862,6 +2862,7 @@ function size_rc_tbeam_nlp(
     Mu_neg = nothing,
     shear_cases = nothing,
     flexure_cases = nothing,
+    joist_spacing = nothing,
     x0::Union{Nothing,Vector{Float64}} = nothing,
     w_dead = nothing,
     w_live = nothing,
@@ -2875,7 +2876,8 @@ function size_rc_tbeam_nlp(
                                 support=defl_support, ξ=defl_ξ,
                                 sustained_live_fraction=sustained_live_fraction,
                                 Tu=Tu, Nu=Nu, shear_cases=shear_cases,
-                                flexure_cases=flexure_cases)
+                                flexure_cases=flexure_cases,
+                                joist_spacing=joist_spacing)
 
     opt_result = optimize_continuous(
         problem;
@@ -2932,6 +2934,7 @@ function size_rc_tbeams_nlp(
     Nu::Vector = zeros_like(Vu),
     shear_cases = nothing,
     flexure_cases = nothing,
+    joist_spacing = nothing,
     w_dead = nothing,
     w_live = nothing,
     L_span = nothing,
@@ -2967,9 +2970,10 @@ function size_rc_tbeams_nlp(
     for i in 1:n
         sc = shear_cases === nothing ? nothing : shear_cases[i]
         fc = flexure_cases === nothing ? nothing : flexure_cases[i]
+        js = joist_spacing isa AbstractVector ? joist_spacing[i] : joist_spacing
         results[i] = size_rc_tbeam_nlp(Mu[i], Vu[i], bf_vec[i], hf_vec[i], opts;
                                         Mu_neg=Mu_neg[i], Nu=Nu[i], shear_cases=sc,
-                                        flexure_cases=fc,
+                                        flexure_cases=fc, joist_spacing=js,
                                         w_dead=wd_vec[i], w_live=wl_vec[i],
                                         L_span=Ls_vec[i],
                                         defl_support=defl_support, defl_ξ=defl_ξ,

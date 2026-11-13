@@ -20,10 +20,10 @@ TRACE_REGISTRY[(:size_members, :sizing)] =
                        [:enter, :exit, :decision, :failure], nothing,
                        @__FILE__, @__LINE__)
 
-"""Concrete plus its longitudinal rebar, so discrete objectives count the steel."""
-function _sizing_material(concrete, rebar)
+"""Concrete plus longitudinal and transverse rebar, so discrete objectives count both."""
+function _sizing_material(concrete, rebar, transverse = rebar)
     concrete isa ReinforcedConcreteMaterial && return concrete
-    return ReinforcedConcreteMaterial(concrete, rebar)
+    return ReinforcedConcreteMaterial(concrete, rebar, transverse)
 end
 
 """Create zero vector matching the units of the input vector."""
@@ -454,7 +454,7 @@ function size_columns(
     if !isnothing(opts.materials)
         result = optimize_discrete(
             checker, demands, conc_geoms, cat,
-            [_sizing_material(m, opts.rebar_material) for m in opts.materials];
+            [_sizing_material(m, opts.rebar_material, get_transverse_rebar(opts)) for m in opts.materials];
             objective = opts.objective,
             n_max_sections = opts.n_max_sections,
             optimizer = opts.solver,
@@ -466,7 +466,7 @@ function size_columns(
         )
     else
         result = optimize_discrete(
-            checker, demands, conc_geoms, cat, _sizing_material(opts.material, opts.rebar_material);
+            checker, demands, conc_geoms, cat, _sizing_material(opts.material, opts.rebar_material, get_transverse_rebar(opts));
             objective = opts.objective,
             n_max_sections = opts.n_max_sections,
             optimizer = opts.solver,
@@ -575,8 +575,11 @@ function _rc_nlp_export_result(
     obj_val = if ok && n > 0
         concrete = opts.material isa ReinforcedConcreteMaterial ? opts.material.concrete : opts.material
         rebar = opts.material isa ReinforcedConcreteMaterial ? opts.material.rebar : opts.rebar_material
+        transverse = opts.material isa ReinforcedConcreteMaterial ? opts.material.transverse :
+                     get_transverse_rebar(opts)
         ustrip(sum(
-            objective_value(opts.objective, r.section, concrete, conc_geoms[i].L; rebar=rebar)
+            objective_value(opts.objective, r.section, concrete, conc_geoms[i].L;
+                            rebar=rebar, transverse=transverse)
             for (i, r) in enumerate(nlp_results)
         ))
     else
@@ -911,7 +914,7 @@ function size_beams(
     if !isnothing(opts.materials)
         result = optimize_discrete(
             checker, demands, conc_geoms, cat,
-            [_sizing_material(m, opts.rebar_material) for m in opts.materials];
+            [_sizing_material(m, opts.rebar_material, get_transverse_rebar(opts)) for m in opts.materials];
             objective      = opts.objective,
             n_max_sections = opts.n_max_sections,
             optimizer      = opts.solver,
@@ -923,7 +926,7 @@ function size_beams(
         )
     else
         result = optimize_discrete(
-            checker, demands, conc_geoms, cat, _sizing_material(opts.material, opts.rebar_material);
+            checker, demands, conc_geoms, cat, _sizing_material(opts.material, opts.rebar_material, get_transverse_rebar(opts));
             objective      = opts.objective,
             n_max_sections = opts.n_max_sections,
             optimizer      = opts.solver,
@@ -2820,7 +2823,7 @@ function size_tbeams(
     )
 
     return optimize_discrete(
-        checker, demands, conc_geoms, cat, _sizing_material(opts.material, opts.rebar_material);
+        checker, demands, conc_geoms, cat, _sizing_material(opts.material, opts.rebar_material, get_transverse_rebar(opts));
         objective      = opts.objective,
         n_max_sections = opts.n_max_sections,
         optimizer      = opts.solver,

@@ -75,27 +75,24 @@ function objective_value(::MinCarbon, s::AbstractSection, mat::AbstractMaterial,
 end
 
 """
-Concrete and longitudinal-steel parts of one RC section.
+Concrete, longitudinal steel, and ties or stirrups of one RC section.
 
-`As` replaces concrete inside `Ag`. Ties and stirrups are not in `As`.
-`cost` on both materials is USD/kg stored as a bare number, so a `MinCost`
-result has mass units and a dollar value, matching
-[`objective_value(::MinCost, ::AbstractSection)`](@ref).
+`As` is the longitudinal area. Ties and stirrups come from
+[`transverse_steel_per_length`](@ref) on `section` and replace concrete as
+well. Weight is kilograms for every RC section. `MinCost` stays the gross
+volume and does not come through here.
 """
-function _rc_objective(obj::AbstractObjective, Ag, As, concrete, rebar, L; as=u"kg")
-    Ac = Ag - As
+function _rc_objective(obj::AbstractObjective, Ag, As, concrete, rebar, transverse, L, section)
+    As_tr = transverse_steel_per_length(section, concrete, transverse)
+    Ac = Ag - As - As_tr
     Ac < zero(Ac) && (Ac = zero(Ac))
     mc = uconvert(u"kg", Ac * L * concrete.ρ)
-    ms = uconvert(u"kg", As * L * rebar.ρ)
+    ml = uconvert(u"kg", As * L * rebar.ρ)
+    mt = uconvert(u"kg", As_tr * L * transverse.ρ)
     if obj isa MinWeight
-        mass = mc + ms
-        return as == u"kg" ? mass : uconvert(as, mass * 1u"gn")
+        return mc + ml + mt
     elseif obj isa MinCarbon
-        return uconvert(u"kgCO2e", mc * concrete.ecc + ms * rebar.ecc)
-    elseif obj isa MinCost
-        isnan(concrete.cost) && error("MinCost requires material.cost to be set (concrete has cost=NaN)")
-        isnan(rebar.cost) && error("MinCost requires material.cost to be set (rebar has cost=NaN)")
-        return mc * concrete.cost + ms * rebar.cost
+        return uconvert(u"kgCO2e", mc * concrete.ecc + ml * rebar.ecc + mt * transverse.ecc)
     else
         error("$(typeof(obj)) has no rebar split")
     end

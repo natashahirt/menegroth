@@ -243,3 +243,28 @@ function _beam_top_bars(sec, top_bars)
     comp !== nothing && return (comp..., :compression)
     return (max(4, sec.stirrup_size), 2, :hanger)
 end
+
+"""
+    transverse_steel_per_length(sec, concrete, rebar) -> Area
+
+Volume of closed-stirrup steel per unit length of a beam, at the spacing
+[`design_beam_shear`](@ref) returns for no shear demand.
+
+That spacing is the least steel that still meets ACI 318-11 §11.4.6.3 and
+§11.4.5.1 (corpus: aci-318-11, PDF p. 174). A factored shear can only place
+the stirrups closer. The wire length is the same closed loop the detailing
+draws, two 135-degree hooks included.
+"""
+function transverse_steel_per_length(sec::Union{RCBeamSection, RCTBeamSection}, concrete, rebar)
+    bw = _beam_web(sec)
+    ds = bar_diameter(sec.stirrup_size)
+    w_cl = bw - 2 * sec.cover - ds
+    h_cl = sec.h - 2 * sec.cover - ds
+    (w_cl > zero(w_cl) && h_cl > zero(h_cl)) || return zero(sec.As)
+    sd = design_beam_shear(0.0u"lbf", bw, sec.d, concrete.fc′, rebar.Fy;
+                           λ = concrete.λ, stirrup_bar = sec.stirrup_size)
+    s = sd.s_design
+    s > zero(s) || return zero(sec.As)
+    len = _closed_loop_length(ustrip(u"m", w_cl), ustrip(u"m", h_cl), sec.stirrup_size) * u"m"
+    return bar_area(sec.stirrup_size) * len / s
+end

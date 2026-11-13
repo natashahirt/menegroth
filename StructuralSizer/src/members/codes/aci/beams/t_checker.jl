@@ -238,35 +238,37 @@ function objective_value(
     material::Concrete,
     length::Length;
     rebar=nothing,
+    transverse=nothing,
 )
     Ag = section.bw * section.h
     uconvert(u"m^3", Ag * length)
 end
 
-"""Self-weight of the T-beam web (kN). Flange concrete stays with the slab. Longitudinal steel is included when `rebar` is passed."""
+"""Self-weight of the T-beam web, in kilograms. Flange concrete stays with the slab. Longitudinal steel and stirrups are included when `rebar` is passed."""
 function objective_value(
     ::MinWeight,
     section::RCTBeamSection,
     material::Concrete,
     length::Length;
     rebar=nothing,
+    transverse=nothing,
 )
     Ag = section.bw * section.h
-    rebar === nothing && return uconvert(u"kN", Ag * length * material.ρ * 1u"gn")
-    return _rc_objective(MinWeight(), Ag, section.As + section.As_prime, material, rebar, length; as=u"kN")
+    rebar === nothing && return uconvert(u"kg", Ag * length * material.ρ)
+    trans = transverse === nothing ? rebar : transverse
+    return _rc_objective(MinWeight(), Ag, section.As + section.As_prime, material, rebar, trans, length, section)
 end
 
-"""Cost of the T-beam web. Without `rebar`, web volume (m³)."""
+"""Cost of the T-beam web: web volume (m³)."""
 function objective_value(
     ::MinCost,
     section::RCTBeamSection,
     material::Concrete,
     length::Length;
     rebar=nothing,
+    transverse=nothing,
 )
-    Ag = section.bw * section.h
-    rebar === nothing && return uconvert(u"m^3", Ag * length)
-    return _rc_objective(MinCost(), Ag, section.As + section.As_prime, material, rebar, length)
+    return uconvert(u"m^3", section.bw * section.h * length)
 end
 
 """Embodied carbon of the T-beam web, a typed `kgCO₂e` quantity."""
@@ -276,11 +278,13 @@ function objective_value(
     material::Concrete,
     length::Length;
     rebar=nothing,
+    transverse=nothing,
 )
     Ag = section.bw * section.h
     rebar === nothing && return uconvert(u"kgCO2e",
         uconvert(u"m^3", Ag * length) * material.ρ * material.ecc)
-    return _rc_objective(MinCarbon(), Ag, section.As + section.As_prime, material, rebar, length)
+    trans = transverse === nothing ? rebar : transverse
+    return _rc_objective(MinCarbon(), Ag, section.As + section.As_prime, material, rebar, trans, length, section)
 end
 
 function diagnose_infeasibility(

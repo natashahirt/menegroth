@@ -901,7 +901,10 @@ function _section_objective(opts, s)
     rebar = hasproperty(opts, :rebar_material) ? opts.rebar_material : nothing
     rebar === nothing &&
         return StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
-    return StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m"; rebar=rebar)
+    transverse = hasproperty(opts, :transverse_rebar_material) ?
+                 StructuralSizer.get_transverse_rebar(opts) : rebar
+    return StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m";
+                                           rebar=rebar, transverse=transverse)
 end
 
 """

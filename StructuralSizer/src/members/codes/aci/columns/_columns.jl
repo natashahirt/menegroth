@@ -11,3 +11,6 @@ include("biaxial.jl")
 
 # Checker depends on pm, slenderness, biaxial
 include("checker.jl")
+
+# One-way shear. Ties are sized here; detailing places the spacing it returns.
+include("shear.jl")

@@ -191,6 +191,11 @@ the next):
 
 Rules:
 
+- **A trace is a path through the map** (user, 2026-11-13). Every trace event
+  names the map node it occurred at, and consecutive events of one element
+  follow edges that exist in the map. An event with no node, or a step along
+  an edge the map does not have, is a test failure: either the code took an
+  undocumented path or the map is wrong.
 - **One machine-readable source.** A graph file (nodes: input, stage,
   element, analysis, check, owner, loop, policy, output; edges: data with the
   variable named, feedback, call). Mermaid views per level are generated from
@@ -212,7 +217,7 @@ Rules:
 |---|---|---|
 | T.1 | Graph schema and the Mermaid generator per level | L0 and L1 regenerated from the file match the README stage graph |
 | T.2 | Populate L0–L2 for every element type from the re-audit (shared with F.1); L3 for the checks the plan touches first | Every stage, loop and element type in the README present |
-| T.3 | Anchor test and runtime coverage test against B1–B7 | Both pass; uncovered nodes listed |
+| T.3 | Trace events carry map node ids (seed check-level nodes from `TRACE_REGISTRY`); anchor test; path test (every event on a node, every step on a map edge) and coverage test against B1–B7 | All pass; uncovered nodes listed |
 | T.4 | Per-run overlay and per-element provenance chain | For any benchmark element, the chain that set its size is shown |
 | T.5 | Interactive zoomable view (scene viewer or canvas) | Zoom from L0 to L3 on a benchmark run |
 

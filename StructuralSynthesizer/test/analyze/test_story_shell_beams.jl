@@ -241,6 +241,20 @@ const _STUD_OPTS = (composite = true,
                                                   section_floor = light)
         SY.size_beams!(struc, opts; shell_demands = out.demands, shell_spans = out.spans)
 
+        # A continuing call starts upward-only from its floor and keeps it.
+        # With `trim_continuing`, the trim brings a lighter design back.
+        cont = (levels = [0], shells = out.shells, shell_demands = out.demands,
+                shell_spans = out.spans, shell_regions = out.regions,
+                shell_kwargs = (target_edge = 1.0u"m", support_points = corners),
+                section_floor = heavy)
+        kept = size_beams_with_story_shell!(struc, opts; cont...)
+        @test kept.converged
+        @test all(b -> section(b).name == "W21X55", struc.beams)
+        trimmed = size_beams_with_story_shell!(struc, opts; cont..., trim_continuing = true)
+        @test trimmed.converged
+        @test any(b -> section(b).name != "W21X55", struc.beams)
+        SY.size_beams!(struc, opts; shell_demands = out.demands, shell_spans = out.spans)
+
         # The shell raises a demand. It never lowers one.
         groups, base, L_groups = SY.member_group_demands(struc; member_edge_group = SY.BEAM_GROUP_SYMBOLS)
         g1 = findfirst(==(group_id(struc.beams[1])), groups)

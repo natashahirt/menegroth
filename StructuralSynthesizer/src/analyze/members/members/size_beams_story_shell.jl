@@ -122,8 +122,9 @@ Steel discrete beams (see [`_shell_ratchet_ok`](@ref)) settle in three steps:
 Every step ends on a pass that changed no section, so each section was
 checked against a shell solved with those same sections. `section_floor`
 (group id → `(section, exact)`) starts upward-only from the first pass and
-skips the trim, for a caller continuing an earlier call. Other beam options
-keep the free passes throughout.
+skips the trim, for a caller continuing an earlier call; `trim_continuing =
+true` runs the trim anyway. Other beam options keep the free passes
+throughout.
 
 Returns `(converged, passes, demands, spans, regions, shells,
 service_converged, region_mismatch)`. `converged` is true when a pass that
@@ -155,6 +156,7 @@ function size_beams_with_story_shell!(struc::BuildingStructure,
                                       shell_spans = nothing,
                                       shell_regions = nothing,
                                       section_floor = nothing,
+                                      trim_continuing::Bool = false,
                                       kwargs...)
     max_passes >= 1 || throw(ArgumentError("max_passes must be at least 1"))
     free_passes >= 0 || throw(ArgumentError("free_passes must not be negative"))
@@ -212,7 +214,7 @@ function size_beams_with_story_shell!(struc::BuildingStructure,
         floor = floor,
         ratchet_from = !ratchet ? typemax(Int) : continuing ? 0 : free_passes,
         first_pass = 1)
-    if ratchet && trim && !continuing && r.converged
+    if ratchet && trim && (!continuing || trim_continuing) && r.converged
         r = _trim_story_shell!(run, r)
     end
     if !r.converged

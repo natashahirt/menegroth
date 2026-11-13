@@ -433,6 +433,11 @@ changed a beam section after the shell, or a column section the shell
 solved with, is followed by another. The next round starts from this one's
 shell demands. Each story is meshed once for all rounds.
 
+With steel discrete beams, rounds after the first start upward-only from the
+sections before them. When those rounds settle, one more round runs the
+story-shell trim (a lighter design is kept only when it converges lighter),
+with up to `max_rounds` further rounds to settle again.
+
 When the rounds settle, the slab bars on each story come from a shell solve
 with the final beam and column sections. Each slab on those stories records
 `converged` and, when the rounds did not settle, why.
@@ -449,7 +454,12 @@ function _size_with_story_shell!(struc, params, beam_opts, column_opts, beam_kwa
     # beam that attracts load and fails cannot trade places with a lighter one.
     upward_only = _shell_ratchet_ok(struc, beam_opts, beam_kwargs)
     floor = nothing
-    for round in 1:max_rounds
+    tried_trim = !upward_only
+    trim_now = false
+    round = 0
+    limit = max_rounds
+    while round < limit
+        round += 1
         columns_before = [section(c) for c in struc.columns]
         sb = size_beams_with_story_shell!(struc, beam_opts; levels = levels, shells = shells,
                                           shell_kwargs = shell_kwargs,
@@ -457,7 +467,9 @@ function _size_with_story_shell!(struc, params, beam_opts, column_opts, beam_kwa
                                           shell_spans = seed.spans,
                                           shell_regions = seed.regions,
                                           section_floor = floor,
+                                          trim_continuing = trim_now,
                                           beam_kwargs...)
+        trim_now = false
         beams_after_shell = [_story_beam_section(struc, b) for b in struc.beams]
         converged, n = _iterate_beams_columns!(struc, params, beam_opts, column_opts,
                                                beam_kwargs; tc = tc,
@@ -492,11 +504,19 @@ function _size_with_story_shell!(struc, params, beam_opts, column_opts, beam_kwa
                               round = round, shell_passes = sb.passes,
                               shell_converged = sb.converged, beams_held = beams_held,
                               columns_held = columns_held)
-        held && break
+        if held
+            (tried_trim || floor === nothing) && break
+            # Rounds after the first started upward-only from the round before,
+            # so sections never came down. Try the trim once on the settled
+            # demands, with its own round budget.
+            tried_trim = true
+            trim_now = true
+            limit = round + max_rounds
+        end
         seed = (demands = sb.demands, spans = sb.spans, regions = sb.regions)
         upward_only && (floor = _section_floors(struc))
     end
-    held || @warn "Story-shell sizing did not settle after $max_rounds rounds" levels
+    held || @warn "Story-shell sizing did not settle after $round rounds" levels
     _record_story_shell_wall_axials!(struc, shells)
     _record_story_shell_convergence!(struc, held)
     return (converged, iters)

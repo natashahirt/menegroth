@@ -1515,6 +1515,8 @@ function _merge_beam_floor_demands!(struc, group_ids, Mu, Mu_neg, shear_cases)
                 ustrip(u"N", demand.Vu * Asap.kip),
                 ustrip(u"N", demand.Nu * Asap.kip),
                 ustrip(u"N*m", demand.Tu * Asap.kip * u"inch"),
+                ustrip(u"N*m", demand.Mu * Asap.kip * u"ft"),
+                ustrip(u"N*m", demand.Mu_neg * Asap.kip * u"ft"),
             ))
         end
     end
@@ -1527,6 +1529,32 @@ function _nlp_shear_arg(cases)
     return [(c.Vu * u"N", c.Nu * u"N", c.Tu * u"N*m") for c in cases]
 end
 
+"""Sagging moments for the beam NLP, one per station row, or `nothing` when there is no row."""
+function _nlp_flexure_arg(cases)
+    isempty(cases) && return nothing
+    return [c.Mu_pos * u"N*m" for c in cases]
+end
+
+"""
+NLP section to install for group `gid`.
+
+A row F section floor is a minimum. The NLP section is kept when its
+objective is at least the floor's. A lighter NLP section, or a failed
+solve, is replaced by the floor. Discrete sizing uses the same rule
+through the catalog mask.
+"""
+function _nlp_section_or_floor(struc, gid, section, opts)
+    fl = get(struc.frame_section_floors, gid, nothing)
+    fl === nothing && return section
+    section === nothing && return fl
+    typeof(section) === typeof(fl) || throw(ArgumentError(
+        "row F section floor for member group $gid is a $(typeof(fl)), " *
+        "and NLP returned a $(typeof(section))"))
+    obj = s -> StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
+    obj(section) >= obj(fl) * (1 - 1e-9) && return section
+    return fl
+end
+
 """
 Keep an NLP beam section. A group with stored row F rows throws instead of
 skipping when the solve is infeasible or the rounded section fails those rows.
@@ -1536,13 +1564,14 @@ function _keep_beam_nlp_section!(struc, gid, result, opts)
     floored = rows !== nothing &&
         any(d -> d isa StructuralSizer.RCBeamDemand, (d for (_, d) in rows))
     ok = result.status in (:optimal, :feasible)
-    if floored && !ok
-        throw(ArgumentError(
+    section = _nlp_section_or_floor(struc, gid, ok ? result.section : nothing, opts)
+    if section === nothing
+        floored && throw(ArgumentError(
             "row F section floor: beam group $gid NLP status is $(result.status)"))
+        return nothing
     end
-    ok || return false
-    floored && _assert_beam_floor_section!(struc, gid, result.section, opts, rows)
-    return true
+    floored && _assert_beam_floor_section!(struc, gid, section, opts, rows)
+    return section
 end
 
 function _assert_beam_floor_section!(struc, gid, section, opts, rows)
@@ -1628,8 +1657,9 @@ function _size_beams_impl!(
     member_array = struc.beams
 
     # Sagging / hogging faces. NLP post-checks Mu_neg (top steel is not a DV)
-    # and may return :infeasible instead of deepening. Shear uses the
-    # per-case rows. The fallback `Nu` takes the envelope tension (Eq. 11-8)
+    # and may return :infeasible instead of deepening. Sagging flexure and
+    # shear each use one row per pattern case. The fallback `Nu` takes the
+    # envelope tension (Eq. 11-8)
     # and no compression: pairing the largest compression with the largest
     # shear raises Vc (ACI 318-11 Eq. 11-4) and is unconservative.
     Mu = [d.Mux_pos * u"N*m"  for d in demands]
@@ -1638,6 +1668,7 @@ function _size_beams_impl!(
     Nu = [d.Pu_t > 0 ? -d.Pu_t * u"N" : 0.0u"N" for d in demands]
     _merge_beam_floor_demands!(struc, group_ids, Mu, Mu_neg, beam_shear)
     shear_cases = [_nlp_shear_arg(rows) for rows in beam_shear]
+    flexure_cases = [_nlp_flexure_arg(rows) for rows in beam_shear]
 
     # Map ConcreteBeamOptions → NLPBeamOptions (shared material fields)
     stirrup_int = parse(Int, replace(string(opts.transverse_bar_size), "no" => ""))
@@ -1685,15 +1716,16 @@ function _size_beams_impl!(
                                                           Mu_neg=Mu_neg[tbeam_idx],
                                                           Nu=Nu[tbeam_idx],
                                                           shear_cases=shear_cases[tbeam_idx],
+                                                          flexure_cases=flexure_cases[tbeam_idx],
                                                           sustained_live_fraction=opts.sustained_live_fraction)
 
             for (k, g_idx) in enumerate(tbeam_idx)
                 r = t_results[k]
-                _keep_beam_nlp_section!(struc, group_ids[g_idx], r, opts) || continue
+                chosen = _keep_beam_nlp_section!(struc, group_ids[g_idx], r, opts)
+                chosen === nothing && continue
                 n_feasible += 1
 
                 gid = group_ids[g_idx]
-                chosen = r.section
                 mg = struc.member_groups[gid]
                 mg.section = chosen
                 asap_sec = StructuralSizer.to_asap_section(chosen, mat; I_factor=I_factor)  # ACI 318-11 §10.10.4.1
@@ -1720,15 +1752,16 @@ function _size_beams_impl!(
             r_results = StructuralSizer.size_rc_beams_nlp(Mu_r, Vu_r, nlp_opts;
                                                          Mu_neg=Mu_neg[rect_idx],
                                                          Nu=Nu[rect_idx],
-                                                         shear_cases=shear_cases[rect_idx])
+                                                         shear_cases=shear_cases[rect_idx],
+                                                         flexure_cases=flexure_cases[rect_idx])
 
             for (k, g_idx) in enumerate(rect_idx)
                 r = r_results[k]
-                _keep_beam_nlp_section!(struc, group_ids[g_idx], r, opts) || continue
+                chosen = _keep_beam_nlp_section!(struc, group_ids[g_idx], r, opts)
+                chosen === nothing && continue
                 n_feasible += 1
 
                 gid = group_ids[g_idx]
-                chosen = r.section
                 mg = struc.member_groups[gid]
                 mg.section = chosen
                 asap_sec = StructuralSizer.to_asap_section(chosen, mat; I_factor=I_factor)  # ACI 318-11 §10.10.4.1
@@ -1763,16 +1796,16 @@ function _size_beams_impl!(
 
     # ── Rectangular NLP path (default) ──
     results = StructuralSizer.size_rc_beams_nlp(Mu, Vu, nlp_opts; Mu_neg=Mu_neg, Nu=Nu,
-                                                shear_cases=shear_cases)
+                                                shear_cases=shear_cases,
+                                                flexure_cases=flexure_cases)
 
     mat = opts.material
     n_feasible = 0
     for (g_idx, gid) in enumerate(group_ids)
         r = results[g_idx]
-        _keep_beam_nlp_section!(struc, gid, r, opts) || continue
+        chosen = _keep_beam_nlp_section!(struc, gid, r, opts)
+        chosen === nothing && continue
         n_feasible += 1
-
-        chosen = r.section
 
         mg = struc.member_groups[gid]
         mg.section = chosen

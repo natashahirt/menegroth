@@ -64,6 +64,25 @@ function _beam_nlp_shear_cases(Vu_kip, Nu_kip, Tu_kipin, shear_cases)
 end
 
 """
+Sagging moments the beam NLP constrains, in kip·ft.
+
+`flexure_cases === nothing` keeps the single `Mu` envelope. A vector is one
+row per load case. The envelope is added when it exceeds every case, so a
+shell moment that is not on a station row still binds. Each row uses the
+same Whitney φMn (ACI 318-11 §10.2).
+"""
+function _beam_nlp_flexure_cases(Mu_kipft, flexure_cases)
+    flexure_cases === nothing && return [Mu_kipft]
+    out = Float64[]
+    for m in flexure_cases
+        push!(out, m isa Unitful.Quantity ? to_kipft(m) : Float64(m))
+    end
+    isempty(out) && throw(ArgumentError("RC beam NLP flexure_cases is empty"))
+    maximum(out) + 1e-9 < Mu_kipft && push!(out, Mu_kipft)
+    return out
+end
+
+"""
     RCBeamNLPProblem <: AbstractNLPProblem
 
 Continuous optimization problem for RC beam sizing.
@@ -118,20 +137,25 @@ struct RCBeamNLPProblem <: AbstractNLPProblem
     # One shear (and, when `Tu_kipin > 0`, torsion) row per load case.
     # The scalars above are the first case, kept for the single-row API.
     shear_cases::Vector{RCBeamNLPShearCase}
+    # One sagging moment per load case, kip·ft. The scalar `Mu_kipft` is the
+    # first case when the caller passed no vector.
+    flexure_cases::Vector{Float64}
 end
 
 """
-    RCBeamNLPProblem(Mu, Vu, opts; Tu=0.0, Nu=0.0, shear_cases=nothing)
+    RCBeamNLPProblem(Mu, Vu, opts; Tu=0.0, Nu=0.0, shear_cases=nothing,
+                     flexure_cases=nothing)
 
 Construct an RC beam NLP problem from factored demands and options.
 Converts Unitful inputs to bare ACI units (kip, kip-ft, inches, psi).
 `Nu` is signed: compression positive (ACI 318-11 Eq. 11-4), tension
 negative (Eq. 11-8). Public default is `Nu = 0` (no axial modifier).
 `shear_cases` replaces that one shear row with one row per load case.
-Each case is `(Vu, Nu, Tu)`. Flexure stays the single `Mu` envelope.
+Each case is `(Vu, Nu, Tu)`. `flexure_cases` is one sagging moment per
+load case; omitted, flexure is the single `Mu` envelope.
 """
 function RCBeamNLPProblem(Mu, Vu, opts::NLPBeamOptions; Tu=0.0, Nu=0.0,
-                          shear_cases=nothing)
+                          shear_cases=nothing, flexure_cases=nothing)
     fc = fc_ksi(opts.material)
     fy = fy_ksi(opts.rebar_material)
     Es = Es_ksi(opts.rebar_material)
@@ -164,6 +188,7 @@ function RCBeamNLPProblem(Mu, Vu, opts::NLPBeamOptions; Tu=0.0, Nu=0.0,
     # Signed axial: preserve sign (tension is negative).
     Nu_kip_val = Nu isa Unitful.Quantity ? to_kip(Nu) : Float64(Nu)
     cases = _beam_nlp_shear_cases(Vu_kip, Nu_kip_val, Tu_kipin_val, shear_cases)
+    moments = _beam_nlp_flexure_cases(Mu_kipft, flexure_cases)
 
     RCBeamNLPProblem(
         Mu_kipft, Vu_kip, opts,
@@ -174,6 +199,7 @@ function RCBeamNLPProblem(Mu, Vu, opts::NLPBeamOptions; Tu=0.0, Nu=0.0,
         Tu_kipin_val,
         Nu_kip_val,
         cases,
+        moments,
     )
 end
 
@@ -228,14 +254,22 @@ end
 # AbstractNLPProblem Interface: Constraints
 # ==============================================================================
 
-"""Number of constraints: flexure, one shear per case, strain, ρmin, plus torsion per case with Tu > 0."""
+"""Number of constraints: one flexure per case, one shear per case, strain, ρmin, plus torsion per case with Tu > 0."""
 function n_constraints(p::RCBeamNLPProblem)
-    return 3 + length(p.shear_cases) + count(c -> c.Tu_kipin > 0, p.shear_cases)
+    return 2 + length(p.flexure_cases) + length(p.shear_cases) +
+           count(c -> c.Tu_kipin > 0, p.shear_cases)
 end
 
 """Human-readable constraint names for solver diagnostics."""
 function constraint_names(p::RCBeamNLPProblem)
-    names = String["flexure utilization"]
+    names = String[]
+    if length(p.flexure_cases) == 1
+        push!(names, "flexure utilization")
+    else
+        for i in eachindex(p.flexure_cases)
+            push!(names, "flexure utilization (case $i)")
+        end
+    end
     if length(p.shear_cases) == 1
         push!(names, "shear adequacy")
     else
@@ -289,7 +323,13 @@ function constraint_fns(p::RCBeamNLPProblem, x::Vector{Float64})
     Mn_lbin = As * p.fy_psi * (d - a / 2)
     φMn_kipft = φ * Mn_lbin / 12_000.0
 
-    util_flexure = p.Mu_kipft / max(φMn_kipft, 1e-6)
+    # One sagging row per load case. φMn does not depend on the case, so the
+    # largest Mu binds. The rows stay separate so a case above the scalar
+    # envelope is not dropped.
+    constraints = Float64[]
+    for Mu_kipft in p.flexure_cases
+        push!(constraints, Mu_kipft / max(φMn_kipft, 1e-6))
+    end
 
     # --- Shear adequacy, one row per load case (signed Nu via Eq. 11-4 / 11-8) ---
     # ACI 318-11 §11.2.1.2 Eq. (11-4) / §11.2.2.3 Eq. (11-8) —
@@ -298,7 +338,6 @@ function constraint_fns(p::RCBeamNLPProblem, x::Vector{Float64})
     # largest compression with the largest shear raises Vc and is unconservative.
     sqrt_fc = sqrt(p.fc_psi)
     Ag_in2 = b * h
-    constraints = Float64[util_flexure]
     for sc in p.shear_cases
         φVn_max_kip = _φVn_with_axial(b, d, Ag_in2, Ag_in2, p.fc_psi, p.λ, sc.Nu_kip)
         push!(constraints, sc.Vu_kip / max(φVn_max_kip, 1e-6))

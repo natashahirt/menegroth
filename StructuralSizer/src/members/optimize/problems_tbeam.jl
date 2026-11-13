@@ -103,6 +103,8 @@ struct RCTBeamNLPProblem <: AbstractNLPProblem
     Nu_kip::Float64
     # One shear (and, when `Tu_kipin > 0`, torsion) row per load case.
     shear_cases::Vector{RCBeamNLPShearCase}
+    # One sagging moment per load case, kip·ft.
+    flexure_cases::Vector{Float64}
 end
 
 """
@@ -117,7 +119,8 @@ function RCTBeamNLPProblem(Mu, Vu, bf, hf, opts::NLPBeamOptions;
                            w_dead=nothing, w_live=nothing, L_span=nothing,
                            support::Symbol=:simply_supported, ξ::Float64=2.0,
                            sustained_live_fraction::Real=0.0,
-                           Tu=0.0, Nu=0.0, shear_cases=nothing)
+                           Tu=0.0, Nu=0.0, shear_cases=nothing,
+                           flexure_cases=nothing)
     fc = fc_ksi(opts.material)
     fy = fy_ksi(opts.rebar_material)
     Es = Es_ksi(opts.rebar_material)
@@ -167,6 +170,7 @@ function RCTBeamNLPProblem(Mu, Vu, bf, hf, opts::NLPBeamOptions;
     # Signed axial: preserve sign (tension is negative).
     Nu_kip_val = Nu isa Unitful.Quantity ? to_kip(Nu) : Float64(Nu)
     cases = _beam_nlp_shear_cases(Vu_kip, Nu_kip_val, Tu_kipin_val, shear_cases)
+    moments = _beam_nlp_flexure_cases(Mu_kipft, flexure_cases)
 
     RCTBeamNLPProblem(
         Mu_kipft, Vu_kip, opts,
@@ -180,6 +184,7 @@ function RCTBeamNLPProblem(Mu, Vu, bf, hf, opts::NLPBeamOptions;
         Tu_kipin_val, c_ctr,
         Nu_kip_val,
         cases,
+        moments,
     )
 end
 
@@ -238,16 +243,23 @@ end
 # AbstractNLPProblem Interface: Constraints
 # ==============================================================================
 
-"""Number of constraints: flexure, one shear per case, strain, ρmin, optional deflection, plus torsion per case with Tu > 0."""
+"""Number of constraints: one flexure per case, one shear per case, strain, ρmin, optional deflection, plus torsion per case with Tu > 0."""
 function n_constraints(p::RCTBeamNLPProblem)
-    nc = 3 + length(p.shear_cases)
+    nc = 2 + length(p.flexure_cases) + length(p.shear_cases)
     p.w_dead_kiplf > 0 && (nc += 2)  # LL + total deflection
     return nc + count(c -> c.Tu_kipin > 0, p.shear_cases)
 end
 
 """Human-readable constraint names for solver diagnostics."""
 function constraint_names(p::RCTBeamNLPProblem)
-    names = String["flexure utilization"]
+    names = String[]
+    if length(p.flexure_cases) == 1
+        push!(names, "flexure utilization")
+    else
+        for i in eachindex(p.flexure_cases)
+            push!(names, "flexure utilization (case $i)")
+        end
+    end
     if length(p.shear_cases) == 1
         push!(names, "shear adequacy")
     else
@@ -330,7 +342,10 @@ function constraint_fns(p::RCTBeamNLPProblem, x::Vector{Float64})
     φ = flexure_phi(εt)
 
     φMn_kipft = φ * Mn_lbin / 12_000.0
-    util_flexure = p.Mu_kipft / max(φMn_kipft, 1e-6)
+    constraints = Float64[]
+    for Mu_kipft in p.flexure_cases
+        push!(constraints, Mu_kipft / max(φMn_kipft, 1e-6))
+    end
 
     # --- Shear adequacy (uses bw, not bf; signed Nu via Eq. 11-4 / 11-8) ---
     # ACI 318-11 §11.2.1.2 Eq. (11-4) / §11.2.2.3 Eq. (11-8) —
@@ -343,7 +358,6 @@ function constraint_fns(p::RCTBeamNLPProblem, x::Vector{Float64})
     hw = max(h - hf, 0.0)
     Ag_comp = Af + bw * hw
     Ag_tens = bw * h
-    constraints = Float64[util_flexure]
     for sc in p.shear_cases
         φVn_max_kip = _φVn_with_axial(bw, d, Ag_comp, Ag_tens, p.fc_psi, p.λ, sc.Nu_kip)
         push!(constraints, sc.Vu_kip / max(φVn_max_kip, 1e-6))

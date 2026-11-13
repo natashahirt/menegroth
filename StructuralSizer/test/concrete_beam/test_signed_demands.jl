@@ -268,6 +268,18 @@ end
         @test cb[3] > 1.0
         @test cb[3] > cb[2]
 
+        # Two sagging moments stay separate rows. The larger case binds even
+        # when the scalar envelope is the smaller moment. Same Whitney φMn
+        # (ACI 318-11 §10.2).
+        split_m = RCBeamNLPProblem(1.0kip * u"ft", 1.0kip, opts;
+                                   flexure_cases=[1.0kip * u"ft", 400.0kip * u"ft"])
+        cm = constraint_fns(split_m, x)
+        @test n_constraints(split_m) == 5
+        @test constraint_names(split_m)[1] == "flexure utilization (case 1)"
+        @test cm[1] * 400.0 ≈ cm[2] rtol=1e-6
+        @test cm[2] > 1.0
+        @test cm[1] < 1.0
+
         # Batch API accepts signed Nu; public default Mu_neg = Mu is unchanged.
         rs = size_rc_beams_nlp([1.0kip * u"ft"], [1.0kip], opts;
                                Mu_neg=[0.0], Nu=[-20.0kip])

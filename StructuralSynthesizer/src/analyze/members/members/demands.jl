@@ -22,18 +22,25 @@ end
 """
     BeamShearCase
 
-One beam's shear in one pattern case, all from that case [N, N·m].
+One beam's shear and flexure in one pattern case, all from that case [N, N·m].
 
 `Vu` is the largest |Vy| (strong-axis shear). `Nu` is the axial at that
 same station, compression-positive, so a gravity case is not credited with
 another case's compression. `Tu` is torsion; station diagrams carry none,
-so gravity rows are 0.
+so gravity rows are 0. `Mu_pos` and `Mu_neg` are that case's sagging and
+hogging peaks, so a moment that is not the shear governor is still a
+flexure case.
 """
 struct BeamShearCase
     Vu::Float64
     Nu::Float64
     Tu::Float64
+    Mu_pos::Float64
+    Mu_neg::Float64
 end
+
+"""Shear row with no flexure. Callers that have a moment pass the five-field form."""
+BeamShearCase(Vu, Nu, Tu) = BeamShearCase(Float64(Vu), Float64(Nu), Float64(Tu), 0.0, 0.0)
 
 """
     build_member_groups!(struc::BuildingStructure; member_type::Symbol=:beams)
@@ -255,9 +262,13 @@ Eq. (11-8), so a covered row never governs a shear constraint.
 function _prune_covered_shear(rows::Vector{BeamShearCase})
     kept = BeamShearCase[]
     for (i, r) in enumerate(rows)
+        # A higher sagging or hogging moment is its own flexure case. Shear
+        # coverage does not drop it.
         covered = any(enumerate(rows)) do (j, o)
             j != i && o.Tu == r.Tu && o.Vu >= r.Vu && o.Nu <= r.Nu &&
-                (o.Vu > r.Vu || o.Nu < r.Nu || j < i)
+                o.Mu_pos >= r.Mu_pos && o.Mu_neg >= r.Mu_neg &&
+                (o.Vu > r.Vu || o.Nu < r.Nu || o.Mu_pos > r.Mu_pos ||
+                 o.Mu_neg > r.Mu_neg || j < i)
         end
         covered || push!(kept, r)
     end
@@ -539,6 +550,8 @@ function member_group_demands(struc::BuildingStructure;
             n_shear = n_pat + (staged === nothing ? 0 : 1)
             case_Vu = fill(-1.0, n_shear)
             case_Nu = zeros(Float64, n_shear)
+            case_Mu_pos = zeros(Float64, n_shear)
+            case_Mu_neg = zeros(Float64, n_shear)
 
             for (seg_pos, seg_idx) in enumerate(seg_list)
                 seg = struc.segments[seg_idx]
@@ -593,6 +606,8 @@ function member_group_demands(struc::BuildingStructure;
                     if member_type === :beams
                         Mux_pos = max(Mux_pos, sag)
                         Mux_neg = max(Mux_neg, hog)
+                        case_Mu_pos[ci] = max(case_Mu_pos[ci], sag)
+                        case_Mu_neg[ci] = max(case_Mu_neg[ci], hog)
                     end
                     Vu_strong = max(Vu_strong, peaks.Vu)
                     if par_shear !== nothing && member_type === :beams
@@ -657,7 +672,8 @@ function member_group_demands(struc::BuildingStructure;
             if par_shear !== nothing && member_type === :beams
                 for ci in eachindex(case_Vu)
                     case_Vu[ci] < 0 && continue
-                    push!(par_shear[g], BeamShearCase(case_Vu[ci], case_Nu[ci], 0.0))
+                    push!(par_shear[g], BeamShearCase(case_Vu[ci], case_Nu[ci], 0.0,
+                                                      case_Mu_pos[ci], case_Mu_neg[ci]))
                 end
             end
         end
@@ -694,7 +710,8 @@ function member_group_demands(struc::BuildingStructure;
             if par_shear !== nothing
                 peak = isempty(par_shear[g]) ? 0.0 : maximum(c.Vu for c in par_shear[g])
                 par_Vus[g] > peak + 1.0 &&
-                    push!(par_shear[g], BeamShearCase(par_Vus[g], 0.0, 0.0))
+                    push!(par_shear[g], BeamShearCase(par_Vus[g], 0.0, 0.0,
+                                                      par_Mux_pos[g], par_Mux_neg[g]))
             end
         end
     end

@@ -2055,8 +2055,10 @@ function size_rc_beam_nlp(Mu, Vu, opts::NLPBeamOptions;
                           Nu = 0.0,
                           Mu_neg = nothing,
                           shear_cases = nothing,
+                          flexure_cases = nothing,
                           x0::Union{Nothing,Vector{Float64}} = nothing)
-    problem = RCBeamNLPProblem(Mu, Vu, opts; Tu=Tu, Nu=Nu, shear_cases=shear_cases)
+    problem = RCBeamNLPProblem(Mu, Vu, opts; Tu=Tu, Nu=Nu, shear_cases=shear_cases,
+                               flexure_cases=flexure_cases)
 
     opt_result = optimize_continuous(
         problem;
@@ -2089,7 +2091,8 @@ Size multiple RC beams using continuous (NLP) optimization.
 function size_rc_beams_nlp(Mu::Vector, Vu::Vector, opts::NLPBeamOptions;
                            Mu_neg::Vector = Mu,
                            Nu::Vector = zeros_like(Vu),
-                           shear_cases = nothing)
+                           shear_cases = nothing,
+                           flexure_cases = nothing)
     n = length(Mu)
     n == length(Vu) || throw(ArgumentError("Mu and Vu must have same length"))
     n == length(Mu_neg) || throw(ArgumentError("Mu_neg must have same length as Mu"))
@@ -2098,12 +2101,17 @@ function size_rc_beams_nlp(Mu::Vector, Vu::Vector, opts::NLPBeamOptions;
         length(shear_cases) == n ||
             throw(ArgumentError("shear_cases must have same length as Mu"))
     end
+    if flexure_cases !== nothing
+        length(flexure_cases) == n ||
+            throw(ArgumentError("flexure_cases must have same length as Mu"))
+    end
 
     results = Vector{RCBeamNLPResult}(undef, n)
     for i in 1:n
         sc = shear_cases === nothing ? nothing : shear_cases[i]
+        fc = flexure_cases === nothing ? nothing : flexure_cases[i]
         results[i] = size_rc_beam_nlp(Mu[i], Vu[i], opts; Mu_neg=Mu_neg[i], Nu=Nu[i],
-                                      shear_cases=sc)
+                                      shear_cases=sc, flexure_cases=fc)
     end
     return results
 end
@@ -2814,6 +2822,7 @@ function size_rc_tbeam_nlp(
     Nu = 0.0,
     Mu_neg = nothing,
     shear_cases = nothing,
+    flexure_cases = nothing,
     x0::Union{Nothing,Vector{Float64}} = nothing,
     w_dead = nothing,
     w_live = nothing,
@@ -2826,7 +2835,8 @@ function size_rc_tbeam_nlp(
                                 w_dead=w_dead, w_live=w_live, L_span=L_span,
                                 support=defl_support, ξ=defl_ξ,
                                 sustained_live_fraction=sustained_live_fraction,
-                                Tu=Tu, Nu=Nu, shear_cases=shear_cases)
+                                Tu=Tu, Nu=Nu, shear_cases=shear_cases,
+                                flexure_cases=flexure_cases)
 
     opt_result = optimize_continuous(
         problem;
@@ -2882,6 +2892,7 @@ function size_rc_tbeams_nlp(
     Mu_neg::Vector = Mu,
     Nu::Vector = zeros_like(Vu),
     shear_cases = nothing,
+    flexure_cases = nothing,
     w_dead = nothing,
     w_live = nothing,
     L_span = nothing,
@@ -2896,6 +2907,10 @@ function size_rc_tbeams_nlp(
     if shear_cases !== nothing
         length(shear_cases) == n ||
             throw(ArgumentError("shear_cases must have same length as Mu"))
+    end
+    if flexure_cases !== nothing
+        length(flexure_cases) == n ||
+            throw(ArgumentError("flexure_cases must have same length as Mu"))
     end
 
     # Allow scalar or vector bf/hf
@@ -2912,8 +2927,10 @@ function size_rc_tbeams_nlp(
     results = Vector{RCTBeamNLPResult}(undef, n)
     for i in 1:n
         sc = shear_cases === nothing ? nothing : shear_cases[i]
+        fc = flexure_cases === nothing ? nothing : flexure_cases[i]
         results[i] = size_rc_tbeam_nlp(Mu[i], Vu[i], bf_vec[i], hf_vec[i], opts;
                                         Mu_neg=Mu_neg[i], Nu=Nu[i], shear_cases=sc,
+                                        flexure_cases=fc,
                                         w_dead=wd_vec[i], w_live=wl_vec[i],
                                         L_span=Ls_vec[i],
                                         defl_support=defl_support, defl_ξ=defl_ξ,

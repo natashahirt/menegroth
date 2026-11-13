@@ -85,6 +85,19 @@ end
     @test obj(only(free.sections)) < obj(floor)
     @test obj(only(held.sections)) >= obj(floor) * (1 - 1e-9)
 
+    # NLP keeps the stored floor when its own section is lighter, and keeps
+    # a heavier NLP section. A group with no floor is unchanged.
+    heavier = cat[argmax(obj.(cat))]
+    struc.frame_section_floors[UInt64(1)] = heavier
+    @test _FF._sections_identical(
+        _FF._nlp_section_or_floor(struc, UInt64(1), light, opts), heavier)
+    @test _FF._sections_identical(
+        _FF._nlp_section_or_floor(struc, UInt64(1), heavier, opts), heavier)
+    @test _FF._sections_identical(
+        _FF._nlp_section_or_floor(struc, UInt64(1), nothing, opts), heavier)
+    @test _FF._nlp_section_or_floor(struc, UInt64(2), light, opts) === light
+    struc.frame_section_floors[UInt64(1)] = floor
+
     # A path that cannot keep the floor refuses it instead of dropping it.
     @test_throws ArgumentError _FF._refuse_frame_floors(struc, [UInt64(1)], "test sizing")
     @test _FF._refuse_frame_floors(struc, [UInt64(2)], "test sizing") === nothing

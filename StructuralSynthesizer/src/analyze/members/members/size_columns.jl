@@ -255,6 +255,9 @@ function _size_columns_impl!(
     end
     result = StructuralSizer.size_columns(rc_demands, geometries, opts; floor_kw...)
     if opts.sizing_strategy === :nlp
+        sections = [_nlp_section_or_floor(struc, gid, result.sections[i], opts)
+                    for (i, gid) in enumerate(group_ids)]
+        result = merge(result, (; sections))
         _assert_column_nlp_meets_floors!(struc, group_ids, result, opts)
     end
 
@@ -310,8 +313,11 @@ section, or the rounded section fails the stored rows.
 The checker bundle has slenderness off, matching the row F check.
 """
 function _assert_column_nlp_meets_floors!(struc, group_ids, result, opts)
-    any(gid -> haskey(struc.frame_floor_demands, gid), group_ids) || return
-    StructuralSizer._rc_nlp_result_installable(result) || throw(ArgumentError(
+    demands = any(gid -> haskey(struc.frame_floor_demands, gid), group_ids)
+    floors = any(gid -> haskey(struc.frame_section_floors, gid), group_ids)
+    (demands || floors) || return
+    installed = all(s -> !isnothing(s), result.sections)
+    (StructuralSizer._rc_nlp_result_installable(result) || installed) || throw(ArgumentError(
         "row F section floor: column NLP did not produce an installable section"))
     bundle = _column_checker_bundle(nothing, opts)
     frame = (column = bundle,)

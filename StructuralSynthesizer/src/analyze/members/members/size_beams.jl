@@ -1031,17 +1031,18 @@ function _field_identical(x, y, depth::Int = 0)
 end
 
 """
-    _frame_floor_mask(struc, group_ids, catalog, objective_of) -> Union{Nothing, Vector{Vector{Int}}}
+    _frame_floor_mask(struc, kind, group_ids, catalog, frame) -> Union{Nothing, Vector{Vector{Int}}}
 
 `struc.frame_section_floors` as a per-group catalog mask. A floored group
-keeps its floor section and every section whose objective is strictly
-greater. The optimizer still checks each one against the group's own demands.
-`nothing` when no group in `group_ids` has a floor.
+keeps every catalog section that passes the stored row F rows of each of its
+members (`struc.frame_floor_demands`), checked with `frame` (see
+[`_frame_checkers`](@ref)). A section lighter than the floor that passes those
+rows stays in. The optimizer still checks each one against the group's own
+demands. `nothing` when no group in `group_ids` has a floor.
 """
-function _frame_floor_mask(struc, group_ids, catalog, objective_of)
+function _frame_floor_mask(struc, kind::Symbol, group_ids, catalog, frame)
     floors = struc.frame_section_floors
     any(gid -> haskey(floors, gid), group_ids) || return nothing
-    obj = [objective_of(s) for s in catalog]
     out = Vector{Vector{Int}}(undef, length(group_ids))
     for (i, gid) in enumerate(group_ids)
         fl = get(floors, gid, nothing)
@@ -1049,16 +1050,39 @@ function _frame_floor_mask(struc, group_ids, catalog, objective_of)
             out[i] = collect(eachindex(catalog))
             continue
         end
-        o_floor = objective_of(fl)
-        same = [j for j in eachindex(catalog) if _sections_identical(catalog[j], fl)]
-        if isempty(same)
+        rows = _floor_rows_by_member(struc, kind, gid)
+        out[i] = [j for j in eachindex(catalog)
+                  if _passes_floor_rows(struc, kind, rows, catalog[j], frame)]
+        any(j -> _sections_identical(catalog[j], fl), out[i]) ||
             _refuse_frame_floors(struc, [gid],
-                "this sizing catalog (the row F floor is not in it)")
-        end
-        out[i] = sort!(union(same, [j for j in eachindex(catalog)
-                                    if obj[j] > o_floor * (1 + 1e-9)]))
+                "this sizing catalog (the row F floor is not in it, or fails its stored rows)")
     end
     return out
+end
+
+"""
+    _floor_rows_by_member(struc, kind, gid) -> Vector{Pair{Int, Vector{Tuple{String, Any}}}}
+
+Stored row F rows of group `gid`, split by the member they were computed for.
+`kind` picks the demand type: `RCColumnDemand` for `:column`, `RCBeamDemand`
+for `:beam`.
+"""
+function _floor_rows_by_member(struc, kind::Symbol, gid)
+    T = kind === :column ? StructuralSizer.RCColumnDemand : StructuralSizer.RCBeamDemand
+    by = Dict{Int, Vector{Tuple{String, Any}}}()
+    for (label, demand) in get(struc.frame_floor_demands, gid, Tuple{String, Any}[])
+        demand isa T || continue
+        push!(get!(Vector{Tuple{String, Any}}, by, demand.member_idx), (label, demand))
+    end
+    return sort!(collect(by); by = first)
+end
+
+"""Whether `section` passes `rows` (from [`_floor_rows_by_member`](@ref)) for every member."""
+function _passes_floor_rows(struc, kind::Symbol, rows, section, frame)
+    members = kind === :column ? struc.columns : struc.beams
+    return all(rows) do (j, member_rows)
+        first(_member_resists(kind, members[j], section, member_rows, frame))
+    end
 end
 
 """Refuse a sizing path that cannot keep the row F section floors of `group_ids`."""
@@ -1476,8 +1500,9 @@ function _size_beams_impl!(
             _refuse_frame_floors(struc, group_ids, "this concrete beam sizing")
         cat = isnothing(opts.custom_catalog) ?
             StructuralSizer.rc_beam_catalog(opts.catalog) : opts.custom_catalog
-        obj = s -> StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
-        floor_kw = (; catalog = cat, feasible = _frame_floor_mask(struc, group_ids, cat, obj))
+        floor_kw = (; catalog = cat,
+                    feasible = _frame_floor_mask(struc, :beam, group_ids, cat,
+                                                 _beam_floor_frame(opts)))
     end
     result = StructuralSizer.size_beams(Mu, Vu, geoms, opts; Mu_neg=Mu_neg, Nu=Nu,
                                         shell_spans=grouped_spans, shear_cases=shear_kw,
@@ -1536,23 +1561,30 @@ function _nlp_flexure_arg(cases)
 end
 
 """
-NLP section to install for group `gid`.
+NLP section to install for group `gid` of `kind` (`:column` or `:beam`).
 
-A row F section floor is a minimum. The NLP section is kept when its
-objective is at least the floor's. A lighter NLP section, or a failed
-solve, is replaced by the floor. Discrete sizing uses the same rule
-through the catalog mask.
+The NLP section is kept when it passes the group's stored row F rows, as
+discrete sizing keeps any catalog section that does (see
+[`_frame_floor_mask`](@ref)). A section that fails them, or a failed solve,
+is replaced by the floor.
 """
-function _nlp_section_or_floor(struc, gid, section, opts)
+function _nlp_section_or_floor(struc, kind::Symbol, gid, section, opts)
     fl = get(struc.frame_section_floors, gid, nothing)
     fl === nothing && return section
     section === nothing && return fl
     typeof(section) === typeof(fl) || throw(ArgumentError(
         "row F section floor for member group $gid is a $(typeof(fl)), " *
         "and NLP returned a $(typeof(section))"))
-    obj = s -> StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
-    obj(section) >= obj(fl) * (1 - 1e-9) && return section
-    return fl
+    frame = kind === :column ? (column = _column_checker_bundle(nothing, opts),) :
+                               _beam_floor_frame(opts)
+    rows = _floor_rows_by_member(struc, kind, gid)
+    return _passes_floor_rows(struc, kind, rows, section, frame) ? section : fl
+end
+
+"""Row F checker bundle of beam options `opts`, in the shape [`_member_resists`](@ref) takes."""
+function _beam_floor_frame(opts)
+    bundle = _beam_checker_bundle(nothing, opts)
+    return (beam = bundle, beam_for = _ -> bundle)
 end
 
 """
@@ -1564,7 +1596,7 @@ function _keep_beam_nlp_section!(struc, gid, result, opts)
     floored = rows !== nothing &&
         any(d -> d isa StructuralSizer.RCBeamDemand, (d for (_, d) in rows))
     ok = result.status in (:optimal, :feasible)
-    section = _nlp_section_or_floor(struc, gid, ok ? result.section : nothing, opts)
+    section = _nlp_section_or_floor(struc, :beam, gid, ok ? result.section : nothing, opts)
     if section === nothing
         floored && throw(ArgumentError(
             "row F section floor: beam group $gid NLP status is $(result.status)"))

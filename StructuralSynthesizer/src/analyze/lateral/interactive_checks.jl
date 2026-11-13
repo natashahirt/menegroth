@@ -787,9 +787,25 @@ function _frame_floor_catalog(kind::Symbol, opts)
 end
 
 """
+Rows member `i` of `kind` has to pass: those stored for it in earlier rounds,
+then this round's `current` rows that are not already stored.
+"""
+function _rows_with_stored(struc, kind, member, i, current)
+    T = kind === :column ? StructuralSizer.RCColumnDemand : StructuralSizer.RCBeamDemand
+    gid = group_id(member)
+    stored = gid === nothing ? Tuple{String, Any}[] :
+        [r for r in get(struc.frame_floor_demands, gid, Tuple{String, Any}[])
+         if r[2] isa T && r[2].member_idx == i]
+    for r in current
+        r in stored || push!(stored, r)
+    end
+    return stored
+end
+
+"""
 Store the row F rows of group `gid`'s members in `cohort` as that group's
-floor demands. `accumulate` keeps the rows stored in earlier rounds, so an
-NLP group's constraints only grow.
+floor demands. `accumulate` keeps the rows stored in earlier rounds, so a
+group's constraints only grow.
 """
 function _store_frame_floor_rows!(struc, kind, members, cohort, gid, rows;
                                   accumulate::Bool = false)
@@ -806,13 +822,14 @@ function _store_frame_floor_rows!(struc, kind, members, cohort, gid, rows;
 end
 
 """
-Give each failing member group the lightest catalog section, no lighter than
-its current one, that passes the row F rows of every member in the group. The
-section goes in `struc.frame_section_floors`. The rows that section was
-required to pass go in `struc.frame_floor_demands`, one vector per group:
-the union of that group's members. Concrete discrete sizing keeps the
-section or a heavier one from then on. Sections only move up, so repeated
-rounds end.
+Give each failing member group the lightest catalog section that passes the
+row F rows of every member in the group, this round's and those stored in
+earlier rounds. The section goes in `struc.frame_section_floors`. The rows go
+in `struc.frame_floor_demands`, one vector per group: the union of that
+group's members over every round. Concrete discrete sizing then keeps any
+catalog section that passes those rows (see [`_frame_floor_mask`](@ref)), so
+a floor can relax below the section it replaced. The stored rows only grow,
+so the floor's objective never falls from one round to the next.
 
 NLP options have no catalog. A failing NLP group gets no section, only its
 rows in `struc.frame_floor_demands`, added to the rows of earlier rounds.
@@ -820,14 +837,13 @@ Column and beam NLP constrain every stored row, so the constraints only grow.
 
 The walk uses the checker of the row F check itself. The member sizer checks
 the gravity combinations, with slenderness, on whatever it chooses. A group
-with no passing section keeps its section and stays failing.
+with no passing section keeps its section and stays failing, and no rows are
+stored for it.
 
 A beam group is walked in its own catalog (`beam_opts_by_group`, from the
 framing level that sizes it). With `uniform_columns` of `:per_story` or
 `:building`, a failing column floors every sizing group in that uniformity
-group, and the section has to pass every column in it. The walk starts at the
-heaviest current section in the cohort, so a floor is never lighter than a
-column uniform sizing would keep.
+group, and the section has to pass every column in it.
 
 Returns `checks` with the detail of each failing member updated.
 """
@@ -902,27 +918,28 @@ function _raise_frame_floors!(checks, struc, rows, member_opts, frame;
                 "the row F rows are kept as constraints for NLP member sizing", failing)
             continue
         end
-        currents = [members_of[kind][i].base.section for i in cohort]
-        o_now = maximum(source.objective(s) for s in currents)
-        order = sort([j for j in eachindex(source.catalog)
-                      if source.objective(source.catalog[j]) >= o_now * (1 - 1e-9)];
+        needed = Dict(i => _rows_with_stored(struc, kind, members_of[kind][i], i,
+                                             rows[(kind, i)])
+                      for i in cohort)
+        order = sort(collect(eachindex(source.catalog));
                      by = j -> (source.objective(source.catalog[j]), j))
         chosen = nothing
         for j in order
             s = source.catalog[j]
-            all(i -> first(_member_resists(kind, members_of[kind][i], s, rows[(kind, i)],
-                                           frame)), cohort) || continue
+            all(i -> first(_member_resists(kind, members_of[kind][i], s, needed[i], frame)),
+                cohort) || continue
             chosen = s
             break
         end
         msg = if chosen === nothing
-            "no catalog section at or above the current one passes, so it is not resized"
+            "no catalog section passes this round's and the stored row F rows, so it is not resized"
         else
             for gid in gids
                 struc.frame_section_floors[gid] = chosen
-                _store_frame_floor_rows!(struc, kind, members_of[kind], cohort, gid, rows)
+                _store_frame_floor_rows!(struc, kind, members_of[kind], cohort, gid, rows;
+                                         accumulate = true)
             end
-            "a heavier section that passes is set as the group's floor for member sizing"
+            "the lightest section that passes is set as the group's floor for member sizing"
         end
         foreach(i -> note[(kind, i)] = msg, failing)
     end

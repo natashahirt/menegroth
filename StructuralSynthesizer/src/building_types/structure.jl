@@ -79,12 +79,13 @@ mutable struct BuildingStructure{T, A, P} <: AbstractBuildingStructure
     # Stage outcomes that leave a design unverified without failing a member
     # check, keyed by stage. Cleared when a design is prepared.
     stage_diagnostics::Dict{Symbol, String}
-    # Member group id → the section the row F frame check requires. Concrete
-    # discrete member sizing keeps that section or a heavier one.
+    # Member group id → the lightest catalog section that passes the group's
+    # row F rows. Marks the group as floored; concrete discrete sizing keeps
+    # any section that passes those rows.
     frame_section_floors::Dict{UInt64, Any}
-    # Member group id → the row F demand rows that section was required to
-    # pass. Each entry is `(label, RCColumnDemand or RCBeamDemand)`, the union
-    # of that group's members. Column and beam NLP read these later.
+    # Member group id → the row F demand rows the group has to pass, from
+    # every round. Each entry is `(label, RCColumnDemand or RCBeamDemand)`,
+    # the union of that group's members. Discrete masks and NLP read these.
     frame_floor_demands::Dict{UInt64, Vector{Tuple{String, Any}}}
     # Unfactored curtain-wall pressure (`GravityLoads.wall_SDL`). Zero until
     # `to_asap!`. ELF and the unfactored dead case read this. The line loads

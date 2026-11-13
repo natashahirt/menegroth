@@ -250,12 +250,13 @@ function _size_columns_impl!(
         cat = isnothing(opts.custom_catalog) ?
             StructuralSizer.rc_column_catalog(opts.section_shape, opts.catalog) :
             opts.custom_catalog
-        obj = s -> StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
-        floor_kw = (; catalog = cat, feasible = _frame_floor_mask(struc, group_ids, cat, obj))
+        floor_kw = (; catalog = cat,
+                    feasible = _frame_floor_mask(struc, :column, group_ids, cat,
+                                                 (column = _column_checker_bundle(nothing, opts),)))
     end
     result = StructuralSizer.size_columns(rc_demands, geometries, opts; floor_kw...)
     if opts.sizing_strategy === :nlp
-        sections = [_nlp_section_or_floor(struc, gid, result.sections[i], opts)
+        sections = [_nlp_section_or_floor(struc, :column, gid, result.sections[i], opts)
                     for (i, gid) in enumerate(group_ids)]
         result = merge(result, (; sections))
         _assert_column_nlp_meets_floors!(struc, group_ids, result, opts)

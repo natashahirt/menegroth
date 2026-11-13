@@ -172,6 +172,53 @@ type, including unconventional layouts, verified by the full tier.
 | F.6 | Fast models for members, walls/lateral and foundations per the fidelity ladder | Band per element type and per system |
 | F.7 | Exploration runner: sweep layouts and systems in the fast tier, shortlist by overlapping bands, verify the shortlist in the full tier | Fast tier ranks the verified best option within the shortlist on every test sweep |
 
+### Workstream T — Design trace map (multi-resolution flowchart)
+
+Goal: one map of how a design moves through the code, readable by humans and
+LLMs. It shows how a building comes in, splits into elements, which elements
+depend on which, which checks each passes through, and where the loops are.
+It is zoomable from the whole building down to single checks.
+
+Resolutions (stable node ids shared across levels, so each node zooms into
+the next):
+
+| Level | Shows |
+|---|---|
+| L0 Building | Inputs → prepare → element split → stages → verification → outputs; inner and outer level |
+| L1 Stage | Stage graph, feedback edges, loops (L0–L16 today; rounds after Phase 2), analysis calls, barrier syncs |
+| L2 Element | Per element type: demand source (and tier), checks in order, decision rule, local loops (e.g. flat-plate phases A/B/C) |
+| L3 Check | Clause, equation, inputs, function anchor, test |
+
+Rules:
+
+- **One machine-readable source.** A graph file (nodes: input, stage,
+  element, analysis, check, owner, loop, policy, output; edges: data with the
+  variable named, feedback, call). Mermaid views per level are generated from
+  it; nothing is hand-drawn twice.
+- **Anchors are function names, not line numbers**, so the map does not rot
+  on every edit. A test checks that every anchor still resolves.
+- **Checked against runtime.** The Phase 1 probe (1.2) and `TraceCollector`
+  emit stage, loop and check labels; a coverage test fails when a run emits a
+  label the map does not have, or the map has a node no benchmark reaches.
+- **Per-run overlay.** A run's actual path drawn on the static map: rounds
+  taken, governing checks, and for any element the chain of decisions that
+  set its size. This is the design trace for one building; it feeds the
+  component dossier in the scene viewer.
+- **As-is first, target later.** The first map describes today's code (built
+  from the re-audit, together with F.1). After Phase 2 the map follows the
+  owner/requirement structure, which should make it simpler.
+
+| WP | Work | Acceptance |
+|---|---|---|
+| T.1 | Graph schema and the Mermaid generator per level | L0 and L1 regenerated from the file match the README stage graph |
+| T.2 | Populate L0–L2 for every element type from the re-audit (shared with F.1); L3 for the checks the plan touches first | Every stage, loop and element type in the README present |
+| T.3 | Anchor test and runtime coverage test against B1–B7 | Both pass; uncovered nodes listed |
+| T.4 | Per-run overlay and per-element provenance chain | For any benchmark element, the chain that set its size is shown |
+| T.5 | Interactive zoomable view (scene viewer or canvas) | Zoom from L0 to L3 on a benchmark run |
+
+Builds on: trace infrastructure (`TraceCollector`), the Design Harness /
+`DesignState` explanation layer, and the scene component dossier.
+
 ### Phase 7 — Speed (parallel track from Phase 1)
 
 | WP | Work |

@@ -8,12 +8,12 @@ title: 'Waffle ribs: per-piece sections, collinear shared bars, one floor flange
 node_label: Per-piece ribs, collinear bars
 tags: waffle,grillage,ribs,collinear,rebar,solid-head,detailing
 status: active
-open_threads: 0
+open_threads: 2
 success: 'null'
 files: ''
 session_id: sess-af5499d1
 created_at: '2026-11-13T20:02:10.014993+00:00'
-updated_at: '2026-11-13T20:02:10.014993+00:00'
+updated_at: '2026-11-13T22:11:11.879789+00:00'
 has_child_rationale: User set the rib sizing policy from the 2024 scripts after the
   grid waffle showed scattered sizes, uneven heads, and changing rebar along ribs.
 ---

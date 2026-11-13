@@ -206,37 +206,7 @@ function _size_columns_impl!(
     geometries = [StructuralSizer.ConcreteMemberGeometry(L; Lu=Lb, kx=Kx, ky=Ky)
                   for (L, Lb, Kx, Ky) in zip(L_totals, Lb_govs, Kx_govs, Ky_govs)]
 
-    # Build RC demands directly from the analysis output. `member_group_demands`
-    # already populated `M1x/M2x/M1y/M2y` from FEA at the column ends in
-    # ACI 318-19 sign convention. We just need to re-unit SI → ACI (kip,
-    # kip·ft) before constructing `RCColumnDemand`s; the demand-driven
-    # `size_columns` overload preserves the signed end moments end-to-end so
-    # the slenderness path can compute `Cm = 0.6 − 0.4·(M1/M2)` instead of
-    # the conservative `M1 = 0` stand-in.
-    #
-    # Each group is checked against the envelope and against every pattern
-    # case on its own, including the NLP path. Below the balance point, less
-    # compression means less moment capacity, so the envelope (max P with
-    # max M) can pass a section that fails a case with the same moment and
-    # lower axial load.
-    kipft = Asap.kip * u"ft"
-    to_kipft(M) = ustrip(uconvert(kipft, M * u"N*m"))
-    rc_row(i, d, Pu, Mux, Muy, M1x, M2x, M1y, M2y) = StructuralSizer.RCColumnDemand(i;
-        Pu  = ustrip(uconvert(Asap.kip, Pu * u"N")),
-        Mux = to_kipft(Mux), Muy = to_kipft(Muy),
-        M1x = to_kipft(M1x), M2x = to_kipft(M2x),
-        M1y = to_kipft(M1y), M2y = to_kipft(M2y),
-        βdns = opts.βdns,
-        transverse_load = d.transverse_load,
-    )
-    rc_demands = map(enumerate(demands)) do (i, d)
-        envelope = rc_row(i, d, d.Pu_c, d.Mux, d.Muy, d.M1x, d.M2x, d.M1y, d.M2y)
-        cases = [envelope]
-        for r in case_rows[i]
-            push!(cases, rc_row(i, d, r.Pu_c, r.Mux, r.Muy, r.M1x, r.M2x, r.M1y, r.M2y))
-        end
-        StructuralSizer.RCColumnDemandSet(i, cases)
-    end
+    rc_demands = _rc_column_demand_sets(demands, case_rows, opts)
 
     floor_kw = (;)
     if opts.sizing_strategy === :nlp
@@ -272,6 +242,41 @@ function _size_columns_impl!(
 
     @info "Sized $(length(group_ids)) column groups" material=StructuralSizer.material_name(opts.material)
     return struc
+end
+
+"""
+    _rc_column_demand_sets(demands, case_rows, opts) -> Vector{RCColumnDemandSet}
+
+One [`RCColumnDemandSet`](@ref) per column group, in kip and kip·ft.
+`member_group_demands` gives the SI group demands and, per group, one
+`ColumnCaseRow` for each member and pattern case, with that member's signed
+end moments in ACI 318-19 convention, so the slenderness path computes
+`Cm = 0.6 − 0.4·(M1/M2)` from the frame.
+
+A group's set is its case rows: each row's axial force and moments act
+together. The group envelope (the largest P of any member and case with the
+largest M of any) is not a load state, and below the balance point it is not
+a bound either, since less compression means less moment capacity (ACI 318-19
+§22.4). The envelope is the set only for a group with no case rows.
+"""
+function _rc_column_demand_sets(demands, case_rows, opts)
+    kipft = Asap.kip * u"ft"
+    to_kipft(M) = ustrip(uconvert(kipft, M * u"N*m"))
+    row(i, d, Pu, Mux, Muy, M1x, M2x, M1y, M2y) = StructuralSizer.RCColumnDemand(i;
+        Pu  = ustrip(uconvert(Asap.kip, Pu * u"N")),
+        Mux = to_kipft(Mux), Muy = to_kipft(Muy),
+        M1x = to_kipft(M1x), M2x = to_kipft(M2x),
+        M1y = to_kipft(M1y), M2y = to_kipft(M2y),
+        βdns = opts.βdns,
+        transverse_load = d.transverse_load,
+    )
+    return map(enumerate(demands)) do (i, d)
+        cases = isempty(case_rows[i]) ?
+            [row(i, d, d.Pu_c, d.Mux, d.Muy, d.M1x, d.M2x, d.M1y, d.M2y)] :
+            [row(i, d, r.Pu_c, r.Mux, r.Muy, r.M1x, r.M2x, r.M1y, r.M2y)
+             for r in case_rows[i]]
+        StructuralSizer.RCColumnDemandSet(i, cases)
+    end
 end
 
 """Append stored row F column rows onto each group's NLP demand set.

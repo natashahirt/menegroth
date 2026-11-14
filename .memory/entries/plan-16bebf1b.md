@@ -8,12 +8,12 @@ title: 'Overnight: scenes on full buildings, shrink-and-verify, grade walls, pha
 node_label: Scenes and phase 6
 tags: scene,shrink,grade-walls,joint-search,two-way,mat
 status: active
-open_threads: 0
+open_threads: 2
 success: 'null'
 files: ''
 session_id: sess-7ea87ccc
 created_at: '2026-11-14T11:51:07.802331+00:00'
-updated_at: '2026-11-14T11:51:07.802331+00:00'
+updated_at: '2026-11-14T15:08:59.966809+00:00'
 ---
 Confirmed 2026-11-14. Work stays on row-f-nlp in /tmp/menegroth-rowf. Main checkout is not edited.
 

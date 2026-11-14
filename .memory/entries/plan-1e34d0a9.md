@@ -7,12 +7,12 @@ title: Edge beams, stop a failed waffle, heads as slabs
 node_label: Edge beams and failed waffle
 tags: waffle,edge-beam,aci-318,solid-head,joist
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-22b4bc22
 created_at: '2026-11-13T23:05:44.030926+00:00'
-updated_at: '2026-11-13T23:05:44.030926+00:00'
+updated_at: '2026-11-14T15:02:03.038193+00:00'
 has_child_rationale: Confirmed scope for the next implementation pass
 ---
 Sketch, then implement. Three steps, in this order.

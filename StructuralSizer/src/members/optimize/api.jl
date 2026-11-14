@@ -201,6 +201,7 @@ function size_columns(
     feasible::Union{Nothing, Vector{Vector{Int}}} = nothing,
     mip_start::Union{Nothing, Vector{Int}} = nothing,
     composite::Union{Nothing, Bool, CompositeContext, PerStationComposite, AbstractVector} = nothing,
+    shell_spans::Union{Nothing, AbstractVector} = nothing,
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
     tc::Union{Nothing, TraceCollector} = nothing,
@@ -215,6 +216,8 @@ function size_columns(
 )
     n = length(Pu)
     n == length(Mux) || throw(ArgumentError("Pu and Mux must have same length"))
+    shell_spans === nothing || length(shell_spans) == n ||
+        throw(ArgumentError("shell_spans must have one entry per demand"))
     n == length(geometries) || throw(ArgumentError("demands and geometries must have same length"))
     n == length(Pu_t) || throw(ArgumentError("Pu and Pu_t must have same length"))
     _check_moment_vector(:M1x, M1x, n)
@@ -255,6 +258,8 @@ function size_columns(
                 "when a compressed member has end moments or transverse load. " *
                 "AISC 360-16 App. 8 §8.2.1 (corpus: aisc-360-16, PDF page 306)."))
         end
+        (shell_spans === nothing || all(isempty, shell_spans)) || throw(ArgumentError(
+            "steel NLP sizing does not check story-shell spans; use sizing_strategy=:discrete"))
         emit!(tc, :sizing, "size_columns", "", :decision; path="nlp")
         return _size_steel_columns_nlp(Pu, Mux, steel_geoms, opts;
                                        Muy=Muy, Mux_neg=Mux_neg, composite=composite)
@@ -301,7 +306,9 @@ function size_columns(
     
     checker = AISCChecker(; max_depth = opts.max_depth,
                             deflection_limit = _deflection_limit(opts),
-                            total_deflection_limit = _total_deflection_limit(opts))
+                            total_deflection_limit = _total_deflection_limit(opts),
+                            shell_spans = shell_spans === nothing ?
+                                Vector{SteelShellSpan}[] : shell_spans)
     
     # Optimize — multi-material if materials vector is provided.
     # `feasible` (per-group candidate restriction) is forwarded unchanged; it is
@@ -998,6 +1005,9 @@ the checker requiring δ_max_LL > 0 / δ_max_total > 0).
   each `MemberDemand`. A vector entry of `nothing` does not override
   `opts.composite == true`. Hogging Chapter F (`Cb=1.0`, `Lb=L`) is applied
   by 6-arg `is_feasible` whenever `Mux_neg` is set (default `Mux_neg=Mu`).
+- `shell_spans`: Optional vector, one entry per beam, of [`SteelShellSpan`](@ref)s
+  from the story shell. A separate live-load check per span; it never changes
+  `δ_max_vec`.
 - `mip_gap`: MIP optimality gap (default 1e-4)
 - `output_flag`: Solver verbosity (default 0)
 
@@ -1051,13 +1061,6 @@ function size_beams(
     shell_spans = nothing,
 )
     length(Pu) == length(Mu) || throw(ArgumentError("Pu and Mu must have same length"))
-    # The story shell passes one span list per group. This checker has no
-    # shell-span slot, so a live-load limit cannot be applied to those spans.
-    if shell_spans !== nothing && opts.deflection_limit !== nothing &&
-            any(!isempty, shell_spans)
-        throw(ArgumentError(
-            "steel beam sizing cannot apply story-shell live-load spans"))
-    end
     length(Pu_t) == length(Mu) || throw(ArgumentError("Pu_t and Mu must have same length"))
     # AISC 360-16 §H1.1 (compression, page 133) and §H1.2 (tension, page 134)
     # — corpus: aisc-360-16. `Pu` is Pu_c; `Pu_t` is the tension magnitude.
@@ -1074,6 +1077,7 @@ function size_beams(
                         feasible=feasible,
                         mip_start=mip_start,
                         composite=composite,
+                        shell_spans=shell_spans,
                         mip_gap=mip_gap, output_flag=output_flag,
                         tc=tc,
                         M1x=M1x, M2x=M2x, M1y=M1y, M2y=M2y,

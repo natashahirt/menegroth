@@ -2,32 +2,13 @@
     _column_top_steel_minimum(col, Vu, b0, d, h, fc, fy; λ=1.0, φ=0.75, drop=nothing)
         -> (As, bslab, vuv)
 
-ACI 318-19 §8.6.1.2 (corpus: aci-318-19, printed p. 111) top steel at a
-column, from [`punching_minimum_top_steel`](@ref). `vuv = Vu / (b0 d)` is the
-two-way shear stress without moment transfer, on the column critical section
-whose perimeter is `b0`.
-
-`bslab` is Table 8.4.2.2.3 (printed p. 105) across `c2`: each side the lesser
-of 1.5h and the distance to the slab edge. The column is taken flush with the
-slab edge. Corner columns have a free edge on one side (`c2 + 1.5h`). Edge
-columns take `c2 + 3h` whichever way the edge runs; that is exact when the
-edge is perpendicular to the span and asks for more steel than the code when
-the edge is parallel to it. With a drop panel, each side is the lesser of 1.5
-times the thickness at the drop and the drop extent past the column face plus
-1.5h.
+Returns no extra top steel. ACI 318-11 does not contain the later §8.6.1.2
+minimum, so the bars in the column band are the §13.5.3 transfer steel.
+`As` is zero and the caller keeps that transfer steel.
 """
 function _column_top_steel_minimum(col, Vu, b0, d, h, fc, fy;
                                    λ::Float64 = 1.0, φ::Float64 = 0.75, drop = nothing)
-    side = if drop === nothing
-        1.5h
-    else
-        min(1.5 * total_depth_at_drop(h, drop), drop.a_drop_2 - col.c2 / 2 + 1.5h)
-    end
-    bslab = col.position == :corner ? col.c2 + side : col.c2 + 2side
-    vuv = uconvert(u"psi", Vu / (b0 * d))
-    As = punching_minimum_top_steel(vuv, bslab, b0, fc, fy, punching_αs(col.position);
-                                    λ = λ, λs = size_effect_factor(d), φ = φ)
-    return (As = As, bslab = bslab, vuv = vuv)
+    return (As = 0.0u"inch^2", bslab = 0.0u"inch", vuv = 0.0u"psi")
 end
 
 """

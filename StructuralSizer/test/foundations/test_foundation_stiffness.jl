@@ -26,6 +26,13 @@ const SS = StructuralSizer
     Kr_w = SS.wall_footing_kr(E, Es, B, h, [leg])
     @test Kr_w ≈ 8.234375 rtol = 1e-9
     @test Kr_w > Kr
+
+    # Σ I_b = 0.4 m^4, divided by B = 4 m, adds 0.1 to I_B.
+    # I_B = 0.018 + 0.1. Kr = 30e9 * 0.118 / (20e6 * 64) = 2.765625.
+    Kr_f = SS.wall_footing_kr(E, Es, B, h, SS.WallLineDemand[];
+                              framed_I = 0.4u"m^4")
+    @test Kr_f ≈ 2.765625 rtol = 1e-9
+    @test Kr_f > Kr
 end
 
 @testset "Eq. 5-3 characteristic" begin

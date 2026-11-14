@@ -141,6 +141,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("slabs/test_torsion_discount.jl")
         # Column growth
         include("slabs/test_column_growth.jl")
+        include("slabs/test_span_clause.jl")
         # Pattern loading
         include("slabs/test_pattern_loading_sizing.jl")
         # Stud catalogs

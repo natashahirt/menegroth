@@ -18,6 +18,9 @@ AISC 360-16 capacity checker for steel members.
 - `total_deflection_limit`: Optional L/δ DL+LL limit (e.g., 1/240)
 - `max_depth`: Maximum section depth constraint
 - `prefer_penalty`: Penalty factor for non-preferred sections (default 1.0 = no penalty)
+- `shell_spans`: One vector of [`SteelShellSpan`](@ref) per demand, from the
+  story shell. Each is a live-load check against `deflection_limit` on its own
+  span, separate from the frame-model deflection. Empty skips it.
 
 # Usage
 ```julia
@@ -34,6 +37,7 @@ struct AISCChecker <: AbstractCapacityChecker
     total_deflection_limit::Union{Nothing, Float64}
     max_depth::Float64  # meters, Inf for no limit
     prefer_penalty::Float64
+    shell_spans::Vector{Vector{SteelShellSpan}}
 end
 
 function AISCChecker(;
@@ -44,10 +48,13 @@ function AISCChecker(;
     deflection_limit = nothing,
     total_deflection_limit = nothing,
     max_depth = Inf,
-    prefer_penalty = 1.0
+    prefer_penalty = 1.0,
+    shell_spans = Vector{SteelShellSpan}[],
 )
     max_d = to_meters(max_depth)
-    AISCChecker(ϕ_b, ϕ_c, ϕ_v, ϕ_t, deflection_limit, total_deflection_limit, max_d, prefer_penalty)
+    spans = Vector{SteelShellSpan}[collect(SteelShellSpan, s) for s in shell_spans]
+    AISCChecker(ϕ_b, ϕ_c, ϕ_v, ϕ_t, deflection_limit, total_deflection_limit, max_d,
+                prefer_penalty, spans)
 end
 
 # ==============================================================================
@@ -384,7 +391,11 @@ function is_feasible(
         δ_ratio = δ_scaled / L_m
         δ_ratio <= checker.total_deflection_limit || return false
     end
-    
+
+    # Story-shell live load, each span on its own length. Separate from the
+    # frame deflection above. The limit is the same L/δ already on the checker.
+    _steel_shell_ratio(checker, demand.member_idx, section, cache.Ix[j]) <= 1 || return false
+
     return true
 end
 
@@ -752,6 +763,11 @@ function is_feasible(
         δ_ratio = δ_scaled / L_m
         δ_ratio <= checker.total_deflection_limit || return false
     end
+
+    # Story-shell live load on the same service inertia as the frame check.
+    # A group's spans are all checked here, so the smallest service inertia
+    # in the group governs.
+    _steel_shell_ratio(checker, demand.member_idx, section, I_svc_m4) <= 1 || return false
 
     return true
 end
@@ -1126,6 +1142,8 @@ function explain_feasibility(
         push!(checks, CheckResult("deflection_total", δ_ratio <= limit_val,
               δ_ratio / limit_val, δ_ratio, limit_val, "AISC 360-16 L"))
     end
+    _push_steel_shell_check!(checks, checker, demand.member_idx, section, cache.Ix[j],
+                             "AISC 360-16 L")
 
     # --- Aggregate ---
     # Exclude informational checks (b1_amplification is a stability indicator,
@@ -1369,6 +1387,8 @@ function explain_feasibility(
         push!(checks, CheckResult("deflection_total", δ_ratio <= limit_val,
               δ_ratio / limit_val, δ_ratio, limit_val, defl_clause))
     end
+    _push_steel_shell_check!(checks, checker, demand.member_idx, section, I_svc_m4,
+                             defl_clause)
 
     capacity_checks = filter(c -> c.name != "b1_amplification", checks)
     if hog_stricter && Mux_neg > 0

@@ -33,6 +33,7 @@
 
 # Types first (required by other modules)
 include("types.jl")
+include("input.jl")
 
 # Shear stud catalogs (StudSpec, INCON, Ancon, snap_to_catalog)
 include("studs/_studs.jl")

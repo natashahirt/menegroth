@@ -361,6 +361,8 @@ function design_footing(::MatFoundation,
     opts::MatParams = MatParams(),
     tc::Union{Nothing, TraceCollector} = nothing,
     walls::Vector{<:WallLineDemand} = WallLineDemand[],
+    framed_I_B = 0.0u"m^4",
+    framed_I_L = 0.0u"m^4",
 )
     N = length(demands)
     length(positions) == N ||
@@ -374,7 +376,8 @@ function design_footing(::MatFoundation,
     if method isa RigidMat
         _mat_on_inapplicable(opts.on_inapplicable)
         result = _design_mat_rigid(demands, positions, soil; opts = opts, walls = walls)
-        reason = _rigid_mat_inapplicable(result, demands, positions, soil, walls, opts)
+        reason = _rigid_mat_inapplicable(result, demands, positions, soil, walls, opts;
+                                         framed_I_B = framed_I_B, framed_I_L = framed_I_L)
         if reason !== nothing
             opts.on_inapplicable == :error && throw(ArgumentError(reason))
             soil.ks === nothing && throw(ArgumentError(
@@ -579,12 +582,16 @@ both plan widths and governed by the smaller. §6.1.2 Step 3 (page 11):
 column spans stay under `1.75/λ` and column loads and adjacent spans vary
 by at most 20%. A mat with no columns is gated on Kr alone.
 """
-function _rigid_mat_inapplicable(result, demands, positions, soil, walls, opts)
+function _rigid_mat_inapplicable(result, demands, positions, soil, walls, opts;
+                                 framed_I_B = 0.0u"m^4", framed_I_L = 0.0u"m^4")
     fc = opts.material.concrete.fc′
     Ec_c = Ec(fc)
     h, B, Lm = result.D, result.B, result.L_ftg
-    Kr = min(ustrip(wall_footing_kr(Ec_c, soil.Es, B, h, walls)),
-             ustrip(wall_footing_kr(Ec_c, soil.Es, Lm, h, walls)))
+    # ACI 336.2R Eq. (5-2): Σ E' I_b of the concrete members framing into the
+    # mat, divided by the width of the check. `framed_I_B` bends about the
+    # axis of the strip whose width is B.
+    Kr = min(ustrip(wall_footing_kr(Ec_c, soil.Es, B, h, walls; framed_I = framed_I_B)),
+             ustrip(wall_footing_kr(Ec_c, soil.Es, Lm, h, walls; framed_I = framed_I_L)))
     if Kr < 0.5
         return "Kr = $(round(Kr, sigdigits = 3)) < 0.5 (ACI 336.2R Eq. 5-1 and §5.2, pages 8–9)"
     end

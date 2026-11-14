@@ -89,7 +89,6 @@ Column sizes and support locations stay the ones used in `result`.
 function scale_moment_result(result::MomentAnalysisResult, r, dscale, qD, qu)
     secondary = _scale_secondary(result.secondary, r, dscale, qD, qu)
     fea = result.fea_Δ_panel === nothing ? nothing : result.fea_Δ_panel * dscale
-    scaled(v) = v === nothing ? nothing : v .* r
     return MomentAnalysisResult(
         result.M0 * r,
         result.M_neg_ext * r,
@@ -104,10 +103,6 @@ function scale_moment_result(result::MomentAnalysisResult, r, dscale, qD, qu)
         secondary = secondary,
         fea_Δ_panel = fea,
         pattern_loading = result.pattern_loading,
-        M_wall_ext = result.M_wall_ext * r,
-        M_wall_int = result.M_wall_int * r,
-        stub_moments_below = scaled(result.stub_moments_below),
-        stub_moments_above = scaled(result.stub_moments_above),
     )
 end
 

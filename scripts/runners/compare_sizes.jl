@@ -163,6 +163,10 @@ function run_cases(label, names)
             design_building(struc, params; restore = false)
         catch err
             println("   FAILED: ", sprint(showerror, err))
+            bt = stacktrace(catch_backtrace())
+            for fr in bt[1:min(12, end)]
+                println("      ", fr)
+            end
             push!(total_rows, (name, "error", "1"))
             continue
         end

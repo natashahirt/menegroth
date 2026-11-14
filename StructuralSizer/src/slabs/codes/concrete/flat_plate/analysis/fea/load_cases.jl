@@ -30,23 +30,38 @@ const _LOAD_COMBOS = (
 # Solve for a Single Load Case
 # =============================================================================
 
-"""
-    _solve_load_case!(cache, q; verbose=false) -> Vector{ElementMoments}
+"""Id of the drop-projection self-weight `AreaLoad` on the `:drop_panel` shells."""
+const FEA_DROP_LOAD_ID = :drop_panel_weight
 
-Set the model's area load to `q`, re-solve, and extract per-element moments.
+"""
+    _set_fea_area_loads!(model, q, q_drop)
+
+Set every slab `AreaLoad` to `q` and the drop-projection load
+(`FEA_DROP_LOAD_ID`) to `q_drop`. The drop load sits on top of `q` over the
+drop patches only.
+"""
+function _set_fea_area_loads!(model, q::Pressure, q_drop::Pressure)
+    for load in model.loads
+        load isa Asap.AreaLoad || continue
+        load.pressure = uconvert(u"Pa", load.id === FEA_DROP_LOAD_ID ? q_drop : q)
+    end
+    return model
+end
+
+"""
+    _solve_load_case!(cache, q; q_drop=0 Pa, verbose=false) -> Vector{ElementMoments}
+
+Set the model's area load to `q` (and the drop patches' extra load to
+`q_drop`), re-solve, and extract per-element moments.
 Returns a fresh `Vector{ElementMoments}` (Mxx, Myy, Mxy in N·m/m).
 
 The model's stiffness matrix is unchanged — only the load vector is updated.
 """
-function _solve_load_case!(cache::FEAModelCache, q::Pressure; verbose::Bool = false)
+function _solve_load_case!(cache::FEAModelCache, q::Pressure;
+                           q_drop::Pressure = 0.0u"Pa", verbose::Bool = false)
     model = cache.model
 
-    # Update area load pressure
-    for load in model.loads
-        if load isa Asap.AreaLoad
-            load.pressure = uconvert(u"Pa", q)
-        end
-    end
+    _set_fea_area_loads!(model, q, q_drop)
 
     # Stiffness is unchanged — only AreaLoad pressure moved. `loads_only` keeps
     # the CHOLMOD factor. Exact match to `values_only` is locked by

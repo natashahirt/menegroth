@@ -348,7 +348,9 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
 
     column_results = build_column_results(
         struc, columns, column_result,
-        Pu, moment_results.unbalanced_moments, punching_results
+        Pu, moment_results.unbalanced_moments, punching_results;
+        Mu_secondary = isnothing(secondary_results) ? nothing :
+                       secondary_results.unbalanced_moments,
     )
 
     return (

@@ -149,6 +149,37 @@ function min_thickness(::TwoWay, ln::Length;
     return max(h, floor_h)
 end
 
+"""
+    beam_slab_alpha_f(Ecb, Ib, Ecs, Is) -> Float64
+
+αf = Ecb Ib / Ecs Is. ACI 318-11 Eq. (13-3) (corpus: aci-318-11, PDF page 253).
+
+`Ib` is the gross moment of inertia of the beam stem. The sentence that
+puts a slab flange into the beam section did not survive the text layer,
+so the slab is not added to `Ib`. `Is` is the gross inertia of the slab
+width bounded by the centerlines of the adjacent panels (notation, page 29):
+`ls · h³ / 12`.
+"""
+function beam_slab_alpha_f(Ecb, Ib, Ecs, Is)
+    Is_m4 = ustrip(u"m^4", Is)
+    Is_m4 > 0 || throw(ArgumentError(
+        "Is must be positive. ACI 318-11 Eq. (13-3) (corpus: aci-318-11, PDF page 253)."))
+    Ecs_Pa = ustrip(u"Pa", Ecs)
+    Ecs_Pa > 0 || throw(ArgumentError("Ecs must be positive (Eq. 13-3)."))
+    return ustrip(u"Pa", Ecb) * ustrip(u"m^4", Ib) / (Ecs_Pa * Is_m4)
+end
+
+"""Gross inertia of a slab strip, `ls · h³ / 12`."""
+slab_strip_inertia(ls::Length, h::Length) = ls * h^3 / 12
+
+"""Average αf on the edges of one panel. ACI 318-11 notation, page 29."""
+function panel_alpha_fm(alphas::AbstractVector{<:Real})
+    isempty(alphas) && throw(ArgumentError(
+        "αfm is the average αf of the beams on the edges of a panel."))
+    any(a -> a < 0, alphas) && throw(ArgumentError("αf cannot be negative."))
+    return sum(alphas) / length(alphas)
+end
+
 # -----------------------------------------------------------------------------
 # One-Way — ACI 318-11 Table 9.5(a)
 # -----------------------------------------------------------------------------
@@ -179,6 +210,36 @@ function min_thickness(::OneWay, ln::Length;
               elseif support == CANTILEVER;        10
               else                                 24 end
     return max(ln * fy_factor / divisor, 4.0u"inch")
+end
+
+"""
+    one_way_support_condition(end_a, end_b) -> SupportCondition
+
+Table 9.5(a) condition of a span from its two ends. Each end is `:free`,
+`:supported` (a beam or wall the slab stops at), or `:continuous` (a support
+the slab runs past). A span with one free end is a cantilever. A span
+between two supports is simple, one-end continuous, or both-ends continuous.
+
+ACI 318-11 §9.5.2.1 and Table 9.5(a) (corpus: aci-318-11, page 131).
+"""
+function one_way_support_condition(end_a::Symbol, end_b::Symbol)
+    known = (:free, :supported, :continuous)
+    (end_a in known && end_b in known) || throw(ArgumentError(
+        "a one-way span end is :free, :supported, or :continuous; got $end_a and $end_b"))
+    ends = (end_a, end_b)
+    count(==( :free), ends) == 2 && throw(ArgumentError(
+        "a one-way span has no beam or wall at either end"))
+    count(==( :free), ends) == 1 && return CANTILEVER
+    n = count(==( :continuous), ends)
+    n >= 2 && return BOTH_ENDS_CONT
+    n == 1 && return ONE_END_CONT
+    return SIMPLE
+end
+
+"""The condition that requires the thicker slab. ACI 318-11 Table 9.5(a) (corpus: aci-318-11, page 131): cantilever ℓ/10, simple ℓ/20, one end ℓ/24, both ends ℓ/28."""
+function thicker_support(a::SupportCondition, b::SupportCondition)
+    rank(s) = s == CANTILEVER ? 10 : s == SIMPLE ? 20 : s == ONE_END_CONT ? 24 : 28
+    return rank(a) <= rank(b) ? a : b
 end
 
 # -----------------------------------------------------------------------------

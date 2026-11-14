@@ -7,6 +7,19 @@
 # ==============================================================================
 
 """
+    tension_controlled_strain(fy; Es=29000 ksi) -> Float64
+
+Net tensile strain at which a section is tension-controlled.
+
+ACI 318-11 §10.3.4 (corpus: aci-318-11, page 142): εt ≥ 0.005 when the
+concrete reaches its 0.003 strain limit. The limit does not depend on `fy`.
+`fy` and `Es` are accepted because the slab loop passes them.
+"""
+function tension_controlled_strain(fy::Pressure; Es::Pressure = 29_000.0u"ksi")
+    return 0.005
+end
+
+"""
     required_reinforcement(Mu, b, d, fc, fy) -> Area
 
 Required tension steel area from Whitney stress block equilibrium.
@@ -44,7 +57,7 @@ increase depth.
 """
 function required_reinforcement(Mu::Moment, b::Length, d::Length, fc::Pressure, fy::Pressure;
                                 require_tension_controlled::Bool = true,
-                                φ::Float64 = 0.9)
+                                φ::Float64 = 0.9, εt_min::Float64 = 0.005)
 
     # Resistance coefficient Rn = Mu/(φ·b·d²) — has units of pressure
     Rn = Mu / (φ * b * d^2)
@@ -58,8 +71,9 @@ function required_reinforcement(Mu::Moment, b::Length, d::Length, fc::Pressure, 
     if require_tension_controlled && ω > 0
         c_over_d = (ω / 0.85) / beta1(fc)
         εt = 0.003 * (1 - c_over_d) / c_over_d
-        # Tolerance so a demand exactly at the εt = 0.005 capacity is not rejected by roundoff.
-        εt < 0.005 - 1e-12 && return Inf * u"m^2"
+        # Tolerance so a demand exactly at the εt_min capacity is not rejected by roundoff.
+        # Default εt_min is ACI 318-11 §10.3.4 (corpus: aci-318-11, page 142).
+        εt < εt_min - 1e-12 && return Inf * u"m^2"
     end
 
     return ω * fc / fy * b * d

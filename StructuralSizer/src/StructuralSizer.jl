@@ -96,6 +96,9 @@ end
 
 include("trace/trace.jl")
 
+# Sizing loops that only grow: how many steps they may take.
+include("iteration.jl")
+
 # =============================================================================
 # Local Modules
 # =============================================================================

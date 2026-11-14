@@ -48,4 +48,16 @@ Base.@kwdef mutable struct ColumnDesignResult
     
     # Punching (if supporting flat slab)
     punching::Union{PunchingDesignResult, Nothing} = nothing
+
+    # One-way shear stored by `_assign_column_shear!`. `Vu_x` is parallel to
+    # the section width and `Vu_y` to the depth, in the assignment that governed.
+    Vu_x::typeof(1.0u"kN") = 0.0u"kN"
+    Vu_y::typeof(1.0u"kN") = 0.0u"kN"
+    ϕVn_x::typeof(1.0u"kN") = 0.0u"kN"
+    ϕVn_y::typeof(1.0u"kN") = 0.0u"kN"
+    shear_ratio::Float64 = 0.0
+    shear_ok::Bool = true
+    tie_spacing::typeof(1.0u"m") = 0.0u"m"
+    tie_bar_size::Int = 0
+    shear_clause::String = ""
 end

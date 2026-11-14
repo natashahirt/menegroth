@@ -401,8 +401,6 @@ function check_flat_plate_at_thickness!(
             moment_results.unbalanced_moments,
             moment_results.Vu_max;
             pattern_loading = moment_results.pattern_loading,
-            M_wall_ext = moment_results.M_wall_ext,
-            M_wall_int = moment_results.M_wall_int,
         )
     end
 

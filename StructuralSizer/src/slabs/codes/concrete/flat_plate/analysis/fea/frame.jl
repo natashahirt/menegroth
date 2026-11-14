@@ -124,4 +124,113 @@ function _extract_cell_moments(
     )
 end
 
+"""
+    _fea_wall_face_moments(cache, struc, slab, span_axis)
+
+Hogging at the face of each wall perpendicular to `span_axis`.
+
+The cut is `_integrate_design_faces`, the same integration the column faces
+use. Only elements whose centroids lie along the wall are included, so the
+integral is the wall length and not the whole floor. Both sides of the wall
+are sampled and the side that has slab elements governs. A wall parallel to
+the span belongs to the other direction.
+"""
+function _fea_wall_face_moments(cache, struc, slab, span_axis)
+    ax = _span_unit_axis(span_axis)
+    ax === nothing && return NamedTuple[]
+    segs = supporting_wall_segments(struc, slab)
+    isempty(segs) && return NamedTuple[]
+    tris = collect(Int, eachindex(cache.element_data))
+    isempty(tris) && return NamedTuple[]
+    out = NamedTuple[]
+    for seg in segs
+        _wall_parallel_to_axis(seg, ax) && continue
+        L = hypot(seg[2][1] - seg[1][1], seg[2][2] - seg[1][2])
+        L < 1e-3 && continue
+        along = _elements_along_wall(cache.element_data, tris, seg, ax)
+        isempty(along) && continue
+        thick = _wall_thickness(struc, seg)
+        t = thick === nothing ? 0.0 : ustrip(u"m", thick)
+        mid = ((seg[1][1] + seg[2][1]) / 2, (seg[1][2] + seg[2][2]) / 2)
+        δ = 0.20
+        off = t / 2 + 0.5 * δ
+        best = 0.0
+        for dir in (-1.0, 1.0)
+            pos = (mid[1] + dir * off * ax[1], mid[2] + dir * off * ax[2])
+            _count_band_elements(cache.element_data, along, pos, ax, δ) == 0 && continue
+            faces = _integrate_design_faces(cache, along, pos, ax, δ)
+            best = max(best, faces.hogging)
+        end
+        best > 0 || continue
+        push!(out, (x = mid[1], y = mid[2], L = L, M = best * u"N*m"))
+    end
+    return out
+end
+
+"""Largest wall-face hogging perpendicular to `span_axis`, in the units of `sample`."""
+function _max_wall_face_moment(cache, struc, slab, span_axis, sample)
+    faces = _fea_wall_face_moments(cache, struc, slab, span_axis)
+    isempty(faces) && return zero(sample)
+    return maximum(f -> uconvert(unit(sample), f.M), faces)
+end
+
+"""
+    _fea_wall_transfer(cache, struc, slab, span_axis) -> Vector
+
+Moment the slab transfers to each wall perpendicular to `span_axis`, as
+`(seg, M)`. With slab on one face the transfer is that face's moment; with
+slab on both it is the difference of the two faces in the same combination.
+The largest over the combinations is kept.
+"""
+function _fea_wall_transfer(cache, struc, slab, span_axis)
+    ax = _span_unit_axis(span_axis)
+    ax === nothing && return Any[]
+    segs = supporting_wall_segments(struc, slab)
+    tris = collect(Int, eachindex(cache.element_data))
+    (isempty(segs) || isempty(tris)) && return Any[]
+    n_combo = _n_design_combos(cache)
+    out = Any[]
+    for seg in segs
+        _wall_parallel_to_axis(seg, ax) && continue
+        hypot(seg[2][1] - seg[1][1], seg[2][2] - seg[1][2]) < 1e-3 && continue
+        along = _elements_along_wall(cache.element_data, tris, seg, ax)
+        isempty(along) && continue
+        thick = _wall_thickness(struc, seg)
+        t = thick === nothing ? 0.0 : ustrip(u"m", thick)
+        mid = ((seg[1][1] + seg[2][1]) / 2, (seg[1][2] + seg[2][2]) / 2)
+        δ = 0.20
+        off = t / 2 + 0.5 * δ
+        faces = NTuple{2,Float64}[]
+        for dir in (-1.0, 1.0)
+            pos = (mid[1] + dir * off * ax[1], mid[2] + dir * off * ax[2])
+            _count_band_elements(cache.element_data, along, pos, ax, δ) == 0 && continue
+            push!(faces, pos)
+        end
+        isempty(faces) && continue
+        best = 0.0
+        for i in 1:n_combo
+            I = [_integrate_at(cache.element_data, along, pos, ax, δ;
+                               tensor_at = k -> _combo_tensor(cache, k, i)) for pos in faces]
+            best = max(best, length(I) == 2 ? abs(I[1] - I[2]) : abs(I[1]))
+        end
+        push!(out, (seg = seg, M = best * u"N*m"))
+    end
+    return out
+end
+
+"""Element indices whose centroids fall along `seg`, measured across the span."""
+function _elements_along_wall(element_data, tris, seg, ax)
+    perp = (-ax[2], ax[1])
+    t1 = seg[1][1] * perp[1] + seg[1][2] * perp[2]
+    t2 = seg[2][1] * perp[1] + seg[2][2] * perp[2]
+    lo, hi = minmax(t1, t2)
+    out = Int[]
+    for k in tris
+        ed = element_data[k]
+        t = ed.cx * perp[1] + ed.cy * perp[2]
+        lo - 1e-6 <= t <= hi + 1e-6 && push!(out, k)
+    end
+    return out
+end
+
 # Note: _check_bandwidth_convergence has been moved to bandwidth.jl

@@ -136,6 +136,59 @@ function _assign_flat_plate_column_section!(col)
     return chosen
 end
 
+"""
+    _rc_column_frame_section(col, params) -> Asap.Section
+
+Frame section for an RC column at its current `c1` × `c2` (or diameter).
+The second moments of area are multiplied by `params.column_I_factor`
+(ACI 318-11 §10.10.4.1). The rectangular torsion constant is
+`β·a·b³`, `β = 1/3 − 0.21 (b/a)(1 − (b/a)⁴/12)`.
+"""
+function _rc_column_frame_section(col, params::DesignParameters)
+    conc = something(col.concrete, resolve_column_concrete(params.materials))
+    E_Pa = ustrip(u"Pa", conc.E)
+    G_Pa = E_Pa / (2.0 * (1.0 + conc.ν))
+    ρ_kg = ustrip(u"kg/m^3", conc.ρ)
+    k = params.column_I_factor
+    b_m = ustrip(u"m", col.c1)
+    h_m = ustrip(u"m", col.c2)
+    if col.shape == :circular
+        A = π * b_m^2 / 4
+        I = π * b_m^4 / 64
+        J = π * b_m^4 / 32
+        return Asap.Section(A * u"m^2", E_Pa * u"Pa", G_Pa * u"Pa",
+                            k * I * u"m^4", k * I * u"m^4", k * J * u"m^4",
+                            ρ_kg * u"kg/m^3")
+    end
+    a_dim, b_dim = max(b_m, h_m), min(b_m, h_m)
+    β = 1/3 - 0.21 * (b_dim / a_dim) * (1 - (b_dim / a_dim)^4 / 12)
+    return Asap.Section(b_m * h_m * u"m^2", E_Pa * u"Pa", G_Pa * u"Pa",
+                        k * b_m * h_m^3 / 12 * u"m^4", k * h_m * b_m^3 / 12 * u"m^4",
+                        k * β * a_dim * b_dim^3 * u"m^4", ρ_kg * u"kg/m^3")
+end
+
+"""Put `asap_sec` on every frame element of `col`."""
+function _install_column_frame_section!(struc::BuildingStructure, col, asap_sec)
+    for seg_idx in segment_indices(col)
+        edge_idx = struc.segments[seg_idx].edge_idx
+        (edge_idx < 1 || edge_idx > length(struc.asap_model.frame_elements)) && continue
+        struc.asap_model.frame_elements[edge_idx].section = asap_sec
+    end
+    return col
+end
+
+"""
+Re-solve after column sections changed on an unchanged mesh. Returns `true`
+when the model was processed and solved.
+"""
+function _resolve_after_column_change!(struc::BuildingStructure)
+    struc.asap_model.processed || return false
+    Asap.update!(struc.asap_model; values_only=true)
+    Asap.solve!(struc.asap_model)
+    _refresh_pattern_solve_cache!(struc)
+    return true
+end
+
 StructuralSizer.TRACE_REGISTRY[(:_reconcile_columns!, :workflow)] =
     StructuralSizer.TracedFunctionMeta(
         :_reconcile_columns!,
@@ -287,6 +340,12 @@ function _reconcile_columns!(
         synced = true
     end
 
+    # ACI 318-11 §13.6.9.2 end moments, after the axial grow. Every flat-plate
+    # design takes this check; there is no flag to leave the moments off.
+    full = check_flat_plate_columns!(struc, params; tc)
+    synced |= !isempty(full.grown)
+    grew += length(full.grown)
+
     if grew > 0
         StructuralSizer.emit!(tc, :workflow, "_reconcile_columns!", "", :decision;
                               outcome="grew_columns", n_reconciled=grew, self_synced=synced)
@@ -297,6 +356,6 @@ function _reconcile_columns!(
     StructuralSizer.emit!(tc, :workflow, "_reconcile_columns!", "", :exit;
                           n_reconciled=grew, self_synced=synced)
 
-    return (struc = struc, n_reconciled = grew, synced = synced)
+    return (struc = struc, n_reconciled = grew, synced = synced, full_load = full)
 end
 

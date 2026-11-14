@@ -828,9 +828,9 @@ capacity ACI 318-11 §11.11.2.1 (corpus: aci-318-11).
 function punching_check_general(Vu::Force, Mux::Torque, Muy::Torque,
                                 d::Length, fc::Pressure, points::AbstractVector;
                                 closed::Bool = true, β::Float64 = 1.0, αs::Int = 40,
-                                λ::Float64 = 1.0, ϕ::Float64 = 0.75)
+                                λ::Float64 = 1.0, λs::Float64 = 1.0, ϕ::Float64 = 0.75)
     res = punching_stress_general(Vu, Mux, Muy, points, d; closed = closed)
-    vc = punching_capacity_stress(fc, β, αs, res.b0, d; λ = λ)
+    vc = punching_capacity_stress(fc, β, αs, res.b0, d; λ = λ, λs = λs)
     ϕvc = ϕ * vc
     sym1, sym2 = section_symmetry(points, res.props)
     ok = res.vu ≤ ϕvc
@@ -846,20 +846,30 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
-    punching_capacity_stress(fc, β, αs, b0, d; λ=1.0) → Pressure
+    size_effect_factor(d) -> Float64
+
+ACI 318-11 §11.11.2.1 (corpus: aci-318-11, page 201) has no size-effect
+factor. Eqs. (11-31) to (11-33) are λ√f'c terms, so this is 1.
+"""
+size_effect_factor(::Length) = 1.0
+
+"""
+    punching_capacity_stress(fc, β, αs, b0, d; λ=1.0, λs=1.0) → Pressure
 
 Nominal punching shear stress vc per ACI 318-11 §11.11.2.1:
 
     vc = min( (2+4/β)λ√f'c,  (αs d/b0+2)λ√f'c,  4λ√f'c )
 
-Eq. (11-31), (11-32), (11-33) respectively. Returns vc as a Pressure (psi).
+Eq. (11-31), (11-32), (11-33) respectively. `λs` multiplies those terms and
+is 1 on this edition ([`size_effect_factor`](@ref)). Returns vc as a Pressure (psi).
 """
 function punching_capacity_stress(fc::Pressure, β::Float64, αs::Int,
-                                   b0::Length, d::Length; λ::Float64 = 1.0)
-    sqrt_fc = sqrt(ustrip(u"psi", fc))
-    vc_a = (2 + 4 / β) * λ * sqrt_fc               # Eq. (11-31)
-    vc_b = (αs * d / b0 + 2) * λ * sqrt_fc         # Eq. (11-32)
-    vc_c = 4 * λ * sqrt_fc                          # Eq. (11-33)
+                                   b0::Length, d::Length; λ::Float64 = 1.0,
+                                   λs::Float64 = 1.0)
+    scale = λs * λ * sqrt(ustrip(u"psi", fc))
+    vc_a = (2 + 4 / β) * scale               # Eq. (11-31)
+    vc_b = (αs * d / b0 + 2) * scale         # Eq. (11-32)
+    vc_c = 4 * scale                          # Eq. (11-33)
     return min(vc_a, vc_b, vc_c) * u"psi"
 end
 
@@ -1196,4 +1206,7 @@ function punching_check(
     return (ok = ok, utilization = utilization, vu = vu, ϕvc = ϕvc,
             b0 = b0, geom = geom)
 end
+
+# §13.5.3.3 flexural fraction of the unbalanced moment.
+include("punching/moment_transfer.jl")
 

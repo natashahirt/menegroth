@@ -620,3 +620,32 @@ end
     @test hasmethod(StructuralSizer._extract_fea_column_forces,
                     Tuple{Any, NTuple{2,Float64}, Int})
 end
+
+@testset "Unsized columns start from the axial load" begin
+    mk() = [TestColumn(0.0u"inch", 0.0u"inch", :interior),
+            TestColumn(18.0u"inch", 18.0u"inch", :interior)]
+    copts = ConcreteColumnOptions()
+    Pu = [400.0, 400.0]  # kip
+    ln = 30.0u"ft"
+    fc = copts.material.fc′
+    fy = copts.rebar_material.Fy
+
+    cols = mk()
+    StructuralSizer._initialize_unsized_columns!(cols, Pu, ln,
+        FlatPlateOptions(column_span_minimum = false), copts)
+    Ag = StructuralSizer.tied_column_area_for_axial(Pu[1] * kip, fc; fy = fy)
+    # ACI 318-11 Eq. (10-2) at ρg = 0.01, rounded up to the inch.
+    @test 0.80 * 0.65 * (0.85 * fc * 0.99 * Ag + fy * 0.01 * Ag) ≈ Pu[1] * kip
+    @test cols[1].c1 == cols[1].c2 == max(ceil(ustrip(u"inch", sqrt(Ag))), 14.0) * u"inch"
+    @test cols[2].c1 == 18.0u"inch"
+
+    cols = mk()
+    StructuralSizer._initialize_unsized_columns!(cols, Pu, ln,
+        FlatPlateOptions(column_span_minimum = true), copts)
+    @test cols[1].c1 == StructuralSizer.estimate_column_size_from_span(ln)
+
+    cols = mk()
+    StructuralSizer._initialize_unsized_columns!(cols, [5.0, 5.0], ln,
+        FlatPlateOptions(column_span_minimum = false), copts)
+    @test cols[1].c1 == 14.0u"inch"
+end

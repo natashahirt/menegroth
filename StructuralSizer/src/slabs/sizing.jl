@@ -464,6 +464,230 @@ function auto_size_drop_depth(h_slab::Length)
 end
 
 # =============================================================================
+# Concrete: one-way and two-way slabs on beams
+# =============================================================================
+
+"""Rib spacing stored on the slab, when the topping spans rib to rib."""
+function _slab_topping_span(slab)
+    details = hasproperty(slab, :design_details) ? slab.design_details : nothing
+    details === nothing && return nothing
+    hasproperty(details, :topping_span) || return nothing
+    return details.topping_span
+end
+
+"""Service dead and live on a slab: the greatest pressure among its cells."""
+function _slab_service_pressures(struc, slab, slab_idx)
+    isempty(slab.cell_indices) && throw(ArgumentError("Slab $slab_idx has no cells."))
+    sdl = maximum(struc.cells[i].sdl for i in slab.cell_indices)
+    live = maximum(struc.cells[i].live_load for i in slab.cell_indices)
+    return sdl, live
+end
+
+function _install_span_result!(struc, slab, result)
+    sw = self_weight(result)
+    for i in slab.cell_indices
+        struc.cells[i].self_weight = sw
+    end
+    slab.result = result
+    return result
+end
+
+"""Concrete from floor options, when the options name one."""
+function _options_concrete(opts)
+    if opts isa FlatSlabOptions
+        return opts.base.material.concrete
+    elseif hasproperty(opts, :material) && opts.material isa ReinforcedConcreteMaterial
+        return opts.material.concrete
+    elseif hasproperty(opts, :material) && opts.material isa Concrete
+        return opts.material
+    end
+    return NWC_4000
+end
+
+"""
+Merge `options.support` with the condition the beams and the adjacent bays
+actually give. The thicker one is used, so an explicit cantilever stays a
+cantilever and a single bay is not credited with continuity it does not have.
+"""
+function _with_one_way_support(struc, slab, slab_idx, options)
+    options isa OneWayOptions || return options
+    derived = _slab_span_support(struc, slab)
+    use = thicker_support(options.support, derived)
+    use == options.support && return options
+    @warn "one-way slab $slab_idx spans as $use, so its thickness does not use $(options.support)"
+    return OneWayOptions(options.material, options.cover, options.bar_size, use)
+end
+
+"""
+Table 9.5(a) condition of a slab (ACI 318-11, corpus: aci-318-11, page 131):
+the thickest condition among its cells. A single bay with a support at each
+end is simply supported.
+"""
+function _slab_span_support(struc, slab)
+    cond = nothing
+    for cell_idx in slab.cell_indices
+        ends = _cell_span_ends(struc, slab, cell_idx)
+        this = one_way_support_condition(ends[1], ends[2])
+        cond = cond === nothing ? this : thicker_support(cond, this)
+    end
+    return something(cond, SIMPLE)
+end
+
+"""Length of an unframed opening's cantilever on this slab, or `nothing`."""
+_opening_cantilever_span(::Any, ::Any) = nothing
+
+"""The two ends of a cell's span: `:free`, `:supported`, or `:continuous`."""
+function _cell_span_ends(struc, slab, cell_idx)
+    cell = struc.cells[cell_idx]
+    skel = struc.skeleton
+    face = cell.face_idx
+    verts = skel.face_vertex_indices[face]
+    edges = skel.face_edge_indices[face]
+    length(verts) == length(edges) || throw(ArgumentError(
+        "face $face has $(length(verts)) vertices and $(length(edges)) edges"))
+    axis = (Float64(cell.spans.axis[1]), Float64(cell.spans.axis[2]))
+    xy = [_plan_xy(skel.vertices[v]) for v in verts]
+    c = (sum(p[1] for p in xy) / length(xy), sum(p[2] for p in xy) / length(xy))
+    pos, neg = :free, :free
+    n = length(edges)
+    for i in 1:n
+        a, b = xy[i], xy[mod1(i + 1, n)]
+        dx, dy = b[1] - a[1], b[2] - a[2]
+        L = hypot(dx, dy)
+        L < 1e-9 && continue
+        # A span end faces the span. An edge running with the span is a side.
+        abs((dx / L) * axis[1] + (dy / L) * axis[2]) > 0.5 && continue
+        mid = ((a[1] + b[1]) / 2, (a[2] + b[2]) / 2)
+        side = (mid[1] - c[1]) * axis[1] + (mid[2] - c[2]) * axis[2]
+        abs(side) < 1e-9 && continue
+        kind = _span_end_kind(struc, slab, edges[i], face)
+        if side > 0
+            pos = _stronger_end(pos, kind)
+        else
+            neg = _stronger_end(neg, kind)
+        end
+    end
+    # An edge more than 60° off the normal of the span is skipped above.
+    # On a skewed bay every beam can be that oblique, so both ends stay
+    # :free even though the beams are there. Credit the beams by which
+    # side of the cell they sit on. Continuity still requires an edge the
+    # span actually ends on, so this fallback is support only.
+    # ACI 318-11 Table 9.5(a) (corpus: aci-318-11, page 131): two supports
+    # and no continuity is a simple span; one support is a cantilever.
+    (pos == :free && neg == :free) || return (pos, neg)
+    left = false
+    right = false
+    for i in 1:n
+        _span_end_kind(struc, slab, edges[i], face) == :free && continue
+        a, b = xy[i], xy[mod1(i + 1, n)]
+        mid = ((a[1] + b[1]) / 2, (a[2] + b[2]) / 2)
+        side = (mid[1] - c[1]) * axis[1] + (mid[2] - c[2]) * axis[2]
+        if side > 1e-6
+            right = true
+        elseif side < -1e-6
+            left = true
+        end
+    end
+    left && right && return (:supported, :supported)
+    left && return (:supported, :free)
+    right && return (:free, :supported)
+    return (pos, neg)
+end
+
+_coord_m(x::Unitful.Length) = Float64(ustrip(u"m", x))
+_coord_m(x::Real) = Float64(x)
+_plan_xy(v) = (p = Meshes.coords(v); (_coord_m(p.x), _coord_m(p.y)))
+
+function _span_end_kind(struc, slab, edge, face)
+    skel = struc.skeleton
+    supported = false
+    for g in (:beams, :walls, :joists, :secondary)
+        edge in get(skel.groups_edges, g, Int[]) && (supported = true)
+    end
+    supported || return :free
+    other = nothing
+    for (f, es) in enumerate(skel.face_edge_indices)
+        f == face && continue
+        edge in es && (other = f)
+    end
+    other === nothing && return :supported
+    ci = findfirst(c -> c.face_idx == other, struc.cells)
+    ci === nothing && return :supported
+    # The slab running past the beam is continuous whether or not the next
+    # bay was grouped into this slab.
+    struc.cells[ci].floor_type in (:unknown, :grade) ? :supported : :continuous
+end
+
+_stronger_end(a, b) = (_end_rank(a) >= _end_rank(b) ? a : b)
+_end_rank(s) = s == :continuous ? 2 : s == :supported ? 1 : 0
+
+"""
+    _size_slab!(::OneWay, ...) -> CIPSlabResult
+
+Minimum one-way thickness on the panel's primary span, ACI 318-11 Table 9.5(a)
+(corpus: aci-318-11, page 131). The analysis method is recorded on
+`slab.design_details`. Bars are not sized here.
+"""
+function _size_slab!(::OneWay, struc, slab, slab_idx;
+                     options::AbstractFloorOptions = OneWayOptions(),
+                     verbose::Bool = false,
+                     kwargs...)
+    sdl, live = _slab_service_pressures(struc, slab, slab_idx)
+    span = _slab_topping_span(slab)
+    span === nothing && (span = slab.spans.primary)
+    options = _with_one_way_support(struc, slab, slab_idx, options)
+    support = hasproperty(options, :support) ? options.support : nothing
+    verbose && @info "Sizing one-way slab $slab_idx" span = span support = support
+    result = _size_span_floor(OneWay(), span, sdl, live;
+                               material = _options_concrete(options), options = options)
+    Lc = _opening_cantilever_span(struc, slab)
+    if Lc !== nothing
+        cant_opts = OneWayOptions(options.material, options.cover, options.bar_size, CANTILEVER)
+        cant = _size_span_floor(OneWay(), Lc, sdl, live;
+                                 material = _options_concrete(options), options = cant_opts)
+        if total_depth(cant) > total_depth(result)
+            @warn "one-way slab $slab_idx has an unframed opening $(Lc) from a support; its thickness is the cantilever"
+            result = cant
+        end
+    end
+    installed = _install_span_result!(struc, slab, result)
+    dead = installed.self_weight + sdl
+    method, reasons = assign_panel_analysis!(OneWay(), struc, slab, dead, live)
+    verbose && @info "One-way analysis" method=typeof(method) reasons=reasons
+    return installed
+end
+
+"""
+    _size_slab!(::TwoWay, ...) -> CIPSlabResult
+
+Minimum two-way thickness. `ln` is the longer of the two panel spans and β
+is longer over shorter (ACI 318-11 §9.5.3.3, corpus: aci-318-11, page 135).
+Beams are sized after the slab, so αfm is not known here and the thickness
+is the §9.5.3.3(a) bound. The planned analysis is recorded on
+`slab.design_details`.
+"""
+function _size_slab!(::TwoWay, struc, slab, slab_idx;
+                     options::AbstractFloorOptions = FlatPlateOptions(),
+                     verbose::Bool = false,
+                     kwargs...)
+    sdl, live = _slab_service_pressures(struc, slab, slab_idx)
+    topping = _slab_topping_span(slab)
+    span = topping === nothing ? max(slab.spans.primary, slab.spans.secondary) : topping
+    l2 = topping === nothing ? min(slab.spans.primary, slab.spans.secondary) :
+         something(get(slab.design_details, :topping_l2, nothing), topping)
+    verbose && @info "Sizing two-way slab $slab_idx" span = span l2 = l2
+    position = hasproperty(slab, :position) ? slab.position : :edge
+    result = _size_span_floor(TwoWay(), span, sdl, live;
+                               material = _options_concrete(options), options = options,
+                               l2 = l2, position = position)
+    installed = _install_span_result!(struc, slab, result)
+    dead = installed.self_weight + sdl
+    method, reasons = assign_panel_analysis!(TwoWay(), struc, slab, dead, live)
+    verbose && @info "Two-way analysis" method=typeof(method) reasons=reasons
+    return installed
+end
+
+# =============================================================================
 # Concrete: Vault (slab-based; 1 cell per slab enforced)
 # =============================================================================
 

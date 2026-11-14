@@ -398,9 +398,6 @@ function run_moment_analysis(
         secondary = secondary_data,
         fea_Δ_panel = fea_Δ_panel,
         pattern_loading = use_pattern,
-        M_wall_ext = _max_wall_face_moment(cache, struc, slab, span_axis, M0_u),
-        M_wall_int = zero(M0_u),
-        column_design_moments = forces.Mub_below,
     )
 end
 

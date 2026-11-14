@@ -133,6 +133,7 @@ function _build_or_update_fea!(
     eb_topology_changed = cache.initialized && (eb_active_now != eb_active_cache)
 
     if !cache.initialized || eb_topology_changed
+        cache.n_rebuilds += 1
         @debug "FEAModelCache" event=:rebuild reason=(!cache.initialized ? "uninitialized" : "edge_beam_topology_changed")
         if eb_topology_changed
             cache.initialized = false
@@ -184,6 +185,7 @@ function _build_or_update_fea!(
                 edge_beam_l2=edge_beam_l2,
                 edge_beam_c1_avg=edge_beam_c1_avg)
         end
+        cache.n_updates += 1
         @debug "FEAModelCache" event=:update
         cache.drop_panel  = drop_panel  # may have changed between iterations (same topology)
         cache.edge_beam_βt = edge_beam_βt  # refresh the stored target for this iteration

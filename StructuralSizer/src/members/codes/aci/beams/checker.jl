@@ -565,6 +565,19 @@ function is_feasible(
     return true
 end
 
+"""Strength checks use the concrete. The rebar on a reinforced-concrete material is for the objective."""
+function is_feasible(
+    checker::ACIBeamChecker,
+    cache::ACIBeamCapacityCache,
+    j::Int,
+    section::RCBeamSection,
+    material::ReinforcedConcreteMaterial,
+    demand::RCBeamDemand,
+    geometry::ConcreteMemberGeometry,
+)
+    is_feasible(checker, cache, j, section, material.concrete, demand, geometry)
+end
+
 """Extract factored torsion Tu from demand as kip·in (backward-compatible)."""
 function _get_Tu_kipin(demand::RCBeamDemand)
     Tu = demand.Tu

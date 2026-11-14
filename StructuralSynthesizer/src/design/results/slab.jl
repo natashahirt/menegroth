@@ -92,6 +92,15 @@ Base.@kwdef mutable struct SlabDesignResult
     method_requested::Union{Nothing, StructuralSizer.FlatPlateAnalysisMethod} = nothing
     method_used::Union{Nothing, StructuralSizer.FlatPlateAnalysisMethod} = nothing
     method_fallback_reasons::Vector{String} = String[]
+
+    # "not_analyzed" when only a minimum thickness was set and no moment
+    # analysis ran. Empty when the floor type does not report it.
+    analysis_status::String = ""
+
+    # Wood-Armer bars of this slab's panels from the story shell, one field
+    # per panel. Empty when the story shell did not design the slab.
+    shell_reinforcement::Vector{StructuralSizer.ElementRebarField} =
+        StructuralSizer.ElementRebarField[]
 end
 
 """

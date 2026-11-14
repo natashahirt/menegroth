@@ -114,6 +114,11 @@ mutable struct FEAModelCache
     # `FEA.averaging_width_factor` before moment extraction.
     averaging_width_factor::Union{Nothing, Float64}
 
+    # How many times this cache built a mesh, and how many times it kept
+    # the mesh and only updated sections and loads.
+    n_rebuilds::Int
+    n_updates::Int
+
     FEAModelCache() = new(
         false, nothing, Dict{Int,ColStubData}(), nothing,
         FEAElementData[], Dict{Int,Vector{Int}}(),
@@ -128,6 +133,8 @@ mutable struct FEAModelCache
         0.0,
         nothing,
         nothing,
+        0,
+        0,
     )
 end
 
@@ -199,7 +206,9 @@ median edge length all belong to one mesh, so none of them survive a remesh.
 """
 function _reset_fea_cache!(cache::FEAModelCache)
     fresh = FEAModelCache()
+    kept = (:n_rebuilds, :n_updates)
     for f in fieldnames(FEAModelCache)
+        f in kept && continue
         setfield!(cache, f, getfield(fresh, f))
     end
     return cache

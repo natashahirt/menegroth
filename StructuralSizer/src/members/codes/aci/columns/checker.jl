@@ -337,6 +337,19 @@ function is_feasible(
     return true
 end
 
+"""Strength checks use the concrete. The rebar on a reinforced-concrete material is for the objective."""
+function is_feasible(
+    checker::ACIColumnChecker,
+    cache::ACIColumnCapacityCache,
+    j::Int,
+    section::Union{RCColumnSection, RCCircularSection},
+    material::ReinforcedConcreteMaterial,
+    demand::Union{RCColumnDemand, RCColumnDemandSet},
+    geometry::ConcreteMemberGeometry,
+)
+    is_feasible(checker, cache, j, section, material.concrete, demand, geometry)
+end
+
 """
     _is_feasible_rc_column(checker, cache, j, section, material, demand, geometry) -> Bool
 
@@ -760,5 +773,17 @@ function explain_feasibility(
     worst = argmax(e -> (!e.passed, e.governing_ratio), expls)
     return FeasibilityExplanation(all(e -> e.passed, expls), worst.checks,
                                   worst.governing_check, worst.governing_ratio)
+end
+
+function explain_feasibility(
+    checker::ACIColumnChecker,
+    cache::ACIColumnCapacityCache,
+    j::Int,
+    section::Union{RCColumnSection, RCCircularSection},
+    material::ReinforcedConcreteMaterial,
+    demand::Union{RCColumnDemand, RCColumnDemandSet},
+    geometry::ConcreteMemberGeometry,
+)
+    explain_feasibility(checker, cache, j, section, material.concrete, demand, geometry)
 end
 

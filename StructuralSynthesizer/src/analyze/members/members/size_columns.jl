@@ -487,6 +487,21 @@ function _add_gravity_loads!(struc, edge_ids_in_group, gravity_factor)
     end
 end
 
+"""
+A catalog section often has `material = nothing`; the grade is the one
+`size_columns` just used. Capture reads `section.material` for Chapter E,
+so a steel section is copied with that grade. The catalog object is left
+unchanged.
+"""
+function _section_with_grade(section, material)
+    material isa StructuralSizer.StructuralSteel || return section
+    hasproperty(section, :material) || return section
+    isnothing(section.material) || return section
+    installed = deepcopy(section)
+    installed.material = material
+    return installed
+end
+
 # Helper: apply optimization results
 """
     _apply_column_results!(struc, result, group_ids, material, material_type, edge_ids_in_group; I_factor)
@@ -510,9 +525,9 @@ function _apply_column_results!(struc, result, group_ids, material, material_typ
     has_multi_mat = hasproperty(result, :materials_chosen)
     
     for (g_idx, gid) in enumerate(group_ids)
-        chosen = result.sections[g_idx]
         group_mat = has_multi_mat ? result.materials_chosen[g_idx] : material
-        
+        chosen = _section_with_grade(result.sections[g_idx], group_mat)
+
         mg = struc.member_groups[gid]
         mg.section = chosen
         

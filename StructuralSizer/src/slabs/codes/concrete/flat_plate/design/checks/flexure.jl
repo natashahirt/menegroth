@@ -20,6 +20,10 @@ Uses the same ACI 318-11 §13.6.4/.6 transverse distribution as `design_strip_re
 exterior negative → column-strip fraction from βt (§13.6.4.2); interior
 negative → 75 / 25 %; positive → 60 / 40 %.
 
+`fy`, `struc`, `slab`, and `span_axis` are accepted from the slab loop.
+§10.3.4 fixes the tension-controlled strain at 0.005, so `fy` does not
+change `Rn_max`. The strip moments are taken from `moment_results`.
+
 # Returns
 Named tuple `(ok, max_ratio, governing_strip)` where
 - `ok::Bool`:  true when all strips satisfy Rn ≤ Rn_max
@@ -27,7 +31,9 @@ Named tuple `(ok, max_ratio, governing_strip)` where
 - `governing_strip`: symbol identifying the controlling location
 """
 function check_flexural_adequacy(moment_results, columns, d, fc;
-                                 βt::Float64 = 0.0, verbose=false)
+                                 βt::Float64 = 0.0, verbose=false,
+                                 fy=nothing, struc=nothing, slab=nothing,
+                                 span_axis=nothing)
     φ = 0.9
     ω_tc = 0.85 * beta1(fc) * (0.003 / (0.003 + 0.005))
     Rn_max = ω_tc * fc * (1 - ω_tc / 1.7)

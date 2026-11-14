@@ -245,3 +245,17 @@ function design_single_strip(location::Symbol, Mu, b, d, fc, fy, h)
     )
 end
 
+"""
+Largest negative moment on the analysis result.
+
+Top bars are sized for the column-face moments. `column_moments` holds
+those, and `M_neg_ext` / `M_neg_int` are their exterior and interior
+envelopes. This result does not store a separate wall-face moment.
+"""
+function _top_bar_moment(moment_results)
+    z = zero(moment_results.M0)
+    m = isempty(moment_results.column_moments) ? z :
+        maximum(abs, moment_results.column_moments)
+    return max(m, abs(moment_results.M_neg_ext), abs(moment_results.M_neg_int))
+end
+

@@ -40,6 +40,66 @@ function _column_span_minimum(ln_max, opts)
 end
 
 """
+    _initialize_unsized_columns!(columns, Pu, ln_max, opts, column_opts)
+
+Give a starting size to each column that nothing sized before the slab
+loop. Later updates only grow, so this start is the smallest column the
+loop can return.
+
+- With `opts.column_span_minimum`, span/15.
+- Otherwise the square tied column that carries `Pu[i]` (kip, this slab's
+  factored load) by ACI 318-11 Eq. (10-2) at ρg = 0.01
+  ([`tied_column_area_for_axial`](@ref)), and at least 14 in.
+
+Either start is rounded up to the inch and clamped to `opts.max_column_size`.
+A column that already has a positive `c1` is left alone.
+"""
+function _initialize_unsized_columns!(columns, Pu, ln_max, opts, column_opts)
+    fc = column_opts.material.fc′
+    fy = column_opts.rebar_material.Fy
+    for (i, col) in enumerate(columns)
+        (isnothing(col.c1) || col.c1 <= 0u"inch") || continue
+        c = if opts.column_span_minimum
+            estimate_column_size_from_span(ln_max)
+        else
+            Ag = tied_column_area_for_axial(Pu[i] * kip, fc; fy = fy)
+            max(ceil(ustrip(u"inch", sqrt(Ag))) * u"inch", 14.0u"inch")
+        end
+        col.c1 = col.c2 = min(c, opts.max_column_size)
+    end
+    return columns
+end
+
+"""
+    _reseed_columns_for_thickness!(columns, Pu, ln_max, opts, column_opts)
+
+Drop the sizes chosen at the previous slab thickness and start again.
+Punching and the §13.6.9.2 moment split both depend on `h`. A column
+continuing from the story above keeps that story's size as a floor, then
+the same start as [`_initialize_unsized_columns!`](@ref) is applied.
+"""
+function _reseed_columns_for_thickness!(columns, Pu, ln_max, opts, column_opts)
+    floors = map(columns) do col
+        above = hasproperty(col, :column_above) ? col.column_above : nothing
+        if above === nothing || isnothing(above.c1) || above.c1 <= 0u"inch"
+            (0.0u"inch", 0.0u"inch")
+        else
+            (above.c1, something(above.c2, above.c1))
+        end
+    end
+    for col in columns
+        col.c1 = 0.0u"inch"
+        col.c2 = 0.0u"inch"
+    end
+    _initialize_unsized_columns!(columns, Pu, ln_max, opts, column_opts)
+    for (col, (a1, a2)) in zip(columns, floors)
+        col.c1 = max(col.c1, a1)
+        col.c2 = max(col.c2, a2)
+    end
+    return columns
+end
+
+"""
     _update_column_sizes!(columns, column_result, Pu, Mu, c_span_min, material, column_tol; Muy, verbose)
 
 Update column dimensions from P-M design results. Returns `true` if any

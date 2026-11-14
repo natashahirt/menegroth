@@ -303,4 +303,32 @@ function estimate_column_size_from_span(span::Length; ratio::Float64=15.0)
     return ceil(ustrip(u"inch", c) - 0.1) * u"inch"
 end
 
+"""
+    tied_column_axial_strength(Ag, fc; fy=60 ksi, ρg=0.01) -> Force
+
+ACI 318-11 Eq. (10-2) (§10.3.6.2; corpus: aci-318-11, p. 143):
+
+    φPn,max = 0.80 φ [0.85 f'c (Ag − Ast) + fy Ast]
+
+φ = 0.65 for a compression-controlled tied member (§9.3.2.2(b), p. 127).
+Ast = ρg Ag, and the default ρg = 0.01 is the §10.9.1 minimum (p. 148).
+"""
+function tied_column_axial_strength(Ag::Area, fc::Pressure;
+                                    fy::Pressure = 60000u"psi", ρg::Float64 = 0.01)
+    Ast = ρg * Ag
+    return 0.80 * 0.65 * (0.85 * fc * (Ag - Ast) + fy * Ast)
+end
+
+"""
+    tied_column_area_for_axial(Pu, fc; fy=60 ksi, ρg=0.01) -> Area
+
+Gross area at which [`tied_column_axial_strength`](@ref) equals `Pu`.
+Eq. (10-2) is linear in Ag.
+"""
+function tied_column_area_for_axial(Pu::Force, fc::Pressure;
+                                    fy::Pressure = 60000u"psi", ρg::Float64 = 0.01)
+    per_area = tied_column_axial_strength(1.0u"m^2", fc; fy, ρg) / 1.0u"m^2"
+    return Pu / per_area
+end
+
 

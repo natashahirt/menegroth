@@ -309,7 +309,7 @@ function punching_check_reduced(points, closed, reaction, openings, column_xy,
                                span_axis = (1.0, 0.0),
                                αs::Int = 40,
                                shape::Symbol = :rectangular,
-                               λ::Float64 = 1.0, ϕ::Float64 = 0.75,
+                               λ::Float64 = 1.0, λs::Float64 = 1.0, ϕ::Float64 = 0.75,
                                Mub_out = M_span)
     (openings === nothing || column_xy === nothing || isempty(openings)) && return nothing
     local_ops = _translate_openings(openings, column_xy)
@@ -336,7 +336,7 @@ function punching_check_reduced(points, closed, reaction, openings, column_xy,
                                  _shift_moment(Muy_g, Vu, props.xc), d, fc, reduced.points;
                                  closed = false, segments = reduced.segments,
                                  β = punching_β(c1, c2; shape = shape),
-                                 αs = αs, λ = λ, ϕ = ϕ)
+                                 αs = αs, λ = λ, λs = λs, ϕ = ϕ)
     return (ok = res.ok, ratio = res.utilization, vu = res.vu, φvc = res.ϕvc,
             b0 = res.b0, Jc = res.J1, Mub = Mub_out)
 end

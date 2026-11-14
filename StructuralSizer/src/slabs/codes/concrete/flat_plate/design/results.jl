@@ -80,7 +80,9 @@ end
 
 Build column design results dict from design outputs.
 """
-function build_column_results(struc, columns, column_result, Pu, Mu, punching_results)
+function build_column_results(struc, columns, column_result, Pu, Mu, punching_results;
+                              Mu_secondary = nothing, stubs = nothing,
+                              stubs_secondary = nothing)
     results = Dict{Int, NamedTuple}()
     if !_rc_nlp_result_installable(column_result)
         @warn "Column NLP result is not a completed design; omitting column results" status=column_result.status
@@ -96,6 +98,9 @@ function build_column_results(struc, columns, column_result, Pu, Mu, punching_re
         d_in = ustrip(u"inch", bb.depth)
         
         Mu_val = uconvert(u"kN*m", Mu[i])
+        # Perpendicular unbalanced moment, before the §13.6.9.2 split.
+        # Zero only when that direction was not analyzed.
+        Mu_sec = isnothing(Mu_secondary) ? 0.0u"kN*m" : uconvert(u"kN*m", Mu_secondary[i])
         
         results[col_idx] = (
             section_size = "$(w_in)×$(d_in)",
@@ -104,6 +109,7 @@ function build_column_results(struc, columns, column_result, Pu, Mu, punching_re
             ρg = section.ρg,
             Pu = uconvert(u"kN", Pu[i] * kip),
             Mu = Mu_val,
+            Mu_secondary = Mu_sec,
             punching = punching_results[col_idx]
         )
     end

@@ -2164,7 +2164,15 @@ resize()
 loop()
 
 async function loadDefault() {
-  for (const name of ["core_office.mgscene", "demo.mgscene"]) {
+  const asked = new URLSearchParams(location.search).get("scene")
+  let names = ["core_office.mgscene", "demo.mgscene"]
+  const listed = await fetch("/scenes.json")
+  if (listed.ok) {
+    const parsed = await listed.json()
+    if (Array.isArray(parsed) && parsed.length > 0) names = parsed
+  }
+  if (asked) names = [asked, ...names.filter((name) => name !== asked)]
+  for (const name of names) {
     const response = await fetch(`/${name}`)
     if (response.ok) {
       await openBuffer(await response.arrayBuffer(), name)

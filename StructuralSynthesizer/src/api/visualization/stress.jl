@@ -1,7 +1,8 @@
 """Compute per-face analytical scalars from ShellInternalForces and append to arrays.
 Signed quantities preserve physical meaning (+ tension/sagging, − compression/hogging)."""
 function _append_shell_analytical!(face_bending, face_membrane, face_shear,
-                                    face_vm, face_surf, shell, u_global, sif_ws)
+                                    face_vm, face_surf, shell, u_global, sif_ws;
+                                    axial = nothing)
     sif = Asap.ShellInternalForces(shell, u_global, sif_ws)
     t = shell.thickness  # [m]
 
@@ -27,7 +28,23 @@ function _append_shell_analytical!(face_bending, face_membrane, face_shear,
     σ_bot = _signed_principal_stress(surf.bottom.σxx, surf.bottom.σyy, surf.bottom.τxy)
     push!(face_surf, _signed_extremum(σ_top, σ_bot))
 
+    # Vertical force per unit length on a horizontal cut, N/m, tension positive.
+    # A horizontal shell has no vertical component in its in-plane axes.
+    axial === nothing || push!(axial, _shell_vertical_force(shell, sif))
+
     return nothing
+end
+
+"""Vertical component of the membrane force, newtons per metre, tension positive.
+
+`v · N · v`, where `v` is global Z projected onto the shell's in-plane axes.
+On a wall this is the axial force per unit length. On a floor the in-plane
+axes are horizontal, so the value is zero.
+"""
+function _shell_vertical_force(shell, sif)::Float64
+    vx = shell.LCS[1][3]
+    vy = shell.LCS[2][3]
+    return vx * vx * sif.Nxx + vy * vy * sif.Nyy + 2 * vx * vy * sif.Nxy
 end
 
 """Return the value with the largest absolute magnitude, preserving sign."""

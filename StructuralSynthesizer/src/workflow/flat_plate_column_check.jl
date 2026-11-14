@@ -315,12 +315,15 @@ function check_flat_plate_columns!(struc::BuildingStructure, params::DesignParam
     run = StructuralSizer.settle!(; budget) do _
         checks = flat_plate_column_checks(struc, column_opts)
         grown, unresolved = _grow_flat_plate_columns!(struc, params, column_opts, checks)
+        stacked, _ = _stack_flat_plate_columns!(struc, params, column_opts, checks)
+        append!(grown, stacked)
         isempty(grown) && return false
         union!(grown_all, grown)
         update_structural_offsets!(struc; input_is_centerline = params.geometry_is_centerline)
         _resolve_after_column_change!(struc)
         return true
     end
+    _shrink_flat_plate_columns!(struc, params, column_opts)
     isempty(unresolved) || @warn "Flat-plate columns fail the full-load P-M check and no catalog section within the column cap passes" columns = unresolved
     run.converged || @warn "Flat-plate column check still growing when its budget ran out" rounds = run.steps
     StructuralSizer.emit!(tc, :workflow, "check_flat_plate_columns!", "", :decision;
@@ -330,4 +333,185 @@ function check_flat_plate_columns!(struc::BuildingStructure, params::DesignParam
                           n_grown = length(grown_all))
     return (grown = sort!(collect(grown_all)), unresolved = unresolved,
             rounds = run.steps, converged = run.converged)
+end
+
+"""Plan area of a column section, m². A circular column uses `c1` as the diameter."""
+function _column_plan_area(col)
+    (isnothing(col.c1) || isnothing(col.c2)) && return 0.0
+    col.shape == :circular && return ustrip(u"m^2", π / 4 * col.c1^2)
+    return ustrip(u"m^2", col.c1 * col.c2)
+end
+
+function _install_rc_column_section!(struc, params, col, sec)
+    bb = StructuralSizer.bounding_box(sec)
+    col.c1 = bb.width
+    col.c2 = bb.depth
+    set_section!(col, sec)
+    _set_rc_column_volumes!(col,
+        something(col.concrete, resolve_column_concrete(params.materials)),
+        resolve_column_rebar(params.materials))
+    _install_column_frame_section!(struc, col, _rc_column_frame_section(col, params))
+    return sec
+end
+
+"""
+Lower column adopts the column above as a whole section.
+
+Design policy, not a code check: the lower column is not given the larger
+side of each plan axis. A 12×20 under a 20×12 stays the lighter of those two
+whole sections. The adopted section has to pass the lower column's full-load
+demand and the flat-plate size cap. A column above with a different shape is
+left alone.
+"""
+function _stack_flat_plate_columns!(struc, params, column_opts, checks)
+    checker = _aci_column_checker(column_opts)
+    catalog = _column_catalog(column_opts)
+    cap = _flat_plate_column_cap(params)
+    is_rc(c) = section(c) isa StructuralSizer.RCColumnSection ||
+               section(c) isa StructuralSizer.RCCircularSection
+    grown, stuck = Int[], Int[]
+    order = sortperm([c.story for c in struc.columns]; rev = true)
+    for i in order
+        col = struc.columns[i]
+        above = col.column_above
+        (above === nothing || !is_rc(col) || !is_rc(above)) && continue
+        _column_plan_area(col) + 1e-6 >= _column_plan_area(above) && continue
+        haskey(checks, i) || (push!(stuck, i); continue)
+        above_sec = section(above)
+        above_sec === nothing && continue
+        mat = _column_concrete(col, column_opts)
+        demands = _rc_demand_orientations(checks[i].demand, column_opts.βdns)
+        geom = _flat_plate_column_geometry(col)
+        candidates = StructuralSizer.AbstractSection[above_sec]
+        if col.shape != :circular
+            for sec in catalog
+                bb = StructuralSizer.bounding_box(sec)
+                (bb.width ≈ above.c2 && bb.depth ≈ above.c1) || continue
+                push!(candidates, sec)
+                break
+            end
+        end
+        cache = StructuralSizer.create_cache(checker, length(candidates))
+        StructuralSizer.precompute_capacities!(checker, cache, candidates, mat, column_opts.objective)
+        pick = nothing
+        best = Inf
+        for (j, sec) in enumerate(candidates)
+            _section_within_cap(sec, cap) || continue
+            all(d -> StructuralSizer.is_feasible(checker, cache, j, sec, mat, d, geom), demands) || continue
+            cost = cache.obj_coeffs[j]
+            cost < best || continue
+            best = cost
+            pick = sec
+        end
+        if pick === nothing
+            @warn "Column above is a larger section and neither that section nor its rotation passes the lower column" column = i
+            push!(stuck, i)
+            continue
+        end
+        _install_rc_column_section!(struc, params, col, pick)
+        push!(grown, i)
+    end
+    return (grown, stuck)
+end
+
+"""True when every flat-plate slab this column supports still punches at the column's current size."""
+function _column_punching_still_ok(struc, params, col)
+    fo = resolve_floor_options(params)
+    fp = fo isa StructuralSizer.FlatSlabOptions ? fo.base : fo
+    fp isa StructuralSizer.FlatPlateOptions || return true
+    cover = fp.cover
+    bar_dia = StructuralSizer.bar_diameter(fp.bar_size)
+    fc = fp.material.concrete.fc′
+    λ = isnothing(fp.λ) ? fp.material.concrete.λ : fp.λ
+    saw = false
+    for slab in struc.slabs
+        slab.floor_type in (:flat_plate, :flat_slab) || continue
+        cols = StructuralSizer.find_supporting_columns(struc, Set(slab.cell_indices))
+        i = findfirst(c -> c === col, cols)
+        i === nothing && continue
+        saw = true
+        dd = slab.design_details
+        (dd isa NamedTuple && hasproperty(dd, :moment_results) && dd.moment_results !== nothing) ||
+            return false
+        mr = dd.moment_results
+        length(mr.column_shears) == length(cols) || return false
+        length(mr.unbalanced_moments) == length(cols) || return false
+        h = thickness(slab)
+        d = StructuralSizer.effective_depth(h; cover = cover, bar_diameter = bar_dia)
+        sr = hasproperty(dd, :secondary_results) ? dd.secondary_results : nothing
+        Muy = (sr === nothing || !hasproperty(sr, :unbalanced_moments)) ? nothing :
+              sr.unbalanced_moments[i]
+        pr = StructuralSizer.check_punching_for_column(
+            col, mr.column_shears[i], mr.unbalanced_moments[i], d, h, fc;
+            Muy = Muy, λ = λ, φ_shear = fp.φ_shear,
+            StructuralSizer.punching_axis_kwargs(struc, slab, col)...)
+        pr.ok || return false
+    end
+    return saw || true
+end
+
+"""
+Try a lighter catalog section after the column loop has settled.
+
+The section has to pass the same full-load P-M check and the stored slab
+punching shear at the new size. One re-solve confirms the forces. A column
+that then fails goes back to the section it had.
+"""
+function _shrink_flat_plate_columns!(struc, params, column_opts)
+    column_opts isa StructuralSizer.ConcreteColumnOptions || return Int[]
+    checks = flat_plate_column_checks(struc, column_opts)
+    isempty(checks) && return Int[]
+    checker = _aci_column_checker(column_opts)
+    catalog = _column_catalog(column_opts)
+    cap = _flat_plate_column_cap(params)
+    caches = Dict{Any, Any}()
+    saved = Dict{Int, Any}()
+    shrunk = Int[]
+    for (i, chk) in checks
+        chk.passed || continue
+        col = struc.columns[i]
+        mat = _column_concrete(col, column_opts)
+        cache = get!(caches, mat) do
+            c = StructuralSizer.create_cache(checker, length(catalog))
+            StructuralSizer.precompute_capacities!(checker, c, catalog, mat, column_opts.objective)
+            c
+        end
+        demands = _rc_demand_orientations(chk.demand, column_opts.βdns)
+        geom = _flat_plate_column_geometry(col)
+        cur = _column_plan_area(col)
+        order = sortperm(cache.obj_coeffs)
+        pick = nothing
+        for j in order
+            sec = catalog[j]
+            bb = StructuralSizer.bounding_box(sec)
+            area = ustrip(u"m^2", bb.width * bb.depth)
+            area < cur - 1e-8 || continue
+            _section_within_cap(sec, cap) || continue
+            all(d -> StructuralSizer.is_feasible(checker, cache, j, sec, mat, d, geom), demands) || continue
+            old_c1, old_c2, old_sec = col.c1, col.c2, section(col)
+            _install_rc_column_section!(struc, params, col, sec)
+            if _column_punching_still_ok(struc, params, col)
+                pick = sec
+                saved[i] = old_sec
+                break
+            end
+            col.c1, col.c2 = old_c1, old_c2
+            old_sec === nothing || _install_rc_column_section!(struc, params, col, old_sec)
+        end
+        pick === nothing || push!(shrunk, i)
+    end
+    isempty(shrunk) && return shrunk
+    update_structural_offsets!(struc; input_is_centerline = params.geometry_is_centerline)
+    _resolve_after_column_change!(struc)
+    again = flat_plate_column_checks(struc, column_opts)
+    restored = false
+    for i in shrunk
+        haskey(again, i) && again[i].passed && _column_punching_still_ok(struc, params, struc.columns[i]) && continue
+        sec = saved[i]
+        sec === nothing && continue
+        _install_rc_column_section!(struc, params, struc.columns[i], sec)
+        restored = true
+    end
+    restored && _resolve_after_column_change!(struc)
+    return shrunk
 end

@@ -393,6 +393,10 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
         end
     end
     
+    if column_opts isa StructuralSizer.ConcreteColumnOptions
+        _shrink_flat_plate_columns!(struc, params, column_opts)
+    end
+
     StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :exit;
                           converged=converged,
                           iterations=iters_used)

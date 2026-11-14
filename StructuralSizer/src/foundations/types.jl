@@ -480,6 +480,8 @@ A grade wall (or one leg of an L or T) as a line load on a footing.
 - `hw`: Wall height, for the shear-wall term of ACI 336.2R Eq. (5-2).
 - `samples`: Base reactions along the wall. A node shared with another leg
   belongs to exactly one leg.
+- `solid`: Length of concrete at the base. A door at the base is omitted.
+  The default is the full centerline.
 """
 struct WallLineDemand{L, F}
     idx::Int
@@ -488,16 +490,18 @@ struct WallLineDemand{L, F}
     tw::L
     hw::L
     samples::Vector{WallLineSample{L, F}}
+    solid::L
 end
 
 """
-    WallLineDemand(idx, p1, p2, tw, hw, samples) → WallLineDemand
+    WallLineDemand(idx, p1, p2, tw, hw, samples; solid_length=nothing) → WallLineDemand
 
 `p1` and `p2` are `(x, y)` plan coordinates. Lengths are stored in metres
 and forces in newtons, so a wall in feet and a thickness in inches are
-the same demand.
+the same demand. `solid_length` is the concrete at the base; omitted, it
+is the distance from `p1` to `p2`.
 """
-function WallLineDemand(idx::Int, p1, p2, tw, hw, samples)
+function WallLineDemand(idx::Int, p1, p2, tw, hw, samples; solid_length = nothing)
     isempty(samples) && throw(ArgumentError(
         "Wall line $idx has no base reactions"))
     xy(p) = (uconvert(u"m", p[1]), uconvert(u"m", p[2]))
@@ -505,8 +509,10 @@ function WallLineDemand(idx::Int, p1, p2, tw, hw, samples)
                              uconvert(u"N", s.Pu),
                              uconvert(u"N", s.Ps)) for s in samples]
     p1m, p2m = xy(p1), xy(p2)
+    full = hypot(p2m[1] - p1m[1], p2m[2] - p1m[2])
+    solid = solid_length === nothing ? full : uconvert(u"m", solid_length)
     WallLineDemand{typeof(p1m[1]), typeof(normed[1].Pu)}(
-        idx, p1m, p2m, uconvert(u"m", tw), uconvert(u"m", hw), normed)
+        idx, p1m, p2m, uconvert(u"m", tw), uconvert(u"m", hw), normed, solid)
 end
 
 """

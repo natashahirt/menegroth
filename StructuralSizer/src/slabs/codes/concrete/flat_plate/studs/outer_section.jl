@@ -40,6 +40,24 @@ cap only stops a search that never passes.
 """
 const MAX_REINFORCEMENT_LINES = 20
 
+"""Plan area of a polygon. Vertices are `(x, y)` number pairs, last edge closes to the first."""
+function _shoelace(poly)
+    A = 0.0
+    n = length(poly)
+    for i in 1:n
+        x1, y1 = poly[i]
+        x2, y2 = poly[mod1(i + 1, n)]
+        A += x1 * y2 - x2 * y1
+    end
+    return abs(A) / 2
+end
+
+"""Floor `|M| − Vu·|e|` at zero. ACI 318-11 R11.11.7.2 (corpus: aci-318-11, page 210)."""
+function _shift_moment(M, Vu, e)
+    mag = abs(ustrip(u"N*m", M)) - abs(ustrip(u"N*m", Vu * e))
+    return sign(ustrip(u"N*m", M)) * max(mag, 0.0) * u"N*m"
+end
+
 """
     reinforcement_lines_per_face(face, d) -> Int
 

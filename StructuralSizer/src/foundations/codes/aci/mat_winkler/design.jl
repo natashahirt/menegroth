@@ -24,8 +24,13 @@ function _design_mat_winkler_fea(
     positions::Vector{<:NTuple{2, <:Length}},
     soil::Soil,
     method::WinklerFEA;
-    opts::MatParams = MatParams()
+    opts::MatParams = MatParams(),
+    walls::Vector{<:WallLineDemand} = WallLineDemand[],
 )
+    # The rigid mat applies a wall line. This plate does not: a non-empty
+    # `walls` would drop that load, so it stops here instead.
+    isempty(walls) || error(
+        "Winkler mat design does not apply wall line loads. Keep the rigid method, or place the line on the plate.")
     N_col = length(demands)
     soil.ks !== nothing || error("WinklerFEA requires soil.ks to be provided")
 

@@ -147,7 +147,8 @@ Options for flat plate / flat slab / waffle / PT slab sizing per ACI 318 Chapter
 
 # Punching Shear Resolution (ACI 318-11 §11.11)
 - `punching_strategy`: *When* to apply punching reinforcement
-  - `:grow_columns` — Only grow columns; error if maxed (default)
+  - `:grow_columns` — Only grow columns; error if maxed
+  - `:joint_search` — Choose thickness, column sizes, and studs together by the objective (default)
   - `:reinforce_last` — Try columns first, reinforce if columns max out
   - `:reinforce_first` — Try reinforcement first, grow columns if reinf. fails
 - `punching_reinforcement`: *What type* of reinforcement to use
@@ -253,6 +254,10 @@ struct FlatPlateOptions <: AbstractFloorOptions
     punching_thickening::Bool
     # ACI 318-11 §13.5.3.3 increase of γf at the column face
     moment_transfer_increase::Bool
+    # :joint_search may place headed studs
+    joint_studs::Bool
+    # Weight on the stud term in the :joint_search objective
+    stud_weight::Float64
 end
 
 """Valid values of `FlatPlateOptions.on_inapplicable`."""
@@ -299,14 +304,16 @@ function _build_flat_plate_options(;
     φ_shear::Float64 = 0.75,
     λ::Union{Float64, Nothing} = nothing,
     deflection_limit::Symbol = :L_360,
-    punching_strategy::Symbol = :grow_columns,
+    punching_strategy::Symbol = :joint_search,
+    joint_studs::Bool = true,
+    stud_weight::Float64 = 1.0,
     punching_reinforcement::Symbol = :headed_studs_generic,
     max_column_size::Length = 30.0u"inch",
     stud_material::RebarSteel = Stud_51,
     stud_diameter::Length = 0.5u"inch",
     stirrup_bar_size::Int = 4,
     min_h::Union{Length, Nothing} = nothing,
-    objective::AbstractObjective = MinVolume(),
+    objective::AbstractObjective = MinCarbon(),
     col_I_factor::Float64 = 0.70,
     on_inapplicable::Symbol = :fallback,
     column_span_minimum::Bool = false,
@@ -321,7 +328,7 @@ function _build_flat_plate_options(;
                      stud_material, stud_diameter, stirrup_bar_size,
                      min_h, objective, col_I_factor, on_inapplicable,
                      column_span_minimum, punching_thickening,
-                     moment_transfer_increase)
+                     moment_transfer_increase, joint_studs, stud_weight)
 end
 
 """
@@ -338,7 +345,7 @@ If both `shear_studs` and `punching_strategy` are provided, `punching_strategy` 
 """
 function FlatPlateOptions(;
     shear_studs::Union{Symbol, Nothing} = nothing,
-    punching_strategy::Symbol = isnothing(shear_studs) ? :grow_columns : _shear_studs_to_strategy(shear_studs),
+    punching_strategy::Symbol = isnothing(shear_studs) ? :joint_search : _shear_studs_to_strategy(shear_studs),
     kw...
 )
     _build_flat_plate_options(; punching_strategy=punching_strategy, kw...)
@@ -355,6 +362,7 @@ function Base.getproperty(opts::FlatPlateOptions, name::Symbol)
         strat === :grow_columns    && return :never
         strat === :reinforce_last  && return :if_needed
         strat === :reinforce_first && return :always
+        strat === :joint_search    && return getfield(opts, :joint_studs) ? :if_needed : :never
         return :never
     end
     return getfield(opts, name)

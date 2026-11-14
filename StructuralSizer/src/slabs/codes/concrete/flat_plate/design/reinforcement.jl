@@ -107,7 +107,8 @@ distribution factors are applied per-column and then enveloped:
 Named tuple with column_strip and middle_strip reinforcement vectors.
 """
 function design_strip_reinforcement(moment_results, columns, h, d, fc, fy, cover;
-                                    βt::Float64 = 0.0, verbose=false)
+                                    βt::Float64 = 0.0, verbose=false,
+                                    struc=nothing, slab=nothing, span_axis=nothing)
     l1 = moment_results.l1
     l2 = moment_results.l2
 

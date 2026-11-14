@@ -36,6 +36,8 @@ Reference buildings, by name. Each returns `(structure, params)`.
 - `steel_beams`: the same grid with a one-way slab on steel beams.
 - `core_office`: 3×3 bays of 8 m, four stories, concrete core walls, FEA strip
   flat plate (slowest case).
+- `two_way`: the office grid with a two-way slab on reinforced-concrete beams.
+- `core_mat`: the core office on one mat.
 """
 const CASES = Dict{String, Function}(
     "flat_plate" => () -> (
@@ -77,6 +79,30 @@ const CASES = Dict{String, Function}(
             wall_thickness = 0.3u"m",
             diaphragm_mode = :rigid,
             foundation_options = _spread(),
+            skip_visualization = true)),
+    "two_way" => () -> (
+        BuildingStructure(gen_medium_office(72.0u"ft", 72.0u"ft", 12.0u"ft", 3, 3, 2)),
+        DesignParameters(
+            name = "two_way",
+            floor = TwoWayOptions(),
+            materials = MaterialOptions(concrete = NWC_4000, rebar = Rebar_60),
+            columns = ConcreteColumnOptions(material = NWC_4000, rebar_material = Rebar_60),
+            beams = ConcreteBeamOptions(material = NWC_4000, rebar_material = Rebar_60),
+            foundation_options = _spread(),
+            skip_visualization = true)),
+    "core_mat" => () -> (
+        BuildingStructure(core_office_skeleton()),
+        DesignParameters(
+            name = "core_mat",
+            floor = FlatPlateOptions(method = FEA(design_approach = :strip)),
+            materials = MaterialOptions(concrete = RC_4000_60.concrete, rebar = Rebar_60),
+            columns = ConcreteColumnOptions(material = RC_4000_60.concrete,
+                                            rebar_material = Rebar_60),
+            wall_thickness = 0.3u"m",
+            diaphragm_mode = :rigid,
+            foundation_options = FoundationParameters(
+                soil = medium_sand,
+                options = FoundationOptions(strategy = :mat)),
             skip_visualization = true)),
 )
 
@@ -151,6 +177,33 @@ function _read_csv(path)
     return [split(l, ","; keepempty = true) for l in lines[2:end]]
 end
 
+"""Write the design as a viewer scene next to the CSV and under viewer/public."""
+function _write_case_scene(design, dir, name)
+    try
+        packet = build_scene(design)
+        path = joinpath(dir, name * ".mgscene")
+        write_scene(path, packet)
+        pub = joinpath(@__DIR__, "..", "..", "viewer", "public")
+        mkpath(pub)
+        write_scene(joinpath(pub, name * ".mgscene"), packet)
+        names = sort!(filter(f -> endswith(f, ".mgscene"), readdir(pub)))
+        open(joinpath(pub, "scenes.json"), "w") do io
+            print(io, "[")
+            for (i, scene_name) in enumerate(names)
+                i > 1 && print(io, ",")
+                print(io, "\"", scene_name, "\"")
+            end
+            println(io, "]")
+        end
+        @printf("   scene %s (%.0f KiB)\n", abspath(path), filesize(path) / 1024)
+    catch err
+        println("   SCENE FAILED: ", sprint(showerror, err))
+        for fr in stacktrace(catch_backtrace())[1:min(8, end)]
+            println("      ", fr)
+        end
+    end
+end
+
 function run_cases(label, names)
     dir = mkpath(joinpath(OUT_ROOT, label))
     total_rows = NTuple{3, String}[]
@@ -177,6 +230,7 @@ function run_cases(label, names)
         end
         nfail = count(r -> r[4] == "false", rows)
         @printf("   %d elements, %d failing, %.1f s\n", length(rows), nfail, t)
+        _write_case_scene(design, dir, name)
     end
     _write_csv(joinpath(dir, "totals.csv"), ("case", "quantity", "value"), total_rows)
     println("wrote ", abspath(dir))

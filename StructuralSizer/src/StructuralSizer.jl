@@ -513,7 +513,7 @@ export AbstractJoistPattern, joist_geometry
 
 # --- Floor options ---
 export AbstractFloorOptions
-export FlatPlateOptions, FlatSlabOptions, OneWayOptions, VaultOptions, CompositeDeckOptions, TimberOptions
+export FlatPlateOptions, FlatSlabOptions, OneWayOptions, TwoWayOptions, VaultOptions, CompositeDeckOptions, TimberOptions
 export flat_slab  # convenience constructor for FlatSlabOptions
 export result_materials
 

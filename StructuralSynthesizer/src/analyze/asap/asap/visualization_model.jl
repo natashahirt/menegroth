@@ -146,6 +146,38 @@ visualize(design, mode=:deflected)
   included group, or `frame_groups` lists `:walls`) gets the same zero frame
   section as `to_asap!`. Which groups are included does not change.
 """
+
+# Wall index of each shell in an analysis model built here. 0 is not a wall.
+# Keyed by object id because `Asap.Model` is not given a field for this.
+const _ANALYSIS_SHELL_WALLS = Dict{UInt, Vector{Int}}()
+
+"""
+    analysis_shell_walls(model) -> Vector{Int} or nothing
+
+1-based `struc.walls` index of each shell, in `model.shell_elements` order.
+A shell that is not a wall is 0. `nothing` when this model was not built by
+[`build_analysis_model!`](@ref).
+"""
+analysis_shell_walls(model) = get(_ANALYSIS_SHELL_WALLS, objectid(model), nothing)
+
+function _store_analysis_shell_walls!(model, shells_by_wall)
+    owner = Dict{UInt, Int}()
+    for (iw, group) in enumerate(shells_by_wall)
+        for sh in group
+            owner[objectid(sh)] = iw
+        end
+    end
+    idx = Vector{Int}(undef, length(model.shell_elements))
+    for (i, sh) in enumerate(model.shell_elements)
+        w = get(owner, objectid(sh), 0)
+        (sh.id === :wall) == (w > 0) || error(
+            "analysis model: shell $(sh.id) has wall index $w")
+        idx[i] = w
+    end
+    _ANALYSIS_SHELL_WALLS[objectid(model)] = idx
+    return idx
+end
+
 function build_analysis_model!(design::BuildingDesign;
                                load_combination::LoadCombination=service,
                                mesh_density::Int=2,
@@ -246,7 +278,7 @@ function build_analysis_model!(design::BuildingDesign;
     # Same mesh and stiffness as to_asap!. Meshed before the slabs so a flat
     # slab can embed the wall nodes at its elevation (see `_slab_wall_nodes`).
     # Walls are vertical; the slab AreaLoad below does not touch them.
-    wall_shells, wall_nodes, _, _ = _mesh_wall_shells(struc, design.params, nodes, Asap.ShellElement[])
+    wall_shells, wall_nodes, shells_by_wall, _ = _mesh_wall_shells(struc, design.params, nodes, Asap.ShellElement[])
     _apply_stated_cracked_wall_stiffness!(wall_shells, design.params)
 
     # ─── 5b. Create shell elements for slabs ───
@@ -470,6 +502,7 @@ function build_analysis_model!(design::BuildingDesign;
     
     design.asap_model = model
     design.asap_model_frame_edge_indices = frame_edge_indices
+    _store_analysis_shell_walls!(model, shells_by_wall)
     
     @info "Built analysis model" frame_groups=resolved_groups n_frames=length(frame_elements) n_shells=length(shell_elements) n_loads=length(loads)
     

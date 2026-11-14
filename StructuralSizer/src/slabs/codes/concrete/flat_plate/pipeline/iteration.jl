@@ -393,6 +393,37 @@ function _size_flat_plate!(
         return span
     end
 
+    # Thickness, columns, and studs ranked by opts.objective (carbon by default).
+    _joint = opts.punching_strategy === :joint_search
+    if _joint && opts.joint_studs && !_is_headed_stud_reinforcement(opts.punching_reinforcement)
+        throw(ArgumentError(
+            "punching_strategy = :joint_search with joint_studs = true needs a headed-stud " *
+            "punching_reinforcement; got :$(opts.punching_reinforcement)"))
+    end
+    joint_scanned = false
+    joint_stud_cols = Set{Int}()
+    n_joint_scans = 0
+    _edge_stiffness_h = opts.has_edge_beam && isnothing(opts.edge_beam_βt)
+    function _joint_ctx(βt)
+        Ie_method = method isa FEA ? method.deflection_Ie_method : :branson
+        return (struc = struc, slab = slab, columns = columns, opts = opts,
+         column_opts = column_opts, fc = fc, fy = fy, λ = λ, φ_shear = φ_shear,
+         cover = cover, bar_dia = bar_dia, γ = γ_concrete, h_increment = h_increment,
+         h_max = h_max, βt = βt, slab_area_m2 = _joint_slab_area_m2(struc, slab),
+         c_floor = [(c.c1, c.c2) for c in columns],
+         Ast_floor = [_joint_section_steel(c) for c in columns],
+         geom_cache = _punch_geom_cache, moment_transfer = _moment_transfer,
+         depth_passes = (hh, sp, ss) -> phase_a_depth_passes(
+             sp, ss, hh, effective_depth(hh; cover = cover, bar_diameter = bar_dia),
+             fc, fy, Es, Ecs, slab.spans, γ_concrete, columns;
+             struc = struc, slab = slab, limit_type = opts.deflection_limit,
+             deflection_Ie_method = Ie_method,
+             λ = λ, φ_shear = φ_shear, βt = βt, span_axis = _get_span_axis(slab),
+             cover = cover, bar_diameter = bar_dia),
+         studs = opts.joint_studs, thicken = opts.punching_thickening,
+         concrete = material.concrete, rebar = material.rebar, preferred = nothing)
+    end
+
     # =====================================================================
     # OUTER LOOP: ties Phase A → B → C together.
     # Phase B (punching) or C (rebar) may signal "need more depth", which
@@ -919,7 +950,67 @@ function _size_flat_plate!(
             end
             
             all_fails = vcat(interior_fails, edge_corner_fails)
-            
+
+            # Rank thickness, columns, and studs from this analysis, then
+            # confirm. A drop panel or an edge-beam stiffness that depends on
+            # h stays on the grow-columns path: the scale does not apply.
+            joint_applies = _joint && thickness_scale_applies(
+                moment_results, drop_panel, h, γ_concrete;
+                stiffness_depends_on_h = _edge_stiffness_h)
+            if joint_applies
+                failing = Int[]
+                for i in all_fails
+                    if i in joint_stud_cols
+                        pr = punching_local[i]
+                        dem = (Vu = moment_results.column_shears[i],
+                               Mub = moment_results.unbalanced_moments[i],
+                               Muy = isnothing(secondary_results) ? nothing :
+                                     secondary_results.unbalanced_moments[i])
+                        r = _try_reinforcement(opts.punching_reinforcement, pr.vu, fc, pr.b0,
+                                               d, h, columns[i], opts, moment_results, dem;
+                                               λ = λ, φ = φ_shear,
+                                               punch_kwargs = punching_axis_kwargs(struc, slab, columns[i]))
+                        if r.ok
+                            punching_local[i] = _merge_reinforcement_result(pr, r)
+                            continue
+                        end
+                    end
+                    push!(failing, i)
+                end
+                if joint_scanned && isempty(failing)
+                    punching_resolved = true
+                    emit!(tc, :slab, "size_flat_plate!", _slab_id, :decision;
+                          phase="B", outcome="joint_confirmed", h=string(h),
+                          n_studs=count(i -> get(punching_local[i], :studs, nothing) !== nothing,
+                                        1:n_cols_ps))
+                    break
+                end
+                scan = joint_search(moment_results, secondary_results, h, _joint_ctx(_βt))
+                joint_scanned = true
+                n_joint_scans += 1
+                best = scan.best
+                emit!(tc, :slab, "size_flat_plate!", _slab_id, :decision;
+                      phase="B", outcome="joint_search", scan=n_joint_scans,
+                      h_chosen=best === nothing ? "none" : string(best.h),
+                      J=best === nothing ? NaN : best.J,
+                      n_feasible=length(scan.feasible))
+                if best === nothing
+                    @warn "Joint search: no thickness up to ln/10 passes with columns within $(opts.max_column_size)" h=h
+                    return _stopped("punching_shear", h, :at_limit)
+                end
+                empty!(joint_stud_cols)
+                for (i, o) in enumerate(best.columns)
+                    o.studs === nothing || push!(joint_stud_cols, i)
+                    columns[i].c1, columns[i].c2 = o.c1, o.c2
+                end
+                last_failing_check = "punching_shear"
+                if !(best.h ≈ h)
+                    h = best.h
+                    break
+                end
+                continue
+            end
+
             if isempty(all_fails)
                 punching_resolved = true
                 verbose && @debug "Phase B converged: all punching OK (iter=$iter_b)"

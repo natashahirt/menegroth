@@ -913,6 +913,21 @@ function group_foundations_by_reaction!(struc::BuildingStructure;
     return n_groups
 end
 
+"""Drop supports a grade-wall footing already carries, and drop an emptied group."""
+function _drop_wall_supports!(struc, skip::Set{Int})
+    isempty(skip) && return struc
+    kept = empty(struc.foundations)
+    for fnd in struc.foundations
+        idxs = filter(i -> i ∉ skip, fnd.support_indices)
+        isempty(idxs) && continue
+        fnd.support_indices = idxs
+        push!(kept, fnd)
+    end
+    empty!(struc.foundations)
+    append!(struc.foundations, kept)
+    return struc
+end
+
 """Number of supports for the first foundation in a group (for grouping compatibility)."""
 function _group_n_supports(struc, f_indices)
     isempty(f_indices) && return 0
@@ -1027,6 +1042,10 @@ function size_foundations_grouped!(
             end
 
             any_compression = false
+            service_actions = StructuralSizer.FootingAction[]
+            strength_actions = StructuralSizer.FootingAction[]
+            n_with_actions = 0
+            n_without_actions = 0
             for f_idx in f_indices
                 fnd = struc.foundations[f_idx]
                 _all_uplift(demands, fnd.support_indices) && continue
@@ -1038,33 +1057,55 @@ function size_foundations_grouped!(
                 gov_Muy = max(gov_Muy, abs(d.Muy))
                 gov_Vux = max(gov_Vux, abs(d.Vux))
                 gov_Vuy = max(gov_Vuy, abs(d.Vuy))
+                for si in fnd.support_indices
+                    actions = foundation_actions_at(struc, si)
+                    if actions === nothing
+                        n_without_actions += 1
+                    else
+                        n_with_actions += 1
+                        append!(service_actions, actions.service)
+                        append!(strength_actions, actions.strength)
+                    end
+                end
             end
 
             if !any_compression
                 @warn "Foundation group $gid in factored uplift — skipping compression footing (ACI 318-11 §15.8.1.2)"
                 return
             end
-            # Use the largest column dimensions in the group (conservative for punching)
-            gov_c1 = 18.0u"inch"
-            gov_c2 = 18.0u"inch"
+            if n_with_actions > 0 && n_without_actions > 0
+                error("Foundation group $gid mixes supports that have concurrent " *
+                      "load cases with supports that do not. Each case keeps its " *
+                      "own axial force and moment (ASCE 7-22 §2.3 and §2.4).")
+            end
+            # Punching is checked at the smallest column in the group. A larger
+            # column would raise the concrete shear strength.
+            gov_c1 = nothing
+            gov_c2 = nothing
             gov_shape = :rectangular
             for f_idx in f_indices
                 fnd = struc.foundations[f_idx]
                 for si in fnd.support_indices
                     d = demands[si]
-                    gov_c1 = max(gov_c1, d.c1)
-                    gov_c2 = max(gov_c2, d.c2)
+                    gov_c1 = gov_c1 === nothing ? d.c1 : min(gov_c1, d.c1)
+                    gov_c2 = gov_c2 === nothing ? d.c2 : min(gov_c2, d.c2)
                     d.shape == :circular && (gov_shape = :circular)
                 end
             end
+            gov_c1 = something(gov_c1, 18.0u"inch")
+            gov_c2 = something(gov_c2, 18.0u"inch")
             gov_demand = StructuralSizer.FoundationDemand(1;
                 Pu=gov_Pu, Mux=gov_Mux, Muy=gov_Muy,
                 Vux=gov_Vux, Vuy=gov_Vuy, Ps=gov_Ps,
                 c1=gov_c1, c2=gov_c2, shape=gov_shape)
 
             if opts.code == :aci
-                group_results_vec[k] = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), 
-                    gov_demand, soil; opts=opts.spread_params, tc=tc)
+                # Each support's cases stay intact. The component-wise max of
+                # P and M is used only when the wall stage stored no cases.
+                group_results_vec[k] = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(),
+                    gov_demand, soil; opts=opts.spread_params, tc=tc,
+                    service_actions = service_actions,
+                    strength_actions = strength_actions)
             else
                 group_results_vec[k] = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), 
                     gov_demand, soil, concrete, rebar;
@@ -1493,6 +1534,7 @@ function size_foundations!(
 )
     try
         demands = isnothing(demands) ? support_demands(struc) : demands
+        wall_fnds, wall_skip = design_grade_wall_foundations(struc, demands, soil, opts)
         StructuralSizer.emit!(tc, :workflow, "size_foundations!", "", :enter;
                               n_supports=length(struc.supports),
                               n_foundations=length(struc.foundations),
@@ -1507,9 +1549,11 @@ function size_foundations!(
                                   n_foundations=length(struc.foundations))
             verbose && @info "Preserving explicit foundation groupings" n_foundations=length(struc.foundations)
             isempty(struc.foundation_groups) && build_foundation_groups!(struc)
-            size_foundations_grouped!(struc; soil=soil, opts=opts, demands=demands,
+            _drop_wall_supports!(struc, wall_skip)
+            isempty(struc.foundations) ||             size_foundations_grouped!(struc; soil=soil, opts=opts, demands=demands,
                                       tc=tc,
                                       concrete=concrete, rebar=rebar, pier_width=pier_width, kwargs...)
+            append!(struc.foundations, wall_fnds)
             StructuralSizer.emit!(tc, :workflow, "size_foundations!", "", :exit;
                                   n_foundations=length(struc.foundations),
                                   n_groups=length(struc.foundation_groups))
@@ -1524,17 +1568,20 @@ function size_foundations!(
                               group_tolerance=group_tolerance)
 
         if strategy == :mat
-            # Single mat foundation covering all supports
-            all_supp = collect(1:length(struc.supports))
+            # Supports a grade-wall footing already carries are not sized again.
+            all_supp = [i for i in eachindex(struc.supports) if i ∉ wall_skip]
             placeholder = _placeholder_foundation_result(typeof(struc).parameters[1])
             empty!(struc.foundations)
-            push!(struc.foundations, Foundation(all_supp, placeholder; foundation_type=:mat))
-            _size_foundation!(struc; soil=soil, opts=opts, demands=demands,
+            if !isempty(all_supp)
+                push!(struc.foundations, Foundation(all_supp, placeholder; foundation_type=:mat))
+                _size_foundation!(struc; soil=soil, opts=opts, demands=demands,
                               tc=tc,
                               concrete=concrete, rebar=rebar, pier_width=pier_width, kwargs...)
+            end
 
         elseif strategy == :strip
             initialize_foundations!(struc)
+            _drop_wall_supports!(struc, wall_skip)
             strip_groups = _strip_groupings_from_orthogonal_grid(struc)
             if !isempty(strip_groups)
                 # Orthogonal grid detected: create strip foundations along shorter-spacing axis
@@ -1572,6 +1619,7 @@ function size_foundations!(
         else  # :spread
             # Pure spread → group by reaction for efficiency
             initialize_foundations!(struc)
+            _drop_wall_supports!(struc, wall_skip)
             group_foundations_by_reaction!(struc; tolerance=group_tolerance, demands=demands)
             StructuralSizer.emit!(tc, :workflow, "size_foundations!", "", :decision;
                                   spread_grouping="reaction_similarity",
@@ -1582,6 +1630,7 @@ function size_foundations!(
                                       concrete=concrete, rebar=rebar, pier_width=pier_width, kwargs...)
         end
 
+        append!(struc.foundations, wall_fnds)
         StructuralSizer.emit!(tc, :workflow, "size_foundations!", "", :exit;
                               n_foundations=length(struc.foundations),
                               n_groups=length(struc.foundation_groups))

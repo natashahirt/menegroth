@@ -672,6 +672,37 @@ function _wall_min_dowel(legs, bar_size, fy)
     return As
 end
 
+"""
+Dowel area for compression above the supported member's bearing strength.
+
+ACI 318-11 §15.8.1.2(a) (corpus: aci-318-11, page 275) and §10.14.1
+(page 162): the supported member's bearing strength is ϕ·0.85·f′c·A1.
+§15.8.2.1's 0.005Ag is a column minimum and is not added for a wall.
+"""
+function _interface_dowel_area(Pu, A1, fc_col, fy, ϕb)
+    Pu <= zero(Pu) && return 0.0u"m^2"
+    A1 <= zero(A1) && return 0.0u"m^2"
+    Bn = ϕb * 0.85 * fc_col * A1
+    Pu > Bn || return 0.0u"m^2"
+    return max((Pu - Bn) / (ϕb * fy), 0.0u"m^2")
+end
+
+"""
+True when some bar from No. 3 up to `bar_size` develops in `avail`.
+
+`avail` is the footing thickness above the cover. The length is
+[`_development_length_footing`](@ref), ACI 318-11 §12.2.2
+(corpus: aci-318-11, page 214).
+"""
+function _bar_develops_in(bar_size::Int, avail, fc, fy, λ, clear_cover)
+    avail <= zero(avail) && return false
+    for size in bar_size:-1:3
+        db = bar_diameter(size)
+        _development_length_footing(size, fc, fy, λ, db) <= avail && return true
+    end
+    return false
+end
+
 function _wall_bearing(legs, plan, h, fc, fy, ϕb, opts)
     opts.check_bearing || return (0.0u"m^2", 0.0u"N", 1.0)
     fc_col = something(opts.fc_col, fc)

@@ -225,7 +225,8 @@ Returns `(ok, ratio, description, studs, stirrups, shear_cap, capital, φvc)`.
 """
 function _try_reinforcement(reinforcement::Symbol, vu, fc, b0, d, h,
                              col, opts, moment_results, demand;
-                             λ::Float64 = 1.0, φ::Float64 = 0.75)
+                             λ::Float64 = 1.0, φ::Float64 = 0.75,
+                             punch_kwargs=nothing)
     fyt = opts.stud_material.Fy
     β = punching_β(col.c1, col.c2; shape = col_shape(col) == :circular ? :circular : :rectangular)
     αs = punching_αs(col.position)

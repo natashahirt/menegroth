@@ -405,7 +405,7 @@ end
 
     @testset "Default still works" begin
         opts = FlatPlateOptions()
-        @test opts.punching_strategy === :grow_columns
+        @test opts.punching_strategy === :joint_search
         @test opts.punching_reinforcement === :headed_studs_generic
         @test opts.stirrup_bar_size == 4
     end

@@ -3,6 +3,18 @@
 # =============================================================================
 
 """
+    _shear_sqrt_fc(fc) -> Float64
+
+√f′c in psi for a Chapter 11 shear stress, not above 100.
+
+ACI 318-11 §11.1.2 (corpus: aci-318-11, page 165): the values of √f′c used
+in this chapter shall not exceed 100 psi, except as §11.1.2.1 allows for
+beams and joists with the stated minimum web reinforcement. A slab is not
+that exception. [`size_effect_factor`](@ref) is 1 on this edition.
+"""
+_shear_sqrt_fc(fc::Pressure) = min(sqrt(ustrip(u"psi", fc)), 100.0)
+
+"""
     punching_capacity_with_studs(fc, β, αs, b0, d, Av, s, fyt; λ=1.0)
 
 Punching shear capacity with headed shear stud reinforcement per ACI 318-11 §11.11.5.
@@ -49,10 +61,9 @@ function punching_capacity_with_studs(
     Av_in2 = ustrip(u"inch^2", Av)
     fyt_psi = ustrip(u"psi", fyt)
     
-    # ACI 318-11 §11.11.5.1: Vc with studs ≤ 3λ√f'c × b0 × d
-    # Compute vc from §11.11.2.1, then cap at 3λ√f'c
-    # ACI 318-19 Table 22.6.6.1: concrete terms carry λs (Eq. 22.5.5.1.3) and
-    # √f'c ≤ 100 psi (§22.6.3.1). λs = 1 is permitted by §22.6.6.2 and not used.
+    # ACI 318-11 §11.11.5.1: Vc with studs ≤ 3λ√f'c × b0 × d.
+    # vc is §11.11.2.1 Eqs. (11-31)–(11-33), then capped at 3λ√f'c.
+    # λs is 1 (size_effect_factor). √f'c is §11.1.2.
     λs_v = size_effect_factor(d)
     sqrt_fc_v = _shear_sqrt_fc(fc)
     vc_a = (2 + 4 / β) * λs_v * λ * sqrt_fc_v               # Eq. (11-31)
@@ -85,11 +96,13 @@ end
 
 Punching capacity at outer critical section (beyond shear studs).
 
-    vc,out = 2 λs λ √f'c  (psi)
+    vc,out = 2 λ √f'c  (psi)
 
-At d/2 beyond the outermost peripheral line of studs, the concrete is
-unreinforced. ACI 318-19 Table 22.6.6.1(e) (corpus: aci-318-19, printed
-p. 418): vc = 2 λs λ √f'c, λs from `size_effect_factor(d)`, √f'c ≤ 100 psi.
+At d/2 beyond the outermost peripheral line of studs the concrete is
+unreinforced. ACI 318-11 §11.11.5.4 (corpus: aci-318-11, page 208): the
+shear stress there shall not exceed 2φλ√f′c. This returns the nominal
+2λ√f′c; the caller applies φ. `size_effect_factor` is 1 on this edition,
+and √f′c is the §11.1.2 limit.
 """
 function punching_capacity_outer(fc::Pressure, d::Length; λ::Float64 = 1.0)
     vc_out = 2.0 * size_effect_factor(d) * λ * _shear_sqrt_fc(fc)
@@ -244,10 +257,9 @@ function design_shear_studs(
         )
     end
     
-    # ACI 318-11 §11.11.5.1: Vc with studs ≤ 3λ√f'c × b0 × d
-    # Compute vc from §11.11.2.1, then cap at 3λ√f'c
-    # ACI 318-19 Table 22.6.6.1: concrete terms carry λs (Eq. 22.5.5.1.3) and
-    # √f'c ≤ 100 psi (§22.6.3.1). λs = 1 is permitted by §22.6.6.2 and not used.
+    # ACI 318-11 §11.11.5.1: Vc with studs ≤ 3λ√f'c × b0 × d.
+    # vc is §11.11.2.1 Eqs. (11-31)–(11-33), then capped at 3λ√f'c.
+    # λs is 1 (size_effect_factor). √f'c is §11.1.2.
     λs_v = size_effect_factor(d)
     sqrt_fc_v = _shear_sqrt_fc(fc)
     vc_a = (2 + 4 / β) * λs_v * λ * sqrt_fc_v               # Eq. (11-31)

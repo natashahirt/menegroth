@@ -311,6 +311,10 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
                    composite_concrete = resolve_slab_concrete(params.materials),
                    composite_option_kwargs(beam_opts)...)
 
+    # Optional: separate collinear beams share one section. Edges of a single
+    # beam are already one member and do not depend on this flag.
+    params.collinear_grouping && group_collinear_members!(struc; member_type=:beams)
+
     # A grillage story is the rib frame. The story shell does not also size
     # those ribs. A story that mixes the two throws.
     shell_levels = setdiff(_story_shell_design_levels(struc), exclusive_grillage_stories(struc))
@@ -369,6 +373,13 @@ function _iterate_beams_columns!(struc, params, beam_opts, column_opts, beam_kwa
                    for (a, b) in zip(beams_before, struc.beams)) &&
                all(_sections_identical(a, section(c))
                    for (a, c) in zip(columns_before, struc.columns))
+        if get(ENV, "SS_TRACE_SHELL_PASSES", "") == "1" && !held
+            for (k, (a, b)) in enumerate(zip(beams_before, struc.beams))
+                s = _story_beam_section(struc, b)
+                _sections_identical(a, s) ||
+                    println("  pass $iter  beam $k  $(_section_tag(a)) → $(_section_tag(s))")
+            end
+        end
         if held
             StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
                                   outcome="converged", iterations=iter)
@@ -407,8 +418,9 @@ function _size_with_story_shell!(struc, params, beam_opts, column_opts, beam_kwa
     seed = (demands = nothing, spans = nothing, regions = nothing)
     converged, iters = false, 0
     held = false
-    # Steel discrete beams only move up once the first shell call settles, so a
-    # beam that attracts load and fails cannot trade places with a lighter one.
+    # Discrete steel and rectangular concrete beams only move up once the first
+    # shell call settles, so a beam that attracts load and fails cannot trade
+    # places with a lighter one.
     upward_only = _shell_ratchet_ok(struc, beam_opts, beam_kwargs)
     floor = nothing
     for round in 1:max_rounds

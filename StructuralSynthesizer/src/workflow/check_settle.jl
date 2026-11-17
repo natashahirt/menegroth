@@ -569,3 +569,185 @@ function _check_settle!(struc, states::Vector{_MemberState}, params, beam_opts, 
     @info "Check-based settle did not find a design that passes its own analysis"
     return false
 end
+
+_beam_sections_identical(a, b) =
+    length(a) == length(b) && all(_sections_identical(x, y) for (x, y) in zip(a, b))
+
+"""Put `sections` on the beams and rebuild the frame. Columns stay as they are."""
+function _install_beam_sections!(struc, sections, beam_opts, I_factor)
+    length(sections) == length(struc.beams) ||
+        error("beam section state has a different beam count")
+    beam_edges = _edge_ids(struc, BEAM_GROUP_SYMBOLS)
+    opts_of = _beam_opts_by_group(struc, beam_opts)
+    for (m, sec) in zip(struc.beams, sections)
+        sec === nothing && continue
+        opts = get(opts_of, group_id(m), beam_opts)
+        rebar = opts isa StructuralSizer.ConcreteBeamOptions ? opts.rebar_material : nothing
+        _install_member_section!(struc, m, sec, beam_edges, opts.material, I_factor, rebar)
+    end
+    _reanalyze_after_section_change!(struc)
+    return struc
+end
+
+"""One section per beam group from a shell cycle. Same rule as [`_mixed_state`](@ref)."""
+function _mixed_beams(struc, states, beam_passed, beam_opts)
+    opts_of = _beam_opts_by_group(struc, beam_opts)
+    out = Vector{Any}(undef, length(struc.beams))
+    choice = Dict{UInt64, Any}()
+    for (mi, m) in enumerate(struc.beams)
+        gid = group_id(m)
+        if gid === nothing
+            out[mi] = states[end][mi]
+            continue
+        end
+        if !haskey(choice, gid)
+            opts = get(opts_of, gid, beam_opts)
+            choices = [(states[k][mi], get(beam_passed[k], gid, true),
+                        _section_cost(opts, states[k][mi])) for k in eachindex(states)]
+            choice[gid] = _pick_group_section(choices).section
+        end
+        out[mi] = choice[gid]
+    end
+    return out
+end
+
+"""
+    _check_shell_settle!(run, states, service_on, regions, pass, service_converged)
+
+`states` is one cycle of beam-section vectors, without the repeated closing
+state. Installs each, solves the story shells on those sections, and checks
+the beams. Returns the pass result when a state passes, `nothing` when these
+options cannot be checked section by section.
+"""
+function _check_shell_settle!(run, states, service_on, regions, pass, service_converged)
+    struc, opts = run.struc, run.opts
+    opts_of = _beam_opts_by_group(struc, opts)
+    if !_settle_checkable(opts) || !all(_settle_checkable, values(opts_of))
+        return nothing
+    end
+    I_factor = get(run.kwargs, :I_factor, 0.35)
+    resolution = get(run.kwargs, :resolution, 200)
+    trace = get(ENV, "SS_TRACE_SHELL_PASSES", "") == "1"
+    passed = Vector{Dict{UInt64, Bool}}()
+    expl = Vector{Dict{UInt64, Any}}()
+    hog = Vector{Dict{UInt64, Float64}}()
+    solved = []
+    costs = Float64[]
+    for (k, state) in enumerate(states)
+        _install_beam_sections!(struc, state, opts, I_factor)
+        fresh = _gather_shell_demands!(run; service_on, regions)
+        spans = service_on ? fresh.spans : nothing
+        report = _beam_group_report(struc, opts; shell_demands = fresh.demands,
+                                    shell_spans = spans, resolution = resolution)
+        report === nothing && return nothing
+        push!(passed, report.passed)
+        push!(expl, report.explanations)
+        push!(hog, report.hogging)
+        push!(solved, fresh)
+        push!(costs, _beams_objective(struc, opts))
+        regions_ok = all(<=(run.region_tol), values(fresh.shifts))
+        trace && println("  shell state $k  cost=$(round(costs[end]; digits=1))  " *
+                         "beams $(count(values(report.passed)))/$(length(report.passed))  " *
+                         "regions=$(regions_ok)  service=$(fresh.service_converged)")
+    end
+    function accept_state(k)
+        fresh = solved[k]
+        regions_ok = all(<=(run.region_tol), values(fresh.shifts))
+        service_ok = !service_on || fresh.service_converged
+        return regions_ok && service_ok && _all_passed(passed[k])
+    end
+    full = [k for k in eachindex(states) if accept_state(k)]
+    if !isempty(full)
+        k = _cheapest_index(costs, full)
+        _install_beam_sections!(struc, states[k], opts, I_factor)
+        _record_beam_checks!(struc, expl[k], hog[k])
+        fresh = solved[k]
+        @info "Story shell settled on checked cycle state $k of $(length(states))"
+        return _shell_pass_result(; converged = true, passes = pass,
+                                  demands = fresh.demands, spans = fresh.spans,
+                                  regions = fresh.regions, service_on,
+                                  service_converged = service_converged && fresh.service_converged,
+                                  shifts = fresh.shifts)
+    end
+    mixed = _mixed_beams(struc, states, passed, opts)
+    seen = Vector{Vector{Any}}(states)
+    failing = Set{UInt64}()
+    current = solved[end]
+    matched = findfirst(s -> _beam_sections_identical(mixed, s), seen)
+    if matched === nothing
+        _install_beam_sections!(struc, mixed, opts, I_factor)
+        current = _gather_shell_demands!(run; service_on, regions)
+        spans = service_on ? current.spans : nothing
+        report = _beam_group_report(struc, opts; shell_demands = current.demands,
+                                    shell_spans = spans, resolution = resolution)
+        push!(seen, [_story_beam_section(struc, b) for b in struc.beams])
+        if report !== nothing && _all_passed(report.passed) &&
+           all(<=(run.region_tol), values(current.shifts)) &&
+           (!service_on || current.service_converged)
+            _record_beam_checks!(struc, report.explanations, report.hogging)
+            @info "Story shell settled on a checked mix of the cycle"
+            return _shell_pass_result(; converged = true, passes = pass,
+                                      demands = current.demands, spans = current.spans,
+                                      regions = current.regions, service_on,
+                                      service_converged = service_converged && current.service_converged,
+                                      shifts = current.shifts)
+        end
+        report !== nothing && (failing = _failing_ids(report.passed))
+    else
+        matched == length(states) ||
+            _install_beam_sections!(struc, states[matched], opts, I_factor)
+        current = solved[matched]
+        gids = Set{UInt64}()
+        for p in passed
+            union!(gids, keys(p))
+        end
+        failing = Set(gid for gid in gids if all(p -> !get(p, gid, true), passed))
+    end
+    for _ in 1:3
+        if !isempty(failing)
+            sized = false
+            for sizing in _beam_sizing_passes(struc, opts)
+                accept = gid -> gid in failing && (sizing.accept === nothing || sizing.accept(gid))
+                any(accept, failing) || continue
+                if sized
+                    _reanalyze_after_section_change!(struc)
+                    current = _gather_shell_demands!(run; service_on, regions = current.regions)
+                end
+                spans = service_on ? current.spans : nothing
+                size_beams!(struc, sizing.opts; run.kwargs..., shell_demands = current.demands,
+                            shell_spans = spans, group_filter = accept)
+                sized = true
+            end
+        end
+        _reanalyze_after_section_change!(struc)
+        state = [_story_beam_section(struc, b) for b in struc.beams]
+        if any(s -> _beam_sections_identical(state, s), seen)
+            @info "Story-shell settle returned to a section state it had already checked"
+            break
+        end
+        push!(seen, state)
+        current = _gather_shell_demands!(run; service_on, regions = current.regions)
+        spans = service_on ? current.spans : nothing
+        report = _beam_group_report(struc, opts; shell_demands = current.demands,
+                                    shell_spans = spans, resolution = resolution)
+        if report !== nothing && _all_passed(report.passed) &&
+           all(<=(run.region_tol), values(current.shifts)) &&
+           (!service_on || current.service_converged)
+            _record_beam_checks!(struc, report.explanations, report.hogging)
+            @info "Story shell settled after resizing the groups that failed the cycle"
+            return _shell_pass_result(; converged = true, passes = pass,
+                                      demands = current.demands, spans = current.spans,
+                                      regions = current.regions, service_on,
+                                      service_converged = service_converged && current.service_converged,
+                                      shifts = current.shifts)
+        end
+        report === nothing && break
+        failing = _failing_ids(report.passed)
+    end
+    @info "Story-shell settle did not find a design that passes its own shell"
+    return _shell_pass_result(; converged = false, passes = pass,
+                              demands = current.demands, spans = current.spans,
+                              regions = current.regions, service_on,
+                              service_converged = service_converged && current.service_converged,
+                              shifts = current.shifts)
+end

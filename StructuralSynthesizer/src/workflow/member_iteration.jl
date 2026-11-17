@@ -343,13 +343,16 @@ coating) and re-solve, until one pass changes no beam and no column section.
 
 At that fixed point each beam was sized on a model with the final column
 sections, and each column on the final beams, so every member passed its
-sizer's checks on the final analysis. A loop that reaches `max_iterations`
-first returns `converged = false`.
+sizer's checks on the final analysis. A loop that returns to a section state
+it already left is settled by [`_check_settle!`](@ref): a design is kept only
+when every group passes the analysis of those sections. A loop that reaches
+`max_iterations` without a repeat returns `converged = false`.
 """
 function _iterate_beams_columns!(struc, params, beam_opts, column_opts, beam_kwargs;
                                  tc = nothing, shell_demands = nothing,
                                  shell_spans = nothing, upward_only::Bool = false)
     max_iter = params.max_iterations
+    history = _MemberState[]
     for iter in 1:max_iter
         beams_before = [_story_beam_section(struc, b) for b in struc.beams]
         columns_before = [section(c) for c in struc.columns]
@@ -380,10 +383,22 @@ function _iterate_beams_columns!(struc, params, beam_opts, column_opts, beam_kwa
                     println("  pass $iter  beam $k  $(_section_tag(a)) → $(_section_tag(s))")
             end
         end
+        state = _member_state(struc)
         if held
             StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
                                   outcome="converged", iterations=iter)
             return (true, iter)
+        end
+        earlier = findfirst(s -> _member_state_identical(s, state), history)
+        push!(history, state)
+        if earlier !== nothing
+            ok = _check_settle!(struc, history[earlier:end - 1], params, beam_opts,
+                                column_opts, beam_kwargs;
+                                shell_demands, shell_spans, tc)
+            StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
+                                  outcome = ok ? "check_settle" : "check_settle_failed",
+                                  iterations = iter)
+            return (ok, iter)
         end
     end
     StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;

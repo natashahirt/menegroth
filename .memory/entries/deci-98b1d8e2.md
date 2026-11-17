@@ -6,13 +6,13 @@ parent_id: plan-fdfcf263
 title: A rib that fails one-way shear at a solid head is resized, not filled in
 node_label: Rib shear returns to the beam
 tags: waffle,solid-head,shear,sizing
-status: active
+status: discarded
 open_threads: 0
 success: 'null'
 files: ''
 session_id: sess-bcaa7123
 created_at: '2026-11-17T03:37:01.243122+00:00'
-updated_at: '2026-11-17T03:37:01.243122+00:00'
+updated_at: '2026-11-17T23:02:34.758369+00:00'
 ---
 The 30 in qualification waffle fails on Slab 15, punching ratio 6.90, clause stored as ACI 318-19 §22.6. The analysis note says the solid-head check took 0 growth steps, stopped, and the governing section was rib one-way shear. The head grows only for column punching. A rib that fails one-way shear at the head is a rib section problem.
 

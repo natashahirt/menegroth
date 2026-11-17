@@ -7,7 +7,7 @@ _infer_floor_type(opts::StructuralSizer.AbstractFloorOptions) = StructuralSizer.
 
 """Column f′c for the initial size estimate. Not the slab concrete."""
 function _get_design_fc(params::DesignParameters)
-    return resolve_column_concrete(params.materials).fc′
+    return column_concrete(params).fc′
 end
 
 """Size foundations using FoundationParameters.
@@ -124,7 +124,8 @@ function _populate_slab_results!(design::BuildingDesign, struc::BuildingStructur
     if isnothing(struc.slabs) || isempty(struc.slabs)
         return
     end
-    
+    head_frame = solid_head_frame_punching(struc, design.params)
+
     for (slab_idx, slab) in enumerate(struc.slabs)
         # Fallback: slab.result is nothing (shouldn't happen for properly initialized slabs,
         # but handle gracefully to avoid dropping the slab from visualization entirely).
@@ -254,9 +255,13 @@ function _populate_slab_results!(design::BuildingDesign, struc::BuildingStructur
         result.is_vault = r isa StructuralSizer.VaultResult
         if result.is_vault
             result.vault_rise = uconvert(u"m", r.rise)
+            result.vault_stress_ok = r.stress_check.ok
+            result.vault_kern_ok = r.kern_check.ok
+            result.converged = r.convergence_check.converged
         end
         result.sizer_result = r
-        
+        record_solid_head_punching!(result, struc, slab, design.params; frame = head_frame)
+
         design.slabs[slab_idx] = result
     end
 end
@@ -269,10 +274,15 @@ Chapter F strong-axis `φMn` [N·m] at the member unbraced length — the same
 corpus: aisc-360-16, page 103).  Returns `nothing` if material is missing
 or `get_ϕMn` is unsupported.
 """
-function _steel_column_φMnx(sec, Lb; Cb::Float64 = 1.0)::Union{Float64, Nothing}
-    (hasproperty(sec, :material) && !isnothing(sec.material)) || return nothing
+function _steel_column_φMnx(sec, Lb; Cb::Float64 = 1.0,
+                            material = nothing)::Union{Float64, Nothing}
+    # A catalog W-shape often stores no material. The caller passes the
+    # design steel, the same metal the sizer checked.
+    mat = material !== nothing ? material :
+          (hasproperty(sec, :material) ? sec.material : nothing)
+    mat === nothing && return nothing
     try
-        return ustrip(u"N*m", StructuralSizer.get_ϕMn(sec, sec.material;
+        return ustrip(u"N*m", StructuralSizer.get_ϕMn(sec, mat;
                                                        Lb = Lb, Cb = Cb, axis = :strong))
     catch e
         if e isa MethodError || (isdefined(Base, :FieldError) && e isa Base.FieldError)
@@ -314,10 +324,12 @@ NOT as a safe capacity — it must never fall back to an unconservative estimate
   §E7 effective area, §E1 `φc = 0.90` (corpus: aisc-360-16, §E3 p.35, §E1 p.33).
   Implemented in `StructuralSizer.get_ϕPn` — reused here, not re-derived.
 """
-function _steel_column_ϕPnc(sec, L; Kx::Float64 = 1.0, Ky::Float64 = 1.0)::Union{Float64, Nothing}
-    (hasproperty(sec, :material) && !isnothing(sec.material)) || return nothing
+function _steel_column_ϕPnc(sec, L; Kx::Float64 = 1.0, Ky::Float64 = 1.0,
+                           material = nothing)::Union{Float64, Nothing}
+    mat = material !== nothing ? material :
+          (hasproperty(sec, :material) ? sec.material : nothing)
+    mat === nothing && return nothing
     try
-        mat = sec.material
         Lc_x = Kx * L
         Lc_y = Ky * L
         # Mirror AISCChecker.is_feasible: min over strong/weak flexural (§E3) and
@@ -365,14 +377,18 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
         end
     end
     
-    # Column concrete and rebar. The slab grade is a different material.
-    conc = resolve_column_concrete(params.materials)
-    reb  = resolve_column_rebar(params.materials)
-    fc′_Pa = ustrip(u"Pa", conc.fc′)
-    fy_Pa  = ustrip(u"Pa", reb.Fy)
-
     has_model = !isnothing(struc.asap_model) && !isempty(struc.asap_model.frame_elements)
-    
+    # Columns a flat-plate slab reports get the P-M check under the full
+    # building load; the frame's moments there come from placeholder beams.
+    rc_opts = _flat_plate_column_opts(params)
+    fp_checks = has_model ? flat_plate_column_checks(struc, rc_opts; params) : Dict{Int, NamedTuple}()
+    fp_supported = flat_plate_supported_columns(struc)
+    # The stacking policy is applied by the flat-plate column check only.
+    nonmonotone = intersect(Set(_non_monotone_columns(struc)), fp_supported)
+    mismatched = intersect(Set(_mismatched_stack_columns(struc)), fp_supported)
+    # Same full-load + pattern envelope the column sizer reads.
+    col_envs = has_model ? column_force_envelopes(struc, params) : Dict{Int, NamedTuple}()
+
     for (col_idx, col) in enumerate(struc.columns)
         result = ColumnDesignResult()
         
@@ -440,15 +456,16 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
                 n = length(f)
                 saw_force = true
                 
-                # Axial (max compression magnitude)
-                Pu_N = max(Pu_N, abs(f[1]))
-                if n >= 7; Pu_N = max(Pu_N, abs(f[7])); end
+                # Axial: largest end compression (negative in Asap). A
+                # tensile end is not compression.
+                Pu_N = max(Pu_N, -f[1])
+                if n >= 7; Pu_N = max(Pu_N, -f[7]); end
                 
-                # Strong-axis moment My (indices 5, 11)
+                # Moment about local y (indices 5, 11), reported as Mu_x
                 if n >= 5;  Mu_x_Nm = max(Mu_x_Nm, abs(f[5])); end
                 if n >= 11; Mu_x_Nm = max(Mu_x_Nm, abs(f[11])); end
                 
-                # Weak-axis moment Mz (indices 6, 12)
+                # Moment about local z (indices 6, 12), reported as Mu_y
                 if n >= 6;  Mu_y_Nm = max(Mu_y_Nm, abs(f[6])); end
                 if n >= 12; Mu_y_Nm = max(Mu_y_Nm, abs(f[12])); end
 
@@ -466,6 +483,14 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
             end
             saw_force || (Nu_N = 0.0)
             isfinite(Nu_N) || (Nu_N = 0.0)
+            # The sizing envelope includes the pattern cases; the element
+            # forces above are the full-load solve only.
+            if haskey(col_envs, col_idx)
+                env = col_envs[col_idx]
+                Pu_N = max(Pu_N, env.Pu)
+                Mu_x_Nm = max(Mu_x_Nm, env.My)
+                Mu_y_Nm = max(Mu_y_Nm, env.Mz)
+            end
             
             result.Pu   = Pu_N * u"N" |> u"kN"
             result.Mu_x = Mu_x_Nm * u"N*m" |> u"kN*m"
@@ -478,11 +503,14 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
                    col_sec isa StructuralSizer.HSSRoundSection
 
         Pu_N_val = ustrip(u"N", result.Pu)
-        Mu_Nm_val = ustrip(u"N*m", result.Mu_x)     # strong-axis moment demand
-        Mu_y_Nm_val = ustrip(u"N*m", result.Mu_y)   # weak-axis moment demand
+        # About local y and z. A steel section's strong axis is local y in the
+        # frame; an RC check tries both assignments instead.
+        Mu_Nm_val = ustrip(u"N*m", result.Mu_x)
+        Mu_y_Nm_val = ustrip(u"N*m", result.Mu_y)
 
-        if is_steel && hasproperty(col_sec, :A) && hasproperty(col_sec, :material) &&
-           !isnothing(col_sec.material)
+        design_steel = params.materials.steel
+        if is_steel && hasproperty(col_sec, :A) &&
+           (col_sec.material isa StructuralSizer.Metal || design_steel isa StructuralSizer.Metal)
             # ─── Steel column axial capacity — AISC 360-16 Chapter E ───
             # The governing limit state is FLEXURAL BUCKLING (§E3, Eq. E3-2/E3-3),
             # NOT gross yield. Columns do not retain the engine's sized capacity
@@ -494,14 +522,19 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
             # (see `_steel_column_ϕPnc` and `AISCChecker.is_feasible`). This is
             # read/reuse of the Chapter E limit-state code, not a new equation.
             # (corpus: aisc-360-16 — §E3 p.35, §E1 φc=0.90 p.33.)
-            Fy_Pa = ustrip(u"Pa", col_sec.material.Fy)
-
             # Prefer the engine's real effective-length factors. `MemberBase`
             # defaults Kx = Ky = 1.0 (braced frame); the real feasibility check
             # uses these SAME Kx/Ky, so this screening ratio tracks it.
             Kx = col.base.Kx
             Ky = col.base.Ky
-            ϕPnc = _steel_column_ϕPnc(col_sec, result.height; Kx = Kx, Ky = Ky)
+            # A catalog shape often carries no material. The design's steel is
+            # the one the sizer used.
+            steel = params.materials.steel
+            mat = col_sec.material isa StructuralSizer.Metal ? col_sec.material :
+                  (steel isa StructuralSizer.Metal ? steel : nothing)
+            Fy_Pa = ustrip(u"Pa", mat.Fy)
+            ϕPnc = _steel_column_ϕPnc(col_sec, result.height; Kx = Kx, Ky = Ky,
+                                      material = mat)
 
             if isnothing(ϕPnc)
                 # SAFETY — no silent unconservative fallback. The §E3/§E4 buckling
@@ -531,13 +564,14 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
                 # per §F1.
                 Lb = col.base.Lb
                 Cb = col.base.Cb
-                φMnx_sizer = _steel_column_φMnx(col_sec, Lb; Cb = Float64(Cb))
+                φMnx_sizer = _steel_column_φMnx(col_sec, Lb; Cb = Float64(Cb),
+                                                material = mat)
                 φMnx = isnothing(φMnx_sizer) ?
                     (hasproperty(col_sec, :Zx) ?
                         0.9 * Fy_Pa * ustrip(u"m^3", col_sec.Zx) : 0.0) :
                     φMnx_sizer
                 φMny = try
-                    ustrip(u"N*m", StructuralSizer.get_ϕMn(col_sec, col_sec.material;
+                    ustrip(u"N*m", StructuralSizer.get_ϕMn(col_sec, mat;
                                                             axis = :weak))
                 catch
                     if hasproperty(col_sec, :Zy)
@@ -581,29 +615,35 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
             result.interaction_ratio = NaN
 
         elseif !is_steel && !isnothing(col.c1) && !isnothing(col.c2)
-            # ACI 318-11 Eq. (10-2) — tied RC columns (rectangular or circular)
-            Ag = result.shape == :circular ?
-                 ustrip(u"m^2", π / 4 * col.c1^2) :
-                 ustrip(u"m^2", col.c1 * col.c2)
-            Ast = 0.01 * Ag  # §10.9.1 minimum, same assumption as column growth
-            φPn0 = _tied_pn_max(Ag, fc′_Pa, fy_Pa)  # N
-
-            result.axial_ratio = φPn0 > 0 ? Pu_N_val / φPn0 : 0.0
-
-            # φMn ≈ 0.9 × fy × Ast × (d − a/2) — rough for rebar at mid-depth
-            d_m = result.shape == :circular ?
-                  ustrip(u"m", col.c1) :
-                  ustrip(u"m", max(col.c1, col.c2))
-            b_m = result.shape == :circular ?
-                  ustrip(u"m", col.c1) :
-                  ustrip(u"m", min(col.c1, col.c2))
-            a_est = b_m > 0 ? fy_Pa * Ast / (0.85 * fc′_Pa * b_m) : 0.0
-            φMn_est = 0.90 * fy_Pa * Ast * (d_m * 0.4 - a_est / 2)  # N·m
-
-            if φMn_est > 0
-                result.interaction_ratio = max(result.axial_ratio, Mu_Nm_val / φMn_est)
+            # Flat-plate buildings: the full-load check, which also covers
+            # RC columns no flat-plate slab bears on (frame forces). A
+            # flat-plate column that check did not reach has no trustworthy
+            # moment (the frame's beam lines are placeholders) and stays
+            # unverified. Any other RC column is checked under its frame forces.
+            c = if haskey(fp_checks, col_idx)
+                fp_checks[col_idx]
+            elseif haskey(col_envs, col_idx) && !(col_idx in fp_supported)
+                rc_frame_column_check(col, rc_opts, frame_column_demand(col_envs[col_idx]))
             else
-                result.interaction_ratio = result.axial_ratio
+                nothing
+            end
+
+            if c === nothing
+                @warn "RC column has no strength check (no full-load flat-plate check, no frame forces, or a non-RC section); marked unverified" col_idx maxlog=8
+                result.axial_ratio = NaN
+                result.interaction_ratio = NaN
+            else
+                if haskey(fp_checks, col_idx)
+                    kipft = Asap.kip * u"ft"
+                    result.Mu_x = uconvert(u"kN*m", c.demand.M2x * kipft)
+                    result.Mu_y = uconvert(u"kN*m", c.demand.M2y * kipft)
+                end
+                result.axial_ratio = isnan(c.axial_ratio) ? NaN :
+                    (c.passed ? min(c.axial_ratio, 1.0) : c.axial_ratio)
+                # `passed` is the sizer's test, whose interaction tolerance
+                # can leave the reported ratio a hair above 1.
+                result.interaction_ratio = c.passed ? min(c.governing_ratio, 1.0) :
+                    max(c.governing_ratio, nextfloat(1.0))
             end
         end
         
@@ -633,9 +673,12 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
                 Mub = hasproperty(pr, :Mub) ? uconvert(u"kN*m", pr.Mub) : 0.0u"kN*m",
             )
         elseif !isnothing(trib_area)
+            # A flat-plate column with no punching result was never checked.
+            # Elsewhere a beam or wall takes the slab, and punching does not apply.
+            unchecked = col_idx in fp_supported
             result.punching = PunchingDesignResult(
                 Vu = 0.0u"kN", φVc = 0.0u"kN",
-                ratio = 0.0, ok = true,
+                ratio = unchecked ? NaN : 0.0, ok = !unchecked,
                 critical_perimeter = 0.0u"m",
                 tributary_area = trib_area_m2,
             )
@@ -650,13 +693,35 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
         end
 
         # ─── Overall ok ───
-        result.ok = result.axial_ratio ≤ 1.0 &&
+        # The sizer's explanation is the check that chose the section. It
+        # replaces an unverified Chapter E screen (a shape with no material).
+        sizer = member_check(col)
+        sizer === nothing || _apply_column_sizer_check!(result, sizer)
+        frame = _assign_seismic_frame!(result, struc, :column, col_idx)
+        screen_ok = result.axial_ratio ≤ 1.0 &&
                     result.interaction_ratio ≤ 1.0 &&
                     result.shear_ok &&
-                    (isnothing(result.punching) || result.punching.ok)
+                    (isnothing(result.punching) || result.punching.ok) &&
+                    (frame === nothing || frame.passed)
+        result.ok = sizer === nothing ? screen_ok :
+                    (sizer.passed && result.shear_ok &&
+                     (isnothing(result.punching) || result.punching.ok) &&
+                     (frame === nothing || frame.passed))
+        _note_under_frame_floor!(result, col, struc, params)
+
+        if haskey(fp_checks, col_idx) && haskey(struc.stage_diagnostics, :flat_plate_columns)
+            push!(result.notes, "full-load column check did not settle")
+        end
+        col_idx in nonmonotone &&
+            push!(result.notes, "smaller than the column above (stack not monotone)")
+        col_idx in mismatched &&
+            push!(result.notes, "column above has a different shape or rotation; stack sizes not compared")
         
         design.columns[col_idx] = result
     end
+    isempty(nonmonotone) || push!(design.diagnostics,
+        "Columns smaller than the column above (stack not monotone): " *
+        join(sort!(collect(nonmonotone)), ", "))
 end
 
 """
@@ -779,9 +844,118 @@ function _populate_beam_results!(design::BuildingDesign, struc::BuildingStructur
             end
         end
 
-        result.ok = result.flexure_ratio ≤ 1.0 && result.shear_ratio ≤ 1.0
+        # The sizer's own checks replace the estimate when it reported them:
+        # they include LTB, composite action, the pattern envelope, and
+        # deflection. Otherwise the ratios above are a plastic-moment and
+        # web-shear estimate on the full-load forces, reported only.
+        expl = member_check(beam)
+        expl === nothing || _apply_beam_check!(result, expl)
+        # A sized beam's verdict is its sizer's: the member loop ends at a
+        # fixed point where every beam passed its checks on the final
+        # analysis, and records `:members` when it did not.
+        frame = _assign_seismic_frame!(result, struc, :beam, beam_idx)
+        result.ok = (isnothing(sec) ?
+            (result.flexure_ratio ≤ 1.0 && result.shear_ratio ≤ 1.0) :
+            !haskey(struc.stage_diagnostics, :members)) &&
+            (frame === nothing || frame.passed)
         design.beams[beam_idx] = result
     end
+end
+
+_is_shear_check(name) = (startswith(name, "shear") && name != "shear_anchors") ||
+                        name == "construction_shear"
+_is_flexure_check(name) = occursin("flexure", name) || startswith(name, "pm_interaction")
+
+"""Copy the row F frame check for this member onto `result`, or `nothing` when it was not checked."""
+function _assign_seismic_frame!(result, struc, kind::Symbol, index::Int)
+    wall = struc.ordinary_wall_result
+    wall === nothing && return nothing
+    hasproperty(wall, :frame_members) || return nothing
+    found = nothing
+    for c in wall.frame_members
+        if c.kind === kind && c.index == index
+            found = c
+            break
+        end
+    end
+    found === nothing && return nothing
+    result.seismic_frame = SeismicFrameCheck(
+        passed = found.passed,
+        governing_check = found.governing_check,
+        ratio = found.governing_ratio,
+        case_label = found.case_label,
+        detail = found.detail,
+    )
+    return found
+end
+
+"""
+Note a column whose installed section is lighter than its row F floor.
+
+Uniform sizing can keep a column's bars on a larger cross-section, which drops
+the steel below the section the frame check accepted. The next frame check
+still fails that column; the note says so on the result.
+"""
+function _note_under_frame_floor!(result::ColumnDesignResult, col, struc, params)
+    opts = params.columns
+    opts isa StructuralSizer.ConcreteColumnOptions || return result
+    gid = group_id(col)
+    gid === nothing && return result
+    floor = get(struc.frame_section_floors, gid, nothing)
+    floor === nothing && return result
+    sec = section(col)
+    (sec === nothing || _sections_identical(sec, floor)) && return result
+    under = false
+    try
+        obj = s -> StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
+        under = obj(sec) < obj(floor) * (1 - 1e-9)
+        if !under && hasproperty(sec, :As_total) && hasproperty(floor, :As_total)
+            As = ustrip(u"m^2", sec.As_total)
+            Af = ustrip(u"m^2", floor.As_total)
+            under = As < Af * (1 - 1e-9) && obj(sec) <= obj(floor) * (1 + 1e-9)
+        end
+    catch
+        under = false
+    end
+    under && push!(result.notes, "section is lighter than the row F floor for this group")
+    return result
+end
+
+"""Copy the sizer's governing check, and its largest flexural and shear ratios, onto `result`."""
+function _apply_beam_check!(result::BeamDesignResult, expl::StructuralSizer.FeasibilityExplanation)
+    result.governing_check = expl.governing_check
+    result.governing_ratio = expl.governing_ratio
+    gov = findfirst(c -> c.name == expl.governing_check, expl.checks)
+    if gov !== nothing
+        c = expl.checks[gov]
+        result.governing_clause = c.code_clause
+        result.governing_demand = c.demand
+        result.governing_capacity = c.capacity
+    end
+    result.flexure_ratio = maximum((c.ratio for c in expl.checks if _is_flexure_check(c.name));
+                                   init = 0.0)
+    result.shear_ratio = maximum((c.ratio for c in expl.checks if _is_shear_check(c.name));
+                                 init = 0.0)
+    return result
+end
+
+"""
+Copy the sizer's governing check onto a column result.
+
+The Chapter E screen in this function needs a material on the section. A
+catalog W-shape is often stored without one, and that screen then stays
+unverified. The sizing pass already checked the section; its explanation is
+the record.
+"""
+function _apply_column_sizer_check!(result::ColumnDesignResult, expl::StructuralSizer.FeasibilityExplanation)
+    result.governing_check = expl.governing_check
+    result.governing_ratio = expl.governing_ratio
+    gov = findfirst(c -> c.name == expl.governing_check, expl.checks)
+    gov === nothing || (result.governing_clause = expl.checks[gov].code_clause)
+    inter = maximum((c.ratio for c in expl.checks if startswith(c.name, "pm_interaction"));
+                    init = NaN)
+    isfinite(inter) && (result.interaction_ratio = inter)
+    return result
 end
 
 """Populate foundation design results from struc.foundations (all values normalized to SI)."""
@@ -789,14 +963,22 @@ function _populate_foundation_results!(design::BuildingDesign, struc::BuildingSt
     fdn_params = design.params.foundation_options
     soil = isnothing(fdn_params) ? StructuralSizer.medium_sand : fdn_params.soil
     qa = uconvert(u"kPa", soil.qa)
+    any(f -> !isnothing(f.result), struc.foundations) || return
+
+    # Unfactored D+L reactions (ASCE 7-16 §2.4.1 combo 2), the same solve the
+    # footings were sized on. Factored reactions are not back-solved.
+    R_s = _service_reactions(struc)
+    nodes = struc.asap_model.nodes
 
     for (fdn_idx, fdn) in enumerate(struc.foundations)
         isnothing(fdn.result) && continue
 
         total_reaction = 0.0u"kN"
+        Ps = 0.0u"kN"
         for sup_idx in fdn.support_indices
             sup = struc.supports[sup_idx]
             total_reaction += uconvert(u"kN", sup.forces[3])
+            Ps += uconvert(u"kN", R_s[nodes[sup.node_idx].globalID[3]] * u"N")
         end
 
         gid = isnothing(fdn.group_id) ? 0 : Int(fdn.group_id % typemax(Int))
@@ -806,21 +988,19 @@ function _populate_foundation_results!(design::BuildingDesign, struc::BuildingSt
         fdn_W = uconvert(u"m", StructuralSizer.footing_width(r))
         gov_util = StructuralSizer.utilization(r)
 
-        # Re-derive bearing ratio: service reaction / (qa × footprint)
-        # The design routine uses service-level Ps, but we only have factored
-        # reaction here. Use a 1.4 factor approximation to get service load.
-        footprint = fdn_L * fdn_W
-        Ps_approx = total_reaction / 1.4  # approximate service from factored
-        bearing = if ustrip(u"kPa", qa) > 0 && ustrip(u"m^2", footprint) > 0
-            ustrip(u"kPa", Ps_approx / footprint) / ustrip(u"kPa", qa)
+        # Per-check ratios come from the design routine. The verdict is its
+        # governing utilization.
+        chk = StructuralSizer.utilization_checks(r)
+        bearing_ratio = if !isnan(chk.bearing)
+            chk.bearing
         else
-            0.0
+            # Routine did not report bearing: average service pressure
+            # Ps / (qa × footprint).
+            footprint = fdn_L * fdn_W
+            ustrip(u"kPa", qa) > 0 && ustrip(u"m^2", footprint) > 0 ?
+                max(ustrip(u"kPa", Ps / footprint) / ustrip(u"kPa", qa), 0.0) : 0.0
         end
-        bearing_ratio = clamp(bearing, 0.0, gov_util)
-
-        # Punching ratio: if governing utilization exceeds bearing, the
-        # difference is attributable to punching shear.
-        punching_ratio = gov_util > bearing_ratio ? gov_util : 0.0
+        nan0(x) = isnan(x) ? 0.0 : x
 
         result = FoundationDesignResult(
             length = fdn_L,
@@ -828,7 +1008,9 @@ function _populate_foundation_results!(design::BuildingDesign, struc::BuildingSt
             depth = uconvert(u"m", r.D),
             reaction = total_reaction,
             bearing_ratio = bearing_ratio,
-            punching_ratio = punching_ratio,
+            punching_ratio = nan0(chk.punching),
+            one_way_shear_ratio = nan0(chk.one_way_shear),
+            governing_ratio = gov_util,
             ok = gov_util <= 1.0,
             concrete_volume = uconvert(u"m^3", StructuralSizer.concrete_volume(r)),
             steel_volume = uconvert(u"m^3", StructuralSizer.steel_volume(r)),
@@ -839,39 +1021,4 @@ function _populate_foundation_results!(design::BuildingDesign, struc::BuildingSt
     end
 end
 
-"""Axis-aligned bounding box of all slab cell vertices in meters: (xmin, xmax, ymin, ymax)."""
-function _slab_bbox_m(struc::BuildingStructure, slab)
-    skel = struc.skeleton
-    xmin = ymin =  Inf
-    xmax = ymax = -Inf
-    for ci in slab.cell_indices
-        cell = struc.cells[ci]
-        for vi in skel.face_vertex_indices[cell.face_idx]
-            c = Meshes.coords(skel.vertices[vi])
-            x = ustrip(u"m", c.x)
-            y = ustrip(u"m", c.y)
-            x < xmin && (xmin = x)
-            x > xmax && (xmax = x)
-            y < ymin && (ymin = y)
-            y > ymax && (ymax = y)
-        end
-    end
-    return (xmin=xmin, xmax=xmax, ymin=ymin, ymax=ymax)
-end
-
-"""
-Trimmed full plan extents (with units) of a drop panel at column center `(cx, cy)`,
-clamped to the slab bounding box.  Returns `(a1_eff, a2_eff)` in meters.
-"""
-function _trimmed_drop_extents_m(dp::StructuralSizer.DropPanelGeometry, cx::Float64, cy::Float64, bbox)
-    a1 = ustrip(u"m", dp.a_drop_1)
-    a2 = ustrip(u"m", dp.a_drop_2)
-    x0 = max(cx - a1, bbox.xmin)
-    x1 = min(cx + a1, bbox.xmax)
-    y0 = max(cy - a2, bbox.ymin)
-    y1 = min(cy + a2, bbox.ymax)
-    eff1 = max(x1 - x0, 0.0) * u"m"
-    eff2 = max(y1 - y0, 0.0) * u"m"
-    return (eff1, eff2)
-end
 

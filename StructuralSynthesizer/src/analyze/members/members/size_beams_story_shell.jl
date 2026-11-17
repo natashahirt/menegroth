@@ -105,7 +105,8 @@ before (the combination with the greatest sagging peak); the first pass uses
 the frame model's. Each beam's service-shell spans are a separate deflection
 check (see the ownership table at the top of this file).
 
-Steel discrete beams (see [`_shell_ratchet_ok`](@ref)) settle in three steps:
+Discrete steel beams and rectangular concrete beams (see [`_shell_ratchet_ok`](@ref))
+settle in three steps:
 
 1. **Settle.** The first `free_passes` passes pick freely.
 2. **Upward only.** Each later pass floors every group at its current
@@ -176,8 +177,8 @@ function size_beams_with_story_shell!(struc::BuildingStructure,
     build_kwargs, solve_kwargs, want_service = _split_shell_kwargs(shell_kwargs)
     ratchet = _shell_ratchet_ok(struc, opts, kwargs)
     section_floor === nothing || ratchet || throw(ArgumentError(
-        "section_floor needs steel :discrete beam options with n_max_sections = 0 " *
-        "and one material on every framing level"))
+        "section_floor needs discrete beam options with n_max_sections = 0 and one " *
+        "material on every framing level. Concrete beams must be rectangular."))
 
     size_beams!(struc, opts; shell_demands = shell_demands, shell_spans = shell_spans,
                 section_floor = section_floor, kwargs...)
@@ -340,18 +341,31 @@ function _trim_story_shell!(run, r)
 end
 
 """
+Whether one beam-options set can floor sections (see `_apply_section_floor`).
+
+Discrete steel, or rectangular discrete concrete, with `n_max_sections = 0`
+and one material. T-beams, NLP, a shared-section cap, and several materials
+cannot: a floor is a per-group mask.
+"""
+function _beam_options_ratchet(opts)
+    discrete = opts isa StructuralSizer.SteelBeamOptions ||
+               (opts isa StructuralSizer.ConcreteBeamOptions && !opts.include_flange)
+    discrete || return false
+    return opts.sizing_strategy === :discrete && opts.n_max_sections == 0 &&
+           opts.materials === nothing
+end
+
+"""
 Whether the story-shell loop can floor sections (see `_apply_section_floor`):
-steel discrete beam options with `n_max_sections = 0` and one material, on
-the building-wide options and on every framing level's own options.
+[`_beam_options_ratchet`](@ref) on the building-wide options and on every
+framing level's own options. `method = :nlp` refuses the call.
 """
 function _shell_ratchet_ok(struc, opts, kwargs = (;))
-    opts isa StructuralSizer.SteelBeamOptions || return false
+    _beam_options_ratchet(opts) || return false
     m = get(kwargs, :method, nothing)
     (m === nothing || m === :discrete) || return false
     return all(_beam_sizing_passes(struc, opts)) do p
-        o = p.opts
-        o isa StructuralSizer.SteelBeamOptions && o.sizing_strategy === :discrete &&
-            o.n_max_sections == 0 && o.materials === nothing
+        _beam_options_ratchet(p.opts)
     end
 end
 

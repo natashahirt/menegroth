@@ -296,7 +296,7 @@ end
 # 2b. Vault panels
 # ─────────────────────────────────────────────────────────────────────────────
 
-"""Print a vault panel: geometry, thrust, stress/deflection/convergence checks."""
+"""Print a vault panel: geometry, thrust, stress/kern/deflection/convergence checks."""
 function _report_vault_panel(io::IO, design::BuildingDesign,
                               s_idx::Int, slab, r::StructuralSizer.VaultResult;
                               conc=resolve_concrete(design.params),
@@ -349,6 +349,14 @@ function _report_vault_panel(io::IO, design::BuildingDesign,
     Printf.@printf(io, "  │    σ_max = %.2f %s,  σ_allow = %.2f %s,  Ratio = %.2f  %s\n",
                    σ_val, stress_label, σ_allow_val, stress_label, sc.ratio, pass_fail(sc.ok))
     Printf.@printf(io, "  │    Governing case: %s\n", string(r.governing_case))
+    println(io, "  │")
+
+    kc = r.kern_check
+    println(io, "  │  THRUST-LINE KERN CHECK (half-span live, middle third)")
+    e_val = _to_report(du, :deflection, kc.e * u"mm"; digits=2)
+    e_lim = _to_report(du, :deflection, kc.limit * u"mm"; digits=2)
+    Printf.@printf(io, "  │    e = %.2f %s,  t·cosθ/6 = %.2f %s,  Ratio = %.2f  %s\n",
+                   e_val, defl_u, e_lim, defl_u, kc.ratio, pass_fail(kc.ok))
     println(io, "  │")
 
     dc = r.deflection_check
@@ -812,7 +820,7 @@ end
 """
 Print ordinary-wall checks and seismic story drift.
 
-A gravity-only design has neither, and this section is omitted. Each wall
+A gravity-only design has the wall checks and no story-drift lines. Each wall
 shows its governing check. A failing check that is not the governing one is
 listed as well. Demand and capacity use the checker's units, converted to the
 report's display units. Every check remains on the design JSON.
@@ -884,26 +892,12 @@ function _report_takeoff(io::IO, design::BuildingDesign; du::DisplayUnits=design
         isnothing(r) && continue
         slab_area = sum(struc.cells[ci].area for ci in slab.cell_indices)
         total_slab_area += slab_area
-        if hasproperty(r, :volume_per_area)
-            total_slab_conc += r.volume_per_area * slab_area
-        elseif hasproperty(r, :thickness)
-            total_slab_conc += StructuralSizer.total_depth(r) * slab_area
+        if :concrete in StructuralSizer.materials(r)
+            total_slab_conc += StructuralSizer.volume_per_area(r, :concrete) * slab_area
         end
         # Drop panel concrete — per column, trimmed to slab boundary
-        if !isnothing(slab.drop_panel)
-            dp = slab.drop_panel
-            slab_cells = Set(slab.cell_indices)
-            bbox = _slab_bbox_m(struc, slab)
-            for (col_idx, col) in enumerate(struc.columns)
-                isempty(intersect(col.tributary_cell_indices, slab_cells)) && continue
-                v_idx = col.vertex_idx
-                (v_idx < 1 || v_idx > length(struc.skeleton.vertices)) && continue
-                c = Meshes.coords(struc.skeleton.vertices[v_idx])
-                cx = ustrip(u"m", c.x)
-                cy = ustrip(u"m", c.y)
-                a1_eff, a2_eff = _trimmed_drop_extents_m(dp, cx, cy, bbox)
-                total_drop_conc += uconvert(u"m^3", StructuralSizer.drop_panel_concrete_volume(dp, a1_eff, a2_eff))
-            end
+        for (_, V) in drop_panel_column_volumes(struc, slab)
+            total_drop_conc += V
         end
     end
 

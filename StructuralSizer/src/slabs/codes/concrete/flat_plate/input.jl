@@ -10,6 +10,14 @@ struct FlatPlateSpanInput
     isotropic::FlatPlateLength
 end
 
+"""
+Longer of the two reinforcement-axis spans. The kernel stores those spans on
+`FlatPlateSpanInput` rather than `Asap.SpanInfo`; the quantity is the same
+one ACI 318-11 Table 9.5(c) uses for minimum thickness (corpus: aci-318-11,
+page 134).
+"""
+Asap.longer_axis_span(si::FlatPlateSpanInput) = max(si.primary, si.secondary)
+
 """Normalized geometry and topology required by DDM, EFM, and slab FEA."""
 struct FlatPlateTopologyInput{F}
     vertex_coords::Matrix{Float64}
@@ -56,14 +64,31 @@ mutable struct FlatPlateCellState
 end
 
 """
+A wall the slab is joined to, resolved on the building before the kernel
+drops the wall objects.
+
+`drop_m` is the pier height below the slab. The shell uses the slab
+analysis modulus; this record carries only the geometry.
+"""
+struct FlatPlateWallPier
+    x1::Float64
+    y1::Float64
+    x2::Float64
+    y2::Float64
+    thickness_m::Float64
+    drop_m::Float64
+end
+
+"""
     FlatPlateFloorInput
 
 Normalized floor declaration, including neighboring floors needed by DDM.
 
 `wall_segments` are the plan lines, in metres, of walls that meet this floor.
-The design kernel has no wall objects and no stories, so these segments are
-resolved on the building and carried in. Empty means the floor has no
-wall support.
+`wall_piers` are those walls with the thickness and the height below the
+slab, so the shell can join the slab to the wall. The design kernel has no
+wall objects and no stories, so both are resolved on the building and
+carried in. Empty means the floor has no wall support.
 """
 struct FlatPlateFloorInput
     cell_indices::Vector{Int}
@@ -72,15 +97,16 @@ struct FlatPlateFloorInput
     result::Union{Nothing, AbstractFloorResult}
     drop_panel::Union{Nothing, DropPanelGeometry}
     wall_segments::Vector{Tuple{NTuple{2,Float64},NTuple{2,Float64}}}
-end
+    wall_piers::Vector{FlatPlateWallPier}
 
-function FlatPlateFloorInput(
-    cell_indices, spans, floor_type, result, drop_panel,
-)
-    FlatPlateFloorInput(
+    function FlatPlateFloorInput(
         cell_indices, spans, floor_type, result, drop_panel,
-        Tuple{NTuple{2,Float64},NTuple{2,Float64}}[],
+        wall_segments = Tuple{NTuple{2,Float64},NTuple{2,Float64}}[],
+        wall_piers = FlatPlateWallPier[],
     )
+        new(cell_indices, spans, floor_type, result, drop_panel,
+            wall_segments, wall_piers)
+    end
 end
 
 """Read-only support above the design joint for EFM stiffness distribution."""
@@ -241,6 +267,7 @@ function FlatPlateKernelState(input::FlatPlateDesignInput{F}) where {F}
                 deepcopy(floor.result),
                 deepcopy(floor.drop_panel),
                 copy(floor.wall_segments),
+                copy(floor.wall_piers),
             )
             for floor in input.floors
         ],

@@ -105,28 +105,39 @@ returns that function's result exactly.
 
 # Clear distance
 §8.12.2(b) / §8.12.3(c) limit the overhang to one-half the clear distance to the
-next web. `d(s)` is the per-side tributary extent perpendicular to the beam, the
-same stand-in for that half-distance already used by
-[`effective_flange_width_from_tributary`](@ref) and by the steel §I3.1a path.
-A missing side (`nothing`) is a slab edge, not a zero-width bay.
+next web. `d(s)` is the per-side tributary extent perpendicular to the beam,
+measured from the beam centerline. `left_clear` / `right_clear`, when given, are
+that side's one-half clear distance to the next web, measured from the web
+faces; the overhang is capped by both. A missing side (`nothing`) is a slab
+edge, not a zero-width bay.
+
+`one_side` overrides the §8.12.3 selection. By default a side with no profile
+makes the beam one-sided. Pass `true` to apply the §8.12.3 limits to both
+present sides, e.g. a joist whose slab stops at a free edge.
 """
 function flange_width_at_station(bw::Length, hf::Length, ln::Length, s::Real;
                                  left::Union{SideExtentProfile, Nothing} = nothing,
-                                 right::Union{SideExtentProfile, Nothing} = nothing)
-    one_side = isnothing(left) || isnothing(right)
-    overhang(p) = _aci_side_overhang(p, s, hf, ln, one_side)
-    return bw + overhang(left) + overhang(right)
+                                 right::Union{SideExtentProfile, Nothing} = nothing,
+                                 left_clear::Union{Length, Nothing} = nothing,
+                                 right_clear::Union{Length, Nothing} = nothing,
+                                 one_side::Union{Bool, Nothing} = nothing)
+    one = something(one_side, isnothing(left) || isnothing(right))
+    return bw + _aci_side_overhang(left, s, hf, ln, one, left_clear) +
+                _aci_side_overhang(right, s, hf, ln, one, right_clear)
 end
 
 """ACI 318-11 §8.12.2 / §8.12.3 overhang on one side (corpus: aci-318-11, PDF p. 119)."""
 function _aci_side_overhang(p::Union{SideExtentProfile, Nothing}, s::Real,
-                            hf::Length, ln::Length, one_side::Bool)
+                            hf::Length, ln::Length, one_side::Bool,
+                            clear::Union{Length, Nothing} = nothing)
     p === nothing && return zero(hf)
     d = _sample_extent(p, s) * u"m"
     # §8.12.3 when the slab exists on one side only; §8.12.2 otherwise.
     # `ln/8` is the per-side form of the §8.12.2 total cap `bf ≤ span/4`
     # (see `effective_flange_width`). `ln/12` is §8.12.3(a) verbatim.
     capped = one_side ? min(6 * hf, ln / 12, d) : min(8 * hf, ln / 8, d)
+    # §8.12.2(b) / §8.12.3(c): one-half the clear distance to the next web.
+    clear === nothing || (capped = min(capped, max(clear, zero(clear))))
     return capped
 end
 
@@ -143,13 +154,20 @@ demand/capacity peak. Where `bf(s)` is constant the ratio peaks at maximum
 sagging moment and `bf` is that constant width, matching
 [`effective_flange_width`](@ref). Hogging stations are skipped: the flange is in
 tension there and §8.12 does not add it. If the demand never sags, the width at
-midspan is returned.
+midspan is returned. `left_clear`, `right_clear` and `one_side` pass through to
+[`flange_width_at_station`](@ref).
 """
 function governing_flange_width(bw::Length, hf::Length, ln::Length, demand_of_s;
                                 left::Union{SideExtentProfile, Nothing} = nothing,
                                 right::Union{SideExtentProfile, Nothing} = nothing,
+                                left_clear::Union{Length, Nothing} = nothing,
+                                right_clear::Union{Length, Nothing} = nothing,
+                                one_side::Union{Bool, Nothing} = nothing,
                                 extra_breakpoints::AbstractVector{Float64} = Float64[])
-    bf_of = s -> flange_width_at_station(bw, hf, ln, s; left = left, right = right)
+    bf_of = s -> flange_width_at_station(bw, hf, ln, s; left = left, right = right,
+                                         left_clear = left_clear,
+                                         right_clear = right_clear,
+                                         one_side = one_side)
     (left === nothing && right === nothing) && return bf_of(0.5)
 
     score = function(s)

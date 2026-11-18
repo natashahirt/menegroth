@@ -11,10 +11,13 @@ Base.@kwdef mutable struct FoundationDesignResult
     # Demands
     reaction::typeof(1.0u"kN") = 0.0u"kN"
     
-    # Checks
-    bearing_ratio::Float64 = 0.0      # actual / allowable bearing pressure
-    punching_ratio::Float64 = 0.0     # punching shear check
-    flexure_ratio::Float64 = 0.0      # flexure check
+    # Checks. Zero means the design routine did not report that check.
+    bearing_ratio::Float64 = 0.0        # service soil pressure / allowable
+    punching_ratio::Float64 = 0.0       # two-way shear Vu/φVc
+    one_way_shear_ratio::Float64 = 0.0  # one-way shear Vu/φVc
+    flexure_ratio::Float64 = 0.0        # flexure check
+    # The design routine's governing utilization; `ok` is decided on it.
+    governing_ratio::Float64 = 0.0
     ok::Bool = true
     
     # Material quantities (propagated from Sizer-level result)
@@ -26,39 +29,28 @@ Base.@kwdef mutable struct FoundationDesignResult
 end
 
 """
+    foundation_check_ratios(fr::FoundationDesignResult) -> Tuple
+
+`(label, ratio)` pairs for each reported foundation check.
+"""
+foundation_check_ratios(fr::FoundationDesignResult) = (
+    ("bearing", fr.bearing_ratio),
+    ("punching_shear_fdn", fr.punching_ratio),
+    ("one_way_shear_fdn", fr.one_way_shear_ratio),
+    ("flexure_fdn", fr.flexure_ratio),
+)
+
+"""
     foundation_diagnostic_governing_check(fr::FoundationDesignResult) -> String
 
-When `fr.ok`, highest utilization among bearing, punching, and flexure. When the footing fails,
-picks the limit state(s) over capacity (ratio > 1) with the worst ratio, not the largest ratio
-among checks that still pass.
+The check with the highest ratio. When the footing fails, only checks over
+capacity (ratio > 1) are candidates. Returns `"utilization"` when the failing
+governing ratio is not explained by any reported check.
 """
 function foundation_diagnostic_governing_check(fr::FoundationDesignResult)::String
-    rb = fr.bearing_ratio
-    rp = fr.punching_ratio
-    rf = fr.flexure_ratio
-    if fr.ok
-        if rb >= rp && rb >= rf
-            return "bearing"
-        elseif rp >= rf
-            return "punching_shear_fdn"
-        else
-            return "flexure_fdn"
-        end
-    end
-    candidates = Tuple{String, Float64}[]
-    rb > 1.0 && push!(candidates, ("bearing", rb))
-    rp > 1.0 && push!(candidates, ("punching_shear_fdn", rp))
-    rf > 1.0 && push!(candidates, ("flexure_fdn", rf))
-    if !isempty(candidates)
-        _, j = findmax([c[2] for c in candidates])
-        return candidates[j][1]
-    end
-    if rb >= rp && rb >= rf
-        return "bearing"
-    elseif rp >= rf
-        return "punching_shear_fdn"
-    else
-        return "flexure_fdn"
-    end
+    checks = foundation_check_ratios(fr)
+    label, r = argmax(last, checks)
+    fr.ok && return label
+    r > 1.0 && return label
+    return fr.governing_ratio > 1.0 ? "utilization" : label
 end
-

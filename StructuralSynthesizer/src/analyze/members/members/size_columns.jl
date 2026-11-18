@@ -45,7 +45,7 @@ function size_members!(
     # Single re-analysis after both member types are sized
     if reanalyze
         Asap.process!(struc.asap_model)
-        Asap.solve!(struc.asap_model)
+        _solve_struc_model!(struc)
     end
 
     return struc
@@ -166,11 +166,42 @@ function _size_columns_impl!(
     
     if reanalyze
         Asap.process!(struc.asap_model)
-        Asap.solve!(struc.asap_model)
+        _solve_struc_model!(struc)
     end
     
     @info "Sized $(length(group_ids)) column groups" material="steel" section_type=opts.section_type
     return struc
+end
+
+"""
+One `RCColumnDemandSet` per column group.
+
+The envelope row and every pattern case are both included, each also with the
+two section axes swapped. Below the balance point a case with the same moment
+and less compression can govern, and the model does not record which global
+direction bends the section about its strong axis.
+"""
+function _rc_column_demand_sets(opts, demands, case_rows)
+    kipft = Asap.kip * u"ft"
+    to_kipft(M) = ustrip(uconvert(kipft, M * u"N*m"))
+    rc_row(i, d, Pu, Mux, Muy, M1x, M2x, M1y, M2y) = StructuralSizer.RCColumnDemand(i;
+        Pu  = ustrip(uconvert(Asap.kip, Pu * u"N")),
+        Mux = to_kipft(Mux), Muy = to_kipft(Muy),
+        M1x = to_kipft(M1x), M2x = to_kipft(M2x),
+        M1y = to_kipft(M1y), M2y = to_kipft(M2y),
+        βdns = opts.βdns,
+        transverse_load = d.transverse_load,
+    )
+    both(i, d, Pu, Mux, Muy, M1x, M2x, M1y, M2y) =
+        (rc_row(i, d, Pu, Mux, Muy, M1x, M2x, M1y, M2y),
+         rc_row(i, d, Pu, Muy, Mux, M1y, M2y, M1x, M2x))
+    return map(enumerate(demands)) do (i, d)
+        cases = collect(both(i, d, d.Pu_c, d.Mux, d.Muy, d.M1x, d.M2x, d.M1y, d.M2y))
+        for r in case_rows[i]
+            append!(cases, both(i, d, r.Pu_c, r.Mux, r.Muy, r.M1x, r.M2x, r.M1y, r.M2y))
+        end
+        StructuralSizer.RCColumnDemandSet(i, cases)
+    end
 end
 
 # Concrete implementation
@@ -190,8 +221,10 @@ function _size_columns_impl!(
 
     _add_gravity_loads!(struc, edge_ids_in_group, gravity_factor)
 
+    case_rows = Vector{ColumnCaseRow}[]
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
-        member_group_demands(struc; member_edge_group=member_edge_group, resolution=resolution)
+        member_group_demands(struc; member_edge_group=member_edge_group, resolution=resolution,
+                             case_rows=case_rows)
 
     # Concrete columns now carry per-axis effective length factors so the ACI
     # 318 slenderness check evaluates the strong (kx, h, b·h³/12) and weak
@@ -207,34 +240,60 @@ function _size_columns_impl!(
     # `size_columns` overload preserves the signed end moments end-to-end so
     # the slenderness path can compute `Cm = 0.6 − 0.4·(M1/M2)` instead of
     # the conservative `M1 = 0` stand-in.
-    rc_demands = StructuralSizer.RCColumnDemand[]
-    for (i, d) in enumerate(demands)
-        Pu_kip   = ustrip(uconvert(Asap.kip,         d.Pu_c * u"N"))
-        Mux_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.Mux  * u"N*m"))
-        Muy_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.Muy  * u"N*m"))
-        M1x_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.M1x  * u"N*m"))
-        M2x_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.M2x  * u"N*m"))
-        M1y_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.M1y  * u"N*m"))
-        M2y_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.M2y  * u"N*m"))
+    #
+    # Each group is checked against the envelope and against every pattern
+    # case on its own, including the NLP path. Below the balance point, less
+    # compression means less moment capacity, so the envelope (max P with
+    # max M) can pass a section that fails a case with the same moment and
+    # lower axial load.
+    rc_demands = _rc_column_demand_sets(opts, demands, case_rows)
 
-        push!(rc_demands, StructuralSizer.RCColumnDemand(i;
-            Pu  = Pu_kip,
-            Mux = Mux_kipf, Muy = Muy_kipf,
-            M1x = M1x_kipf, M2x = M2x_kipf,
-            M1y = M1y_kipf, M2y = M2y_kipf,
-            βdns = opts.βdns,
-            transverse_load = d.transverse_load,
-        ))
+    has_floor = any(gid -> haskey(struc.frame_section_floors, gid), group_ids)
+    if has_floor
+        # NLP has no catalog, so it cannot keep a section floor.
+        (opts.sizing_strategy !== :nlp && opts.materials === nothing &&
+         opts.n_max_sections == 0) ||
+            _refuse_frame_floors(struc, group_ids, "this concrete column sizing")
     end
-
-    result = StructuralSizer.size_columns(rc_demands, geometries, opts)
+    # A section floor indexes one catalog, so growth happens here and the
+    # explicit catalog turns off the growth inside `size_columns`. With no
+    # floor, `size_columns` grows a soft named catalog itself.
+    tier = (has_floor && opts.catalog_constraint === :soft &&
+            opts.custom_catalog === nothing) ? opts.catalog : nothing
+    cat = has_floor ?
+        (isnothing(opts.custom_catalog) ?
+            StructuralSizer.rc_column_catalog(opts.section_shape, opts.catalog) :
+            opts.custom_catalog) : nothing
+    obj = s -> StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
+    result = nothing
+    while true
+        floor_kw = has_floor ?
+            (; catalog = cat,
+              feasible = _frame_floor_mask(struc, group_ids, cat, obj)) : (;)
+        try
+            result = StructuralSizer.size_columns(rc_demands, geometries, opts; floor_kw...)
+            break
+        catch e
+            grown = tier isa Symbol ?
+                StructuralSizer.grow_rc_column_catalog(cat, opts.section_shape, tier) :
+                nothing
+            (grown !== nothing && e isa ArgumentError &&
+                startswith(e.msg, "No feasible sections for group")) || rethrow()
+            cat, nxt = grown
+            depth_in = round(Int, maximum(s -> s isa StructuralSizer.RCCircularSection ?
+                ustrip(u"inch", s.D) : ustrip(u"inch", max(s.b, s.h)), cat))
+            @warn "RC column sizing: no section in the :$tier catalog passes the section floor; " *
+                  "retrying with :$nxt added (sizes to $(depth_in) in)." reason = e.msg
+            tier = nxt
+        end
+    end
 
     _apply_column_results!(struc, result, group_ids, opts.material, :concrete, edge_ids_in_group;
                            I_factor=I_factor, rebar=opts.rebar_material)
 
     if reanalyze
         Asap.process!(struc.asap_model)
-        Asap.solve!(struc.asap_model)
+        _solve_struc_model!(struc)
     end
 
     @info "Sized $(length(group_ids)) column groups" material=StructuralSizer.material_name(opts.material)
@@ -349,7 +408,7 @@ function _size_columns_impl!(
 
     if reanalyze
         Asap.process!(struc.asap_model)
-        Asap.solve!(struc.asap_model)
+        _solve_struc_model!(struc)
     end
 
     n_total = length(group_ids)
@@ -424,7 +483,16 @@ function _apply_column_results!(struc, result, group_ids, material, material_typ
             L_total = L_raw isa Unitful.Quantity ? L_raw : L_raw * u"m"
             
             set_section!(m, chosen)
+            _record_member_check!(m, chosen, result, g_idx)
             set_volumes!(m, member_material_volumes(chosen, L_total, group_mat; rebar=rebar))
+            # Plan size follows the installed RC section; harmonization,
+            # offsets and reports read c1/c2.
+            if chosen isa StructuralSizer.RCColumnSection ||
+               chosen isa StructuralSizer.RCCircularSection
+                bb = StructuralSizer.bounding_box(chosen)
+                m.c1 = bb.width
+                m.c2 = bb.depth
+            end
             
             # Update ASAP elements
             for seg_idx in segment_indices(m)
@@ -449,15 +517,15 @@ Estimate initial column sizes and store in Column.c1, Column.c2.
 This provides preliminary column dimensions needed for slab clear span calculation
 (ln = l - c) before full column design. The estimate is intentionally conservative.
 
-After sizing, calls `update_structural_offsets!` to compute the inward offset
-from architectural vertices to structural centerlines for edge/corner columns.
+After sizing, calls `update_structural_offsets!` to record boundary normals.
+Column centers stay on the skeleton vertices.
 
 # Arguments
 - `struc`: BuildingStructure with columns and tributary areas computed
 - `fc`: Concrete compressive strength (default 4000 psi)
 - `qu_default`: Default factored floor load if not available from cells (default 200 psf)
 - `method`: :tributary (from Voronoi area) or :span (from span rule of thumb)
-- `input_is_centerline`: forwarded to `update_structural_offsets!`; when `true`, all offsets are zero
+- `input_is_centerline`: forwarded to `update_structural_offsets!`. Column centers stay on the vertices either way.
 - `start`: `:span` sizes for axial load and at least span/15 (StructurePoint).
   `:axial` sizes for axial load only, with a 14" minimum. Column sizing only
   grows, so the start is the smallest column the design can return; `:axial`

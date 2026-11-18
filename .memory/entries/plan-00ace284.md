@@ -7,7 +7,7 @@ title: Flat-plate column sizing cleanups, after the straight-skeleton tributary 
 node_label: Column sizing cleanups
 tags: columns,flat-plate,biaxial,distribution-factor,aci-318-11
 status: active
-open_threads: 3
+open_threads: 4
 success: 'null'
 files: StructuralSizer/src/slabs/codes/concrete/flat_plate/pipeline/column_updates.jl@a2f41ef,
   StructuralSizer/src/slabs/codes/concrete/flat_plate/pipeline/iteration.jl@a2f41ef,
@@ -15,7 +15,7 @@ files: StructuralSizer/src/slabs/codes/concrete/flat_plate/pipeline/column_updat
   StructuralSynthesizer/src/workflow/flat_plate_column_check.jl@a2f41ef, scripts/runners/core_office_column_stack.jl@a2f41ef
 session_id: sess-ffbd8ef6
 created_at: '2026-11-08T22:21:29.471081+00:00'
-updated_at: '2026-11-09T02:23:45.174564+00:00'
+updated_at: '2026-11-17T16:26:43.385355+00:00'
 has_child_rationale: Queued behind the tributary refactor at the user's request
 ---
 The four tasks below are done (Nov 8), before v7. v7 is the next design. The tributary refactor (deci-1d3a040b) is already finished.

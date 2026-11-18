@@ -15,7 +15,9 @@
 #   - Column: 16" × 16" square  Story height: 9 ft
 #   - Slab: 7 in (SP result)
 #
-# Loads:  SDL = 20 psf   LL = 50 psf   qu = 193 psf (factored, SP given)
+# Loads:  SDL = 20 psf   LL = 40 psf   qu = 193 psf (factored, SP given)
+#   7 in at 150 pcf is 87.5 psf. 1.2(87.5+20)+1.6(40) = 193. A 50 psf live
+#   load produces 209 psf and is not this example.
 #
 # SP Reference Values:
 #   - Stiffnesses:  SP Table 2 (section properties and EFM stiffnesses)
@@ -108,7 +110,7 @@ h     = 7.0u"inch"
 
 # ── Loads ──
 sdl = 20.0u"psf"
-ll  = 50.0u"psf"
+ll  = 40.0u"psf"
 qu  = 193.0u"psf"       # SP given factored load
 
 # ── Materials ──
@@ -247,8 +249,9 @@ M0_sp_kf = ustrip(u"kip*ft", sp.M0)
         @sprintf("l₁=%.0f′ l₂=%.0f′ lₙ=%.1f′", l1_fea_ft, l2_fea_ft, ln_fea_ft))
 println()
 
-_rpt.note("SP qᵤ lower than computed — likely different SW assumption. All methods share l₁, l₂, M₀ baseline.")
+_rpt.note("qᵤ = 193 psf is 1.2D+1.6L for the 7 in slab at 150 pcf and LL = 40 psf. FEA uses the material density.")
 
+@test ustrip(u"psf", qu_150) ≈ 193 atol = 1
 @test qu_fea_psf > 0
 @test M0_fea > 0
 _step_status["Load Baseline"] = "✓"

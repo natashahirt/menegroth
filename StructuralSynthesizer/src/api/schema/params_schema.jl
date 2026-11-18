@@ -75,7 +75,7 @@ function api_params_schema_structured()
             "fields" => Dict{String, Any}(
                 "method" => Dict("type" => "enum", "default" => "DDM",
                     "allowed" => collect(API_FLOOR_ANALYSIS_METHODS),
-                    "guidance" => "DDM/DDM_SIMPLIFIED (ACI 318-11 §13.6; = 318-19 §8.10 — checks as implemented): requires rectangular panel geometry, aspect ratio 0.5<=l2/l1<=2.0 (§13.6.1.2), L/D<=2.0 using estimated self-weight (§13.6.1.5), and adequate continuous spans/column lines (>=3 spans target; warning/violation when insufficient, §13.6.1.1). Additional implemented checks include adjacent-span variation <=1/3 when adjacency data exists (§13.6.1.3), column offset <=10% of span from column lines (§13.6.1.4), and practical clear-span minimum ln>=4 ft. EFM/EFM_HARDY_CROSS (ACI 318-11 §13.7 / §8.11 checks as implemented): still requires rectangular/orthogonal panel geometry for frame idealization (§8.11.2), gravity-load framing assumptions (§8.11.1.1), at least two supporting columns, and column-size limits for torsional-stiffness formulation (§8.11.5, c2/l2<=0.5 check). FEA: shell analysis is the most general and allowed for irregular geometry; however, if design_approach=:frame, post-processing uses ACI §13.6.4/.6-style column-/middle-strip fractions and emits warnings when DDM regularity checks fail. Use FEA for non-rectangular panels, setbacks, or free-form column layouts.",
+                    "guidance" => "DDM/DDM_SIMPLIFIED (ACI 318-11 §13.6; = 318-19 §8.10 — checks as implemented): requires rectangular panel geometry, aspect ratio 0.5<=l2/l1<=2.0 (§13.6.1.2), L/D<=2.0 using estimated self-weight (§13.6.1.5), and adequate continuous spans/column lines (>=3 spans target; warning/violation when insufficient, §13.6.1.1). Additional implemented checks include adjacent-span variation <=1/3 when adjacency data exists (§13.6.1.3), column offset <=10% of span from column lines (§13.6.1.4), and practical clear-span minimum ln>=4 ft. EFM/EFM_HARDY_CROSS (ACI 318-11 §13.7 / §8.11 checks as implemented): still requires rectangular/orthogonal panel geometry for frame idealization (§8.11.2), gravity-load framing assumptions (§8.11.1.1), at least two supporting columns, and column-size limits for torsional-stiffness formulation (§8.11.5, c2/l2<=0.5 check). FEA: shell analysis is the most general and allowed for irregular geometry; however, if design_approach=:frame, post-processing uses the ACI 318-11 §13.6.4 column-/middle-strip fractions, which §13.7.7.5 permits on frame moments. It notes a non-rectangular panel, a longer/shorter span greater than 2 (R13.6.1.2: the panel acts one-way; the flat-plate row is unchanged and the split is still used), or a wall parallel to the span (the αf1·ℓ2/ℓ1 ≥ 1 row) at ℓ2/ℓ1 outside 0.5–2.0, where the end value of the table is used. Use FEA for non-rectangular panels, setbacks, or free-form column layouts.",
                     "applicability_checks" => Dict{String, Any}(
                         "implemented_in" => Dict(
                             "DDM" => "StructuralSizer/src/slabs/codes/concrete/flat_plate/analysis/ddm.jl",
@@ -118,13 +118,13 @@ function api_params_schema_structured()
                         "FEA" => Dict{String, Any}(
                             "code_basis" => "Implementation policy + ACI-referenced post-processing",
                             "hard_checks" => Any[
-                                Dict("id" => "fea_min_supporting_columns", "clause" => "implementation", "check" => "at least 2 supporting columns"),
+                                Dict("id" => "fea_min_supporting_columns", "clause" => "implementation", "check" => "at least 2 supports (columns or wall lines)"),
                             ],
                             "advisory_checks" => Any[
                                 Dict(
                                     "id" => "fea_frame_design_approach_guardrail",
                                     "clause" => "ACI §13.6.4/.6 style CS/MS fraction use in implementation",
-                                    "check" => "if design_approach=:frame and DDM regularity checks fail, emit warning (results may be approximate)",
+                                    "check" => "if design_approach=:frame, emit a note when a panel is non-rectangular, when longer/shorter span is greater than 2 (R13.6.1.2 one-way behavior; the flat-plate split is still used), or when a wall parallel to the span puts the split on the αf1·ℓ2/ℓ1 ≥ 1 row at ℓ2/ℓ1 outside 0.5–2.0 (end value used) (ACI 318-11 §13.7.7.5, §13.6.1.2, §13.6.4.1)",
                                 ),
                                 Dict(
                                     "id" => "fea_strip_non_quad_guardrail",
@@ -165,6 +165,11 @@ function api_params_schema_structured()
                     "guidance" => "Column concrete. Higher f'c (6-8 ksi) allows smaller columns for high axial loads."),
                 "rebar" => Dict("type" => "string", "default" => "Rebar_60",
                     "guidance" => "Rebar grade. Rebar_60 (Grade 60, fy=60 ksi) is standard. Rebar_80 for reduced congestion."),
+                "rebar_coating" => Dict("type" => "string", "default" => "uncoated",
+                    "enum" => collect(REBAR_COATING_NAMES),
+                    "guidance" => "Bar coating for the whole project. Epoxy or zinc_epoxy (corrosive exposure, " *
+                        "e.g. parking decks) lengthens development and laps by 1.2-1.5x (ACI 318-19 Table 25.4.2.5). " *
+                        "Galvanized does not."),
                 "steel" => Dict("type" => "string", "default" => "A992",
                     "guidance" => "Structural steel. A992 (Fy=50 ksi) standard for W-shapes. A500_GrB for HSS."),
             ),
@@ -310,8 +315,8 @@ function api_params_schema_structured()
                          "Not supported for pixelframe columns.",
         ),
         "geometry_is_centerline" => Dict(
-            "type" => "boolean", "default" => false,
-            "guidance" => "When false, vertices are architectural reference points and columns are offset inward. When true, vertices are structural centerlines — no offset is applied.",
+            "type" => "boolean", "default" => true,
+            "guidance" => "When true (default), vertices are column and beam centerlines. The slab edge extends to the largest column face on each side and moves as columns are resized. When false, vertices are a drawn slab edge and are shifted to centerlines once, by a fixed setback.",
         ),
         "skip_visualization" => Dict(
             "type" => "boolean", "default" => false,

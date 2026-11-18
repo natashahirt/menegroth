@@ -13,7 +13,7 @@ end
 """Fallback: no additional kwargs for generic floor systems."""
 _default_floor_kwargs(::AbstractFloorSystem, span, user_kwargs::NamedTuple) = NamedTuple()
 
-# Vault: default lambda = 10 (span/rise = 10) unless user provides rise or lambda
+# Vault: default lambda = DEFAULT_VAULT_LAMBDA unless user provides rise or lambda
 function _default_floor_kwargs(::Vault, span, user_kwargs::NamedTuple)
     # Only add lambda if user hasn't provided rise or lambda
     has_rise = haskey(user_kwargs, :rise) && !isnothing(user_kwargs.rise)
@@ -29,7 +29,7 @@ function _default_floor_kwargs(::Vault, span, user_kwargs::NamedTuple)
     end
     
     if !has_rise && !has_lambda && !has_options_lambda && !has_options_rise
-        return (lambda=10.0,)
+        return (lambda=DEFAULT_VAULT_LAMBDA,)
     end
     return NamedTuple()
 end

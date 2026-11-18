@@ -638,7 +638,7 @@ function _fire_scenario_table(label, wD_ext, wL, L, geom, opts, ix_min, scenario
             result = size_steel_w_beam_nlp(Mu, Vu, geom, opts; Ix_min = ix_min)
 
             fire_rating <= 0 && break
-            result.status ∉ (:optimal, :feasible) && break
+            result.status ∉ (:optimal, :feasible, :converged) && break
 
             sec     = result.section
             PA_in   = ustrip(u"inch", sec.PA)
@@ -668,7 +668,7 @@ function _fire_scenario_table(label, wD_ext, wL, L, geom, opts, ix_min, scenario
                 r.name,
                 res.d_final, res.bf_final, res.tf_final, res.tw_final,
                 res.weight_per_ft, r.coat_t, r.w_fire, Δ)
-        @test res.status ∈ (:optimal, :feasible)
+        @test res.status ∈ (:optimal, :feasible, :converged)
     end
 
     sfrm_row = rows[2]

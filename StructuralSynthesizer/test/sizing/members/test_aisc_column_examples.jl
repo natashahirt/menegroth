@@ -346,16 +346,21 @@ end
 
         # 2. Initialize
         struc = BuildingStructure(skel)
-        # For columns: Lb = L (default), Kx=Ky=1.0 (pinned-pinned)
+        # Lb = L. The base is fixed and the top is free, so this is a
+        # cantilever: theoretical K = 2.0, the same factor as the comparison
+        # above. K = 1.0 is the pinned-pinned factor and overstates ϕPn.
         initialize_segments!(struc; default_Cb=1.0)
         initialize_members!(struc)
+        for col in struc.columns
+            col.base.Kx = 2.0
+            col.base.Ky = 2.0
+        end
         
         # 3. Analysis model
         to_asap!(struc)
         model = struc.asap_model
         
-        # Fixed base, pinned top (typical column BCs)
-        # DOF order: [ux, uy, uz, rx, ry, rz]
+        # Fixed base, free top. DOF order: [ux, uy, uz, rx, ry, rz]
         model.nodes[id_bot].dof = [false, false, false, false, false, false]  # Fixed base
         model.nodes[id_top].dof = [true, true, true, true, true, true]        # Free (load applied here)
 
@@ -382,8 +387,8 @@ end
         mg = struc.member_groups[first(keys(struc.member_groups))]
         selected = mg.section
         
-        # Check capacity (K=1.0 assumed, weak axis governs)
-        KL = L_ft * u"ft"
+        # Check capacity with the cantilever factor the member was sized for.
+        KL = 2.0 * L_ft * u"ft"
         ϕPn = get_ϕPn(selected, A992_Steel, KL; axis=:weak)
         
         # Must satisfy demand
@@ -427,6 +432,12 @@ end
         struc = BuildingStructure(skel)
         initialize_segments!(struc; default_Cb=1.0)
         initialize_members!(struc)
+        # Fixed base, free top: cantilever, K = 2.0. Checking ϕPn at K = 1.0
+        # would accept a column the boundary condition cannot carry.
+        for col in struc.columns
+            col.base.Kx = 2.0
+            col.base.Ky = 2.0
+        end
         
         # 3. Analysis model
         to_asap!(struc)
@@ -461,8 +472,8 @@ end
         mg = struc.member_groups[first(keys(struc.member_groups))]
         selected = mg.section
         
-        # Check capacities
-        KL = L_ft * u"ft"
+        # Check capacities at the cantilever factor the member was sized for.
+        KL = 2.0 * L_ft * u"ft"
         Lb = L_ft * u"ft"
         
         ϕPn = get_ϕPn(selected, A992_Steel, KL; axis=:weak)

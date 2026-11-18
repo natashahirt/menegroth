@@ -73,7 +73,7 @@ function _refresh_pattern_solve_cache!(struc::BuildingStructure)
         _clear_pattern_solve_cache!(struc)
         return
     end
-    u_cases = Asap.solve(model, cases)
+    u_cases = Asap.solve(model, cases, struc.asap_rigid_links)
     _store_pattern_solve_cache!(struc, cases, u_cases)
     # An unshored composite mesh keeps pattern dead load on the steel section.
     # AISC 360-22 Commentary §I3.1b (corpus: aisc-360-22, PDF p. 500).
@@ -100,15 +100,15 @@ function _solve_with_patterns!(struc::BuildingStructure, params::DesignParameter
     
     if length(cases) <= 1
         _clear_pattern_solve_cache!(struc)
-        Asap.solve!(model)
+        _solve_struc_model!(struc)
         return
     end
     
     # Full-loading solve (mutating) — sets model.u, node.displacement, element.forces
-    Asap.solve!(model)
+    _solve_struc_model!(struc)
     
     # Multi-case solve (non-mutating) — reuses cached K factorization
-    u_cases = Asap.solve(model, cases)
+    u_cases = Asap.solve(model, cases, struc.asap_rigid_links)
     _store_pattern_solve_cache!(struc, cases, u_cases)
     
     # Per-DOF abs envelope on el.forces (NOT used for member sizing; see
@@ -168,28 +168,44 @@ function _should_run_patterns(struc::BuildingStructure, params::DesignParameters
     return false
 end
 
-"""Dead-load factor already baked into `cell_dead_loads` (ACI 318-11 §9.2.1)."""
-function _pattern_dead_factor(struc::BuildingStructure)
-    for (ci, cell) in enumerate(struc.cells)
-        dls = get(struc.cell_dead_loads, ci, nothing)
-        (dls === nothing || isempty(dls)) && continue
-        unfact = cell.sdl + cell.self_weight
-        iszero(ustrip(unfact)) && continue
-        p = first(dls).pressure
-        return Float64(ustrip(uconvert(unit(unfact), p) / unfact))
+"""
+    member_self_weight_acceleration(params) -> Acceleration
+
+Acceleration on every frame `GravityLoad` of the building model: `D·g`,
+with `D` the dead factor of `governing_combo(params)`. Member self-weight is
+dead load `D` in ACI 318-11 Eq. (9-1) through (9-7) (§9.2.1; corpus:
+aci-318-11, page 123). The pattern cases store slab dead load at the same
+factor.
+
+Loads for unfactored cases (service reactions, gravity basic cases, ELF
+seismic weight) use [`unfactored_gravity_load`](@ref) copies.
+"""
+member_self_weight_acceleration(params::DesignParameters) =
+    uconvert(u"m/s^2", Float64(governing_combo(params).D) * GRAVITY)
+
+"""Copy of a member self-weight load at `g` (unfactored `ρ A g`)."""
+unfactored_gravity_load(ld::Asap.GravityLoad) = Asap.GravityLoad(ld.element, GRAVITY, ld.id)
+
+"""Set every frame `GravityLoad` on the model to [`member_self_weight_acceleration`](@ref)."""
+function _sync_member_self_weight!(struc::BuildingStructure, params::DesignParameters)
+    model = struc.asap_model
+    isnothing(model) && return
+    a = member_self_weight_acceleration(params)
+    for ld in model.loads
+        ld isa Asap.GravityLoad && (ld.factor = a)
     end
-    return 1.0
+    return
 end
 
 """
-Dead factor for wall self-weight.
+Dead factor for wall and drop-panel self-weight.
 
 Pattern solves store slab dead as `combo.D * D`. The single gravity solve
-stores an envelope. Wall weight uses that same choice: `combo.D` when the
+stores an envelope. These weights use that same choice: `combo.D` when the
 dead and live tributaries are split, and the dead-only envelope otherwise.
 The envelope of a pure dead load is the largest `D` factor in the set.
 """
-function _wall_self_weight_dead_factor(params::DesignParameters; patterned::Bool)
+function _self_weight_dead_factor(params::DesignParameters; patterned::Bool)
     patterned && return Float64(governing_combo(params).D)
     combos = params.load_combinations
     isempty(combos) && throw(ArgumentError(
@@ -201,7 +217,7 @@ end
 """Append wall-triangle self-weight, factored as dead load."""
 function _append_factored_wall_self_weight!(loads, shells, params::DesignParameters;
                                            patterned::Bool)
-    factor = _wall_self_weight_dead_factor(params; patterned)
+    factor = _self_weight_dead_factor(params; patterned)
     for ld in wall_self_weight_loads(shells)
         ld.pressure = factor * ld.pressure
         push!(loads, ld)
@@ -209,14 +225,17 @@ function _append_factored_wall_self_weight!(loads, shells, params::DesignParamet
     return loads
 end
 
+"""True when the model's slab dead and live tributaries are stored split (pattern solve)."""
+_pattern_dead_split(struc::BuildingStructure, params::DesignParameters) =
+    params.pattern_loading != :none &&
+    !isempty(struc.cell_dead_loads) &&
+    any(!isempty, values(struc.cell_dead_loads))
+
 """Rewrite `:wall_self_weight` pressures from the shells and the current dead factor."""
 function _sync_wall_self_weight!(struc::BuildingStructure, params::DesignParameters)
     model = struc.asap_model
     isnothing(model) && return
-    patterned = params.pattern_loading != :none &&
-                !isempty(struc.cell_dead_loads) &&
-                any(!isempty, values(struc.cell_dead_loads))
-    factor = _wall_self_weight_dead_factor(params; patterned)
+    factor = _self_weight_dead_factor(params; patterned=_pattern_dead_split(struc, params))
     for ld in model.loads
         (ld isa Asap.AreaLoad && ld.id === :wall_self_weight) || continue
         isempty(ld.shells) && continue
@@ -229,28 +248,130 @@ end
 Copy one factored tributary live load at three-quarters pressure.
 
 ACI 318-11 §13.7.6.3 permits three-quarters of the full factored live load
-on the existing alternate-span cases (corpus: aci-318-11, page 261). Stored
+on the two-way alternate-panel cases (corpus: aci-318-11, page 261). Stored
 `cell_live_loads` are already full factored live (`combo.L * live`). This
 copy multiplies that pressure by 3/4 and does not mutate the stored load.
 §13.7.6.4 (same page) keeps the full-load case unscaled.
+
+Beams and one-way slabs do not use this factor. ACI 318-19 §6.4.2 (corpus:
+aci-318-19, page 75) puts the full factored live load on alternate spans and
+on adjacent spans. §6.4.3 leaves two-way systems on their own rule.
 """
 function _pattern_alternate_live(ld::Asap.TributaryLoad)
     # ACI 318-11 §13.7.6.3 — three-quarters of the full factored live load
-    # (corpus: aci-318-11, page 261).
+    # (corpus: aci-318-11, page 261). Two-way panels only.
     Asap.TributaryLoad(ld.element, copy(ld.positions), ld.widths,
                        0.75 * ld.pressure, ld.direction, ld.id)
+end
+
+const _TWO_WAY_PATTERN_FLOORS = (:two_way, :flat_plate, :flat_slab, :waffle)
+
+"""Cell centroids of the floors that take a live-load pattern. Grade and vault cells are omitted."""
+function _pattern_cell_points(struc::BuildingStructure)
+    skel = struc.skeleton
+    vc = skel.geometry.vertex_coords
+    pts = NamedTuple{(:ci, :x, :y, :z, :two_way), Tuple{Int, Float64, Float64, Float64, Bool}}[]
+    for (ci, cell) in enumerate(struc.cells)
+        cell.floor_type == :grade && continue
+        cell.floor_type == :vault && continue
+        vis = skel.face_vertex_indices[cell.face_idx]
+        isempty(vis) && continue
+        push!(pts, (
+            ci = ci,
+            x = sum(vc[v, 1] for v in vis) / length(vis),
+            y = sum(vc[v, 2] for v in vis) / length(vis),
+            z = sum(vc[v, 3] for v in vis) / length(vis),
+            two_way = cell.floor_type in _TWO_WAY_PATTERN_FLOORS,
+        ))
+    end
+    return pts
+end
+
+"""
+Spans along one plan axis. Each line is a vector of spans, and each span is
+the cell indices at that station. ACI 318-19 §6.4.2 (page 75) patterns a
+line of spans, so X-spanning and Y-spanning lines are built separately.
+"""
+function _span_lines(pts, along::Symbol)
+    groups = Dict{NTuple{2, Float64}, Vector{Int}}()
+    for (i, p) in enumerate(pts)
+        key = along == :x ?
+            (round(p.y; digits=3), round(p.z; digits=3)) :
+            (round(p.x; digits=3), round(p.z; digits=3))
+        push!(get!(groups, key, Int[]), i)
+    end
+    lines = Vector{Vector{Int}}[]
+    for idxs in values(groups)
+        xs = [along == :x ? pts[i].x : pts[i].y for i in idxs]
+        stations = sort(unique(round.(xs; digits=3)))
+        spans = [Int[] for _ in stations]
+        for (i, x) in zip(idxs, xs)
+            s = findfirst(==(round(x; digits=3)), stations)
+            push!(spans[s], pts[i].ci)
+        end
+        push!(lines, spans)
+    end
+    return lines
+end
+
+"Live-load cell sets of §6.4.2: alternate spans, then each pair of adjacent spans. The all-loaded set is omitted."
+function _section_642_cell_sets(lines)
+    allcells = Int[]
+    for line in lines
+        for span in line
+            append!(allcells, span)
+        end
+    end
+    unique!(sort!(allcells))
+    sets = Vector{Int}[]
+    function consider!(cells)
+        cells = unique(sort(cells))
+        (isempty(cells) || cells == allcells) && return
+        any(s -> s == cells, sets) && return
+        push!(sets, cells)
+    end
+    for parity in 0:1
+        cells = Int[]
+        for line in lines
+            for (s, span) in enumerate(line)
+                (s % 2) == parity && append!(cells, span)
+            end
+        end
+        consider!(cells)
+    end
+    maxn = maximum(length, lines; init=0)
+    for j in 1:(maxn - 1)
+        cells = Int[]
+        for line in lines
+            length(line) > j || continue
+            append!(cells, line[j])
+            append!(cells, line[j + 1])
+        end
+        consider!(cells)
+    end
+    return sets
+end
+
+"Stored tributary live loads of `cells`, at full factored pressure."
+function _cells_live(struc::BuildingStructure, cells)
+    loads = Asap.TributaryLoad[]
+    for ci in cells
+        append!(loads, get(struc.cell_live_loads, ci, Asap.TributaryLoad[]))
+    end
+    return loads
 end
 
 """
 Generate pattern loading cases from the dead/live tributary load dicts.
 
-Returns a vector of load vectors:
-1. Full loading (dead + all live) — unscaled, ACI 318-11 §13.7.6.4
-2. Checkerboard A (dead + 3/4 live on "even" cells) — ACI 318-11 §13.7.6.3
-3. Checkerboard B (dead + 3/4 live on "odd" cells) — ACI 318-11 §13.7.6.3
+1. Full loading (dead + all live), ACI 318-11 §13.7.6.4 and ACI 318-19 §6.4.3
+2. Checkerboard of two-way cells at 3/4 live, ACI 318-11 §13.7.6.3
+3. Beam and one-way arrangements at full live, ACI 318-19 §6.4.2:
+   the span and alternate spans, and each pair of adjacent spans
 
-Alternate-span layout is unchanged. Only the patterned live pressure is
-reduced. Dead load and member self-weight are not scaled.
+Dead load, member self-weight, wall weight, fire coating, drop panels, and
+vault thrust are on every case. Vault thrust is the factored line load
+`:vault_thrust`; it is not a cell tributary and used to be dropped.
 """
 function _generate_pattern_cases(struc::BuildingStructure)
     dead_all = Asap.AbstractLoad[]
@@ -267,59 +388,54 @@ function _generate_pattern_cases(struc::BuildingStructure)
     # Full loading
     case_full = Asap.AbstractLoad[dead_all; live_all]
     
-    # Recomputed each call: it depends on `struc.cells` as well as the
-    # skeleton, and it is linear in the cell count.
+    # Two-way panels only. ACI 318-11 §13.7.6.3 (corpus: aci-318-11, page 261).
+    # Beams and one-way spans are the §6.4.2 cases below, at full live.
+    pts = _pattern_cell_points(struc)
+    two_way = Set(p.ci for p in pts if p.two_way)
     set_a, set_b = _checkerboard_partition(struc)
-    
-    live_a = Asap.TributaryLoad[]
-    live_b = Asap.TributaryLoad[]
-    for ci in set_a
-        append!(live_a, get(struc.cell_live_loads, ci, Asap.TributaryLoad[]))
-    end
-    for ci in set_b
-        append!(live_b, get(struc.cell_live_loads, ci, Asap.TributaryLoad[]))
-    end
-
-    # ACI 318-11 §13.7.6.3 — three-quarters of the full factored live load on
-    # the existing alternate-span cases (corpus: aci-318-11, page 261).
-    # case_full above stays at full factored live (§13.7.6.4, same page).
+    live_a = _cells_live(struc, filter(in(two_way), set_a))
+    live_b = _cells_live(struc, filter(in(two_way), set_b))
     live_a_pat = Asap.AbstractLoad[_pattern_alternate_live(ld) for ld in live_a]
     live_b_pat = Asap.AbstractLoad[_pattern_alternate_live(ld) for ld in live_b]
 
-    case_a = Asap.AbstractLoad[dead_all; live_a_pat]
-    case_b = Asap.AbstractLoad[dead_all; live_b_pat]
+    # ACI 318-19 §6.4.2 (corpus: aci-318-19, page 75): full factored live on
+    # alternate spans, and on each pair of adjacent spans, along each plan axis.
+    span_sets = Vector{Int}[]
+    for along in (:x, :y)
+        append!(span_sets, _section_642_cell_sets(_span_lines(pts, along)))
+    end
 
-    # Member self-weight is not in the cell tributary dicts. Include every
-    # Asap.GravityLoad on the model so a section change that updates ρA
-    # (and K) is visible in pattern u (ACI 318-11 §13.7.6.3–13.7.6.4,
-    # corpus: aci-318-11, page 261).
-    # cell_dead_loads are already factored (combo.D, ACI 318-11 §9.2.1,
-    # corpus: aci-318-11, page 123). GravityLoad.factor is g (unfactored ρAg).
-    # Scale copies so pattern cases do not mix unfactored self-weight with
-    # factored cell dead loads.
+    # Dead extras ride on every case. Vault thrust is already factored
+    # (`dead * D + live * L`) and is not split, so the whole line load is kept.
+    extras = Asap.AbstractLoad[]
     model = struc.asap_model
     if !isnothing(model)
-        gloads_raw = [ld for ld in model.loads if ld isa Asap.GravityLoad]
-        if !isempty(gloads_raw)
-            Df = _pattern_dead_factor(struc)
-            gloads = Asap.AbstractLoad[Asap.GravityLoad(ld.element, Df * ld.factor)
-                                      for ld in gloads_raw]
-            case_full = Asap.AbstractLoad[case_full; gloads]
-            case_a = Asap.AbstractLoad[case_a; gloads]
-            case_b = Asap.AbstractLoad[case_b; gloads]
-        end
-        # Wall self-weight is already multiplied by the dead factor. It stays
-        # with dead in every pattern case. It is not a live load.
-        wsw = Asap.AbstractLoad[ld for ld in model.loads
-                                if ld isa Asap.AreaLoad && ld.id === :wall_self_weight]
-        if !isempty(wsw)
-            case_full = Asap.AbstractLoad[case_full; wsw]
-            case_a = Asap.AbstractLoad[case_a; wsw]
-            case_b = Asap.AbstractLoad[case_b; wsw]
+        for ld in model.loads
+            if ld isa Asap.GravityLoad
+                push!(extras, Asap.GravityLoad(ld.element, ld.factor, ld.id))
+            elseif (ld isa Asap.AreaLoad && ld.id === :wall_self_weight) ||
+                   (ld isa Asap.LineLoad && ld.id === FIRE_COATING_LOAD_ID) ||
+                   (ld isa Asap.NodeForce && ld.id === DROP_PANEL_LOAD_ID) ||
+                   (ld isa Asap.LineLoad && ld.id === :vault_thrust)
+                push!(extras, ld)
+            end
         end
     end
-    
-    return [case_full, case_a, case_b]
+
+    cases = Vector{Asap.AbstractLoad}[]
+    push!(cases, Asap.AbstractLoad[case_full; extras])
+    if !isempty(live_a_pat)
+        push!(cases, Asap.AbstractLoad[dead_all; live_a_pat; extras])
+    end
+    if !isempty(live_b_pat)
+        push!(cases, Asap.AbstractLoad[dead_all; live_b_pat; extras])
+    end
+    for cells in span_sets
+        live = _cells_live(struc, cells)
+        isempty(live) && continue
+        push!(cases, Asap.AbstractLoad[dead_all; live; extras])
+    end
+    return cases
 end
 
 """

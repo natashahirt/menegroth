@@ -35,18 +35,18 @@ ENGINEERING JUDGMENT / KNOWN ISSUE — this PINS `design_building`'s slab order 
 intra-run slab parallelism (`struc.slab_parallel_batches` no longer shapes the
 graph). The pre-existing coarse thread-count non-determinism (single-thread
 `eachindex` vs multithread batch order inside `size_slabs!`) is a SEPARATE known
-issue not addressed here. The recommended proper future fix is an order-INDEPENDENT
-two-pass (pre-grow all shared columns to their final size, then size every slab
-against the final columns — deterministic AND parallelizable); it is NOT
-implemented now (see NOTES). This is not a code requirement — it is a
-byte-identity-preserving scope decision under `code-accuracy.mdc`.
+issue not addressed here. A floor whose flat-plate slabs share a column uses
+the order-independent two-pass instead: propose each slab on a private copy,
+adopt the governing column, then commit every slab against that column.
+A floor with no shared column keeps this single level, so its result stays
+the eachindex sequence.
 
-**Coarse global nodes (unchanged placement/sync).** Member sizing stays a single
-`:members` node (flat-plate `_reconcile_columns!` OR the ITERATIVE, beam↔column
-COUPLED `_size_beams_columns!` loop — see the deferral note below), depending on
-every per-slab node; foundations stays a single `:foundations` node after
-`:members`. `_reconcile_columns!` / `harmonize_uniform_column_sizes!` / foundations
-keep their exact current placement so `design_building` stays byte-identical.
+**Coarse global nodes.** Member sizing stays a single `:members` node
+(flat-plate `_reconcile_columns!` OR the ITERATIVE, beam↔column COUPLED
+`_size_beams_columns!` loop — see the deferral note below), depending on
+every per-slab node. Ordinary walls are one node after `:members`.
+Foundations are one `:foundations` node after ordinary walls: a thickness
+jump remeshes inside the wall stage, and the footing is sized on that model.
 
 Each node carries the provenance from `PIPELINE_PROVENANCE` (per-slab nodes inherit
 `NODE_SLAB_SIZING`'s record via [`pipeline_provenance`](@ref)). `struc` is read for
@@ -70,21 +70,18 @@ function build_design_graph(struc::BuildingStructure, params::DesignParameters;
     stages = build_pipeline(params; tc=tc)
 
     has_foundations = !isnothing(params.foundation_options)
-    has_ordinary_walls = params.lateral !== nothing
+    has_ordinary_walls = true
     expected_stages = 2 + (has_foundations ? 1 : 0) + (has_ordinary_walls ? 1 : 0)
     length(stages) == expected_stages || error(
         "build_design_graph: stage count mismatch " *
         "($(length(stages)) stages vs $expected_stages expected)")
 
     slab_stage   = stages[1]
-    member_stage = stages[2]
-    stage_i = 3
-    fdn_stage = nothing
-    if has_foundations
-        fdn_stage = stages[stage_i]
-        stage_i += 1
-    end
-    wall_stage = has_ordinary_walls ? stages[stage_i] : nothing
+    member_stage = _member_stage_after_floor_resolution(struc, params, stages[2], tc)
+    # `build_pipeline` emits walls, then foundations. The footing reads the
+    # model the wall jump left.
+    wall_stage = has_ordinary_walls ? stages[3] : nothing
+    fdn_stage = has_foundations ? stages[has_ordinary_walls ? 4 : 3] : nothing
 
     graph_nodes = DesignNode[]
     slab_prov   = pipeline_provenance(NODE_SLAB_SIZING)
@@ -95,6 +92,7 @@ function build_design_graph(struc::BuildingStructure, params::DesignParameters;
     # NOT one level per `slab_parallel_batches` batch; see the topology note above)
     n_slabs = length(struc.slabs)
     slab_keys_all = NodeKey[]
+    member_upstream = NodeKey[]
     if n_slabs == 0
         # No slabs: keep the coarse `:slab_sizing` node (its stage closure is a
         # no-op loop) so `:members` still has a stable slab-stage dependency and
@@ -104,6 +102,7 @@ function build_design_graph(struc::BuildingStructure, params::DesignParameters;
                                      slab_prov.reads, slab_prov.writes,
                                      slab_prov.code_version))
         push!(slab_keys_all, NODE_SLAB_SIZING)
+        member_upstream = copy(slab_keys_all)
     else
         floor_opts      = resolve_floor_options(params)
         column_opts     = _get_column_opts(params)
@@ -137,20 +136,14 @@ function build_design_graph(struc::BuildingStructure, params::DesignParameters;
             StructuralSizer.prepare_floor_design_workspace(cache_request).column_cache
         end
 
-        # ── EXACT-FIRST slab ordering (Finding 1, P0) ──────────────────────────
-        # Emit the fine per-slab nodes as ROOTS (no inter-slab edges) in ascending
-        # `slab_idx` order. `topological_levels` groups them into ONE level in
-        # insertion (== `eachindex`) order, and both the direct executor and the
-        # incremental scheduler process a level SEQUENTIALLY in that order — so the
-        # fine path reproduces the single-threaded coarse `size_slabs!` reference
-        # (`StructuralSizer/src/slabs/sizing.jl` §size_slabs!, `eachindex` branch).
-        # Slab sizing reads LIVE shared column c1/c2 and columns grow monotonically,
-        # so this order is the byte-identity invariant; `slab_parallel_batches`
-        # (the earlier coloring order) is deliberately NOT used to shape the graph.
-        # The single post-level `sync_asap!` (all nodes carry the stage's
-        # `needs_sync`) matches the coarse pipeline's single post-slab-stage sync;
-        # slab sizing performs no inter-slab sync (it never reads solved
-        # `el.forces`), so there is no intermediate sync to reproduce.
+        # No shared column: one root per slab, in index order. A shared column
+        # takes propose → envelope → commit → lock instead.
+        member_upstream = if _flat_plate_slabs_share_columns(struc)
+            _push_two_level_slab_nodes!(
+                graph_nodes, struc, slab_opts, column_opts, params, tc,
+                shared_col_cache, slab_prov, slab_floor_type)
+            NodeKey[NODE_SLAB_LOCK]
+        else
         for sidx in 1:n_slabs
             key      = slab_node_key(sidx)
             this_opts   = slab_opts[sidx]
@@ -207,30 +200,43 @@ function build_design_graph(struc::BuildingStructure, params::DesignParameters;
                                          slab_prov.code_version, fn_ctx))
             push!(slab_keys_all, key)
         end
+        copy(slab_keys_all)
+        end
     end
 
     # ── Coarse member node depends on ALL slab nodes ────────────────────────
+    # A two-level floor depends on the lock, which itself depends on every
+    # commit. The transitive closure still contains every slab node.
     mem_prov = pipeline_provenance(NODE_MEMBERS)
-    push!(graph_nodes, StageNode(NODE_MEMBERS, copy(slab_keys_all), member_stage.fn,
+    push!(graph_nodes, StageNode(NODE_MEMBERS, member_upstream, member_stage.fn,
                                  member_stage.needs_sync, mem_prov.param_slice,
                                  mem_prov.reads, mem_prov.writes, mem_prov.code_version))
 
-    # ── Coarse foundation node after members (when requested) ───────────────
-    if has_foundations
-        fdn_prov = pipeline_provenance(NODE_FOUNDATIONS)
-        push!(graph_nodes, StageNode(NODE_FOUNDATIONS, NodeKey[NODE_MEMBERS], fdn_stage.fn,
-                                     fdn_stage.needs_sync, fdn_prov.param_slice,
-                                     fdn_prov.reads, fdn_prov.writes, fdn_prov.code_version))
-    end
-
-    # Ordinary walls after foundations when those were requested, otherwise
-    # after members. Checks do not change stiffness (`needs_sync` is false).
+    # Ordinary walls after members. A thickness jump remeshes inside the
+    # stage (`needs_sync` stays false). Foundations follow that stage.
     if has_ordinary_walls
         wall_prov = pipeline_provenance(NODE_ORDINARY_WALLS)
-        upstream = has_foundations ? NODE_FOUNDATIONS : NODE_MEMBERS
-        push!(graph_nodes, StageNode(NODE_ORDINARY_WALLS, NodeKey[upstream], wall_stage.fn,
+        push!(graph_nodes, StageNode(NODE_ORDINARY_WALLS, NodeKey[NODE_MEMBERS], wall_stage.fn,
                                      wall_stage.needs_sync, wall_prov.param_slice,
                                      wall_prov.reads, wall_prov.writes, wall_prov.code_version))
+    end
+
+    # Foundations read the reactions on the thickness the wall stage accepted.
+    # They also read the frame forces the member stage publishes. The wall
+    # output hash is the thickness list, so a load-combination edit can change
+    # those forces without changing a thickness. Foundations would then stay
+    # clean, and the all-clean restore would put the old solved model back
+    # (old column forces, old bearing). The member node writes `:asap_model`,
+    # whose fingerprint is the frame forces, so foundations depend on it
+    # directly. The wall node stays a dependency, and it still runs first.
+    if has_foundations
+        fdn_prov = pipeline_provenance(NODE_FOUNDATIONS)
+        fdn_upstream = has_ordinary_walls ?
+            NodeKey[NODE_MEMBERS, NODE_ORDINARY_WALLS] :
+            NodeKey[NODE_MEMBERS]
+        push!(graph_nodes, StageNode(NODE_FOUNDATIONS, fdn_upstream, fdn_stage.fn,
+                                     fdn_stage.needs_sync, fdn_prov.param_slice,
+                                     fdn_prov.reads, fdn_prov.writes, fdn_prov.code_version))
     end
 
     return DesignGraph(graph_nodes)
@@ -239,10 +245,10 @@ end
 """
     _floor_options_for_slab(struc, slab_idx, params, global_opts) -> AbstractFloorOptions
 
-Options for one slab. A slab whose floor type matches the building-wide
-options uses those options. A scoped override that covers the slab's cells
-supplies its own options, with the same concrete and column-cracking factor
-the initializer applies. The last matching override wins.
+Options for one slab. A scoped override that covers the slab's cells supplies
+its own options, with the same concrete and column-cracking factor the
+initializer applies; the last matching override wins. Otherwise a slab whose
+floor type matches the building-wide options uses those options.
 """
 function _floor_options_for_slab(
     struc::BuildingStructure,
@@ -251,23 +257,483 @@ function _floor_options_for_slab(
     global_opts::StructuralSizer.AbstractFloorOptions,
 )
     slab = struc.slabs[slab_idx]
-    StructuralSizer.floor_symbol(global_opts) == slab.floor_type && return global_opts
     chosen = nothing
     for ov in params.scoped_floor_overrides
         ov.floor_type == slab.floor_type || continue
         isdisjoint(_match_override_cells(struc, ov), slab.cell_indices) && continue
         opts = _scoped_override_floor_opts(ov)
         opts === nothing && continue
-        concrete = something(ov.concrete, resolve_concrete(params))
+        concrete = something(ov.concrete, _primary_material(global_opts))
         chosen = _apply_col_I_factor(
             _with_concrete_material(opts, concrete),
             params.column_I_factor,
         )
     end
-    chosen === nothing && throw(ArgumentError(
+    chosen === nothing || return chosen
+    StructuralSizer.floor_symbol(global_opts) == slab.floor_type && return global_opts
+    # A beamless :two_way panel was redesigned as a flat plate. The request
+    # options are still TwoWayOptions; the flat-plate kernel needs its own.
+    if slab.floor_type === :flat_plate && global_opts isa StructuralSizer.TwoWayOptions
+        return _apply_col_I_factor(
+            _flat_plate_options_from(_options_covering_slab(struc, slab, params, global_opts)),
+            params.column_I_factor)
+    end
+    throw(ArgumentError(
         "slab $slab_idx is a $(slab.floor_type) floor, which $(typeof(global_opts)) " *
         "does not describe, and no scoped override covers its cells"))
+end
+
+"""Options that cover this slab, preferring the last matching scoped override."""
+function _options_covering_slab(
+    struc::BuildingStructure,
+    slab,
+    params::DesignParameters,
+    global_opts::StructuralSizer.AbstractFloorOptions,
+)
+    chosen = global_opts
+    for ov in params.scoped_floor_overrides
+        ov.floor_type in (slab.floor_type, :two_way) || continue
+        isdisjoint(_match_override_cells(struc, ov), slab.cell_indices) && continue
+        opts = _scoped_override_floor_opts(ov)
+        opts === nothing && continue
+        concrete = something(ov.concrete, _primary_material(global_opts))
+        chosen = _with_concrete_material(opts, concrete)
+    end
     return chosen
+end
+
+"""
+    _member_stage_after_floor_resolution(struc, params, member_stage, tc)
+
+A `:two_way` request whose every panel was redesigned as a flat plate uses
+the flat-plate column reconciliation, not the beam-and-column loop. There
+is no beam grid left to size. Any other request keeps the stage
+`build_pipeline` chose.
+"""
+function _member_stage_after_floor_resolution(
+    struc::BuildingStructure,
+    params::DesignParameters,
+    member_stage::PipelineStage,
+    tc::Union{Nothing, StructuralSizer.TraceCollector},
+)
+    _infer_floor_type(resolve_floor_options(params)) === :two_way || return member_stage
+    isempty(struc.slabs) && return member_stage
+    all(s -> s.floor_type in (:flat_plate, :flat_slab), struc.slabs) || return member_stage
+    column_opts = _get_column_opts(params)
+    if column_opts isa StructuralSizer.PixelFrameColumnOptions
+        throw(ArgumentError(
+            "Flat plate/slab requires reinforced concrete columns. " *
+            "PixelFrame columns are not supported for beamless slab systems."))
+    end
+    return PipelineStage(struc -> begin
+        StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_2_reconcile", :enter)
+        _design_flat_plate_members!(struc, params; tc=tc)
+        StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_2_reconcile", :exit)
+    end, false)
+end
+
+"""Uniform column sizing, when `params` asks for it. Returns the columns enlarged."""
+_harmonize_columns!(struc::BuildingStructure, params::DesignParameters) =
+    params.uniform_column_sizing === :off ? 0 : harmonize_uniform_column_sizes!(struc, params)
+
+"""Flat-plate and flat-slab slabs whose stored checks used a smaller column than is installed."""
+_stale_flat_plate_slabs(struc::BuildingStructure) =
+    [s for s in eachindex(struc.slabs)
+     if struc.slabs[s].floor_type in (:flat_plate, :flat_slab) &&
+        !_slab_checked_at_installed_columns(struc, s)]
+
+StructuralSizer.TRACE_REGISTRY[(:_design_flat_plate_members!, :workflow)] =
+    StructuralSizer.TracedFunctionMeta(
+        :_design_flat_plate_members!,
+        :workflow,
+        [:enter, :exit, :decision],
+        nothing,
+        @__FILE__,
+        @__LINE__,
+    )
+
+"""
+    _design_flat_plate_members!(struc, params; tc=nothing) -> NamedTuple
+
+Member stage of a flat-plate or flat-slab building.
+
+[`_reconcile_columns!`](@ref) gives each column the lightest section that
+passes its full-load strength and punching, then uniform column sizing
+promotes each group to its largest member when that option is on. A column
+whose plan size changed was not the column the slab was checked at
+([`_slab_checked_at_installed_columns`](@ref)), so that slab is designed
+again. The new analysis may grow a column. That grown plan size is a floor
+under the next search, so a column the analysis rejected is not selected
+again. Rounds repeat until every slab was checked at its installed columns.
+
+Returns `(passes, redesigned)`: the rounds run, including the last one that
+found nothing stale, and the slabs designed again.
+"""
+function _design_flat_plate_members!(struc::BuildingStructure, params::DesignParameters;
+                                     tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
+    StructuralSizer.emit!(tc, :workflow, "_design_flat_plate_members!", "", :enter;
+                          n_slabs = length(struc.slabs))
+    # Plan size a slab reanalysis grew a column back to. The section search
+    # does not go under it.
+    floors = Dict{Int, Tuple}()
+    _reconcile_columns!(struc, params; tc, floors)
+    _harmonize_columns!(struc, params)
+    floor_opts = resolve_floor_options(params)
+    column_opts = _get_column_opts(params)
+    redesigned = Set{Int}()
+    run = StructuralSizer.settle!(;
+            budget = StructuralSizer.monotone_budget(params.max_iterations, 48)) do _
+        stale = _stale_flat_plate_slabs(struc)
+        isempty(stale) && return false
+        before = Dict{Int, Tuple}(
+            i => (col.c1, col.c2)
+            for (i, col) in enumerate(struc.columns) if col.c1 !== nothing)
+        outcomes = Any[nothing for _ in eachindex(struc.slabs)]
+        for sidx in stale
+            opts = _floor_options_for_slab(struc, sidx, params, floor_opts)
+            outcome = _isolated_floor_outcome(struc, sidx, opts, column_opts, params, tc, nothing)
+            outcomes[sidx] = _commit_floor!(struc, sidx, outcome, opts, column_opts, params)
+        end
+        union!(redesigned, stale)
+        _apply_support_envelope!(struc, outcomes)
+        _raise_column_floors!(floors, before, struc)
+        sync_asap!(struc; params)
+        _reconcile_columns!(struc, params; tc, floors)
+        _harmonize_columns!(struc, params)
+        return true
+    end
+    StructuralSizer.emit!(tc, :workflow, "_design_flat_plate_members!", "", :decision;
+                          passes = run.steps, stop = string(run.stop),
+                          n_redesigned = length(redesigned))
+    run.converged || error(
+        "flat-plate member stage did not settle: after $(run.steps) rounds, slabs " *
+        "$(_stale_flat_plate_slabs(struc)) were still checked at smaller columns " *
+        "than are installed")
+    StructuralSizer.emit!(tc, :workflow, "_design_flat_plate_members!", "", :exit;
+                          n_redesigned = length(redesigned))
+    return (passes = run.steps, redesigned = sort!(collect(redesigned)))
+end
+
+"""
+Record a plan floor where the slab reanalysis grew a column.
+
+`before` is the plan size at the start of the round. A column that came out
+larger failed at the smaller size, and the section search will not go back
+under the size the analysis accepted.
+"""
+function _raise_column_floors!(floors, before, struc)
+    tol = 0.05u"inch"
+    for (i, col) in enumerate(struc.columns)
+        haskey(before, i) || continue
+        (col.c1 === nothing || col.c2 === nothing) && continue
+        b1, b2 = before[i]
+        (col.c1 > b1 + tol || col.c2 > b2 + tol) || continue
+        f1, f2 = get(floors, i, (zero(col.c1), zero(col.c2)))
+        floors[i] = (max(f1, col.c1), max(f2, col.c2))
+    end
+    return floors
+end
+
+"""
+True when two flat-plate or flat-slab panels share a supporting column.
+
+Those panels read the column size while they size (`ln = l1 − c1`, and the
+punching perimeter) and they grow it. Sizing them in index order makes the
+floor depend on which panel runs first.
+"""
+function _flat_plate_slabs_share_columns(struc::BuildingStructure)
+    owner = Dict{Int, Int}()
+    for sidx in eachindex(struc.slabs)
+        ft = struc.slabs[sidx].floor_type
+        ft in (:flat_plate, :flat_slab) || continue
+        for cidx in _slab_supporting_columns(struc, sidx)
+            prev = get(owner, cidx, sidx)
+            prev != sidx && return true
+            owner[cidx] = sidx
+        end
+    end
+    return false
+end
+
+_support_area(c1, c2) = (isnothing(c1) || isnothing(c2)) ? -Inf :
+    float(ustrip(u"m^2", c1 * c2))
+
+"""Longitudinal-steel score used only to break a same-footprint tie.
+
+ACI 318-11 §10.3.6.2 (corpus: aci-318-11, page 143): at a fixed gross area,
+φPn,max does not decrease as Ast increases, because fy > 0.85 f′c. A missing
+area sorts below any reported area.
+"""
+function _ast_score(section)
+    area = _column_section_steel_area(section)
+    area === nothing && return -1.0
+    return float(ustrip(u"m^2", area))
+end
+
+"""An update may replace the column when neither side gets smaller."""
+function _support_beats(c1, c2, update)
+    (isnothing(update.c1) || isnothing(update.c2)) && return false
+    (isnothing(c1) || isnothing(c2)) && return true
+    return update.c1 >= c1 && update.c2 >= c2
+end
+
+"""
+    _governing_support_update(c1, c2, section, labeled) -> update or nothing
+
+`labeled` is `(slab_index, support_update)` pairs for one column. The winner
+is the largest footprint that does not shrink either side of the current
+column. Equal footprints keep the larger longitudinal steel area. The same
+score keeps the earlier slab, so the choice does not depend on proposal order.
+Returns `nothing` when the current column already matches that winner.
+"""
+function _governing_support_update(c1, c2, section, labeled)
+    best = nothing
+    best_key = (-Inf, -1.0, 0)
+    for (sidx, update) in labeled
+        _support_beats(c1, c2, update) || continue
+        key = (_support_area(update.c1, update.c2), _ast_score(update.section), -sidx)
+        if best === nothing || key > best_key
+            best = update
+            best_key = key
+        end
+    end
+    best === nothing && return nothing
+    current_key = (_support_area(c1, c2), _ast_score(section))
+    (best_key[1], best_key[2]) > current_key || return nothing
+    return best
+end
+
+"""
+Write `update` onto `col`. A missing section does not replace a real one.
+Returns `true` when the column was written.
+"""
+function _install_governing_support!(col, update)
+    if update.section === nothing && col.base.section !== nothing &&
+            (update.c1 != col.c1 || update.c2 != col.c2)
+        return false
+    end
+    col.c1 = deepcopy(update.c1)
+    col.c2 = deepcopy(update.c2)
+    col.shape = update.shape
+    update.section === nothing || (col.base.section = deepcopy(update.section))
+    update.volumes === nothing || (col.base.volumes = deepcopy(update.volumes))
+    return true
+end
+
+"""
+True when every column slab `slab_idx` was designed against still has the
+plan size and shape it had then (`designed_supports`), and so does the
+column directly above each one (`designed_above`; both written by
+[`install_floor_design!`](@ref)). Stored design details without that record
+are treated as stale, since the columns they were checked at are unknown. A
+slab with no stored design details has no checks to be stale.
+"""
+function _slab_checked_at_installed_columns(struc::BuildingStructure, slab_idx::Int)::Bool
+    dd = struc.slabs[slab_idx].design_details
+    dd isa NamedTuple || return true
+    (hasproperty(dd, :designed_supports) && hasproperty(dd, :designed_above)) || return false
+    for (cidx, (c1, c2, shape)) in dd.designed_supports
+        col = struc.columns[cidx]
+        (col.c1 == c1 && col.c2 == c2 && col.shape == shape) || return false
+    end
+    for (cidx, rec) in dd.designed_above
+        a = struc.columns[cidx].column_above
+        now = a === nothing ? nothing : (a.c1, a.c2, a.shape)
+        isequal(now, rec) || return false
+    end
+    return true
+end
+
+"""
+True when `update` is the column already on the building.
+
+A proposal computed against these dimensions does not need another solve
+after the envelope. A larger installed column does.
+"""
+function _support_update_installed(c1, c2, shape, section, update)::Bool
+    c1 == update.c1 && c2 == update.c2 && shape == update.shape || return false
+    update.section === nothing && return true
+    return section == update.section
+end
+
+"""
+True when every column this proposal sized is the column now on `struc`.
+
+`outcome` that is missing or not installable does not match.
+"""
+function _supports_still_match(struc::BuildingStructure, outcome)::Bool
+    outcome === nothing && return false
+    StructuralSizer.is_installable(outcome) || return false
+    for update in outcome.proposal.support_updates
+        idx = update.source_index
+        1 <= idx <= length(struc.columns) || return false
+        col = struc.columns[idx]
+        _support_update_installed(col.c1, col.c2, col.shape, col.base.section, update) ||
+            return false
+    end
+    return true
+end
+
+"""
+Adopt each column's governing proposal. Columns with no proposal stay put.
+Returns the number of columns written.
+"""
+function _apply_support_envelope!(struc::BuildingStructure, proposals)
+    by_col = Dict{Int, Vector{Tuple{Int, Any}}}()
+    for (sidx, outcome) in enumerate(proposals)
+        outcome === nothing && continue
+        StructuralSizer.is_installable(outcome) || continue
+        for update in outcome.proposal.support_updates
+            push!(get!(by_col, update.source_index, Tuple{Int, Any}[]), (sidx, update))
+        end
+    end
+    n = 0
+    for cidx in sort!(collect(keys(by_col)))
+        cidx in eachindex(struc.columns) || continue
+        col = struc.columns[cidx]
+        chosen = _governing_support_update(col.c1, col.c2, col.base.section, by_col[cidx])
+        chosen === nothing && continue
+        _install_governing_support!(col, chosen) && (n += 1)
+    end
+    return n
+end
+
+"""
+    _commit_floor!(struc, slab_idx, outcome, floor_opts, column_opts, params) -> outcome
+
+Install `outcome` on slab `slab_idx` without writing its columns, and
+refresh that slab's volumes.
+"""
+function _commit_floor!(struc, slab_idx, outcome, floor_opts, column_opts, params)
+    _require_installable_floor(outcome, slab_idx)
+    request = floor_design_request(
+        struc, slab_idx;
+        options = floor_opts,
+        column_options = column_opts,
+        max_iterations = params.max_iterations,
+        fire_rating = params.fire_rating,
+    )
+    install_floor_design!(struc, request, outcome; install_supports = false)
+    _update_one_slab_volume!(struc, slab_idx, floor_opts)
+    return outcome
+end
+
+function _isolated_floor_outcome(struc, slab_idx, floor_opts, column_opts, params, tc, col_cache)
+    request = floor_design_request(
+        struc, slab_idx;
+        options = floor_opts,
+        column_options = column_opts,
+        max_iterations = params.max_iterations,
+        fire_rating = params.fire_rating,
+    )
+    return design_floor(
+        struc, request;
+        verbose = false,
+        workspace = StructuralSizer.FloorDesignWorkspace(col_cache),
+        tc = tc,
+    )
+end
+
+"""
+Propose, envelope, commit, and lock for a floor whose slabs share columns.
+
+Propose and commit do not write columns. The envelope and the lock do, after
+every slab in that level has reported. Commit nodes keep [`slab_node_key`](@ref).
+"""
+function _push_two_level_slab_nodes!(
+    graph_nodes, struc, slab_opts, column_opts, params, tc, col_cache, slab_prov, slab_floor_type,
+)
+    n = length(struc.slabs)
+    proposed = Any[nothing for _ in 1:n]
+    committed = Any[nothing for _ in 1:n]
+    propose_keys = NodeKey[slab_propose_key(sidx) for sidx in 1:n]
+    commit_keys = NodeKey[slab_node_key(sidx) for sidx in 1:n]
+
+    for sidx in 1:n
+        floor_opts = slab_opts[sidx]
+        is_first = sidx == 1
+        node_cache = col_cache
+        fn = function (struc)
+            if is_first
+                StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_1_slabs", :enter;
+                                      floor_type=string(slab_floor_type), two_level=true)
+                StructuralSizer.emit!(tc, :slab, "size_slabs!", "", :enter;
+                                      n_slabs=n, options_type=string(typeof(floor_opts)),
+                                      has_column_opts=!isnothing(column_opts),
+                                      max_iterations=params.max_iterations, two_level=true)
+            end
+            outcome = _isolated_floor_outcome(
+                struc, sidx, floor_opts, column_opts, params, tc, node_cache)
+            _require_installable_floor(outcome, sidx)
+            proposed[sidx] = outcome
+            return nothing
+        end
+        push!(graph_nodes, StageNode(
+            propose_keys[sidx], NodeKey[], fn, false,
+            slab_prov.param_slice, slab_prov.reads, slab_prov.writes,
+            :slab_propose_v1))
+    end
+
+    push!(graph_nodes, StageNode(
+        NODE_SLAB_ENVELOPE, propose_keys,
+        function (struc)
+            _apply_support_envelope!(struc, proposed)
+            return nothing
+        end,
+        false, slab_prov.param_slice, slab_prov.reads, Symbol[:columns],
+        :slab_column_envelope_v1))
+
+    for sidx in 1:n
+        floor_opts = slab_opts[sidx]
+        node_cache = col_cache
+        fn = function (struc)
+            # The envelope writes the governing column once. A slab whose
+            # proposal already used that column keeps its result.
+            outcome = _supports_still_match(struc, proposed[sidx]) ? proposed[sidx] :
+                _isolated_floor_outcome(
+                    struc, sidx, floor_opts, column_opts, params, tc, node_cache)
+            committed[sidx] = _commit_floor!(
+                struc, sidx, outcome, floor_opts, column_opts, params)
+            return nothing
+        end
+        push!(graph_nodes, StageNode(
+            commit_keys[sidx], NodeKey[NODE_SLAB_ENVELOPE], fn, false,
+            slab_prov.param_slice, slab_prov.reads, slab_prov.writes,
+            :slab_commit_v1))
+    end
+
+    # The lock adopts the committed envelope. A slab committed against a
+    # column that the envelope then enlarged is designed again against it,
+    # until a round enlarges nothing. Columns only grow, so the rounds end;
+    # the budget is the default growth ceiling.
+    budget = StructuralSizer.monotone_budget(params.max_iterations, 48)
+    push!(graph_nodes, StageNode(
+        NODE_SLAB_LOCK, commit_keys,
+        function (struc)
+            run = StructuralSizer.settle!(; budget) do _
+                _apply_support_envelope!(struc, committed) > 0 || return false
+                for sidx in 1:n
+                    _supports_still_match(struc, committed[sidx]) && continue
+                    outcome = _isolated_floor_outcome(
+                        struc, sidx, slab_opts[sidx], column_opts, params, tc, col_cache)
+                    committed[sidx] = _commit_floor!(
+                        struc, sidx, outcome, slab_opts[sidx], column_opts, params)
+                end
+                return true
+            end
+            StructuralSizer.emit!(tc, :slab, "size_slabs!", "", :decision;
+                                  lock_rounds = run.steps, lock_stop = string(run.stop))
+            run.converged || error(
+                "shared-column floor did not settle: columns were still growing after " *
+                "$(run.steps) lock rounds, so some slabs were checked against smaller " *
+                "columns than are installed")
+            StructuralSizer.emit!(tc, :slab, "size_slabs!", "", :exit)
+            StructuralSizer.emit!(tc, :pipeline, "build_pipeline", "stage_1_slabs", :exit)
+            return nothing
+        end,
+        true, slab_prov.param_slice, slab_prov.reads, Symbol[:columns, :slabs],
+        :slab_column_lock_v2))
+    return graph_nodes
 end
 
 """
@@ -361,6 +827,22 @@ _accessory_stud_material(opts::StructuralSizer.FlatPlateOptions) = opts.stud_mat
 _accessory_stud_material(opts::StructuralSizer.FlatSlabOptions) = opts.base.stud_material
 _accessory_stud_material(::StructuralSizer.AbstractFloorOptions) = StructuralSizer.Stud_51
 
+"""
+Column plan size a shear cap or capital was built around, or `nothing`.
+
+A round column under a rectangular head (edge or corner) is its equivalent
+square, as in the punching check; under a round head it is the diameter.
+"""
+function _head_base_dims(col, head_shape::Symbol)
+    (col === nothing || isnothing(col.c1) || isnothing(col.c2)) && return nothing
+    if col.shape === :circular
+        head_shape === :circular && return (col.c1, col.c1)
+        c = StructuralSizer.equivalent_square_column(col.c1)
+        return (c, c)
+    end
+    return (col.c1, col.c2)
+end
+
 """Add `dv` onto the existing `mat` entry of a volume dict."""
 function _bump_volume!(vols::MaterialVolumes, mat, dv)
     v = uconvert(u"m^3", dv)
@@ -397,33 +879,26 @@ function _add_slab_accessory_volumes!(struc, slab, options)
                 if hasproperty(detail, :studs) && !isnothing(detail.studs)
                     _bump_volume!(slab.volumes, stud, StructuralSizer.stud_steel_volume(detail.studs))
                 end
-                if hasproperty(detail, :shear_cap) && !isnothing(detail.shear_cap) &&
-                        col_idx isa Integer && 1 <= col_idx <= length(struc.columns)
-                    col = struc.columns[col_idx]
-                    if !isnothing(col.c1) && !isnothing(col.c2)
+                col = (col_idx isa Integer && 1 <= col_idx <= length(struc.columns)) ?
+                      struc.columns[col_idx] : nothing
+                dims(head) = _head_base_dims(col, head.shape)
+                if hasproperty(detail, :shear_cap) && !isnothing(detail.shear_cap)
+                    cd = dims(detail.shear_cap)
+                    cd === nothing ||
                         _bump_volume!(slab.volumes, concrete, StructuralSizer.shear_cap_concrete_volume(
-                            detail.shear_cap, col.c1, col.c2))
-                    end
+                            detail.shear_cap, cd...))
                 end
                 if hasproperty(detail, :capital) && !isnothing(detail.capital)
-                    _bump_volume!(slab.volumes, concrete,
-                        StructuralSizer.capital_concrete_volume(detail.capital))
+                    cd = dims(detail.capital)
+                    _bump_volume!(slab.volumes, concrete, cd === nothing ?
+                        StructuralSizer.capital_concrete_volume(detail.capital) :
+                        StructuralSizer.capital_concrete_volume(detail.capital, cd...))
                 end
             end
         end
     end
-    if !isnothing(slab.drop_panel)
-        dp = slab.drop_panel
-        slab_cells = Set(slab.cell_indices)
-        bbox = _slab_bbox_m(struc, slab)
-        for col in struc.columns
-            isempty(intersect(col.tributary_cell_indices, slab_cells)) && continue
-            v_idx = col.vertex_idx
-            (v_idx < 1 || v_idx > length(struc.skeleton.vertices)) && continue
-            c = Meshes.coords(struc.skeleton.vertices[v_idx])
-            a1, a2 = _trimmed_drop_extents_m(dp, ustrip(u"m", c.x), ustrip(u"m", c.y), bbox)
-            _bump_volume!(slab.volumes, concrete, StructuralSizer.drop_panel_concrete_volume(dp, a1, a2))
-        end
+    for (_, V) in drop_panel_column_volumes(struc, slab)
+        _bump_volume!(slab.volumes, concrete, V)
     end
     return slab
 end

@@ -6,6 +6,10 @@ Base.@kwdef mutable struct BeamDesignResult
     section_size::String = ""
     section_obj::Union{StructuralSizer.AbstractSection, Nothing} = nothing
     Mu::typeof(1.0u"kN*m") = 0.0u"kN*m"
+    # Moment of the ACI flexure check with the highest ratio (kip·ft from the
+    # checker, stored in kN·m). `nothing` when that check was not reported.
+    # `Mu` stays the peak of the solved load case.
+    check_Mu::Union{Nothing, typeof(1.0u"kN*m")} = nothing
     Vu::typeof(1.0u"kN") = 0.0u"kN"
     flexure_ratio::Float64 = 0.0
     shear_ratio::Float64 = 0.0

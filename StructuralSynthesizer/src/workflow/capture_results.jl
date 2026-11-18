@@ -383,9 +383,6 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
     rc_opts = _flat_plate_column_opts(params)
     fp_checks = has_model ? flat_plate_column_checks(struc, rc_opts; params) : Dict{Int, NamedTuple}()
     fp_supported = flat_plate_supported_columns(struc)
-    # The stacking policy is applied by the flat-plate column check only.
-    nonmonotone = intersect(Set(_non_monotone_columns(struc)), fp_supported)
-    mismatched = intersect(Set(_mismatched_stack_columns(struc)), fp_supported)
     # Same full-load + pattern envelope the column sizer reads.
     col_envs = has_model ? column_force_envelopes(struc, params) : Dict{Int, NamedTuple}()
 
@@ -712,16 +709,9 @@ function _populate_column_results!(design::BuildingDesign, struc::BuildingStruct
         if haskey(fp_checks, col_idx) && haskey(struc.stage_diagnostics, :flat_plate_columns)
             push!(result.notes, "full-load column check did not settle")
         end
-        col_idx in nonmonotone &&
-            push!(result.notes, "smaller than the column above (stack not monotone)")
-        col_idx in mismatched &&
-            push!(result.notes, "column above has a different shape or rotation; stack sizes not compared")
-        
+
         design.columns[col_idx] = result
     end
-    isempty(nonmonotone) || push!(design.diagnostics,
-        "Columns smaller than the column above (stack not monotone): " *
-        join(sort!(collect(nonmonotone)), ", "))
 end
 
 """
@@ -921,6 +911,23 @@ function _note_under_frame_floor!(result::ColumnDesignResult, col, struc, params
     return result
 end
 
+"""
+Demand, in kip·ft, of the ACI flexure check with the highest ratio.
+
+`nothing` when the explanation has no `flexure` or `flexure_neg` check. Those
+two checks store moment as kip·ft (`to_kipft` in the beam checker).
+"""
+function _aci_flexure_demand(expl)
+    best_r, best_d = -1.0, nothing
+    for c in expl.checks
+        c.name in ("flexure", "flexure_neg") || continue
+        c.ratio > best_r || continue
+        best_r = c.ratio
+        best_d = c.demand
+    end
+    return best_d
+end
+
 """Copy the sizer's governing check, and its largest flexural and shear ratios, onto `result`."""
 function _apply_beam_check!(result::BeamDesignResult, expl::StructuralSizer.FeasibilityExplanation)
     result.governing_check = expl.governing_check
@@ -936,6 +943,8 @@ function _apply_beam_check!(result::BeamDesignResult, expl::StructuralSizer.Feas
                                    init = 0.0)
     result.shear_ratio = maximum((c.ratio for c in expl.checks if _is_shear_check(c.name));
                                  init = 0.0)
+    d = _aci_flexure_demand(expl)
+    d === nothing || (result.check_Mu = uconvert(u"kN*m", d * Asap.kip * u"ft"))
     return result
 end
 

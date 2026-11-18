@@ -143,25 +143,33 @@ Ec_ksi(mat::NamedTuple)                  = ustrip(ksi, Ec(mat.fc * ksi))
 # ==============================================================================
 
 """
-    fr(fc::Pressure) -> Pressure
+    fr(fc::Pressure; λ=1.0) -> Pressure
     fr(mat::Concrete) -> Pressure
     fr(mat::ReinforcedConcreteMaterial) -> Pressure
 
-Modulus of rupture per ACI 318-11 §9.5.2.3.
-For normal-weight concrete: fr = 7.5 √f'c (psi units)
+Modulus of rupture per ACI 318-11 §9.5.2.3, Eq. (9-10)
+(corpus: aci-318-11, page 132):
+
+    f_r = 7.5 λ √f'c    (psi units)
+
+`λ` is the lightweight-concrete modification factor of §8.6.1. The default
+`λ = 1.0` is normal-weight concrete only; any caller that holds a material
+must pass its `λ` (the material methods do).
 
 # Example
 ```julia
-fr(4000u"psi")  # ≈ 474 psi
+fr(4000u"psi")            # ≈ 474 psi (normal weight)
+fr(4000u"psi"; λ = 0.75)  # ≈ 356 psi (all-lightweight)
 ```
 """
-function fr(fc::Unitful.Pressure)
+function fr(fc::Unitful.Pressure; λ::Real = 1.0)
+    0 < λ <= 1 || throw(ArgumentError("λ must be in (0, 1]; got $λ"))
     fc_psi = ustrip(u"psi", fc)
-    return 7.5 * sqrt(fc_psi) * u"psi"
+    return 7.5 * λ * sqrt(fc_psi) * u"psi"
 end
 
-"""Modulus of rupture from a `Concrete` material's f'c."""
-fr(mat::Concrete)                    = fr(mat.fc′)
+"""Modulus of rupture from a `Concrete` material's f'c and λ."""
+fr(mat::Concrete)                    = fr(mat.fc′; λ = mat.λ)
 """Modulus of rupture from a `ReinforcedConcreteMaterial`'s concrete component."""
 fr(mat::ReinforcedConcreteMaterial)  = fr(mat.concrete)
 

@@ -35,12 +35,28 @@ struct InteractiveStoryShearCheck
     passed::Bool
 end
 
-"""One frame member under the 25% story shear. `kind` is `:column` or `:beam`."""
+"""
+One frame member under the 25% story shear. `kind` is `:column` or `:beam`.
+
+`governing_check` and `governing_ratio` come from `explain_feasibility` on the
+worst row. `governing_ratio` is `NaN` when the member was not checked (no
+section, or no frame element). `case_label` is the load row that governed.
+"""
 struct FrameMemberCheck
     kind::Symbol
     index::Int
     passed::Bool
     detail::String
+    governing_check::String
+    governing_ratio::Float64
+    case_label::String
+    function FrameMemberCheck(kind::Symbol, index::Integer, passed::Bool, detail::AbstractString,
+                              governing_check::AbstractString = "",
+                              governing_ratio::Real = passed ? 0.0 : NaN,
+                              case_label::AbstractString = "")
+        return new(kind, Int(index), passed, String(detail), String(governing_check),
+                   Float64(governing_ratio), String(case_label))
+    end
 end
 
 """
@@ -54,6 +70,9 @@ ASCE 7-22 §11.2, bearing wall and building frame system (corpus: asce-7-22,
 PDF page 101). The share is reported for every row. Only row B.6 is limited.
 """
 function _wall_dead_load_shares(struc, basic, elf)
+    if any(lv -> lv.master === nothing, elf.levels)
+        return _wall_dead_load_shares_first_order(struc, basic, elf)
+    end
     model = struc.asap_model
     masters = [(lv.elevation_m, lv.master) for lv in elf.levels]
     base = first(elf.levels).elevation_m - first(elf.levels).story_height_m
@@ -80,13 +99,48 @@ function _wall_dead_load_shares(struc, basic, elf)
 end
 
 """
-Refuse row B.6 when a story's walls carry more than the project share.
+Same wall share, from the story cut, when the diaphragm has no rigid master.
 
-Row A.3 and row F are not limited here. The measured shares are still returned
-to the caller.
+The total is the vertical force through that cut. There is no story
+geometric stiffness in the displacement.
+"""
+function _wall_dead_load_shares_first_order(struc, basic, elf)
+    qmap = _fixed_end_by_element(basic.loads[1])
+    base = first(elf.levels).elevation_m - first(elf.levels).story_height_m
+    shares = WallGravityShare[]
+    for (i, lv) in enumerate(elf.levels)
+        zbot = i == 1 ? base : elf.levels[i - 1].elevation_m
+        contrib = _story_cut_contributions(struc.asap_model, basic.u[1],
+                                           struc.wall_mesh, zbot; qmap=qmap)
+        isempty(contrib) && throw(ArgumentError(
+            "ordinary wall stage: no wall or frame member crosses z = $(zbot) m."))
+        total = sum(c -> -c.fz, contrib)
+        wall = 0.0
+        for pier in struc.wall_mesh.piers
+            abs(_pier_bottom(pier) - zbot) <= WALL_CUT_ZTOL_M || continue
+            for c in _cut_contributions(pier.shells, basic.u[1], zbot; qmap=qmap)
+                wall += -c.fz
+            end
+        end
+        total > 1.0 || throw(ArgumentError(
+            "ordinary wall stage: story $(lv.story) has no unfactored dead " *
+            "vertical force, so the wall share is undefined."))
+        push!(shares, WallGravityShare(lv.story, wall, total, wall / total))
+    end
+    return shares
+end
+
+"""
+Refuse a building-frame shear-wall row when a story's walls carry more than
+the project share.
+
+`:B6` points at the ordinary bearing-wall row `:A3`. `:B4` points at the
+special bearing-wall row `:A1`. Bearing-wall rows and row F are not limited
+here. The measured shares are still returned to the caller.
 """
 function _refuse_building_frame_gravity!(row::Symbol, shares)
-    row === :B6 || return shares
+    bearing = row === :B6 ? :A3 : row === :B4 ? :A1 : nothing
+    bearing === nothing && return shares
     for s in shares
         s.share <= _BUILDING_FRAME_WALL_GRAVITY_SHARE + 1e-9 && continue
         pct = round(100 * s.share; digits=1)
@@ -96,7 +150,7 @@ function _refuse_building_frame_gravity!(row::Symbol, shares)
             "$(round(Int, 100 * _BUILDING_FRAME_WALL_GRAVITY_SHARE))%, chosen for " *
             "the 'relatively small percentage' in commentary C12.2.1 (corpus: " *
             "asce-7-22, PDF page 708). That percentage is not given a number in " *
-            "ASCE 7-22. Use Table 12.2-1 row :A3 when the walls carry more."))
+            "ASCE 7-22. Use Table 12.2-1 row :$bearing when the walls carry more."))
     end
     return shares
 end
@@ -201,6 +255,9 @@ function _enforce_interactive_wall_shear!(struc, elf, material, grown_by_wall, �
     by_level = Dict{Int, Vector{Int}}()
     for pier in struc.wall_mesh.piers
         wall = struc.walls[pier.wall_index]
+        # A pierced wall is not in the gross-pier action list. Its shear is
+        # the segment check.
+        isempty(wall.openings) || continue
         push!(get!(by_level, _elf_level_index(struc, elf, wall), Int[]), pier.wall_index)
     end
     checks = InteractiveStoryShearCheck[]
@@ -305,16 +362,13 @@ function _missing_frame_sections(struc)
     return out
 end
 
+"""
+Frame-member failures are stored on each column and beam result
+(`seismic_frame`), not as a wall record. A thicker wall does not fix them.
+The call remains so the stage has one place that used to file the placeholder.
+"""
 function _record_frame_members!(checks, struc, members::Vector{FrameMemberCheck},
                                 plan_axis::NTuple{2, Float64}=(1.0, 0.0))
-    isempty(members) && return checks
-    any(!c.passed, members) || return checks
-    idx = first(eachindex(struc.walls))
-    wall = struc.walls[idx]
-    push!(checks[idx], WallCheckRecord(
-        idx, wall.story, _pier_axis_direction(wall, plan_axis), :frame_quarter,
-        :strength_1_2D_1_0E, :only, "interactive frame strength", false, 1.0,
-        0.0, 0.0, "ASCE 7-22 12.2.5.8"))
     return checks
 end
 
@@ -347,12 +401,12 @@ Seismic effects scaled to 25% of the story forces, accidental torsion included.
 Only effects whose 100% axis is in `directions` are kept. Each entry is
 `(direction, torsion, label, loads)`.
 """
-function _quarter_story_cases(elf, directions::AbstractVector{Symbol},
+function _quarter_story_cases(struc, elf, directions::AbstractVector{Symbol},
                               effects::AbstractVector{SeismicEffectCase})
     out = Tuple{Symbol, Symbol, Symbol, Vector{Asap.AbstractLoad}}[]
     for effect in effects
         effect.direction in directions || continue
-        full = seismic_effect_loads(elf, effect)
+        full = seismic_effect_loads(struc, elf, effect)
         # ASCE 7-22 §12.2.5.8 (corpus: asce-7-22, PDF page 179): the frames
         # shall be capable of resisting at least 25% of the design story shear.
         push!(out, (effect.direction, effect.torsion, effect.label,
@@ -403,8 +457,8 @@ function _check_frame_only_stability!(struc, elf, second, inputs, seismic_system
     _refuse_flat_plate(struc)
     model = struc.asap_model
     links = struc.asap_rigid_links
-    cases = _quarter_story_cases(elf, directions, effects)
-    stability = _quarter_story_cases(elf, directions,
+    cases = _quarter_story_cases(struc, elf, directions, effects)
+    stability = _quarter_story_cases(struc, elf, directions,
         [e for e in seismic_effect_cases(elf; orthogonal=false) if e.torsion === :none])
     loads = vcat([c[4] for c in cases], [c[4] for c in stability])
     θmax = stability_coefficient_limit(inputs.β, seismic_system.Cd; Ω0=seismic_system.Ω0)
@@ -515,22 +569,19 @@ elastic second-order analysis. The moment magnifier of §6.6 is the other method
 
 Returns one result per member. An empty section list is the caller's problem:
 this function is only called when every section is a reinforced-concrete one.
+
+A member group that fails gets a section floor in `struc.frame_section_floors`
+when `member_opts` can resize it (see [`_raise_frame_floors!`](@ref)).
+Each kind is checked with the concrete and rebar it was sized with (see
+[`_frame_checkers`](@ref)).
 """
 function _check_frame_member_strength(struc, basic, elf, second, inputs, directions,
-                                      effects::AbstractVector{SeismicEffectCase})
-    material = inputs.material
-    material isa ReinforcedConcreteMaterial || throw(ArgumentError(
-        "interactive system: the frame check needs a ReinforcedConcreteMaterial."))
-    fy = ustrip(u"ksi", material.rebar.Fy)
-    fyt = ustrip(u"ksi", material.transverse.Fy)
-    Es = ustrip(u"ksi", material.rebar.E)
-    λ = material.concrete.λ
-    col_checker = ACIColumnChecker(; include_slenderness=false, include_biaxial=true,
-                                   fy_ksi=fy, Es_ksi=Es)
-    beam_checker = ACIBeamChecker(; fy_ksi=fy, fyt_ksi=fyt, Es_ksi=Es, λ=λ)
-    col_cache = Dict{UInt, ACIColumnCapacityCache}()
-    beam_cache = Dict{UInt, ACIBeamCapacityCache}()
-    cases = _quarter_story_cases(elf, directions, effects)
+                                      effects::AbstractVector{SeismicEffectCase};
+                                      member_opts = (columns = nothing, beams = nothing),
+                                      beam_opts_by_group = Dict{UInt64, Any}(),
+                                      uniform_columns::Symbol = :off)
+    frame = _frame_checkers(inputs.material, member_opts; beam_opts_by_group)
+    cases = _quarter_story_cases(struc, elf, directions, effects)
     loads = [c[4] for c in cases]
     solved = Dict{GravityStiffnessKey, Vector{Vector{Float64}}}()
     for key in _earthquake_gravity_keys(inputs.roof)
@@ -538,25 +589,88 @@ function _check_frame_member_strength(struc, basic, elf, second, inputs, directi
                                  geometric_stiffness=second[key].Kg, exclude_shells=true)
     end
     out = FrameMemberCheck[]
+    rows = Dict{Tuple{Symbol, Int}, Vector{Tuple{String, Any}}}()
     rho = Float64(inputs.rho)
     for (kind, members) in ((:column, struc.columns), (:beam, struc.beams))
         for (i, member) in enumerate(members)
             els = _member_frame_elements(struc, member)
             isempty(els) && (push!(out, FrameMemberCheck(kind, i, false, "no frame element")); continue)
-            ok, detail = _member_resists(kind, i, member, els, struc, basic, second, solved,
-                                         cases, inputs, material, col_checker, beam_checker,
-                                         col_cache, beam_cache, rho)
-            push!(out, FrameMemberCheck(kind, i, ok, detail))
+            member_rows = _member_demand_rows(kind, i, els, basic, second, solved, cases,
+                                              inputs, rho)
+            rows[(kind, i)] = member_rows
+            rep = _member_frame_report(kind, member, member.base.section, member_rows, frame)
+            push!(out, FrameMemberCheck(kind, i, rep.passed, rep.detail, rep.governing_check,
+                                        rep.governing_ratio, rep.case_label))
         end
     end
-    return out
+    return _raise_frame_floors!(out, struc, rows, member_opts, frame;
+                                beam_opts_by_group, uniform_columns)
 end
 
-function _cached_column_capacity!(cache_of, checker, section, material)
+"""
+    _frame_checkers(wall_material, member_opts) -> NamedTuple
+
+Checker, concrete, and capacity cache for each frame member kind:
+`(column = (checker, concrete, cache), beam = (checker, concrete, cache))`.
+
+A column is checked with the concrete and rebar of `member_opts.columns`, and a
+beam with those of `member_opts.beams` (longitudinal and transverse), when
+those are the concrete options the members were sized with. Otherwise the
+kind falls back to `wall_material`, the `ReinforcedConcreteMaterial` of the
+wall inputs. The column checker never magnifies moments: the row F forces
+already include story P-delta.
+"""
+function _column_checker_bundle(wall_material, col_opts)
+    col_concrete, col_rebar = col_opts isa StructuralSizer.ConcreteColumnOptions ?
+        (col_opts.material, col_opts.rebar_material) :
+        (wall_material.concrete, wall_material.rebar)
+    checker = ACIColumnChecker(; include_slenderness=false, include_biaxial=true,
+                               fy_ksi=ustrip(u"ksi", col_rebar.Fy),
+                               Es_ksi=ustrip(u"ksi", col_rebar.E))
+    return (checker = checker, concrete = col_concrete,
+            cache = Dict{UInt, ACIColumnCapacityCache}())
+end
+
+"""Checker, concrete, and capacity cache for one beam options object."""
+function _beam_checker_bundle(wall_material, beam_opts)
+    concrete, rebar, stirrup = beam_opts isa StructuralSizer.ConcreteBeamOptions ?
+        (beam_opts.material, beam_opts.rebar_material,
+         StructuralSizer.get_transverse_rebar(beam_opts)) :
+        (wall_material.concrete, wall_material.rebar, wall_material.transverse)
+    checker = ACIBeamChecker(; fy_ksi=ustrip(u"ksi", rebar.Fy),
+                             fyt_ksi=ustrip(u"ksi", stirrup.Fy),
+                             Es_ksi=ustrip(u"ksi", rebar.E),
+                             λ=concrete.λ)
+    return (checker = checker, concrete = concrete,
+            cache = Dict{UInt, ACIBeamCapacityCache}())
+end
+
+function _frame_checkers(wall_material, member_opts; beam_opts_by_group = Dict{UInt64, Any}())
+    wall_material isa ReinforcedConcreteMaterial || throw(ArgumentError(
+        "interactive system: the frame check needs a ReinforcedConcreteMaterial."))
+    column = _column_checker_bundle(wall_material, member_opts.columns)
+    beam = _beam_checker_bundle(wall_material, member_opts.beams)
+    bundles = Dict{UInt, Any}(objectid(member_opts.beams) => beam)
+    beam_for = function (member)
+        gid = group_id(member)
+        opts = gid === nothing ? member_opts.beams : get(beam_opts_by_group, gid, member_opts.beams)
+        return get!(bundles, objectid(opts)) do
+            _beam_checker_bundle(wall_material, opts)
+        end
+    end
+    return (column = column, beam = beam, beam_for = beam_for)
+end
+
+"""The beam checker for `member`, or the building-wide one when `frame` has no lookup."""
+function _beam_bundle(frame, member)
+    return hasproperty(frame, :beam_for) ? frame.beam_for(member) : frame.beam
+end
+
+function _cached_column_capacity!(cache_of, checker, section, concrete)
     id = objectid(section)
     haskey(cache_of, id) && return cache_of[id]
     cache = ACIColumnCapacityCache(1)
-    precompute_capacities!(checker, cache, [section], material, MinVolume())
+    precompute_capacities!(checker, cache, [section], concrete, MinVolume())
     cache_of[id] = cache
     return cache
 end
@@ -570,45 +684,250 @@ function _cached_beam_capacity!(cache_of, checker, section, concrete)
     return cache
 end
 
-"""True when every earthquake combination and every 25% case passes."""
-function _member_resists(kind, index, member, els, struc, basic, second, solved, cases,
-                         inputs, material, col_checker, beam_checker, col_cache, beam_cache, rho)
-    geometry = StructuralSizer.ConcreteMemberGeometry(member.base.L; Lu=member.base.Lb,
-                                      kx=member.base.Kx, ky=member.base.Ky, braced=false)
-    section = member.base.section
+"""Loads in `loads` that act on frame element `el`.
+
+Shell area loads have no frame element. A tributary or line load on another
+member is not this element's station diagram; its effect is already in the
+solved end forces.
+"""
+function _loads_on_element(loads, el)
+    id = el.elementID
+    return [ld for ld in loads if hasproperty(ld, :element) && ld.element.elementID == id]
+end
+
+"""
+`(label, demand)` for every earthquake combination, every 25% case, and every
+frame element of one member. A column demand is an `RCColumnDemand`, a beam
+demand an `RCBeamDemand`, both in kip and kip·ft as the member sizers build
+them. Mixed force and moment quantities do not promote to one demand type.
+Station diagrams use only the loads on that element.
+"""
+function _member_demand_rows(kind, index, els, basic, second, solved, cases, inputs, rho)
+    kip(F_N) = ustrip(uconvert(Asap.kip, F_N * u"N"))
+    kipft(M_Nm) = ustrip(uconvert(Asap.kip * u"ft", M_Nm * u"N*m"))
+    rows = Tuple{String, Any}[]
+    dead = [_loads_on_element(basic.loads[1], el) for el in els]
+    live = [_loads_on_element(basic.loads[2], el) for el in els]
+    roof = [_loads_on_element(basic.loads[3], el) for el in els]
     for combo in asce7_strength_combinations
         (combo.E != 0.0 || combo.Ev != 0.0) || continue
         key = _gravity_key(combo, inputs.roof)
         set = second[key]
         lateral = solved[key]
         for (k, (_, _, label, _)) in enumerate(cases)
-            for el in els
-                D = _element_forces_from_u(el, set.u[1], basic.loads[1])
-                L = _element_forces_from_u(el, set.u[2], basic.loads[2])
-                C = _element_forces_from_u(el, set.u[3], basic.loads[3])
+            for (j, el) in enumerate(els)
+                D = _element_forces_from_u(el, set.u[1], dead[j])
+                L = _element_forces_from_u(el, set.u[2], live[j])
+                C = _element_forces_from_u(el, set.u[3], roof[j])
                 eh = _element_forces_from_u(el, lateral[k], Asap.AbstractLoad[])
                 stations = _combine_member_stations(combo, inputs.roof, D, L, C, eh,
                                                     inputs.SDS, rho)
-                passed = if kind === :column
+                demand = if kind === :column
                     Pu, Mux, Muy = _column_demand_values(stations)
-                    demand = RCColumnDemand(index; Pu=Pu * u"N", Mux=Mux * u"N*m",
-                                            Muy=Muy * u"N*m")
-                    cache = _cached_column_capacity!(col_cache, col_checker, section, material)
-                    is_feasible(col_checker, cache, 1, section, material.concrete, demand, geometry)
+                    RCColumnDemand(index; Pu=kip(Pu), Mux=kipft(Mux), Muy=kipft(Muy))
                 else
                     sag, hog, Vu, Nu = _beam_demand_values(el, stations)
-                    demand = RCBeamDemand(index; Mu=sag * u"N*m", Mu_neg=hog * u"N*m",
-                                          Vu=Vu * u"N", Nu=Nu * u"N")
-                    cache = _cached_beam_capacity!(beam_cache, beam_checker, section,
-                                                   material.concrete)
-                    is_feasible(beam_checker, cache, 1, section, material.concrete, demand, geometry)
+                    RCBeamDemand(index; Mu=kipft(sag), Mu_neg=kipft(hog),
+                                 Vu=kip(Vu), Nu=kip(Nu))
                 end
-                passed && continue
-                return false, "$(combo.name) $label does not pass"
+                push!(rows, ("$(combo.name) $label", demand))
             end
         end
     end
+    return rows
+end
+
+"""Geometry the row F check uses. Story P-delta is already in the forces."""
+function _member_frame_geometry(member)
+    return StructuralSizer.ConcreteMemberGeometry(member.base.L; Lu=member.base.Lb,
+                                                  kx=member.base.Kx, ky=member.base.Ky,
+                                                  braced=false)
+end
+
+"""Checker bundle and its capacity cache for one section."""
+function _member_frame_bundle(kind, member, section, frame)
+    k = kind === :column ? frame.column : _beam_bundle(frame, member)
+    cache = kind === :column ?
+        _cached_column_capacity!(k.cache, k.checker, section, k.concrete) :
+        _cached_beam_capacity!(k.cache, k.checker, section, k.concrete)
+    return k, cache
+end
+
+"""`(passed, detail)`: whether `section` passes every row of one member. `frame` is [`_frame_checkers`](@ref)."""
+function _member_resists(kind, member, section, rows, frame)
+    geometry = _member_frame_geometry(member)
+    k, cache = _member_frame_bundle(kind, member, section, frame)
+    for (label, demand) in rows
+        is_feasible(k.checker, cache, 1, section, k.concrete, demand, geometry) ||
+            return false, "$label does not pass"
+    end
     return true, ""
+end
+
+"""
+Pass/fail and the governing check of the installed section, from
+`explain_feasibility` on every row. The catalog walk stays on
+[`_member_resists`](@ref). A failing row outranks a passing one; otherwise the
+higher ratio governs.
+"""
+function _member_frame_report(kind, member, section, rows, frame)
+    isempty(rows) && return (passed = true, detail = "", governing_check = "",
+                             governing_ratio = 0.0, case_label = "")
+    geometry = _member_frame_geometry(member)
+    k, cache = _member_frame_bundle(kind, member, section, frame)
+    worst = nothing
+    worst_label = ""
+    for (label, demand) in rows
+        expl = explain_feasibility(k.checker, cache, 1, section, k.concrete, demand, geometry)
+        if worst === nothing ||
+           (!expl.passed, expl.governing_ratio) > (!worst.passed, worst.governing_ratio)
+            worst = expl
+            worst_label = label
+        end
+    end
+    detail = worst.passed ? "" : "$worst_label does not pass"
+    return (passed = worst.passed, detail = detail, governing_check = worst.governing_check,
+            governing_ratio = worst.governing_ratio, case_label = worst_label)
+end
+
+"""
+Sizing catalog and objective of `opts` when it can keep a row F section floor,
+else a reason string. Mirrors the concrete discrete sizing paths.
+"""
+function _frame_floor_catalog(kind::Symbol, opts)
+    expected = kind === :column ? StructuralSizer.ConcreteColumnOptions :
+                                  StructuralSizer.ConcreteBeamOptions
+    opts isa expected ||
+        return "the $(kind) options are not $(nameof(expected)), so it is not resized"
+    opts.sizing_strategy === :discrete ||
+        return "the $(kind) options are not :discrete, so it is not resized"
+    (opts.materials === nothing && opts.n_max_sections == 0) ||
+        return "the $(kind) options use several materials or n_max_sections, so it is not resized"
+    if kind === :beam && opts.include_flange
+        return "T-beam sizing cannot keep a section floor, so it is not resized"
+    end
+    cat = if opts.custom_catalog !== nothing
+        opts.custom_catalog
+    elseif kind === :column
+        StructuralSizer.rc_column_catalog(opts.section_shape, opts.catalog)
+    else
+        StructuralSizer.rc_beam_catalog(opts.catalog)
+    end
+    obj = s -> StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
+    return (catalog = cat, objective = obj)
+end
+
+"""
+Give each failing member group the lightest catalog section, no lighter than
+its current one, that passes the row F rows of every member in the group. The
+section goes in `struc.frame_section_floors`, and concrete discrete sizing
+keeps it or a heavier one from then on. Sections only move up, so repeated
+rounds end.
+
+The walk uses the checker of the row F check itself. The member sizer checks
+the gravity combinations, with slenderness, on whatever it chooses. A group
+with no passing section keeps its section and stays failing.
+
+A beam group is walked in its own catalog (`beam_opts_by_group`, from the
+framing level that sizes it). With `uniform_columns` of `:per_story` or
+`:building`, a failing column floors every sizing group in that uniformity
+group, and the section has to pass every column in it. The walk starts at the
+heaviest current section in the cohort, so a floor is never lighter than a
+column uniform sizing would keep.
+
+Returns `checks` with the detail of each failing member updated.
+"""
+function _raise_frame_floors!(checks, struc, rows, member_opts, frame;
+                              beam_opts_by_group = Dict{UInt64, Any}(),
+                              uniform_columns::Symbol = :off)
+    members_of = Dict(:column => struc.columns, :beam => struc.beams)
+    note = Dict{Tuple{Symbol, Int}, String}()
+    # (kind, indices that must pass, group ids that receive the floor, indices to annotate)
+    work = Tuple{Symbol, Vector{Int}, Vector{UInt64}, Vector{Int}}[]
+    handled = Set{Tuple{Symbol, Int}}()
+    if uniform_columns !== :off
+        cohorts = Dict{Int, Vector{Int}}()
+        for (i, col) in enumerate(struc.columns)
+            key = uniform_columns === :building ? 0 : col.story
+            push!(get!(Vector{Int}, cohorts, key), i)
+        end
+        for idxs in values(cohorts)
+            failing = [i for i in idxs
+                       if any(c -> c.kind === :column && c.index == i && !c.passed &&
+                              haskey(rows, (:column, i)), checks)]
+            isempty(failing) && continue
+            cohort = [i for i in idxs if haskey(rows, (:column, i))]
+            gids = UInt64[]
+            for i in cohort
+                gid = group_id(struc.columns[i])
+                gid === nothing && continue
+                gid in gids || push!(gids, gid)
+            end
+            if isempty(gids)
+                for i in failing
+                    note[(:column, i)] = "the member has no sizing group, so it is not resized"
+                    push!(handled, (:column, i))
+                end
+                continue
+            end
+            push!(work, (:column, cohort, gids, failing))
+            foreach(i -> push!(handled, (:column, i)), failing)
+        end
+    end
+    pending = Dict{Tuple{Symbol, UInt64}, Vector{Int}}()
+    for c in checks
+        c.passed && continue
+        (:column, c.index) in handled && continue
+        haskey(rows, (c.kind, c.index)) || continue
+        gid = group_id(members_of[c.kind][c.index])
+        if gid === nothing
+            note[(c.kind, c.index)] = "the member has no sizing group, so it is not resized"
+            continue
+        end
+        push!(get!(pending, (c.kind, gid), Int[]), c.index)
+    end
+    for ((kind, gid), idxs) in pending
+        group = [i for (i, m) in enumerate(members_of[kind])
+                 if group_id(m) == gid && haskey(rows, (kind, i))]
+        push!(work, (kind, group, UInt64[gid], idxs))
+    end
+    for (kind, cohort, gids, failing) in work
+        opts = kind === :column ? member_opts.columns :
+               get(beam_opts_by_group, first(gids), member_opts.beams)
+        source = _frame_floor_catalog(kind, opts)
+        if source isa String
+            foreach(i -> note[(kind, i)] = source, failing)
+            continue
+        end
+        currents = [members_of[kind][i].base.section for i in cohort]
+        o_now = maximum(source.objective(s) for s in currents)
+        order = sort([j for j in eachindex(source.catalog)
+                      if source.objective(source.catalog[j]) >= o_now * (1 - 1e-9)];
+                     by = j -> (source.objective(source.catalog[j]), j))
+        chosen = nothing
+        for j in order
+            s = source.catalog[j]
+            all(i -> first(_member_resists(kind, members_of[kind][i], s, rows[(kind, i)],
+                                           frame)), cohort) || continue
+            chosen = s
+            break
+        end
+        msg = if chosen === nothing
+            "no catalog section at or above the current one passes, so it is not resized"
+        else
+            for gid in gids
+                struc.frame_section_floors[gid] = chosen
+            end
+            "a heavier section that passes is set as the group's floor for member sizing"
+        end
+        foreach(i -> note[(kind, i)] = msg, failing)
+    end
+    return [haskey(note, (c.kind, c.index)) ?
+                FrameMemberCheck(c.kind, c.index, c.passed,
+                                 "$(c.detail); $(note[(c.kind, c.index)])",
+                                 c.governing_check, c.governing_ratio, c.case_label) :
+                c
+            for c in checks]
 end
 
 """
@@ -618,14 +937,19 @@ A flat plate is refused. Members without a reinforced-concrete section are
 recorded as failing and the frame is not solved, because there is nothing to
 check. When every section is sized, the frame-only model is solved and each
 beam and column is checked. θ above θmax throws: §12.8.7 says the structure
-shall be redesigned.
+shall be redesigned. A failing group may get a section floor from
+`member_opts` (`columns` and `beams`, the design's member options).
 """
 function _check_interactive_frames!(struc, basic, elf, second, inputs, seismic_system, directions,
-                                    effects::AbstractVector{SeismicEffectCase})
+                                    effects::AbstractVector{SeismicEffectCase};
+                                    member_opts = (columns = nothing, beams = nothing),
+                                    beam_opts_by_group = Dict{UInt64, Any}(),
+                                    uniform_columns::Symbol = :off)
     missing = _missing_frame_sections(struc)
     # The frame-only solve runs either way. A missing section means the
     # strength check has nothing to use; the story shear and θ are still real.
     _check_frame_only_stability!(struc, elf, second, inputs, seismic_system, directions, effects)
     isempty(missing) || return missing
-    return _check_frame_member_strength(struc, basic, elf, second, inputs, directions, effects)
+    return _check_frame_member_strength(struc, basic, elf, second, inputs, directions, effects;
+                                        member_opts, beam_opts_by_group, uniform_columns)
 end

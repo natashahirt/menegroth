@@ -7,7 +7,9 @@
 
 include("flexure.jl")
 include("shear.jl")
+include("joist_construction.jl")
 include("serviceability.jl")
+include("shell_deflection.jl")
 
 # Torsion design (ACI 318-11 §11.5 — threshold, adequacy, reinforcement)
 include("torsion.jl")

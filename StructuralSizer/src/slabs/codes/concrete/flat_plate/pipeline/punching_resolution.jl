@@ -27,13 +27,28 @@ kept (bare for `:grow_columns`/`:reinforce_last`, bare or reinforced for
 stiffer column attracts more moment, and re-checks every column. Without
 `recheck`, the analytic estimate from `solve_column_for_punching` is used.
 
+`punch_kwargs(i)` returns the keywords column `i`'s own punching check uses
+(`punching_axis_kwargs`); shear caps and capitals check their sections with
+them. Default: none.
+
+# Flat slabs (`drop = (panel, h_total, d_total)`)
+`check_punching` checks two sections (ACI 318-11 §11.11.1.2, page 200):
+- At the drop-panel edge, in the slab depth. Column growth and reinforcement
+  around the column do not change that section, so a failure there goes
+  straight to a thicker slab.
+- At the column face, inside the drop. Studs and stirrups are designed at
+  the total depth `d_total`, and their lines stop where the section `d/2`
+  past the last line would leave the drop. Shear caps and capitals assume
+  the slab depth around the column and are not used with a drop panel.
+
 Returns `(columns_grew, updated_h)`.
 """
 function _resolve_punching_failures!(punching_local, columns, all_fails, opts, column_opts,
                                       moment_results, secondary_results,
                                       h, d, fc, h_increment;
                                       λ=1.0, φ_shear=0.75, verbose::Bool = false,
-                                      recheck = nothing)
+                                      recheck = nothing, punch_kwargs = i -> (;),
+                                      drop = nothing)
     c_max = opts.max_column_size
     _shape_con = column_opts.shape_constraint
     _max_ar = column_opts.max_aspect_ratio
@@ -46,6 +61,11 @@ function _resolve_punching_failures!(punching_local, columns, all_fails, opts, c
     for i in all_fails
         col = columns[i]
         pr = punching_local[i]
+        if drop !== nothing && hasproperty(pr, :drop_section) && !pr.drop_section.ok
+            h = round_up_thickness(h + h_increment, h_increment)
+            @warn "Column $i: punching fails at the drop-panel edge. Increasing h → $h" position=col.position ratio=pr.drop_section.ratio
+            return (true, h)
+        end
         demand = (Vu = moment_results.column_shears[i],
                   Mub = moment_results.unbalanced_moments[i],
                   Muy = isnothing(secondary_results) ? nothing :
@@ -61,9 +81,13 @@ function _resolve_punching_failures!(punching_local, columns, all_fails, opts, c
         )
         grow = (target = (c1_req, c2_req), c_max = c_max, inc = _c_inc,
                 shape = _shape_con, max_ar = _max_ar)
-        reinforce(res) = _try_reinforcement(reinforcement, res.vu, fc, res.b0, d, h, col,
-                                            opts, moment_results, demand;
-                                            λ=λ, φ=φ_shear)
+        reinforce(res) = drop === nothing ?
+            _try_reinforcement(reinforcement, res.vu, fc, res.b0, d, h, col,
+                               opts, moment_results, demand;
+                               λ=λ, φ=φ_shear, punch_kwargs=punch_kwargs(i)) :
+            _try_drop_reinforcement(reinforcement, res, fc, col, opts, moment_results,
+                                    demand, drop; λ=λ, φ=φ_shear,
+                                    punch_kwargs=punch_kwargs(i))
 
         if strategy === :reinforce_first
             # ── Try reinforcement first, grow columns only if reinforcement fails ──
@@ -81,7 +105,7 @@ function _resolve_punching_failures!(punching_local, columns, all_fails, opts, c
                 verbose && @warn "Column $i: reinforcement insufficient, grew to $(col.c1)×$(col.c2)"
             else
                 h = round_up_thickness(h + h_increment, h_increment)
-                @warn "Column $i: Reinforcement and columns at max. Increasing h → $h"
+                @warn "Column $i stays $(col.c1)×$(col.c2); reinforcement and sizes within $c_max do not pass. Increasing h → $h"
                 return (true, h)
             end
 
@@ -95,7 +119,7 @@ function _resolve_punching_failures!(punching_local, columns, all_fails, opts, c
             reinf_result = reinforce(pr)
             if reinf_result.ok
                 punching_local[i] = _merge_reinforcement_result(pr, reinf_result)
-                verbose && @info "Column $i at max size — $(reinf_result.description)"
+                verbose && @info "Column $i stays $(col.c1)×$(col.c2); $(reinf_result.description)"
             else
                 h = round_up_thickness(h + h_increment, h_increment)
                 @warn "Column $i: Max size and reinforcement insufficient. Increasing h → $h"
@@ -109,13 +133,26 @@ function _resolve_punching_failures!(punching_local, columns, all_fails, opts, c
                 verbose && @warn "Column $i punching FAILED (ratio=$(round(pr.ratio, digits=2))). Grew to $(col.c1)×$(col.c2)"
             else
                 h = round_up_thickness(h + h_increment, h_increment)
-                @warn "Column $i at max size ($c_max), punching_strategy=:grow_columns. Increasing h → $h" position=col.position ratio=pr.ratio
+                @warn "Column $i stays $(col.c1)×$(col.c2); no size within $c_max passes punching. Increasing h → $h" position=col.position ratio=pr.ratio
                 return (true, h)
             end
         end
     end
 
     return (columns_grew, h)
+end
+
+"""
+    _drop_depths(drop_panel, h, cover, bar_diameter) -> Union{Nothing, NamedTuple}
+
+`(panel, h_total, d_total)` for `_resolve_punching_failures!`, or `nothing`
+for a flat plate.
+"""
+function _drop_depths(drop_panel, h, cover, bar_diameter)
+    drop_panel === nothing && return nothing
+    h_total = total_depth_at_drop(h, drop_panel)
+    return (panel = drop_panel, h_total = h_total,
+            d_total = effective_depth(h_total; cover = cover, bar_diameter = bar_diameter))
 end
 
 """
@@ -177,19 +214,25 @@ function _grow_to_passing!(accept, col, i, grow, recheck)
 end
 
 """
-    _outer_section_demand(col, demand) -> NamedTuple
+    _outer_section_demand(col, demand; span_axis=(1.0, 0.0)) -> NamedTuple
 
 Column size and demand in the frame of `reinforcement_outer_section`, mapped the
 same way as `check_punching_for_column`:
-- `Mub` varies the d/2 stress along c1, so it is the moment about y; `Muy`
-  varies it along c2 (about x).
+- The moment spanning along c1 varies the d/2 stress along c1, so it is the
+  moment about y; the one spanning along c2 is about x. `Mub` spans along
+  `span_axis`, `_span_along_c1` places it.
 - Edge columns are oriented by `_orient_edge_column` (c1 perpendicular to the
-  free edge) and take the governing edge moment about the axis parallel to it
-  (ACI 318-11 R11.11.7.2, pages 209–211).
+  free edge). The moment about the axis parallel to the edge is `M_about_y`
+  and the other is `M_about_x`, split by `_edge_moment_pairs` as in the
+  column-face check (ACI 318-11 R11.11.7.2, pages 209–211). When the edge
+  direction does not decide the split, both take the larger moment, which
+  bounds either assignment.
 - Circular edge/corner columns use the equivalent square; circular interior
   columns use the equivalent square for the polygonal outer section.
+
+`span_axis` is the plan direction of `Mub`.
 """
-function _outer_section_demand(col, demand)
+function _outer_section_demand(col, demand; span_axis = (1.0, 0.0))
     c1, c2 = col.c1, col.c2
     if col_shape(col) == :circular
         c1 = c2 = equivalent_square_column(col.c1)
@@ -199,10 +242,18 @@ function _outer_section_demand(col, demand)
     if col.position === :edge
         ori = _orient_edge_column(c1, c2, Mub, Muy;
                                   free_edge_parallel = _infer_free_edge_parallel(col))
+        pairs = _edge_moment_pairs(col, Mub, Muy, span_axis)
+        M_par, M_oth = if length(pairs) == 1
+            abs(pairs[1].M_par), abs(pairs[1].M_oth)
+        else
+            M = max(abs(Mub), abs(Muy))
+            M, M
+        end
         return (c1 = ori.c1, c2 = ori.c2, Vu = demand.Vu,
-                M_about_x = zero(Mub), M_about_y = ori.M_edge)
+                M_about_x = M_oth, M_about_y = M_par)
     end
-    return (c1 = c1, c2 = c2, Vu = demand.Vu, M_about_x = Muy, M_about_y = Mub)
+    M_c1, M_c2 = _span_along_c1(col, span_axis) ? (Mub, Muy) : (Muy, Mub)
+    return (c1 = c1, c2 = c2, Vu = demand.Vu, M_about_x = M_c2, M_about_y = M_c1)
 end
 
 """
@@ -219,24 +270,28 @@ _is_headed_stud_reinforcement(r::Symbol) =
 
 Dispatch to the appropriate reinforcement design function and check at the
 column's current size. `demand = (Vu, Mub, Muy)` feeds the outer critical
-section check of studs and stirrups.
+section check of studs and stirrups, and both sections of a shear cap and
+the capital's section, which also take the column's `punch_kwargs`.
 
 Returns `(ok, ratio, description, studs, stirrups, shear_cap, capital, φvc)`.
 """
 function _try_reinforcement(reinforcement::Symbol, vu, fc, b0, d, h,
                              col, opts, moment_results, demand;
-                             λ::Float64 = 1.0, φ::Float64 = 0.75)
+                             λ::Float64 = 1.0, φ::Float64 = 0.75, punch_kwargs = (;),
+                             max_extent = nothing)
     fyt = opts.stud_material.Fy
     β = punching_β(col.c1, col.c2; shape = col_shape(col) == :circular ? :circular : :rectangular)
     αs = punching_αs(col.position)
 
     if _is_headed_stud_reinforcement(reinforcement) || reinforcement === :closed_stirrups
-        outer = _outer_section_demand(col, demand)
+        outer = _outer_section_demand(col, demand;
+                                      span_axis = get(punch_kwargs, :span_axis, (1.0, 0.0)))
         # Extend the lines until the section d/2 past the last line passes
         # (studs §11.11.5.4, page 208; stirrups §11.11.7.2(b), page 210).
         # Neither clause cuts the zone off at a fraction of the span.
         geom = (c1 = outer.c1, c2 = outer.c2, qu = moment_results.qu, Vu = outer.Vu,
-                M_about_x = outer.M_about_x, M_about_y = outer.M_about_y)
+                M_about_x = outer.M_about_x, M_about_y = outer.M_about_y,
+                max_extent = max_extent)
     end
 
     if _is_headed_stud_reinforcement(reinforcement)
@@ -262,18 +317,20 @@ function _try_reinforcement(reinforcement::Symbol, vu, fc, b0, d, h,
 
     elseif reinforcement === :shear_caps
         # ── Shear caps (§13.2.6) ──
-        cap = design_shear_cap(vu, fc, d, h, col.position, col.c1, col.c2;
-                                λ=λ, φ=φ, max_projection=h)
+        cap = design_shear_cap(col, demand.Vu, demand.Mub, fc, d, h;
+                                Muy=demand.Muy, λ=λ, φ=φ, max_projection=h,
+                                punch_kwargs=punch_kwargs)
         chk = check_punching_with_shear_cap(cap)
-        desc = "Shear cap: h_cap=$(cap.h_cap), extent=$(cap.extent)"
+        desc = "Shear cap: h_cap=$(cap.h_cap), extent=$(cap.extent), governing $(cap.governing)"
         return (ok=chk.ok, ratio=chk.ratio, description=desc,
                 studs=nothing, stirrups=nothing, shear_cap=cap, capital=nothing,
                 φvc=0.0u"psi")  # capacity encoded in cap.ratio
 
     elseif reinforcement === :column_capitals
         # ── Column capitals (§13.1.2) ──
-        capital = design_column_capital(vu, fc, d, h, col.position, col.c1, col.c2;
-                                         λ=λ, φ=φ)
+        capital = design_column_capital(col, demand.Vu, demand.Mub, fc, d, h;
+                                         Muy=demand.Muy, λ=λ, φ=φ,
+                                         punch_kwargs=punch_kwargs)
         chk = check_punching_with_capital(capital)
         desc = "Column capital: h_cap=$(capital.h_cap), c_eff=$(capital.c1_eff)×$(capital.c2_eff)"
         return (ok=chk.ok, ratio=chk.ratio, description=desc,
@@ -287,6 +344,37 @@ function _try_reinforcement(reinforcement::Symbol, vu, fc, b0, d, h,
     end
 end
 
+_reinforcement_not_ok(desc) =
+    (ok=false, ratio=Inf, description=desc, studs=nothing, stirrups=nothing,
+     shear_cap=nothing, capital=nothing, φvc=0.0u"psi")
+
+"""
+    _try_drop_reinforcement(reinforcement, res, fc, col, opts, moment_results, demand, drop;
+                            λ, φ) -> NamedTuple
+
+`_try_reinforcement` for a flat-slab column, from the two-section result `res`
+of `check_punching`. The drop-edge section must already pass. Studs and
+stirrups are designed for the column-face section at `drop.d_total` and
+`drop.h_total`. The outermost line is limited so the section `d/2` beyond it
+stays inside the drop on its shorter side, `min(a1, a2) − max(c1, c2)/2` from
+the column face, where the depth is still `d_total`.
+"""
+function _try_drop_reinforcement(reinforcement::Symbol, res, fc, col, opts, moment_results,
+                                 demand, drop; λ::Float64 = 1.0, φ::Float64 = 0.75,
+                                 punch_kwargs = (;))
+    res.drop_section.ok || return _reinforcement_not_ok("Punching fails at the drop-panel edge")
+    if !(_is_headed_stud_reinforcement(reinforcement) || reinforcement === :closed_stirrups)
+        return _reinforcement_not_ok(":$reinforcement is not used with a drop panel")
+    end
+    face = res.column_section
+    reach = min(drop.panel.a_drop_1, drop.panel.a_drop_2) - max(col.c1, col.c2) / 2 -
+            drop.d_total / 2
+    reach > zero(reach) || return _reinforcement_not_ok("Drop panel too small for reinforcement")
+    return _try_reinforcement(reinforcement, face.vu, fc, face.b0, drop.d_total, drop.h_total,
+                              col, opts, moment_results, demand; λ = λ, φ = φ,
+                              punch_kwargs = punch_kwargs, max_extent = reach)
+end
+
 """
     _merge_reinforcement_result(pr, reinf_result) -> NamedTuple
 
@@ -298,5 +386,6 @@ function _merge_reinforcement_result(pr, reinf_result)
             studs=reinf_result.studs,
             stirrups=reinf_result.stirrups,
             shear_cap=reinf_result.shear_cap,
-            capital=reinf_result.capital)
+            capital=reinf_result.capital,
+            moment_transfer=get(pr, :moment_transfer, nothing))
 end

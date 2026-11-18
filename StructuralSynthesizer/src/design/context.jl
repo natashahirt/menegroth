@@ -17,6 +17,66 @@ function resolve_rc_material(params::DesignParameters, override=nothing)
 end
 
 """
+    column_concrete(params) -> Concrete
+    column_rebar(params) -> RebarSteel
+
+Concrete and rebar of the RC columns, for every strength check, takeoff,
+embodied-carbon count, and stiffness. Concrete `params.columns` options win.
+Without them, the material cascade gives the value (`resolve_column_concrete`,
+default 6 ksi; `resolve_column_rebar`, default Grade 60).
+[`check_column_materials`](@ref) rejects a cascade that names a different
+material from the options.
+"""
+column_concrete(params::DesignParameters) =
+    params.columns isa ConcreteColumnOptions ? params.columns.material :
+    resolve_column_concrete(params.materials)
+
+column_rebar(params::DesignParameters) =
+    params.columns isa ConcreteColumnOptions ? params.columns.rebar_material :
+    resolve_column_rebar(params.materials)
+
+"""
+    concrete_column_options(params) -> ConcreteColumnOptions
+
+`params.columns` when it is concrete. Otherwise the default options with the
+column concrete and rebar of the material cascade, so the columns are checked
+in the material they are taken off in.
+"""
+concrete_column_options(params::DesignParameters) =
+    params.columns isa ConcreteColumnOptions ? params.columns :
+    ConcreteColumnOptions(material = resolve_column_concrete(params.materials),
+                          rebar_material = resolve_column_rebar(params.materials))
+
+"""
+    check_column_materials(params)
+
+Throw an `ArgumentError` when concrete `params.columns` and the material
+cascade both name a column concrete or rebar and they differ. The cascade
+names one through `materials.column`, or through `materials.concrete` /
+`materials.rebar`.
+"""
+function check_column_materials(params::DesignParameters)
+    opts = params.columns
+    opts isa ConcreteColumnOptions || return nothing
+    m = params.materials
+    conc = something(isnothing(m.column) ? nothing : m.column.concrete, m.concrete, Some(nothing))
+    reb = something(isnothing(m.column) ? nothing : m.column.rebar, m.rebar, Some(nothing))
+    if conc !== nothing && opts.materials === nothing && !isequal(conc, opts.material)
+        throw(ArgumentError(
+            "Column concrete is set twice and differs: params.columns.material = " *
+            "$(StructuralSizer.material_name(opts.material)) but params.materials gives $(StructuralSizer.material_name(conc)). " *
+            "Set one, or make them the same."))
+    end
+    if reb !== nothing && !isequal(reb, opts.rebar_material)
+        throw(ArgumentError(
+            "Column rebar is set twice and differs: params.columns.rebar_material = " *
+            "$(StructuralSizer.material_name(opts.rebar_material)) but params.materials gives $(StructuralSizer.material_name(reb)). " *
+            "Set one, or make them the same."))
+    end
+    return nothing
+end
+
+"""
     resolve_floor_options(params::DesignParameters) -> AbstractFloorOptions
 
 Resolve the effective floor options from `params`.  Returns a typed
@@ -26,6 +86,7 @@ material cascade from `params.materials` into the floor options.
 function resolve_floor_options(params::DesignParameters)
     floor = something(params.floor, StructuralSizer.FlatPlateOptions())
     check_material_compatibility(params.materials, floor)
+    check_column_materials(params)
     cascaded = _apply_material_cascade(params.materials, floor)
     # ACI 318-11 §10.10.4.1 — `params.column_I_factor` is the single source of truth
     # for flat-plate COLUMN cracked stiffness. Thread it into the floor options so the
@@ -48,6 +109,12 @@ function _apply_material_cascade(mat::MaterialOptions, opts::StructuralSizer.Fla
     _has_material(mat) || return opts
     new_base = _apply_material_cascade(mat, opts.base)
     @set opts.base = new_base
+end
+
+"""Cascade user-specified materials into `TwoWayOptions`."""
+function _apply_material_cascade(mat::MaterialOptions, opts::StructuralSizer.TwoWayOptions)
+    _has_material(mat) || return opts
+    @set opts.material = resolve_slab_rc(mat)
 end
 
 """Cascade user-specified materials into `OneWayOptions`."""

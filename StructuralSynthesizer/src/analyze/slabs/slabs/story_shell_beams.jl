@@ -65,31 +65,15 @@ Story-shell demand on one beam, enveloped over [`StructuralSizer.StoryLoadCases`
 the slab mid-plane. `Vu` is the largest frame shear (N). `moment_fields` is
 one [`ShellMomentField`](@ref) per load combination; it is empty when the
 beam's field origin was not given.
-
-`simple` is true for a steel beam on simple connections at both ends. Its
-`Mu_neg` and `moment_fields` are reported only: sizing keeps the frame
-model's simple-span hogging and zero-moment points (see
-[`analyze_story_shell`](@ref)).
 """
 struct ShellBeamDemand
     Mu_pos::Float64
     Mu_neg::Float64
     Vu::Float64
     moment_fields::Vector{ShellMomentField}
-    simple::Bool
 end
 
-ShellBeamDemand(Mu_pos, Mu_neg, Vu, fields = ShellMomentField[]) =
-    ShellBeamDemand(Mu_pos, Mu_neg, Vu, fields, false)
-
-"""`d` marked as a steel beam on simple connections at both ends."""
-_as_simple(d::ShellBeamDemand) = ShellBeamDemand(d.Mu_pos, d.Mu_neg, d.Vu, d.moment_fields, true)
-
-"""Hogging that sizes the beam: zero for a simple-connection steel beam."""
-_design_Mu_neg(d::ShellBeamDemand) = d.simple ? 0.0 : d.Mu_neg
-
-"""Moment fields that place studs: none for a simple-connection steel beam."""
-_design_moment_fields(d::ShellBeamDemand) = d.simple ? ShellMomentField[] : d.moment_fields
+ShellBeamDemand(Mu_pos, Mu_neg, Vu) = ShellBeamDemand(Mu_pos, Mu_neg, Vu, ShellMomentField[])
 
 """
 One field per load combination along the ordered `pieces`. `flip` is true
@@ -203,7 +187,7 @@ function story_shell_beam_demands(model, frames, beam_index::AbstractDict{Symbol
         if origin !== nothing
             fields = _shell_moment_fields(pieces, cases, elemental_loads,
                                           _field_flip(pieces, origin))
-            d = ShellBeamDemand(d.Mu_pos, d.Mu_neg, d.Vu, fields, d.simple)
+            d = ShellBeamDemand(d.Mu_pos, d.Mu_neg, d.Vu, fields)
         end
         out[i] = d
     end

@@ -1,3 +1,23 @@
+"""Fix every skeleton node that no frame element, shell, or rigid link uses."""
+function _fix_unconnected_nodes!(nodes, frame_elements, shell_elements, rigid_links)
+    used = Set{UInt64}()
+    for el in frame_elements
+        el isa Asap.Element || continue
+        push!(used, objectid(el.nodeStart), objectid(el.nodeEnd))
+    end
+    for sh in shell_elements, nd in sh.nodes
+        push!(used, objectid(nd))
+    end
+    for link in rigid_links
+        push!(used, objectid(link.nodeA), objectid(link.nodeB))
+    end
+    for nd in nodes
+        objectid(nd) in used && continue
+        nd.dof .= false
+    end
+    return nodes
+end
+
 """
     _create_offset_nodes(skel, col_offset_by_vertex, support_set) -> Vector{Asap.Node}
 
@@ -87,6 +107,27 @@ function _free_restrained_node_rotations!(nodes, frame_elements, shell_elements)
     return nodes
 end
 
+"""
+Fix every node that no frame or shell element uses.
+
+A skeleton vertex that this model does not draw still has a node. A free
+translation there is a zero row in the stiffness.
+"""
+function _fix_unused_nodes!(nodes, frame_elements, shell_elements)
+    used = Set{UInt64}()
+    for el in frame_elements
+        push!(used, objectid(el.nodeStart), objectid(el.nodeEnd))
+    end
+    for sh in shell_elements, nd in sh.nodes
+        push!(used, objectid(nd))
+    end
+    for nd in nodes
+        objectid(nd) in used && continue
+        fill!(nd.dof, false)
+    end
+    return nodes
+end
+
 function _add_rotation_block!(blocks, node, K)
     B = get!(() -> zeros(3, 3), blocks, node)
     B .+= K
@@ -117,9 +158,26 @@ function _note_rotation_anchor!(blocks, anchor, node, other, K, r, t, o)
 end
 
 """
+    _inert_frame_edges(skel) -> Set{Int}
+
+Skeleton edges that keep a frame slot and add no stiffness or mass.
+
+`:walls` is meshed as shells. `:absent` is parked geometry: the edge stays so
+a later pass can move it into a member group, and until then it is not a
+member.
+"""
+function _inert_frame_edges(skel)
+    ids = Set{Int}()
+    for group in (:walls, :absent)
+        union!(ids, get(skel.groups_edges, group, Int[]))
+    end
+    return ids
+end
+
+"""
     _zero_wall_frame_section(E, G) -> Asap.Section
 
-Frame section for a skeleton `:walls` edge.
+Frame section for a `:walls` or `:absent` edge.
 
 The edge keeps its `model.frame_elements` slot so callers can still index that
 vector by skeleton edge. Area, `Ix`, `Iy`, `J`, and density are zero, so
@@ -206,10 +264,15 @@ Uses TributaryLoads for accurate load distribution based on tributary polygons.
   - `:shell` — Semirigid shell elements from slab geometry, at the slab's real
     modulus (Phase 9a: shells join the assembled `K` via the 4-argument
     `Asap.Model` constructor). The modulus is not a penalty value.
-  - `:flexible` — No rigid link and no diaphragm shell. Story force is split
-    by tributary area ([`distribute_flexible_diaphragm_story_force`](@ref));
-    `to_asap!` calls the existing column-tributary path and does not apply a
-    story force to the building. Missing tributary geometry throws.
+  - `:flexible` — No rigid link and no diaphragm shell. The lateral stage
+    builds the lines of seismic-system walls and their collector ties
+    ([`flexible_diaphragm_layout!`](@ref)) and splits story forces among
+    them. A strut is refused. No story force is applied to the building.
+  - `:semirigid` — Membrane triangles over every slab face, meshed after the
+    walls so each wall node on a slab edge is shared ([`_create_semirigid_floors`](@ref)).
+    They carry in-plane force only; slab gravity keeps the tributary path. The
+    modulus is the slab modulus times the first of
+    `params.semirigid_stiffness_factors`. The layout is `struc.diaphragm_layout`.
   - `nothing` — Use `params.diaphragm_mode` (default)
 - `shell_props::Union{Nothing, NamedTuple}=nothing`: Custom shell properties
   - `E`: Young's modulus (overrides `params.diaphragm_E`)
@@ -229,12 +292,12 @@ Uses TributaryLoads for accurate load distribution based on tributary polygons.
     `spans.axis` as the one-way `axis`. Falls back to `:cell_tributary` (with a
     warning) when no diaphragm shells were built.
 
-A `:walls` edge keeps `model.frame_elements[edge_idx]` aligned with skeleton edge
-`edge_idx`, with the same release and eccentricity as any other edge. Its
-section is [`_zero_wall_frame_section`](@ref) (zero area, `Ix`, `Iy`, `J`,
-and density) so the placeholder frame is not counted again once wall shells
-exist. An empty or missing `:walls` group leaves every edge on the
-placeholder section.
+A `:walls` or `:absent` edge keeps `model.frame_elements[edge_idx]` aligned
+with skeleton edge `edge_idx`, with the same release and eccentricity as any
+other edge. Its section is [`_zero_wall_frame_section`](@ref) (zero area,
+`Ix`, `Iy`, `J`, and density). A wall is meshed as shells, so the placeholder
+must not be counted again. An `:absent` edge is parked geometry, not a
+member. With neither group, every edge stays on the placeholder section.
 
 Each entry in `struc.walls` is meshed into the same model as `ShellTri3`
 elements (two columns along the wall, two triangles per quad). A wall node
@@ -282,15 +345,17 @@ function to_asap!(struc::BuildingStructure{T, A, P};
                   mesh_div::Int=WALL_MESH_DIV,
                   mesh_rows::Int=WALL_MESH_ROWS) where {T, A, P}
     
-    # Determine diaphragm mode: explicit argument overrides params
+    # Determine diaphragm mode: explicit argument overrides params.
+    # :auto classifies the floor and keeps the result only when wind and
+    # seismic agree; otherwise the floor is the semirigid membrane.
     diaphragm_mode = isnothing(diaphragms) ? params.diaphragm_mode : diaphragms
-    diaphragm_mode in (:none, :rigid, :shell, :flexible) ||
-        error("diaphragms must be :none, :rigid, :shell, or :flexible")
-    # :flexible has no diaphragm constraint. The column tributary areas are
-    # required here; a story force is not applied to the building.
-    if diaphragm_mode == :flexible
-        _require_flexible_diaphragm_tributaries!(struc)
-    end
+    diaphragm_mode == :auto && (diaphragm_mode = resolve_auto_diaphragm(struc, params))
+    diaphragm_mode in (:none, :rigid, :shell, :flexible, :semirigid) ||
+        error("diaphragms must be :none, :rigid, :shell, :flexible, :semirigid, or :auto")
+    diaphragm_mode == :semirigid && isempty(struc.slabs) && throw(ArgumentError(
+        "to_asap!: a :semirigid diaphragm meshes the slabs, and this structure has none."))
+    # :flexible has no diaphragm constraint, and a story force is not applied.
+    diaphragm_mode == :flexible && _require_flexible_diaphragm_support!(struc)
     load_routing in (:auto, :cell_tributary, :shell_area) ||
         error("load_routing must be :auto, :cell_tributary, or :shell_area")
     
@@ -317,10 +382,10 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     nodes = _create_offset_nodes(skel, col_offset_by_vertex, support_set)
 
     # 2. Frame Elements — placeholder section (replaced during sizing).
-    # A :walls edge keeps its slot (model.frame_elements[edge_idx] is still that
-    # skeleton edge) but gets a zero section so the frame does not double-count
-    # wall stiffness or mass once shells are meshed. Empty or missing :walls
-    # leaves every edge on the placeholder.
+    # A :walls or :absent edge keeps its slot (model.frame_elements[edge_idx]
+    # is still that skeleton edge) but gets a zero section. Walls are meshed
+    # as shells. An :absent edge is parked and is not a member. With neither
+    # group, every edge stays on the placeholder.
     # Use steel from materials cascade if available, else defaults
     _mat_steel = params.materials.steel
     frame_E = isnothing(_mat_steel) ? params.default_frame_E : uconvert(u"Pa", _mat_steel.E)
@@ -334,9 +399,8 @@ function to_asap!(struc::BuildingStructure{T, A, P};
         0.5e-6u"m^4",     # J
         frame_ρ
     )
-    wall_ids = get(skel.groups_edges, :walls, Int[])
-    wall_edges = isempty(wall_ids) ? nothing : Set(wall_ids)
-    wall_section = isnothing(wall_edges) ? nothing : _zero_wall_frame_section(frame_E, frame_G)
+    inert_edges = _inert_frame_edges(skel)
+    inert_section = isempty(inert_edges) ? nothing : _zero_wall_frame_section(frame_E, frame_G)
     # Per-beam end releases resolved from segment fields + (role, material) dispatch.
     # Non-beam edges (columns/struts/walls) and unmodeled edges default to
     # :fixedfixed.
@@ -349,11 +413,17 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     edge_eccentricity = _build_edge_eccentricity_map(struc, params)
     frame_elements = map(enumerate(skel.edge_indices)) do (edge_idx, (v1, v2))
         release = get(edge_release, edge_idx, :fixedfixed)
-        ecc = get(edge_eccentricity, edge_idx, (0.0, 0.0, 0.0, 0.0))
-        section = (!isnothing(wall_edges) && edge_idx in wall_edges) ? wall_section : default_section
-        return Asap.Element(nodes[v1], nodes[v2], section; release=release, eccentricity=ecc)
+        section = edge_idx in inert_edges ? inert_section : default_section
+        return Asap.Element(nodes[v1], nodes[v2], section; release=release)
     end
     _roll_columns_to_section_axes!(frame_elements, struc)
+    # The map is the physical offset (positive local y = global up). Sign
+    # slot 3 after the column roll, using the roll the element will keep.
+    for (edge_idx, el) in enumerate(frame_elements)
+        ecc = get(edge_eccentricity, edge_idx, (0.0, 0.0, 0.0, 0.0))
+        el.eccentricity = Asap.orient_up_eccentricity(
+            ecc, el.nodeStart, el.nodeEnd; roll = el.Ψ)
+    end
     
     # 3. Diaphragm construction (Phase 9).
     #  :shell    → semirigid: real slab shells contribute to K (Phase 9a).
@@ -382,12 +452,24 @@ function to_asap!(struc::BuildingStructure{T, A, P};
 
     # A stem that lands on another wall's interior is split first, so the
     # mesh shares the corner nodes. A second to_asap! does not split again.
-    split_tee_junctions!(struc.walls)
-    wall_shells, wall_nodes, shells_by_wall = _mesh_wall_shells(
+    split_tee_junctions!(struc.walls; strip_walls=struc._tributary_caches.strip_walls)
+    wall_shells, wall_nodes, shells_by_wall, cells_by_wall = _mesh_wall_shells(
         struc, params, nodes, shell_elements;
         mesh_div=mesh_div, mesh_rows=mesh_rows)
-    struc.wall_mesh = WallMesh(shells_by_wall, wall_assemblies(struc.walls))
+    struc.wall_mesh = WallMesh(shells_by_wall, wall_assemblies(struc.walls), cells_by_wall)
     _free_restrained_node_rotations!(nodes, frame_elements, vcat(shell_elements, wall_shells))
+
+    # Membrane floor after the walls, so every wall node on a slab edge is a
+    # floor node. Its triangles join the model after load routing, like the
+    # wall shells, so they never carry slab gravity pressure.
+    semirigid = nothing
+    if diaphragm_mode == :semirigid
+        pool = vcat(nodes, Asap.Node[nd for sh in wall_shells for nd in sh.nodes])
+        semirigid = _create_semirigid_floors(struc, nodes, pool;
+            factor=first(params.semirigid_stiffness_factors),
+            props=_build_shell_props(params, :shell, shell_props))
+        @debug "Created semirigid floors" n_floors=length(semirigid.floors)
+    end
 
     if diaphragm_mode == :rigid && !isempty(struc.slabs)
         # A node whose θz no element restrains keeps it fixed, and the
@@ -397,12 +479,19 @@ function to_asap!(struc::BuildingStructure{T, A, P};
         # stiffness. Supports stay fixed.
         _free_plan_rotation_for_rigid_diaphragm!(nodes)
         _free_plan_rotation_for_rigid_diaphragm!(wall_nodes)
+    end
+    # After every pass that frees a rotation. A grade wall's base, including
+    # the nodes between support vertices, is fixed in all six degrees of
+    # freedom. The rigid link then skips those nodes.
+    _fix_grade_wall_bases!(skel, wall_shells)
+    if diaphragm_mode == :rigid && !isempty(struc.slabs)
         rigid_links = _build_rigid_diaphragm_links(struc, nodes)
         _join_wall_nodes_to_rigid_diaphragm!(rigid_links, skel, wall_nodes)
         @debug "Created rigid diaphragm links" n_links=length(rigid_links)
     end
 
     struc.asap_rigid_links = rigid_links
+    struc.diaphragm_layout = semirigid
     
     # 4. Compute tributaries if not done
     isempty(struc.cell_groups) && build_cell_groups!(struc)
@@ -425,8 +514,21 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     # model here; they are not a second diaphragm and they are not a line load.
     # Their weight is a separate area load on the triangles, added below.
     append!(shell_elements, wall_shells)
+    semirigid === nothing || append!(shell_elements, semirigid_shells(semirigid))
+    # A vertex no element uses still has free translations. Fix it so it is
+    # not a mechanism. Coincident rib landings that were not drawn as an
+    # element land here.
+    _fix_unconnected_nodes!(nodes, frame_elements, shell_elements, rigid_links)
 
+    # Slab past the centerlines, loaded on the edge members whichever routing
+    # carries the rest of the slab.
+    edge_strips = slab_edge_strips_by_cell(struc)
+    per_cell = Set{Int}()
     if routing === :shell_area
+        if any(s -> _grillage_level(s) !== nothing, struc.slabs)
+            throw(ArgumentError(
+                "a grillage floor owns its panel load. Shell area routing would apply it again."))
+        end
         _create_shell_area_loads!(loads, frame_elements, struc, nodes, params)
     else
         # Joist-framed slabs route their pressure onto the interior joists +
@@ -448,24 +550,28 @@ function to_asap!(struc::BuildingStructure{T, A, P};
 
             # Already routed onto joists + girders above.
             cell_idx in handled_cells && continue
+            push!(per_cell, cell_idx)
 
             if use_patterns
                 dead, live = _create_cell_tributary_loads!(
                     loads, frame_elements, skel, struc, cell, cell_idx, params;
-                    split_dead_live=true, combo=combo)
+                    split_dead_live=true, combo=combo, edge_strips=edge_strips)
                 struc.cell_dead_loads[cell_idx] = dead
                 struc.cell_live_loads[cell_idx] = live
                 struc.cell_tributary_loads[cell_idx] = vcat(dead, live)
             else
                 combined = _create_cell_tributary_loads!(
                     loads, frame_elements, skel, struc, cell, cell_idx, params;
-                    split_dead_live=false, combo=combo)
+                    split_dead_live=false, combo=combo, edge_strips=edge_strips)
                 struc.cell_dead_loads[cell_idx] = Asap.TributaryLoad[]
                 struc.cell_live_loads[cell_idx] = Asap.TributaryLoad[]
                 struc.cell_tributary_loads[cell_idx] = combined
             end
         end
     end
+    _append_unrouted_edge_strip_loads!(loads, frame_elements, struc, edge_strips, per_cell, params;
+                                       use_patterns=use_patterns && routing !== :shell_area,
+                                       combo=combo)
     
     # 6. Add structural effects (e.g., vault thrust)
     for slab in struc.slabs
@@ -480,6 +586,10 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     # dead load in this solve already carries. Slab shells are not in this load.
     if !isempty(wall_shells)
         _append_factored_wall_self_weight!(loads, wall_shells, params; patterned=use_patterns)
+    end
+    if _has_drop_panels(struc)
+        append!(loads, drop_panel_weight_loads(struc, nodes;
+            factor=_self_weight_dead_factor(params; patterned=use_patterns)))
     end
 
     # 7. Build unified Asap.Model (Phase 9a — diaphragm shells now contribute

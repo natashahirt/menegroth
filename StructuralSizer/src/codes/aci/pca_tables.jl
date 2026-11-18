@@ -942,61 +942,72 @@ end
 
 
 """
-    pca_np_fem_coefficients(c1, l1, c2, l2, h_drop, h_slab, a_drop) -> (m_uniform, m_near, m_far)
+Near-end fixed-end-moment influence of a prismatic beam, integrated from 0 to
+`x` (fractions of the span): ∫ ξ(1 − ξ)² dξ.
+"""
+_prismatic_fem_influence(x::Float64) = x^2 / 2 - 2x^3 / 3 + x^4 / 4
 
-Compute the three FEM coefficients needed for a non-prismatic slab-beam
-with drop panels:
+"""
+    _np_patch_coefficient(m_patch, s, t) -> Float64
 
-    FEM = m_uniform × w_slab × l₂ × l₁²
-        + m_near × w_drop × b_drop × l₁²
-        + m_far  × w_drop × b_drop × l₁²
+Near-end FEM coefficient of a uniform patch over `[s, t]` (fractions of l₁
+from the near end). The tables tabulate tiles of width 0.2 starting at
+`a = 0, 0.2, …, 0.8`. A tile partly covered by the patch takes the covered
+share of its coefficient, weighted by the prismatic influence shape
+[`_prismatic_fem_influence`](@ref) inside that tile.
 
-The near-end patch starts at a = 0 with width (b−a) = 2×a_drop/l₁.
-The far-end patch starts at a = 1 − 2×a_drop/l₁.
+ENGINEERING JUDGMENT: the tables give no rule for a patch narrower than a
+tile. The prismatic influence shape inside one tile is the interpolant.
+"""
+function _np_patch_coefficient(m_patch, s::Float64, t::Float64)
+    s = clamp(s, 0.0, 1.0)
+    t = clamp(t, 0.0, 1.0)
+    t > s || return 0.0
+    m = 0.0
+    for (k, a) in enumerate(_TABLE_NP_A_VALS)
+        b = a + 0.2
+        lo = max(a, s)
+        hi = min(b, t)
+        hi > lo || continue
+        full = _prismatic_fem_influence(b) - _prismatic_fem_influence(a)
+        part = _prismatic_fem_influence(hi) - _prismatic_fem_influence(lo)
+        m += m_patch[k] * part / full
+    end
+    return m
+end
 
-Since PCA tables give m_NF for (b−a) = 0.2, we interpolate in `a`
-for the actual patch position and scale by the actual (b−a) ratio
-relative to 0.2.
+"""
+    pca_np_fem_coefficients(c1, l1, c2, l2, h_drop, h_slab, a_drop; a_far=a_drop)
+        -> (m_uniform, m_near, m_far)
+
+FEM coefficients of a non-prismatic slab-beam with drop panels, at the near
+end of the span:
+
+    FEM_near = m_uniform × w_slab × l₂ × l₁²
+             + m_near × w_drop × b_drop × l₁²
+             + m_far  × w_drop × b_drop × l₁²
+
+`b_drop` is the drop width across the span. The near patch runs from the
+near column centre to the drop edge, `[0, a_drop/l₁]`. The far patch runs
+from the far drop edge to the far column centre, `[1 − a_far/l₁, 1]`. The
+FEM at the far end swaps `a_drop` and `a_far`.
 
 # Arguments
 - `c1`, `l1`, `c2`, `l2`: column and span dimensions
 - `h_drop`: drop panel projection
 - `h_slab`: slab thickness
-- `a_drop`: drop panel half-extent from column center (Length)
-
-# Returns
-Named tuple `(m_uniform, m_near, m_far)`.
+- `a_drop`: drop extent along the span from the near column centre (Length)
+- `a_far`: drop extent along the span from the far column centre
 
 # Reference
-PCA Notes on ACI 318-11, Tables A2–A5.
+PCA Notes on ACI 318-11, Tables A2–A5 (m_NF for patch loads of width 0.2 l₁).
 """
-function pca_np_fem_coefficients(c1, l1, c2, l2, h_drop, h_slab, a_drop)
+function pca_np_fem_coefficients(c1, l1, c2, l2, h_drop, h_slab, a_drop; a_far = a_drop)
     sf = pca_slab_beam_factors_np(c1, l1, c2, l2, h_drop, h_slab)
-
-    # Drop panel extent as fraction of span
-    b_a_actual = Float64(2.0 * ustrip(a_drop) / ustrip(uconvert(unit(a_drop), l1)))
-
-    # Near-end patch: starts at a = 0.0
-    # Far-end patch: starts at a = 1.0 − b_a_actual
-    a_near = 0.0
-    a_far  = 1.0 - b_a_actual
-
-    # Interpolate m_NF in the `a` dimension for each patch
-    a_vals = _TABLE_NP_A_VALS
-    m_vals = collect(sf.m_patch)
-
-    function _interp_m_at_a(a_target::Float64)
-        (ia_lo, ia_hi, ta) = _find_bracket(a_vals, a_target)
-        return (1 - ta) * m_vals[ia_lo] + ta * m_vals[ia_hi]
-    end
-
-    # The tabulated m_NF values are for (b−a) = 0.2.
-    # For a different patch width, scale linearly: m ∝ (b−a).
-    scale = b_a_actual / 0.2
-
-    m_near = _interp_m_at_a(a_near) * scale
-    m_far  = _interp_m_at_a(a_far)  * scale
-
+    β_near = Float64(ustrip(a_drop) / ustrip(uconvert(unit(a_drop), l1)))
+    β_far  = Float64(ustrip(a_far) / ustrip(uconvert(unit(a_far), l1)))
+    m_near = _np_patch_coefficient(sf.m_patch, 0.0, β_near)
+    m_far  = _np_patch_coefficient(sf.m_patch, 1.0 - β_far, 1.0)
     return (m_uniform = sf.m_uniform, m_near = m_near, m_far = m_far)
 end
 

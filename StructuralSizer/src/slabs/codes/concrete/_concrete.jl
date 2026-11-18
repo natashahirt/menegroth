@@ -12,17 +12,27 @@ include("waffle/_waffle.jl")
 # Calculations and analysis (loads before sizing)
 include("flat_plate/_flat_plate.jl")
 
-# One-way coefficients, or the shell for any other panel.
+# Solid-head rectangle. Included here so it can use the gross inertia and
+# Eq. (13-6) already defined for the equivalent frame.
+include("waffle/solid_head_section.jl")
+
+# Frame beams sharing nodes with the story shell.
+include("panel_shell_beams.jl")
+
+# §8.3.3 coefficients or the area shell. `story_shell_bars.jl` dispatches on
+# `OneWayMomentCoefficients`, so this file comes first.
 include("panel_analysis.jl")
 
-# Frame beams sharing nodes with that shell. Wall lines are supports of it.
-include("panel_shell_beams.jl")
+# Panel reinforcement read from a story-shell solution. Exported as
+# `StoryPanelDesign`; the story shell builds one per panel.
+include("story_shell_bars.jl")
+
+# Cracked service shell: span geometry and the Ie/Ig stiffness scale.
+# The re-solve that reads displacements lives in StructuralSynthesizer.
+include("story_shell_service.jl")
 
 # Slab edge outside the column centerlines. The centerline polygon stays put.
 include("slab_edge.jl")
-
-# Slab bars from that shell's moment tensor.
-include("story_shell_bars.jl")
 
 # CIP sizing for all cast-in-place types (FlatPlate, FlatSlab, TwoWay, OneWay, Waffle, PTBanded)
 include("sizing.jl")

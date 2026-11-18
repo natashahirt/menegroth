@@ -24,32 +24,38 @@ using StructuralSynthesizer
         @test M1 ≈ 0.0
     end
 
-    @testset "Single curvature (FEM signs opposite) → ACI M1/M2 < 0" begin
-        # Equal magnitudes, opposite FEM signs (single curvature).
-        M1, M2 = f(+100.0, -100.0)
+    # Inputs are internal-moment-diagram values at the two ends. A linear
+    # diagram with the same sign at both ends has no inflection point.
+    @testset "Single curvature (internal moments same sign) → ACI M1/M2 < 0" begin
+        M1, M2 = f(+100.0, +100.0)
         @test M2 ≈ 100.0
         @test M1 ≈ -100.0
         @test M1 / M2 ≈ -1.0  # ACI 318-19: -1.0 = pure single curvature
 
-        # Unequal magnitudes, opposite signs.
-        M1, M2 = f(+50.0, -100.0)
+        M1, M2 = f(-50.0, -100.0)
         @test M2 ≈ 100.0
         @test M1 ≈ -50.0
         @test M1 / M2 ≈ -0.5
     end
 
-    @testset "Double curvature (FEM signs same) → ACI M1/M2 > 0" begin
-        # Equal magnitudes, same FEM sign (double curvature S-shape).
-        M1, M2 = f(+100.0, +100.0)
+    @testset "Double curvature (internal moments change sign) → ACI M1/M2 > 0" begin
+        M1, M2 = f(+100.0, -100.0)
         @test M2 ≈ 100.0
         @test M1 ≈ +100.0
         @test M1 / M2 ≈ +1.0  # ACI 318-19: +1.0 = pure double curvature
 
-        # Unequal magnitudes, same sign.
-        M1, M2 = f(-50.0, -100.0)
+        M1, M2 = f(+50.0, -100.0)
         @test M2 ≈ 100.0
         @test M1 ≈ +50.0
         @test M1 / M2 ≈ +0.5
+    end
+
+    # Agrees with the wall-pier reading of the same diagram.
+    @testset "Matches segment_end_moment_ratio" begin
+        for (a, b) in ((100.0, 60.0), (100.0, -60.0), (-30.0, -90.0), (40.0, -120.0))
+            M1, M2 = f(a, b)
+            @test M1 / M2 ≈ StructuralSynthesizer.segment_end_moment_ratio(a, b)
+        end
     end
 
     @testset "|M2| ≥ |M1| ordering enforced" begin
@@ -73,12 +79,33 @@ using StructuralSynthesizer
     @testset "ACI 318-19 limits sanity checks" begin
         # In single curvature (M1/M2 < 0), the slenderness limit
         # (34 + 12·M1/M2) is *smaller* than 34 — more conservative.
-        M1, M2 = f(+100.0, -100.0)
+        M1, M2 = f(+100.0, +100.0)
         @test 34 + 12 * M1 / M2 ≈ 22.0  # = 34 - 12·1 = 22
 
         # In double curvature (M1/M2 > 0), the limit is larger (capped at 40).
-        M1, M2 = f(+100.0, +100.0)
+        M1, M2 = f(+100.0, -100.0)
         @test 34 + 12 * M1 / M2 ≈ 46.0  # raw value before min(., 40) clamp
+    end
+
+    # Fixed-fixed column whose top sways without rotating bends in double
+    # curvature with equal end moments, so ACI M1/M2 must be +1.
+    @testset "Asap sway column is double curvature" begin
+        Asap = StructuralSynthesizer.Asap
+        sec = Asap.Section(0.01u"m^2", 200e9u"Pa", 77e9u"Pa",
+                           1e-4u"m^4", 1e-4u"m^4", 1e-4u"m^4")
+        base = Asap.Node([0.0u"m", 0.0u"m", 0.0u"m"], fill(false, 6))
+        top = Asap.Node([0.0u"m", 0.0u"m", 3.0u"m"],
+                        [true, false, false, false, false, false])
+        col = Asap.Element(base, top, sec)
+        load = Asap.NodeForce(top, [1000.0u"N", 0.0u"N", 0.0u"N"])
+        model = Asap.Model([base, top], [col], Asap.AbstractLoad[load])
+        Asap.solve!(model)
+        fd = Asap.ElementForceAndDisplacement(col, Asap.AbstractLoad[]; resolution = 11)
+        Ms = maximum(abs, fd.forces.My) >= maximum(abs, fd.forces.Mz) ?
+             fd.forces.My : fd.forces.Mz
+        M1, M2 = f(Ms[1], Ms[end])
+        @test M2 ≈ 1000.0 * 3.0 / 2 rtol = 1e-6
+        @test M1 / M2 ≈ 1.0 rtol = 1e-6
     end
 end
 

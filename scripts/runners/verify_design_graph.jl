@@ -163,11 +163,6 @@ function run_reference_path(struc::BuildingStructure, params::DesignParameters)
         stage.needs_sync && sync_asap!(struc; params=params)
     end
 
-    if params.uniform_column_sizing !== :off
-        n_harmonized = SS.harmonize_uniform_column_sizes!(struc, params)
-        n_harmonized > 0 && sync_asap!(struc; params=params)
-    end
-
     design = capture_design(struc, params; t_start=t_start)
 
     restore!(struc; geometry_is_centerline=params.geometry_is_centerline)
@@ -370,7 +365,7 @@ function main()
     cases = (
         ("flat-plate DDM (reconcile columns, foundations on)",
          "gen_medium_office 54'×42'×10', 2×2 bays, 1 story, DDM flat plate, " *
-         "foundations on. Stage 2 = _reconcile_columns! (needs_sync=false).",
+         "foundations on. Stage 2 = _design_flat_plate_members! (needs_sync=false).",
          build_verify_building),
         ("beam/column (vault floor, _size_beams_columns! + needs_sync)",
          "gen_medium_office 30'×24'×12', 2×2 bays, 1 story, vault floor (λ=8). " *

@@ -1,18 +1,20 @@
 # =============================================================================
-# Shear Cap Design for Punching Shear — ACI 318-11 §13.2.6 / §11.11.1.2(b)
+# Shear Cap Design for Punching Shear — ACI 318-11 §13.2.6 / §11.11.1.2
 # =============================================================================
 #
 # A shear cap is a localized projection below the slab at the column.
-# It increases the effective depth d and moves the critical section to
-# d/2 from the cap edge, enlarging b0.
 #
-# Geometry (§13.2.6):
-#   The cap must extend horizontally from the column face at least the
-#   projection depth:  extent ≥ h_cap.
+# Geometry (§13.2.6, corpus: aci-318-11, page 244):
+#   The cap extends horizontally from the column face at least the
+#   projection below the slab soffit: extent ≥ h_cap. At a slab edge the cap
+#   stops at the edge, so it grows only toward the slab interior there.
 #
-# Critical section (§11.11.1.2(b)):
-#   Located at d_eff/2 from the edge of the shear cap, where
-#   d_eff = d_slab + h_cap.
+# Critical sections (§11.11.1.2, page 200; R11.11.1.2, page 200: "For slabs
+# with changes in thickness, such as the edge of drop panels or shear caps,
+# it is necessary to check shear at several sections"):
+#   (a) d/2 from the column face, through the cap: depth d + h_cap.
+#   (b) d/2 outside the cap edge, in the slab: depth d.
+#   The worse ratio governs.
 #
 # =============================================================================
 
@@ -21,183 +23,146 @@ using Unitful: @u_str
 using Asap: Length, Pressure, Force, Moment, Area
 
 """
-    design_shear_cap(vu, fc, d, h, position, c1, c2;
-                     λ=1.0, φ=0.75, Vu=nothing, Mub=nothing,
-                     max_projection=nothing, h_increment=0.25u"inch")
+    _support_footprint(col, ext; free_edge_parallel=nothing) -> NamedTuple
 
-Design a shear cap to resolve punching shear failure at a column.
-
-Iteratively increases the cap projection `h_cap` until punching is satisfied
-or `max_projection` is reached.
-
-# Algorithm
-1. Start with `h_cap = h_increment` (typically 0.25")
-2. Compute effective depth: `d_eff = d + h_cap`
-3. Cap extent from column face: `extent = h_cap` (ACI §13.2.6 minimum)
-4. Effective column dimensions at cap edge: `c1_cap = c1 + 2·extent`, `c2_cap = c2 + 2·extent`
-5. Critical section at `d_eff/2` from cap edge → compute `b0_cap`
-6. Re-check punching with new `d_eff` and `b0_cap`
-7. If still failing, increase `h_cap` and repeat
-
-# Arguments
-- `vu`: Factored shear stress demand (psi)
-- `fc`: Concrete compressive strength
-- `d`: Effective slab depth (without cap)
-- `h`: Total slab thickness
-- `position`: Column position (:interior, :edge, :corner)
-- `c1`, `c2`: Column dimensions
-
-# Keyword Arguments
-- `λ`: Lightweight concrete factor (default: 1.0)
-- `φ`: Strength reduction factor (default: 0.75)
-- `Vu`: Factored shear force (for combined stress check; optional)
-- `Mub`: Unbalanced moment (for combined stress check; optional)
-- `max_projection`: Maximum cap depth (default: h, i.e. cap ≤ slab thickness)
-- `h_increment`: Cap depth increment (default: 0.25")
-
-# Returns
-`ShearCapDesign` struct
-
-# Reference
-- ACI 318-11 §13.2.6, §11.11.1.2(b)
+Plan footprint of a support enlarged by `ext` from each column face that has
+slab beyond it: both sides at an interior column, one side perpendicular to
+the free edge and both sides along it at an edge column, one side each way
+at a corner. Returns `(c1, c2, shape, centroid_dims)` in the column's named
+axes; `centroid_dims` is the column itself, which carries `Vu` and the
+moments. Circular edge and corner columns use the equivalent square, as the
+punching check does.
 """
-function design_shear_cap(
-    vu::Pressure,
-    fc::Pressure,
-    d::Length,
-    h::Length,
-    position::Symbol,
-    c1::Length,
-    c2::Length;
-    λ::Float64 = 1.0,
-    φ::Float64 = 0.75,
-    Vu::Union{Force, Nothing} = nothing,
-    Mub::Union{Moment, Nothing} = nothing,
-    max_projection::Union{Length, Nothing} = nothing,
-    h_increment::Length = 0.25u"inch"
-)
-    max_proj = isnothing(max_projection) ? h : max_projection
-    vu_psi = ustrip(u"psi", vu)
-
-    h_cap = h_increment
-    while h_cap <= max_proj
-        d_eff = d + h_cap
-
-        # ACI §13.2.6: extent ≥ h_cap from each column face
-        extent = h_cap
-
-        # Effective column dimensions at the cap edge
-        c1_cap = c1 + 2 * extent
-        c2_cap = c2 + 2 * extent
-
-        # Critical section at d_eff/2 from cap edge (§11.11.1.2(b))
-        geom = punching_geometry(c1_cap, c2_cap, d_eff; position=position)
-        b0_cap = geom.b0
-
-        # Punching capacity at the cap critical section
-        c1_cap_in = ustrip(u"inch", c1_cap)
-        c2_cap_in = ustrip(u"inch", c2_cap)
-        β = max(c1_cap_in, c2_cap_in) / max(min(c1_cap_in, c2_cap_in), 1.0)
-        αs = punching_αs(position)
-        vc = punching_capacity_stress(fc, β, αs, b0_cap, d_eff; λ=λ)
-        φvc_psi = φ * ustrip(u"psi", vc)
-
-        # Compute demand at the enlarged critical section
-        if !isnothing(Vu) && !isnothing(Mub)
-            # Full combined stress check with unbalanced moment
-            γv_val = gamma_v(geom.b1, geom.b2)
-            cAB = hasproperty(geom, :cAB) ? geom.cAB :
-                   max(geom.cAB_x, geom.cAB_y)
-            Jc = if position == :interior
-                polar_moment_Jc_interior(geom.b1, geom.b2, d_eff)
-            elseif position == :edge
-                polar_moment_Jc_edge(geom.b1, geom.b2, d_eff, cAB)
-            else
-                polar_moment_Jc_edge(geom.b1, geom.b2, d_eff, cAB) / 2
-            end
-            vu_cap = combined_punching_stress(Vu, Mub, b0_cap, d_eff, γv_val, Jc, cAB)
-            vu_cap_psi = ustrip(u"psi", vu_cap)
-        else
-            # Scale demand by perimeter and depth ratio (conservative approximation)
-            # Original vu was at (b0_orig × d); new section is (b0_cap × d_eff)
-            b0_orig = punching_geometry(c1, c2, d; position=position).b0
-            vu_cap_psi = vu_psi * ustrip(u"inch", b0_orig) * ustrip(u"inch", d) /
-                         (ustrip(u"inch", b0_cap) * ustrip(u"inch", d_eff))
+function _support_footprint(col, ext; free_edge_parallel = nothing)
+    pos = col.position
+    if col_shape(col) == :circular
+        if pos == :interior
+            D = col.c1 + 2ext
+            return (c1 = D, c2 = D, shape = :circular, centroid_dims = (col.c1, col.c1))
         end
-
-        ratio = vu_cap_psi / φvc_psi
-        if ratio <= 1.0
-            return ShearCapDesign(
-                required = true,
-                h_cap = uconvert(u"inch", h_cap),
-                extent = uconvert(u"inch", extent),
-                d_eff = uconvert(u"inch", d_eff),
-                b0_cap = uconvert(u"inch", b0_cap),
-                ratio = ratio,
-                ok = true
-            )
-        end
-
-        h_cap += h_increment
-    end
-
-    # Max projection reached — return best attempt
-    d_eff = d + max_proj
-    extent = max_proj
-    c1_cap = c1 + 2 * extent
-    c2_cap = c2 + 2 * extent
-    geom = punching_geometry(c1_cap, c2_cap, d_eff; position=position)
-    b0_cap = geom.b0
-
-    β = max(ustrip(u"inch", c1_cap), ustrip(u"inch", c2_cap)) /
-        max(min(ustrip(u"inch", c1_cap), ustrip(u"inch", c2_cap)), 1.0)
-    αs = punching_αs(position)
-    vc = punching_capacity_stress(fc, β, αs, b0_cap, d_eff; λ=λ)
-    φvc_psi = φ * ustrip(u"psi", vc)
-
-    if !isnothing(Vu) && !isnothing(Mub)
-        γv_val = gamma_v(geom.b1, geom.b2)
-        cAB = hasproperty(geom, :cAB) ? geom.cAB : max(geom.cAB_x, geom.cAB_y)
-        Jc = if position == :interior
-            polar_moment_Jc_interior(geom.b1, geom.b2, d_eff)
-        elseif position == :edge
-            polar_moment_Jc_edge(geom.b1, geom.b2, d_eff, cAB)
-        else
-            polar_moment_Jc_edge(geom.b1, geom.b2, d_eff, cAB) / 2
-        end
-        vu_cap = combined_punching_stress(Vu, Mub, b0_cap, d_eff, γv_val, Jc, cAB)
-        vu_cap_psi = ustrip(u"psi", vu_cap)
+        c1 = c2 = equivalent_square_column(col.c1)
     else
-        b0_orig = punching_geometry(c1, c2, d; position=position).b0
-        vu_cap_psi = vu_psi * ustrip(u"inch", b0_orig) * ustrip(u"inch", d) /
-                     (ustrip(u"inch", b0_cap) * ustrip(u"inch", d_eff))
+        c1, c2 = col.c1, col.c2
     end
-
-    ratio = vu_cap_psi / φvc_psi
-    return ShearCapDesign(
-        required = true,
-        h_cap = uconvert(u"inch", max_proj),
-        extent = uconvert(u"inch", max_proj),
-        d_eff = uconvert(u"inch", d_eff),
-        b0_cap = uconvert(u"inch", b0_cap),
-        ratio = ratio,
-        ok = ratio <= 1.0
-    )
+    ctr = (c1, c2)
+    if pos == :interior
+        return (c1 = c1 + 2ext, c2 = c2 + 2ext, shape = :rectangular, centroid_dims = ctr)
+    elseif pos == :edge
+        edge_par = something(free_edge_parallel, _infer_free_edge_parallel(col))
+        # :c2 — the free edge runs along c2, so c1 is perpendicular to it.
+        Δ1, Δ2 = edge_par === :c2 ? (ext, 2ext) : (2ext, ext)
+        return (c1 = c1 + Δ1, c2 = c2 + Δ2, shape = :rectangular, centroid_dims = ctr)
+    end
+    return (c1 = c1 + ext, c2 = c2 + ext, shape = :rectangular, centroid_dims = ctr)
 end
 
 """
-    check_punching_with_shear_cap(vu, cap::ShearCapDesign; φ=0.75)
+    _enlarged_support_supported(col, punch_kwargs) -> Bool
 
-Check punching shear adequacy with a shear cap.
+`false` where the closed-form footprint above does not describe the support:
+skew or re-entrant corners (the punching check builds their section from the
+column polygon) and edge or corner columns with slab openings (the opening
+section is built about the column centre).
+"""
+function _enlarged_support_supported(col, punch_kwargs)
+    if col.position == :corner && hasproperty(col, :corner_kind)
+        kind = getfield(col, :corner_kind)
+        angle = hasproperty(col, :corner_angle) ? Float64(getfield(col, :corner_angle)) : NaN
+        kind == :reentrant && return false
+        kind == :convex && !isnan(angle) && !isapprox(angle, π / 2; atol = 0.12) && return false
+    end
+    ops = get(punch_kwargs, :openings, nothing)
+    has_openings = ops !== nothing && !isempty(ops) && get(punch_kwargs, :column_xy, nothing) !== nothing
+    return !(has_openings && col.position != :interior)
+end
 
-# Returns
-NamedTuple (ok, ratio, message)
+"""Column-like stand-in for an enlarged support, keeping the column's orientation data."""
+function _support_proxy(col, fp)
+    base = (position = col.position, c1 = fp.c1, c2 = fp.c2, shape = fp.shape)
+    hasproperty(col, :θ) && (base = merge(base, (θ = getfield(col, :θ),)))
+    hasproperty(col, :boundary_edge_dirs) &&
+        (base = merge(base, (boundary_edge_dirs = getfield(col, :boundary_edge_dirs),)))
+    return base
+end
+
+"""
+    design_shear_cap(col, Vu, Mub, fc, d, h; Muy=nothing, λ=1.0, φ=0.75,
+                     max_projection=nothing, h_increment=0.25u"inch",
+                     punch_kwargs=(;)) -> ShearCapDesign
+
+Smallest shear cap, in steps of `h_increment` up to `max_projection`
+(default `h`), for which both §11.11.1.2 critical sections pass under the
+demand `Vu`, `Mub` (spanning along `punch_kwargs.span_axis`) and `Muy`:
+
+- (a) at d/2 from the column face, depth `d + h_cap`;
+- (b) at d/2 outside the cap, slab depth `d`, with the cap footprint as the
+  loaded area (β from the footprint) and the edge and corner centroid shift
+  taken from the column centre.
+
+Both sections use [`check_punching_for_column`](@ref) (Eq. 13-1 transfer;
+the §13.5.3.3 increase is not applied). `punch_kwargs` are the same keywords
+the column's own punching check uses (`punching_axis_kwargs`).
+
+The extent from the column face equals `h_cap`, the §13.2.6 minimum. Skew or
+re-entrant corners, and edge or corner columns with slab openings, return a
+design that is not ok: the footprint is not modelled there.
+
+# Reference
+- ACI 318-11 §13.2.6 (corpus: aci-318-11, page 244), §11.11.1.2 (page 200)
+"""
+function design_shear_cap(col, Vu::Force, Mub::Moment, fc::Pressure, d::Length, h::Length;
+                          Muy::Union{Moment, Nothing} = nothing,
+                          λ::Float64 = 1.0, φ::Float64 = 0.75,
+                          max_projection::Union{Length, Nothing} = nothing,
+                          h_increment::Length = 0.25u"inch",
+                          punch_kwargs = (;))
+    max_proj = something(max_projection, h)
+    _enlarged_support_supported(col, punch_kwargs) ||
+        return ShearCapDesign(required = true, ratio = Inf, ok = false, governing = :unsupported)
+    edge_par = get(punch_kwargs, :free_edge_parallel, nothing)
+    kw = (; λ = λ, φ_shear = φ, Muy = Muy, punch_kwargs...)
+
+    function attempt(h_cap)
+        face = check_punching_for_column(col, Vu, Mub, d + h_cap, h + h_cap, fc; kw...)
+        fp = _support_footprint(col, h_cap; free_edge_parallel = edge_par)
+        edge = check_punching_for_column(_support_proxy(col, fp), Vu, Mub, d, h, fc;
+                                         kw..., centroid_dims = fp.centroid_dims)
+        ratio = max(face.ratio, edge.ratio)
+        return ShearCapDesign(
+            required = true,
+            h_cap = uconvert(u"inch", h_cap),
+            extent = uconvert(u"inch", h_cap),
+            d_eff = uconvert(u"inch", d + h_cap),
+            b0_cap = uconvert(u"inch", edge.b0),
+            c1_cap = uconvert(u"inch", fp.c1),
+            c2_cap = uconvert(u"inch", fp.c2),
+            ratio = ratio,
+            ok = ratio <= 1.0,
+            governing = face.ratio >= edge.ratio ? :column_face : :cap_edge,
+            shape = fp.shape,
+        )
+    end
+
+    best = nothing
+    h_cap = h_increment
+    while h_cap <= max_proj
+        best = attempt(h_cap)
+        best.ok && return best
+        h_cap += h_increment
+    end
+    return something(best, attempt(max_proj))
+end
+
+"""
+    check_punching_with_shear_cap(cap::ShearCapDesign) -> NamedTuple
+
+`(ok, ratio, message)` of a designed shear cap.
 """
 function check_punching_with_shear_cap(cap::ShearCapDesign)
     if !cap.required
         return (ok=false, ratio=Inf, message="Shear cap not designed")
     end
     msg = cap.ok ? "OK (shear cap h=$(cap.h_cap)): ratio=$(round(cap.ratio, digits=3))" :
-                   "NG (shear cap h=$(cap.h_cap)): ratio=$(round(cap.ratio, digits=3)) > 1.0"
+                   "NG (shear cap h=$(cap.h_cap), $(cap.governing)): ratio=$(round(cap.ratio, digits=3)) > 1.0"
     return (ok=cap.ok, ratio=cap.ratio, message=msg)
 end

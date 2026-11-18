@@ -56,7 +56,8 @@ function detail_beam(sec::Union{RCBeamSection, RCTBeamSection}; span::Length,
                      Vu, λ::Real = 1.0, coating::Symbol = :uncoated, Nu = nothing,
                      top_bars = nothing, stock::Length = 60.0u"ft",
                      first_stirrup::Length = 2.0u"inch",
-                     gravity_seismic::Bool = false)
+                     gravity_seismic::Bool = false,
+                     induced_within_strength::Bool = false)
     md = MemberDetail(:beam)
     m(x) = ustrip(u"m", x)
     lam = _detailing_λ(λ)
@@ -162,29 +163,33 @@ function detail_beam(sec::Union{RCBeamSection, RCTBeamSection}; span::Length,
                            λ = λ, stirrup_bar = sec.stirrup_size,
                            Nu = Nu, Ag = isnothing(Nu) ? nothing : Ag)
     shear_clause = ""
-    if gravity_seismic
+    if gravity_seismic || induced_within_strength
         limit = gravity_beam_transverse_limit(sec.d, bar_diameter(sec.bar_size);
                                               Pu = Nu === nothing ? 0.0u"N" : Nu,
                                               Ag = Ag, fc = fc)
-        seismic = gravity_beam_seismic_shear(sec, ℓn * u"m", Vu, fc, fy;
-                                            Nu = Nu === nothing ? 0.0u"N" : Nu)
-        if seismic.ok
-            sd = design_beam_shear(seismic.Ve, _beam_web(sec), sec.d, fc, fyt;
-                                   λ = λ, stirrup_bar = sec.stirrup_size,
-                                   Nu = Nu, Ag = Ag,
-                                   omit_concrete = seismic.concrete_omitted)
-            s_seis = min(sd.s_design, limit.spacing)
-            sd = merge(sd, (s_design = s_seis,))
-            vc = seismic.concrete_omitted ? "Vc = 0" : "Vc counted"
-            shear_clause = ", Ve $(round(ustrip(u"kip", seismic.Ve); digits = 1)) kip, $vc (§18.6.5)"
+        if gravity_seismic && !induced_within_strength
+            seismic = gravity_beam_seismic_shear(sec, ℓn * u"m", Vu, fc, fy;
+                                                Nu = Nu === nothing ? 0.0u"N" : Nu)
+            if seismic.ok
+                sd = design_beam_shear(seismic.Ve, _beam_web(sec), sec.d, fc, fyt;
+                                       λ = λ, stirrup_bar = sec.stirrup_size,
+                                       Nu = Nu, Ag = Ag,
+                                       omit_concrete = seismic.concrete_omitted)
+                s_seis = min(sd.s_design, limit.spacing)
+                sd = merge(sd, (s_design = s_seis,))
+                vc = seismic.concrete_omitted ? "Vc = 0" : "Vc counted"
+                shear_clause = ", Ve $(round(ustrip(u"kip", seismic.Ve); digits = 1)) kip, $vc (§18.6.5)"
+            else
+                push!(md.warnings, "probable moment did not converge; stirrups use the factored shear (§18.6.5)")
+                sd = merge(sd, (s_design = min(sd.s_design, limit.spacing),))
+            end
+            mats = special_moment_frame_materials(fc, fy; lightweight = λ < 1)
+            append!(md.warnings, mats.warnings)
+            append!(md.notes, mats.notes)
+            append!(md.notes, special_frame_splice_notes())
         else
-            push!(md.warnings, "probable moment did not converge; stirrups use the factored shear (§18.6.5)")
             sd = merge(sd, (s_design = min(sd.s_design, limit.spacing),))
         end
-        mats = special_moment_frame_materials(fc, fy; lightweight = λ < 1)
-        append!(md.warnings, mats.warnings)
-        append!(md.notes, mats.notes)
-        append!(md.notes, special_frame_splice_notes())
         push!(md.notes, "transverse reinforcement throughout at no more than d/2 (§18.14.3.2(a))")
     end
     sd.section_adequate || push!(md.warnings,
@@ -226,7 +231,53 @@ function detail_beam(sec::Union{RCBeamSection, RCTBeamSection}; span::Length,
     sec isa RCTBeamSection && push!(md.notes,
         "Distribution of flange tension bars (§24.3.4) is not detailed.")
     _report_beam_areas!(md, sec, top)
+    _locate_beam!(md, sec)
     return md
+end
+
+"""
+Centerlines in the beam frame: `x` along the span, `y` across the web, `z` up
+from the soffit. Bottom bars share one row. The continuous bars take the
+first places in that row and the rest take what remains; which bar is
+continuous is not given by the code, so the row is split in order.
+"""
+function _locate_beam!(md::MemberDetail, sec)
+    m(x) = ustrip(u"m", x)
+    bw, h = m(_beam_web(sec)), m(sec.h)
+    cov = m(sec.cover)
+    ds = m(bar_diameter(sec.stirrup_size))
+    nb = sec.n_bars
+    if nb > 0
+        db = m(bar_diameter(sec.bar_size))
+        ys = _spread(nb, -(bw / 2 - cov - ds - db / 2), bw / 2 - cov - ds - db / 2)
+        integ = findfirst(g -> g.role === :integrity, md.groups)
+        bot = findfirst(g -> g.role === :bottom, md.groups)
+        n_cont = integ === nothing ? 0 : md.groups[integ].count
+        n_rest = bot === nothing ? 0 : md.groups[bot].count
+        n_cont + n_rest == nb || throw(ArgumentError(
+            "bottom bars are $nb in the section and $(n_cont + n_rest) in the groups"))
+        integ !== nothing && (md.groups[integ] = _with_centerlines(md.groups[integ], _wires_at_y(md.groups[integ].path, ys[1:n_cont])))
+        bot !== nothing && (md.groups[bot] = _with_centerlines(md.groups[bot], _wires_at_y(md.groups[bot].path, ys[(n_cont + 1):end])))
+    end
+    top = findfirst(g -> g.role === :top || g.role === :hanger, md.groups)
+    if top !== nothing
+        g = md.groups[top]
+        db = m(bar_diameter(g.bar_size))
+        outer = bw / 2 - cov - ds - db / 2
+        md.groups[top] = _with_centerlines(g, _wires_at_y(g.path, _spread(g.count, -outer, outer)))
+    end
+    st = findfirst(g -> g.role === :stirrup, md.groups)
+    if st !== nothing
+        inset = cov + ds / 2
+        hy = bw / 2 - inset
+        loop = ((-hy, inset), (hy, inset), (hy, h - inset), (-hy, h - inset))
+        g = md.groups[st]
+        md.groups[st] = _with_centerlines(g, _wires_at_x(loop, g.x_positions))
+    end
+    y_half = sec isa RCTBeamSection ? m(sec.bf) / 2 : m(sec.b) / 2
+    box = md.outline[1]
+    md.solid = (box[1], box[2], -y_half, y_half, 0.0, h)
+    return nothing
 end
 
 """
@@ -269,4 +320,106 @@ function _beam_top_bars(sec, top_bars)
     hog !== nothing && return (hog..., :hogging)
     comp !== nothing && return (comp..., :compression)
     return (max(4, sec.stirrup_size), 2, :hanger)
+end
+
+"""
+    hogging_bars(sec, Mu, fc, fy) -> (bar_size, n_bars) or nothing
+
+Top bars for a factored negative moment `Mu`.
+
+The compression block for that moment is in the web, so the width is `bw`
+(or `b` for a rectangle), not the flange. The section's stored `d` is used
+as the depth from the compression face to the top steel. That matches when
+the top cover equals the bottom cover.
+
+Returns `nothing` when the moment is zero or the bars do not fit.
+"""
+function hogging_bars(sec::Union{RCBeamSection, RCTBeamSection}, Mu, fc, fy)
+    bw = sec isa RCTBeamSection ? sec.bw : sec.b
+    return _hogging_bars(Mu, bw, sec.d, fc, fy)
+end
+
+function _hogging_bars(Mu, b, d, fc, fy)
+    Mu > zero(Mu) || return nothing
+    As = required_reinforcement(Mu, b, d, fc, fy)
+    isfinite(ustrip(u"m^2", As)) || return nothing
+    As > zero(As) || return nothing
+    try
+        picked = select_bars(As, b)
+        return (picked.bar_size, picked.n_bars)
+    catch err
+        err isa InterruptException && rethrow()
+        return nothing
+    end
+end
+
+"""
+    detail_solid_head_piece(; length, width, depth, d, cover, Mu_neg, ends, fc, fy,
+                            λ=1.0, coating=:uncoated) -> MemberDetail
+
+Top bars of one solid-head piece, drawn as a slab of the full rib depth
+(`width × depth`), not as a beam cage. The bars are spread across the width.
+
+`Mu_neg` is the piece's own factored hogging envelope. The bars are the area
+for that moment on `width` at effective depth `d`, full length, since no
+cutoff diagram is stored. `ends` names each end `:face` (a rib leaves the
+head there), `:continuous` (another head piece continues), or `:exterior`
+(nothing continues). Past a face the bars run a straight development length
+ℓd into the rib (§25.4.2); at a continuous end they run half a Class B lap
+past the end; at an exterior end they stop at the cover with a 90-degree hook.
+
+No stirrups are placed: two-way shear at the head is the solid-head punching
+check. ACI 318-11 §13.3.7 is not used.
+"""
+function detail_solid_head_piece(; length::Length, width::Length, depth::Length, d::Length,
+                                 cover::Length, Mu_neg, ends::Tuple{Symbol, Symbol},
+                                 fc, fy, λ::Real = 1.0, coating::Symbol = :uncoated)
+    all(e -> e in (:face, :continuous, :exterior), ends) || throw(ArgumentError(
+        "a head piece end is :face, :continuous, or :exterior, got $ends"))
+    md = MemberDetail(:slab)
+    m(x) = ustrip(u"m", x)
+    L, h, w, cov = m(length), m(depth), m(width), m(cover)
+    (L > 0 && h > 0 && w > 0) || throw(ArgumentError(
+        "a head piece needs a positive length, width, and depth"))
+    push!(md.notes, "Solid head: a slab of the full rib depth, no stirrups and no T-flange. Two-way shear is the head punching check.")
+    push!(md.notes, "The other bar direction is the topping mat. ACI 318-11 §13.3.7 was not used.")
+    md.solid = (0.0, L, -w / 2, w / 2, 0.0, h)
+    push!(md.outline, (0.0, L, 0.0, h))
+    Mu_neg === nothing && return md
+    picked = _hogging_bars(Mu_neg, width, d, fc, fy)
+    if picked === nothing
+        Mu_neg > zero(Mu_neg) && push!(md.warnings,
+            "the head piece's hogging moment does not fit top bars in its width")
+        return md
+    end
+    bs, n = picked
+    lam = _detailing_λ(λ)
+    db = m(bar_diameter(bs))
+    z = h - cov - db / 2
+    ψt = (z - db / 2) > m(12.0u"inch") ? 1.3 : 1.0
+    ℓd = m(straight_development_length(bs, fc, fy, lam; ψt = ψt, coating = coating,
+                                       epoxy_close = true, favorable_cover = false))
+    half_lap = m(tension_lap_length(bs, fc, fy, lam; as_ratio = 1.0, percent_spliced = 100.0,
+                                    ψt = ψt, coating = coating, epoxy_close = true,
+                                    favorable_cover = false)) / 2
+    reach(e) = e === :face ? ℓd : e === :continuous ? half_lap : -cov
+    x0, x1 = -reach(ends[1]), L + reach(ends[2])
+    hook = m(hook_centerline_length(bs; angle = 90))
+    tail = m(standard_hook(bs; angle = 90).extension)
+    hs, he = ends[1] === :exterior, ends[2] === :exterior
+    path = NTuple{2, Float64}[]
+    hs && push!(path, first(_hook_tail(x0, z, tail, z - cov, -1, +1)))
+    push!(path, (x0, z), (x1, z))
+    he && push!(path, first(_hook_tail(x1, z, tail, z - cov, -1, -1)))
+    shape = hs && he ? :hook_both : hs ? :hook_start : he ? :hook_end : :straight
+    # The same bars, spread across the piece as a slab mat in the span
+    # direction. One layer, cover in from each side of the width.
+    ys = _spread(n, -w / 2 + cov + db / 2, w / 2 - cov - db / 2)
+    push!(md.groups, BarGroup(; mark = "H1", role = :top, direction = :primary,
+                              bar_size = bs, count = n,
+                              length = ((x1 - x0) + (hs + he) * hook) * u"m",
+                              shape = shape, path = path,
+                              centerlines = _wires_at_y(path, ys),
+                              note = "solid-head slab bars, span direction, piece hogging envelope"))
+    return md
 end

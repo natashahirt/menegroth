@@ -19,5 +19,5 @@ Select steel joist and deck system.
 function _size_span_floor(::JoistRoofDeck, span::L, sdl::F, live::F;
                     material::Metal=A992_Steel,
                     spacing::L=uconvert(unit(span), 1.5u"m")) where {L, F}
-    error("JoistRoofDeck sizing not yet implemented")
+    throw(UnsupportedFloorSystemError(JoistRoofDeck))
 end

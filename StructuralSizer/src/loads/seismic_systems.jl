@@ -125,8 +125,8 @@ Ordinary rows `:A3`, `:B6`, `:C7`, `:E8`, and `:F` are
 [`ordinary_concrete_seismic_system`](@ref). Special rows `:A1` and `:B4`
 are returned for every category in which the table permits them. In D, E,
 or F the stored `hn` is the height limit. Pass `hn` to enforce it. The
-gravity frame is detailed to §18.14.3.3 because the induced moments are
-not calculated.
+gravity frame is detailed to §18.14.3.2 when the moments from δDE do not
+exceed the design strength, and to §18.14.3.3 otherwise.
 
 # Citation
 ASCE 7-22 Table 12.2-1 (corpus: asce-7-22, PDF page 173), read from the

@@ -107,6 +107,75 @@ function _gravity_center_lap!(md, sec, H, hs, cs, z_bar, bs, n, fc, fy; continue
 end
 
 """
+True when the factored gravity axial exceeds 0.35P0.
+
+P0 = 0.85f′c(Ag − Ast) + fy·Ast, the same expression as pure compression.
+`Pu` is compression-positive. A missing force does not exceed the limit.
+
+# Citation
+ACI 318-19 §18.14.3.2(c) (corpus: aci-318-19, PDF pages 353–354).
+"""
+function _exceeds_35P0(sec, fc, fy, Pu)
+    Pu === nothing && return false
+    Ag = ustrip(u"inch^2", sec isa RCCircularSection ? π * sec.D^2 / 4 : sec.b * sec.h)
+    As = ustrip(u"inch^2", sec.As_total)
+    P0 = 0.85 * ustrip(u"psi", fc) * (Ag - As) + ustrip(u"psi", fy) * As
+    return ustrip(u"lbf", Pu) > 0.35 * P0
+end
+
+"""
+§18.14.3.2(b) and (c).
+
+Returns whether (c) applies. The half-table amount is placed by
+[`_detail_gravity_hoops!`](@ref) for rectilinear hoops and by
+[`_add_spiral!`](@ref) for a spiral, not left as a warning.
+"""
+function _note_gravity_column_within!(md, sec, fc, fy, Pu_gravity; spiral::Bool = false)
+    push!(md.notes,
+        (spiral ? "spiral" : "hoops") *
+        " over the full height at most the lesser of 6db and 6 in., " *
+        "and §18.7.5.2(a) through (e) over ℓo (§18.14.3.2(b))")
+    if Pu_gravity === nothing
+        push!(md.notes,
+            "factored gravity axial was not passed; §18.14.3.2(c) is not applied")
+        return false
+    end
+    if _exceeds_35P0(sec, fc, fy, Pu_gravity)
+        push!(md.notes,
+            "factored gravity axial exceeds 0.35P0; half of Table 18.7.5.4 " *
+            (spiral ? "(d) and (e)" : "(a) and (b)") * " is placed over ℓo (§18.14.3.2(c))")
+        return true
+    end
+    push!(md.notes, "factored gravity axial does not exceed 0.35P0 (§18.14.3.2(c))")
+    return false
+end
+
+"""
+Spacing that supplies one-half of Table 18.7.5.4 (a) and (b).
+
+The two expressions are the same ones [`boundary_transverse_amount`](@ref)
+evaluates for Table 18.10.6.4(g). This call is Table 18.7.5.4. Parts (c)
+and (f) are not in the §18.14.3.2(c) minimum. `nothing` when the core
+area is not positive.
+
+# Citation
+ACI 318-19 §18.14.3.2(c) and Table 18.7.5.4 (corpus: aci-318-19, PDF
+pages 353–354 and 311).
+"""
+function _half_table_hoop_spacing(sec, fc, fyt)
+    cover = sec.cover
+    core_x = sec.b - 2 * cover
+    core_y = sec.h - 2 * cover
+    (ustrip(u"m", core_x) > 0 && ustrip(u"m", core_y) > 0) || return nothing
+    amount = boundary_transverse_amount(sec.b * sec.h, core_x * core_y, fc, fyt)
+    ratio = 0.5 * amount.required
+    ratio > 0 || return nothing
+    legs = column_tie_legs(sec)
+    Ash = min(legs.x, legs.y) * bar_area(sec.tie_bar_size)
+    return Ash / (ratio * max(core_x, core_y))
+end
+
+"""
 Hoops over ℓo at each joint face, through the middle of the column, and
 through the joint.
 
@@ -115,7 +184,8 @@ ACI 318-19 §18.7.5.1 and §18.7.5.3–§18.7.5.5 (corpus: aci-318-19, PDF pages
 ACI 318-19 §18.4.4.4 and §15.3.1.3 (PDF pages 297 and 159).
 """
 function _detail_gravity_hoops!(md, sec, H, hs, s_ordinary, bs, tie_bar, cov, dt, fc, fy, fyt;
-                               Pu, beam_depth, shear_end = nothing, shear_mid = nothing)
+                               Pu, beam_depth, shear_end = nothing, shear_mid = nothing,
+                               within::Bool = false, Pu_gravity = nothing)
     m(x) = ustrip(u"m", x)
     Ag = sec.b * sec.h
     ratio = ustrip(u"inch^2", sec.As_total) / ustrip(u"inch^2", Ag)
@@ -133,12 +203,28 @@ function _detail_gravity_hoops!(md, sec, H, hs, s_ordinary, bs, tie_bar, cov, dt
         push!(md.warnings, "hx = $(round(hx_in; digits = 1)) in. exceeds 14 in. (§18.7.5.2)")
     end
     ℓo = min(m(special_column_hoop_length(least * u"m", clear * u"m")), clear)
-    # Shear spacing can only close the hoops. It does not relax §18.7.5.3.
-    s_end = min(m(_special_hoop_spacing(sec, least * u"m", db, fy, hx, fc, fyt, Pu)), s_ordinary)
-    shear_end === nothing || (s_end = min(s_end, m(shear_end)))
     grade = coupling_beam_grade(fy)
     from_bar = (grade == 60 ? 6 : 5) * db
-    s_mid = m(min(s_ordinary * u"m", 6.0u"inch", from_bar))
+    # §18.14.3.2(b): lesser of 6db and 6 in. over the full height.
+    # §18.14.3.2(c): half of Table 18.7.5.4 (a) and (b) over ℓo when the
+    # factored gravity axial exceeds 0.35P0. That path does not use
+    # §18.7.5.3 or Table 18.7.5.4(c). The §18.14.3.3 path does.
+    over = within && _exceeds_35P0(sec, fc, fy, Pu_gravity)
+    if within
+        s_end = min(s_ordinary, m(6.0u"inch"), m(6 * db))
+        if over
+            s_half = _half_table_hoop_spacing(sec, fc, fyt)
+            s_half === nothing || (s_end = min(s_end, m(s_half)))
+        end
+        s_mid = min(s_ordinary, m(6.0u"inch"), m(6 * db))
+        end_clause = over ? "18.14.3.2(c)" : "18.14.3.2(b)"
+    else
+        # Shear spacing can only close the hoops. It does not relax §18.7.5.3.
+        s_end = min(m(_special_hoop_spacing(sec, least * u"m", db, fy, hx, fc, fyt, Pu)), s_ordinary)
+        s_mid = m(min(s_ordinary * u"m", 6.0u"inch", from_bar))
+        end_clause = "18.7.5.3"
+    end
+    shear_end === nothing || (s_end = min(s_end, m(shear_end)))
     shear_mid === nothing || (s_mid = min(s_mid, m(shear_mid)))
     # §18.4.3.3(a)–(c), which §18.4.4.4 applies inside the joint (PDF page 296).
     joint_bar = grade == 60 ? min(8 * db, 8.0u"inch") : min(6 * db, 6.0u"inch")
@@ -157,12 +243,20 @@ function _detail_gravity_hoops!(md, sec, H, hs, s_ordinary, bs, tie_bar, cov, dt
     bot = _spaced_positions(0.0, ℓo, s_end)
     top0 = clear - ℓo
     top = top0 <= ℓo + 1e-9 ? Float64[] : _spaced_positions(top0, clear, s_end)
-    place("C2", bot, "hoops over ℓo above the lower joint, $(round(s_end / 0.0254; digits = 1)) in. (§18.7.5.3)")
-    place("C2t", top, "hoops over ℓo below the upper joint, $(round(s_end / 0.0254; digits = 1)) in. (§18.7.5.3)")
+    pitch = round(s_end / 0.0254; digits = 1)
+    place("C2", bot, "hoops over ℓo above the lower joint, $(pitch) in. (§$(end_clause))")
+    place("C2t", top, "hoops over ℓo below the upper joint, $(pitch) in. (§$(end_clause))")
     mid0 = isempty(bot) ? 0.0 : bot[end]
     mid1 = isempty(top) ? clear : top[1]
     mid = mid1 > mid0 + s_mid ? _spaced_positions(mid0 + s_mid, mid1 - s_mid, s_mid) : Float64[]
-    place("C3", mid, "hoops between the ℓo zones, $(round(s_mid / 0.0254; digits = 1)) in. (§18.7.5.5)")
+    mid_clause = within ? "18.14.3.2(b)" : "18.7.5.5"
+    place("C3", mid, "hoops between the ℓo zones, $(round(s_mid / 0.0254; digits = 1)) in. (§$(mid_clause))")
+    # §18.7.5.7, required by §18.14.3.2(c) when the gravity axial exceeds
+    # 0.35P0. Cover outside the confining hoop is `sec.cover`. Above 4 in.,
+    # a second hoop sits at 4 in. cover, at most 12 in. apart, over ℓo.
+    if over && cov > m(4.0u"inch") + 1e-9
+        _place_cover_hoops!(md, sec, bot, top, tie_bar, dt)
+    end
     depth = m(beam_depth)
     joint0 = H - hs
     joint1 = joint0 + min(depth, hs)
@@ -173,6 +267,47 @@ function _detail_gravity_hoops!(md, sec, H, hs, s_ordinary, bs, tie_bar, cov, dt
                            "two hoop layers are placed at its faces (§15.3.1.3)")
     end
     place("J1", joint, "joint hoops, $(round(s_joint / 0.0254; digits = 1)) in. (§18.4.4.4, §15.3.1.3)")
+    return nothing
+end
+
+"""
+Additional hoops at 4 in. cover over ℓo, spacing at most 12 in.
+
+The confining hoop is the one already placed at `sec.cover`. This set sits
+outside it. A section that cannot hold a hoop at 4 in. cover keeps the
+warning and does not get a crossing loop.
+
+# Citation
+ACI 318-19 §18.7.5.7 (corpus: aci-318-19, PDF page 312), required by
+§18.14.3.2(c).
+"""
+function _place_cover_hoops!(md, sec, bot, top, tie_bar, dt)
+    m(x) = ustrip(u"m", x)
+    cov = m(4.0u"inch")
+    w = m(sec.b)
+    h = m(sec.h)
+    if w <= 2cov + dt || h <= 2cov + dt
+        push!(md.warnings,
+            "cover outside the confining hoop exceeds 4 in., and the section " *
+            "cannot hold the additional hoop at 4 in. cover (§18.7.5.7)")
+        return nothing
+    end
+    s = m(12.0u"inch")
+    w_cl = w - 2cov - dt
+    h_cl = h - 2cov - dt
+    len = _closed_loop_length(w_cl, h_cl, tie_bar; hook_angle = 135)
+    path = [(0.0, -w / 2 + cov + dt / 2), (0.0, w / 2 - cov - dt / 2)]
+    # One group per ℓo zone. The clear height between them is not this spacing.
+    function place(mark, a, b)
+        b >= a || return
+        xs = _spaced_positions(a, b, s)
+        push!(md.groups, BarGroup(; mark = mark, role = :tie, direction = :transverse,
+                                  bar_size = tie_bar, count = length(xs), length = len * u"m",
+                                  shape = :closed_tie, path = path, x_positions = xs,
+                                  note = "additional hoops at 4 in. cover, 12 in. (§18.7.5.7)"))
+    end
+    isempty(bot) || place("C4", 0.0, bot[end])
+    isempty(top) || place("C4t", top[1], top[end])
     return nothing
 end
 
@@ -254,11 +389,21 @@ Bars of one story of a rectangular or circular RC column.
   relax the code spacing.
 - `gravity_seismic`: the column is outside the seismic force-resisting
   system in Seismic Design Category D, E, or F, and the moments from the
-  design displacement are not calculated, so §18.14.3.3 applies. Hoops follow
-  §18.7.5 over ℓo and through the middle, the lap sits in the center half,
-  and the joint is hooped under §18.4.4.
+  design displacement were not calculated or they exceed the design strength,
+  so §18.14.3.3 applies. Hoops follow §18.7.5 over ℓo and through the middle,
+  the lap sits in the center half, and the joint is hooped under §18.4.4.
+- `induced_within_strength`: those moments and shears were calculated and do
+  not exceed the design strength, so §18.14.3.2 applies. Hoops run the full
+  height at most the lesser of 6db and 6 in., and §18.7.5.2(a) through (e)
+  over ℓo. The lap stays the ordinary lap. A circular column with a spiral
+  takes the same pitch limit and §18.7.6 shear; a circular column with ties,
+  or on the §18.14.3.3 path, keeps its ordinary transverse bars and a warning.
 - `Pu`: largest factored compression, including earthquake, for the
-  §18.7.5.4 amount. Omitted, it is taken as zero.
+  §18.7.5.4 amount on the §18.14.3.3 path. Omitted, it is taken as zero.
+- `Pu_gravity`: factored gravity axial for the §18.14.3.2(c) trigger.
+  This is the axial from the gravity combinations, including the vertical
+  ground motion of §18.14.2.1, and not the earthquake shear. Omitted, (c)
+  is not applied.
 - `material` and `axials`: with these, the hoops are spaced for the
   probable-moment shear of §18.7.6. `Vu_x` and `Vu_y` are the factored
   shears from analysis. `beam_shear` is the cap from the beams at the joint.
@@ -283,7 +428,9 @@ function detail_column(sec::Union{RCColumnSection, RCCircularSection}; height::L
                        coating::Symbol = :uncoated, stock::Length = 60.0u"ft",
                        tie_spacing::Union{Nothing, Length} = nothing,
                        gravity_seismic::Bool = false,
+                       induced_within_strength::Bool = false,
                        Pu::Union{Nothing, Force} = nothing,
+                       Pu_gravity::Union{Nothing, Force} = nothing,
                        beam_depth::Union{Nothing, Length} = nothing,
                        material::Union{Nothing, ReinforcedConcreteMaterial} = nothing,
                        axials = (),
@@ -305,11 +452,18 @@ function detail_column(sec::Union{RCColumnSection, RCCircularSection}; height::L
     tie_bar = circular ? (bs >= 11 ? 4 : 3) : sec.tie_bar_size   # §25.7.2.2
     dt = m(bar_diameter(tie_bar))
 
-    if gravity_seismic && circular
-        push!(md.warnings, "gravity seismic detailing is placed for a rectangular column; " *
-                           "this circular column keeps the ordinary spiral")
+    spiral = circular && sec.tie_type == :spiral
+    # §18.14.3.2 with a spiral is detailed. §18.14.3.3 on a circular column,
+    # and §18.14.3.2 with circular hoops, are not.
+    spiral_within = induced_within_strength && !gravity_seismic && spiral
+    if (gravity_seismic || induced_within_strength) && circular && !spiral_within
+        push!(md.warnings, "gravity seismic detailing is placed for a rectangular column " *
+                           "or a §18.14.3.2 spiral; this circular column keeps its ordinary " *
+                           (spiral ? "spiral" : "ties"))
     end
     seismic = gravity_seismic && !circular
+    within = induced_within_strength && !circular
+    hooped = seismic || within
 
     # ── Longitudinal bars ──────────────────────────────────────────────────
     z_bar = width / 2 - cov - dt - db / 2
@@ -352,9 +506,37 @@ function detail_column(sec::Union{RCColumnSection, RCCircularSection}; height::L
 
     # ── Transverse bars ────────────────────────────────────────────────────
     top_limit = H - hs + cs            # lowest slab bars above
-    if circular && sec.tie_type == :spiral
+    if spiral
+        s_shear = tie_spacing
+        over = false
+        if spiral_within
+            ratio = ustrip(u"inch^2", sec.As_total) / ustrip(u"inch^2", π * sec.D^2 / 4)
+            (0.01 - 1e-9 <= ratio <= 0.06 + 1e-9) || push!(md.warnings,
+                "longitudinal ratio $(round(ratio; digits = 4)) is outside 0.01Ag to 0.06Ag (§18.7.4.1)")
+            over = _note_gravity_column_within!(md, sec, fc, fy, Pu_gravity; spiral = true)
+            if material !== nothing
+                range = isempty(axials) && Pu !== nothing ? (Pu,) : axials
+                designed = special_column_shear_design(sec, material, (H - hs) * u"m";
+                                                       axials = range, Vu_x = Vu_x, Vu_y = Vu_y,
+                                                       beam_shear = beam_shear)
+                # One pitch runs the full height, so it takes the tighter of
+                # the ℓo and middle spacings.
+                s_design = min(designed.spacing, designed.spacing_middle)
+                s_shear = s_shear === nothing ? s_design : min(s_shear, s_design)
+                ve = round(ustrip(u"kip", max(designed.Ve_x, designed.Ve_y)); digits = 1)
+                push!(md.notes, "design shear $(ve) kip, " *
+                    (designed.concrete_omitted ? "Vc = 0 over ℓo" : "Vc counted") * " (§18.7.6)")
+                designed.ok || push!(md.warnings,
+                    "the section cannot provide the §18.7.6 shear; the spiral is at the closest pitch")
+            else
+                push!(md.warnings, "§18.7.6 shear is not computed until the column material is passed")
+            end
+            over && cov > m(4.0u"inch") + 1e-9 && push!(md.warnings,
+                "cover outside the spiral exceeds 4 in.; the §18.7.5.7 additional " *
+                "transverse reinforcement is not detailed for a circular column")
+        end
         _add_spiral!(md, sec, H, top_limit, fc, fyt; cover = cov, db = db,
-                     shear_spacing = tie_spacing)
+                     shear_spacing = s_shear, within = spiral_within, over = over)
     else
         s_code = m(column_tie_spacing(bs, tie_bar, least * u"m"))
         s = s_code
@@ -365,7 +547,7 @@ function detail_column(sec::Union{RCColumnSection, RCCircularSection}; height::L
             s_shear > 1e-9 && (s = min(s, s_shear))
         end
         shear_end = shear_mid = nothing
-        if seismic && material !== nothing
+        if hooped && material !== nothing
             range = isempty(axials) && Pu !== nothing ? (Pu,) : axials
             designed = special_column_shear_design(sec, material, (H - hs) * u"m";
                                                    axials = range, Vu_x = Vu_x, Vu_y = Vu_y,
@@ -377,13 +559,17 @@ function detail_column(sec::Union{RCColumnSection, RCCircularSection}; height::L
             push!(md.notes, "design shear $(ve) kip, $vc (§18.7.6)")
             designed.ok || push!(md.warnings,
                 "the section cannot provide the §18.7.6 shear; the hoops are at the closest spacing")
-        elseif seismic
+        elseif hooped
             push!(md.warnings, "§18.7.6 shear is not computed until the column material is passed")
         end
-        if seismic
+        if within
+            _note_gravity_column_within!(md, sec, fc, fy, Pu_gravity)
+        end
+        if hooped
             _detail_gravity_hoops!(md, sec, H, hs, s, bs, tie_bar, cov, dt, fc, fy, fyt;
                                    Pu = Pu, beam_depth = beam_depth === nothing ? slab_above : beam_depth,
-                                   shear_end = shear_end, shear_mid = shear_mid)
+                                   shear_end = shear_end, shear_mid = shear_mid,
+                                   within = within, Pu_gravity = Pu_gravity)
         else
         xs = _spaced_positions(s / 2, top_limit - s / 2, s)
         if circular
@@ -550,9 +736,14 @@ function _locate_crossties!(md::MemberDetail, sec::RCColumnSection, cov::Float64
     length(across_y) > 0 && push!(specs, (:z, across_y, half_z))
     length(across_z) > 0 && push!(specs, (:y, across_z, half_y))
     groups = findall(g -> g.role === :crosstie, md.groups)
-    length(groups) == length(specs) || throw(ArgumentError(
-        "$(length(groups)) crosstie groups and $(length(specs)) supported faces"))
-    for (i, (along, coords, half)) in zip(groups, specs)
+    isempty(groups) && isempty(specs) && return nothing
+    # Each tie zone adds one crosstie group per supported face, in the same
+    # order, so a seismic column repeats the face pattern once per zone.
+    (!isempty(groups) && !isempty(specs) && length(groups) % length(specs) == 0) ||
+        throw(ArgumentError(
+            "$(length(groups)) crosstie groups and $(length(specs)) supported faces"))
+    for (j, i) in enumerate(groups)
+        along, coords, half = specs[mod1(j, length(specs))]
         g = md.groups[i]
         wires = Vector{NTuple{3, Float64}}[]
         for x in g.x_positions, c in coords
@@ -582,21 +773,45 @@ function _add_crossties!(md, sec::RCColumnSection, xs, tie_bar, cov, dt; mark_ba
     end
 end
 
+"""
+One continuous spiral from the floor to the lowest slab bars above.
+
+`within` is the §18.14.3.2(b) column: the pitch is at most the lesser of
+6db and 6 in. over the full height. `over` adds §18.14.3.2(c): ρs is at
+least one-half the greater of Table 18.7.5.4 (d) and (e). The code asks for
+that amount over ℓo; the spiral keeps one pitch, so it runs the full height.
+
+# Citation
+ACI 318-19 §25.7.3 and Eq. (25.7.3.3); §18.14.3.2(b) and (c) and Table
+18.7.5.4 (corpus: aci-318-19, PDF pages 353–354 and 311).
+"""
 function _add_spiral!(md, sec::RCCircularSection, H, top_limit, fc, fyt; cover, db,
-                      shear_spacing = nothing)
+                      shear_spacing = nothing, within::Bool = false, over::Bool = false)
     m(x) = ustrip(u"m", x)
     D = m(sec.D)
     Dc = D - 2cover                       # out-to-out of the spiral
     Ag = π * D^2 / 4
     Ach = π * Dc^2 / 4
     ρs = 0.45 * (Ag / Ach - 1) * ustrip(u"psi", fc) / ustrip(u"psi", fyt)   # Eq. (25.7.3.3)
+    ρ_note = "Eq. 25.7.3.3"
+    if over
+        # Table 18.7.5.4 (d) and (e); boundary_transverse_amount evaluates the
+        # same two spiral expressions.
+        half = 0.5 * boundary_transverse_amount(Ag * u"m^2", Ach * u"m^2", fc, fyt;
+                                                spiral = true).required
+        if half > ρs
+            ρs = half
+            ρ_note = "§18.14.3.2(c), half of Table 18.7.5.4 (d) and (e)"
+        end
+    end
+    s_cap = within ? min(m(6.0u"inch"), 6 * db) : Inf
     clear_min, clear_max = m(1.0u"inch"), m(3.0u"inch")
     chosen = nothing
     for bsp in 3:5
         dsp = m(bar_diameter(bsp))
         Asp = ustrip(u"m^2", bar_area(bsp))
         s_req = 4 * Asp / (Dc * ρs)
-        s = min(s_req, clear_max + dsp)
+        s = min(s_req, clear_max + dsp, s_cap)
         if s - dsp >= clear_min - 1e-9
             chosen = (bsp, dsp, s)
             break
@@ -607,6 +822,7 @@ function _add_spiral!(md, sec::RCCircularSection, H, top_limit, fc, fyt; cover, 
         return
     end
     bsp, dsp, s = chosen
+    cap_note = within && s >= s_cap - 1e-9 ? ", at most the lesser of 6db and 6 in. (§18.14.3.2(b))" : ""
     shear_note = ""
     if shear_spacing !== nothing
         s_sh = m(shear_spacing)
@@ -631,5 +847,5 @@ function _add_spiral!(md, sec::RCCircularSection, H, top_limit, fc, fyt; cover, 
                               shape = :spiral, path = path,
                               x_positions = collect(0.0:s:top_limit),
                               note = "pitch $(round(s / 0.0254; digits = 2)) in., ρs ≥ $(round(ρs; digits = 4)) " *
-                                     "(Eq. 25.7.3.3), 1.5 extra turns each end$(shear_note)"))
+                                     "($(ρ_note)), 1.5 extra turns each end$(cap_note)$(shear_note)"))
 end

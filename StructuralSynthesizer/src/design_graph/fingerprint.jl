@@ -165,6 +165,13 @@ function _field_fingerprint(struc, field::Symbol)
                    for f in struc.foundations]
     elseif field === :asap_model
         return _asap_fingerprint(struc.asap_model)
+    elseif field === :walls
+        # The ordinary-wall stage's thickness. Not `repr(struc.walls)`: that
+        # mixes checks, mesh, and openings into the hash foundations read.
+        return Any[w.thickness for w in struc.walls]
+    elseif field === :frame_section_floors
+        return Any[(gid, repr(s)) for (gid, s) in sort!(collect(struc.frame_section_floors);
+                                                        by = first)]
     else
         # Unknown field: fall back to a repr of the whole field. Safe (complete)
         # but coarse; declared writes should use the named fields above.

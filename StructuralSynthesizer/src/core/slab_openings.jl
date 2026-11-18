@@ -51,17 +51,18 @@ end
 # =============================================================================
 
 """
-    add_slab_opening!(skel, loop, stories) -> skel
+    add_slab_opening!(skel, loop, stories; framing=:auto) -> skel
 
-Add one unframed opening with plan outline `loop` (`(x, y)` points; plain
-numbers are meters) on each story in `stories` (a level index or a collection,
-e.g. `1:5` for a stair repeated up the building).
+Add one opening with plan outline `loop` (`(x, y)` points; plain numbers are
+meters) on each story in `stories` (a level index or a collection, e.g. `1:5`
+for a stair repeated up the building). `framing` is `:auto`, `:opening_axes`,
+or `:none`; see [`SlabOpening`](@ref).
 
 Throws if the outline has fewer than 3 points or no area, a story does not
 exist, or the opening overlaps another opening on the same story (draw
 overlapping cuts as one outline, so net areas are not subtracted twice).
 """
-function add_slab_opening!(skel::BuildingSkeleton, loop, stories)
+function add_slab_opening!(skel::BuildingSkeleton, loop, stories; framing::Symbol=:auto)
     pts = _opening_loop(loop)
     length(pts) >= 3 || throw(ArgumentError("Slab opening needs at least 3 points; got $(length(pts))."))
     abs(_shoelace_area(pts)) > OPENING_OVERLAP_TOL_M2 ||
@@ -74,7 +75,7 @@ function add_slab_opening!(skel::BuildingSkeleton, loop, stories)
             _overlap_area(pts, other.loop) > OPENING_OVERLAP_TOL_M2 &&
                 throw(ArgumentError("Slab opening overlaps opening $k on story $level; draw them as one outline."))
         end
-        push!(skel.openings, SlabOpening(level, pts))
+        push!(skel.openings, SlabOpening(level, pts, framing))
     end
     return skel
 end
@@ -111,6 +112,28 @@ function face_openings(skel::BuildingSkeleton, face_idx::Int)
     return [k for (k, op) in enumerate(skel.openings)
             if op.story == level &&
                _area_on_face(skel, face_idx, face, op.loop) > OPENING_OVERLAP_TOL_M2]
+end
+
+"""
+Warn for every vault face that contains an opening.
+
+The opening is not framed and is not part of the vault span, stress, or
+thrust. Framing and the vault check come later; until then the result is
+for the full bay.
+"""
+function warn_vault_openings!(struc, only::Union{Nothing,Int}=nothing)
+    idxs = only === nothing ? eachindex(struc.slabs) : (only,)
+    for slab_idx in idxs
+        slab = struc.slabs[slab_idx]
+        slab.floor_type === :vault || continue
+        for ci in slab.cell_indices
+            face = struc.cells[ci].face_idx
+            n = length(face_openings(struc.skeleton, face))
+            n == 0 && continue
+            @warn "vault slab $slab_idx face $face has $n unframed opening(s); they are left out of the vault check"
+        end
+    end
+    return struc
 end
 
 """Plan outlines (meters) of the voids in `face_idx`: its openings, then its holes."""

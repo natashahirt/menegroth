@@ -98,12 +98,14 @@ function _compute_story_props(struc, cols, story::Int; concrete::StructuralSizer
     # --- Sum of factored axial loads (ΣPu) ---
     # Get from ASAP results if available, otherwise estimate from tributary
     ΣPu = 0.0kip
+    drop_weights = nothing
     for col in cols
         # Try to get from analysis results first
         Pu = _get_column_axial_from_analysis(struc, col)
         if isnothing(Pu)
             # Estimate from tributary area if analysis not available
-            Pu = _estimate_column_axial(struc, col)
+            drop_weights = something(drop_weights, drop_panel_weights_by_vertex(struc))
+            Pu = _estimate_column_axial(struc, col; drop_weights)
         end
         ΣPu += Pu
     end
@@ -175,8 +177,14 @@ function _get_column_axial_from_analysis(struc, col)
     Pu_max > 0 ? uconvert(kip, Pu_max * u"N") : nothing
 end
 
-"""Estimate column axial load from tributary area and loads. Returns Force (kip)."""
-function _estimate_column_axial(struc, col)
+"""
+Estimate column axial load from tributary area and loads. Returns Force (kip).
+
+`drop_weights` is [`drop_panel_weights_by_vertex`](@ref); pass it when
+estimating many columns so it is computed once.
+"""
+function _estimate_column_axial(struc, col;
+                                drop_weights = drop_panel_weights_by_vertex(struc))
     # Get tributary area (column_tributary_by_cell returns Dict{Int, AreaQuantity})
     trib = column_tributary_by_cell(struc, col)
     
@@ -192,7 +200,11 @@ function _estimate_column_axial(struc, col)
         
         Pu += uconvert(kip, qu * area)
     end
-    
+
+    # Drop-panel weight is dead load at the column top, outside the cell pressures.
+    γD = max(default_combo.D, strength_1_4D.D)
+    Pu += uconvert(kip, γD * get(drop_weights, col.vertex_idx, 0.0u"N"))
+
     return Pu
 end
 
@@ -246,7 +258,8 @@ been solved.
 function _estimate_story_shear(struc, cols, story::Int)
     model = _get_solved_model(struc)
     if isnothing(model)
-        ΣPu = sum(_estimate_column_axial(struc, col) for col in cols)
+        dw = drop_panel_weights_by_vertex(struc)
+        ΣPu = sum(_estimate_column_axial(struc, col; drop_weights=dw) for col in cols)
         return 0.05 * ΣPu
     end
 
@@ -273,7 +286,8 @@ function _estimate_story_shear(struc, cols, story::Int)
 
     if Vus ≈ 0
         # No shear detected — fall back to 5% gravity estimate
-        ΣPu = sum(_estimate_column_axial(struc, col) for col in cols)
+        dw = drop_panel_weights_by_vertex(struc)
+        ΣPu = sum(_estimate_column_axial(struc, col; drop_weights=dw) for col in cols)
         return 0.05 * ΣPu
     end
 
@@ -387,11 +401,13 @@ Named tuple:
 - `stories_needing_attention::Vector{Int}`: Stories where drift ratio > 1.4
 
 # Notes
-- The model's loads are modified in-place (P-Δ NodeForces are appended).
-  Call this once after the first-order solve; do not call repeatedly unless
-  you first remove the added P-Δ loads.
-- The original first-order loads remain unchanged — only additive P-Δ
-  forces are appended.
+- The model's loads are modified in-place: P-Δ `NodeForce`s with id
+  `:p_delta` are appended and left on the model. A later call removes them
+  and re-solves first-order before iterating again.
+- Solves honor `struc.asap_rigid_links`.
+- The design pipeline does not call this. Its columns are designed as
+  braced (nonsway magnifier), and second-order lateral effects are taken by
+  the wall stage's story geometric stiffness.
 """
 function p_delta_iterate!(struc;
     max_iter::Int = 10,
@@ -420,16 +436,21 @@ function p_delta_iterate!(struc;
         push!(columns_by_story[s], col)
     end
 
+    # Forces from an earlier call would otherwise count as first-order load.
+    n_before = length(model.loads)
+    filter!(ld -> !(ld isa Asap.NodeForce && ld.id === :p_delta), model.loads)
+    n_original_loads = length(model.loads)
+    if n_original_loads < n_before
+        Asap.update!(model)
+        _solve_struc_model!(struc)
+    end
+
     # ── Record first-order drifts (baseline) ──
     first_order_drifts = Dict{Int, Float64}()   # story → max drift (m)
     for (s, cols) in columns_by_story
         Δ = _compute_story_drift(struc, cols, s)
         first_order_drifts[s] = ustrip(u"m", Δ)
     end
-
-    # Track P-Δ loads we add so they can be identified later
-    pdelta_load_ids = Symbol[]
-    n_original_loads = length(model.loads)
 
     prev_drifts = copy(first_order_drifts)
     converged = false
@@ -496,7 +517,7 @@ function p_delta_iterate!(struc;
 
         # ── Re-solve ──
         Asap.update!(model)
-        Asap.solve!(model)
+        _solve_struc_model!(struc)
 
         # ── Check convergence ──
         curr_drifts = Dict{Int, Float64}()

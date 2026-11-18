@@ -34,7 +34,6 @@ Constraints:
 - `δ_limit`: Maximum allowable rise reduction in meters
 - `h_bounds`: (h_min, h_max) rise bounds in meters
 - `t_bounds`: (t_min, t_max) thickness bounds in meters
-- `check_asymmetric`: Whether to check asymmetric load case
 - `rib_depth_m`: Rib depth (0 for no ribs)
 - `rib_apex_m`: Rib apex rise above extrados (0 for no ribs)
 - `mode`: Optimization mode (:both, :rise_only, :thickness_only)
@@ -50,7 +49,6 @@ struct VaultNLPProblem <: AbstractNLPProblem
     δ_limit::Float64
     h_bounds::Tuple{Float64, Float64}
     t_bounds::Tuple{Float64, Float64}
-    check_asymmetric::Bool
     rib_depth_m::Float64
     rib_apex_m::Float64
     mode::Symbol  # :both, :rise_only, :thickness_only
@@ -76,7 +74,6 @@ Create a vault optimization problem with Unitful inputs.
 - `deflection_limit::Length`: Max rise reduction (default: span/240)
 - `rise_bounds::Tuple{Length, Length}`: (h_min, h_max) rise bounds
 - `thickness_bounds::Tuple{Length, Length}`: (t_min, t_max) thickness bounds
-- `check_asymmetric::Bool`: Check half-span loading (default: true)
 - `rib_depth::Length`: Rib depth (default: 0)
 - `rib_apex_rise::Length`: Rib apex rise (default: 0)
 - `mode::Symbol`: Optimization mode (:both, :rise_only, :thickness_only)
@@ -92,7 +89,6 @@ function VaultNLPProblem(
     deflection_limit::Union{Length, Nothing} = nothing,
     rise_bounds::Tuple{<:Length, <:Length},
     thickness_bounds::Tuple{<:Length, <:Length},
-    check_asymmetric::Bool = true,
     rib_depth::Length = 0.0u"m",
     rib_apex_rise::Length = 0.0u"m",
     mode::Symbol = :both,
@@ -103,13 +99,8 @@ function VaultNLPProblem(
     live_kN = ustrip(u"kN/m^2", live)
     finish_kN = ustrip(u"kN/m^2", finishing_load)
     
-    # Default allowable stress: 0.45 fc'
-    σ_allow = isnothing(allowable_stress) ? 
-        0.45 * ustrip(u"MPa", material.fc′) : Float64(allowable_stress)
-    
-    # Default deflection limit: span/240
-    δ_lim = isnothing(deflection_limit) ? 
-        span_m / 240 : ustrip(u"m", deflection_limit)
+    σ_allow = ustrip(u"MPa", vault_allowable_stress(material, allowable_stress))
+    δ_lim = ustrip(u"m", vault_rise_loss_limit(span, deflection_limit))
     
     h_min = ustrip(u"m", rise_bounds[1])
     h_max = ustrip(u"m", rise_bounds[2])
@@ -123,7 +114,7 @@ function VaultNLPProblem(
         span_m, trib_m, sdl_kN, live_kN, finish_kN,
         material, σ_allow, δ_lim,
         (h_min, h_max), (t_min, t_max),
-        check_asymmetric, rib_d, rib_h,
+        rib_d, rib_h,
         mode
     )
 end
@@ -174,7 +165,7 @@ function variable_names(p::VaultNLPProblem)
     end
 end
 """Return constraint name strings for the vault optimization problem."""
-constraint_names(::VaultNLPProblem) = ["stress", "convergence"]
+constraint_names(::VaultNLPProblem) = ["stress", "convergence", "kern"]
 
 """
     _get_h_t(p::VaultNLPProblem, x) -> (h, t)
@@ -196,82 +187,80 @@ end
 # Gradient-Based Interface (for NonConvex.jl, Ipopt)
 # ==============================================================================
 
-"""Number of constraints: stress and convergence/deflection."""
-n_constraints(::VaultNLPProblem) = 2
+"""Number of constraints: stress, convergence/deflection, and thrust-line kern."""
+n_constraints(::VaultNLPProblem) = 3
 
 """
 Constraint bounds for vault:
 - g1 = σ_max - σ_allow ≤ 0 (stress)
 - g2 = δ - δ_limit ≤ 0 (deflection)
+- g3 = e / (t cos θ / 6) - 1 ≤ 0 (half-span thrust line in the middle third)
 """
 function constraint_bounds(::VaultNLPProblem)
-    lb = [-Inf, -Inf]
-    ub = [0.0, 0.0]
+    lb = [-Inf, -Inf, -Inf]
+    ub = [0.0, 0.0, 0.0]
     return (lb, ub)
 end
 
 """
-Objective function: shell volume = arc_length × thickness × trib_depth.
+Concrete volume of one vault bay (shell and ribs), m³, from
+[`get_vault_properties`](@ref): the extrados is the intrados raised by `t`,
+so the shell is `t · span · trib`. The analytical path uses the same volume.
+"""
+_vault_volume(p::VaultNLPProblem, h, t) =
+    get_vault_properties(p.span_m, h, t, p.trib_m, p.rib_depth_m, p.rib_apex_m).total_vol
 
-Note: Uses initial rise for arc length (not equilibrium rise) to keep
-the function smooth for gradient-based optimization.
+"""
+    _vault_cases(p, h, t) -> NamedTuple
+
+[`vault_load_cases`](@ref) at rise `h` and thickness `t`, in metres.
+"""
+function _vault_cases(p::VaultNLPProblem, h, t)
+    return vault_load_cases(p.span_m * u"m", h * u"m", p.trib_m * u"m", t * u"m",
+                            p.rib_depth_m * u"m", p.rib_apex_m * u"m", p.material.ρ,
+                            p.sdl_kN * u"kN/m^2", p.live_kN * u"kN/m^2",
+                            p.finish_kN * u"kN/m^2")
+end
+
+"""
+Elastic shortening at rise `h` and thickness `t` under the full service load
+and the self-weight from `cases`.
+"""
+function _vault_shortening(p::VaultNLPProblem, h, t, cases)
+    total = (p.sdl_kN + p.live_kN + p.finish_kN) * u"kN/m^2" + cases.self_weight
+    return solve_equilibrium_rise(p.span_m * u"m", h * u"m", total, t * u"m",
+                                  p.trib_m * u"m", p.material.E;
+                                  deflection_limit = p.δ_limit * u"m")
+end
+
+"""
+Objective function: concrete volume of one bay ([`_vault_volume`](@ref)).
+
+Note: Uses initial rise (not equilibrium rise) to keep the function smooth
+for gradient-based optimization.
 """
 function objective_fn(p::VaultNLPProblem, x::Vector{Float64})
     h, t = _get_h_t(p, x)
-    arc_len = parabolic_arc_length(p.span_m, h)
-    return arc_len * t * p.trib_m
+    return _vault_volume(p, h, t)
 end
 
 """
 Constraint functions for vault optimization.
 
-Returns [g1, g2] where:
+Returns [g1, g2, g3] where:
 - g1 = σ_max - σ_allow (stress constraint, ≤ 0 for feasible)
 - g2 = δ - δ_limit (deflection constraint, ≤ 0 for feasible)
+- g3 = kern ratio - 1 (≤ 0 for feasible)
 
 For non-convergent cases, g2 returns a large positive value.
 """
 function constraint_fns(p::VaultNLPProblem, x::Vector{Float64})
     h, t = _get_h_t(p, x)
-    
-    # Convert back to Unitful for vault analysis functions
-    span_u = p.span_m * u"m"
-    rise_u = h * u"m"
-    trib_u = p.trib_m * u"m"
-    thick_u = t * u"m"
-    rib_d_u = p.rib_depth_m * u"m"
-    rib_h_u = p.rib_apex_m * u"m"
-    density_u = p.material.ρ
-    load_u = (p.sdl_kN + p.live_kN) * u"kN/m^2"
-    finish_u = p.finish_kN * u"kN/m^2"
-    
-    # Compute stress (symmetric case)
-    sym = vault_stress_symmetric(
-        span_u, rise_u, trib_u, thick_u, rib_d_u, rib_h_u,
-        density_u, load_u, finish_u
-    )
-    σ_max_MPa = ustrip(u"MPa", sym.σ)
-    sw_kN_m2 = ustrip(u"kN/m^2", sym.self_weight)
-    
-    # Asymmetric case (if enabled)
-    if p.check_asymmetric
-        asym = vault_stress_asymmetric(
-            span_u, rise_u, trib_u, thick_u, rib_d_u, rib_h_u,
-            density_u, load_u, finish_u
-        )
-        σ_max_MPa = max(σ_max_MPa, ustrip(u"MPa", asym.σ))
-    end
-    
-    # Compute elastic shortening (Unitful version)
-    total_load_u = load_u + sym.self_weight + finish_u
-    E_u = p.material.E
-    eq = solve_equilibrium_rise(
-        span_u, rise_u, total_load_u, thick_u, trib_u, E_u;
-        deflection_limit = p.δ_limit * u"m"
-    )
-    
+    cases = _vault_cases(p, h, t)
+    eq = _vault_shortening(p, h, t, cases)
+
     # Constraint values
-    g1 = σ_max_MPa - p.σ_allow  # Stress constraint: g1 ≤ 0
+    g1 = ustrip(u"MPa", cases.σ_max) - p.σ_allow  # Stress constraint: g1 ≤ 0
     
     # Deflection constraint: g2 ≤ 0
     if eq.converged
@@ -280,8 +269,9 @@ function constraint_fns(p::VaultNLPProblem, x::Vector{Float64})
     else
         g2 = 1.0  # Large positive = infeasible (non-convergent)
     end
-    
-    return [g1, g2]
+    g3 = cases.kern.ratio - 1.0
+
+    return [g1, g2, g3]
 end
 
 # ==============================================================================
@@ -296,57 +286,19 @@ Returns rich result data for `build_result()`.
 """
 function evaluate(p::VaultNLPProblem, x::Vector{Float64})
     h, t = _get_h_t(p, x)
-    
-    # Convert back to Unitful for vault analysis functions
-    span_u = p.span_m * u"m"
-    rise_u = h * u"m"
-    trib_u = p.trib_m * u"m"
-    thick_u = t * u"m"
-    rib_d_u = p.rib_depth_m * u"m"
-    rib_h_u = p.rib_apex_m * u"m"
-    density_u = p.material.ρ
-    load_u = (p.sdl_kN + p.live_kN) * u"kN/m^2"
-    finish_u = p.finish_kN * u"kN/m^2"
-    
-    # Compute stress (symmetric case)
-    sym = vault_stress_symmetric(
-        span_u, rise_u, trib_u, thick_u, rib_d_u, rib_h_u,
-        density_u, load_u, finish_u
-    )
-    σ_max = ustrip(u"MPa", sym.σ)
-    sw_kN_m2 = ustrip(u"kN/m^2", sym.self_weight)
-    
-    # Asymmetric case (if enabled)
-    if p.check_asymmetric
-        asym = vault_stress_asymmetric(
-            span_u, rise_u, trib_u, thick_u, rib_d_u, rib_h_u,
-            density_u, load_u, finish_u
-        )
-        σ_max = max(σ_max, ustrip(u"MPa", asym.σ))
-    end
-    
-    # Compute elastic shortening (Unitful version)
-    total_load_u = load_u + sym.self_weight + finish_u
-    E_u = p.material.E
-    eq = solve_equilibrium_rise(
-        span_u, rise_u, total_load_u, thick_u, trib_u, E_u;
-        deflection_limit = p.δ_limit * u"m"
-    )
-    
-    # Extract results
+    cases = _vault_cases(p, h, t)
+    eq = _vault_shortening(p, h, t, cases)
+    σ_max = ustrip(u"MPa", cases.σ_max)
+
     converged = eq.converged
     final_rise_m = converged ? ustrip(u"m", eq.final_rise) : h
     deflection_ok = converged && eq.deflection_ok
-    
-    # Evaluate feasibility
     stress_ok = σ_max <= p.σ_allow
-    feasible = stress_ok && deflection_ok
-    
-    # Compute objective (volume)
-    arc_len = parabolic_arc_length(p.span_m, final_rise_m)
-    volume = arc_len * t * p.trib_m
-    
-    # Rich result for build_result()
+    feasible = stress_ok && cases.kern.ok && deflection_ok
+
+    # Objective at the equilibrium rise, the geometry that is built.
+    props = get_vault_properties(p.span_m, final_rise_m, t, p.trib_m, p.rib_depth_m, p.rib_apex_m)
+
     result = (
         h = h,
         t = t,
@@ -358,11 +310,16 @@ function evaluate(p::VaultNLPProblem, x::Vector{Float64})
         final_rise = final_rise_m,
         deflection_ok = deflection_ok,
         feasible = feasible,
-        volume = volume,
-        arc_length = arc_len,
+        volume = props.total_vol,
+        arc_length = props.arc_length,
+        governing = cases.governing,
+        kern = cases.kern,
+        thrust_dead = cases.thrust_dead,
+        thrust_live = cases.thrust_live,
+        self_weight = cases.self_weight,
     )
-    
-    return (feasible, volume, result)
+
+    return (feasible, props.total_vol, result)
 end
 
 # ==============================================================================
@@ -394,37 +351,15 @@ function build_result(
     thickness = t * u"m"
     rise = eval_result.final_rise * u"m"
     arc_length = eval_result.arc_length * u"m"
-    
-    # Convert to Unitful for vault analysis functions
-    span_u = p.span_m * u"m"
-    rise_u = h * u"m"
     trib_u = p.trib_m * u"m"
-    thick_u = t * u"m"
-    rib_d_u = p.rib_depth_m * u"m"
-    rib_h_u = p.rib_apex_m * u"m"
-    density_u = p.material.ρ
-    sdl_u = p.sdl_kN * u"kN/m^2"
-    live_u = p.live_kN * u"kN/m^2"
-    finish_u = p.finish_kN * u"kN/m^2"
-    
-    # Compute thrust from symmetric analysis
-    sym = vault_stress_symmetric(
-        span_u, rise_u, trib_u, thick_u, rib_d_u, rib_h_u,
-        density_u, sdl_u, finish_u  # Dead only
-    )
-    sym_live = vault_stress_symmetric(
-        span_u, rise_u, trib_u, thick_u, rib_d_u, rib_h_u,
-        density_u, live_u, 0.0u"kN/m^2"  # Live only
-    )
-    
-    # Line load units (force per length) - thrust is a force, convert to force/length
-    # thrust is total horizontal force, divide by trib_depth to get kN/m
-    thrust_dead = sym.thrust / trib_u  # Force / Length = Force/Length
-    thrust_live = sym_live.thrust / trib_u
-    
-    # Volume and self-weight (coherent SI)
-    volume_per_area = eval_result.arc_length * t * u"m"
-    self_weight = uconvert(u"kPa", sym.self_weight)
+
+    # Thrust per unit length of support (kN/m), from the evaluated load cases.
+    thrust_dead = uconvert(u"kN/m", eval_result.thrust_dead / trib_u)
+    thrust_live = uconvert(u"kN/m", eval_result.thrust_live / trib_u)
+
+    # Volume per plan area of the bay (m³/m² = m), as the analytical path.
+    volume_per_area = eval_result.volume / (p.span_m * p.trib_m) * u"m"
+    self_weight = uconvert(u"kPa", eval_result.self_weight)
     
     # Build check tuples
     stress_check = (
@@ -443,26 +378,13 @@ function build_result(
     )
     
     convergence_check = (converged = eval_result.converged, iterations = 0)
-    
-    # Determine governing case
-    governing_case = :symmetric  # We'd need to track this in eval_result for accuracy
-    if p.check_asymmetric
-        load_total_u = (p.sdl_kN + p.live_kN) * u"kN/m^2"
-        asym = vault_stress_asymmetric(
-            span_u, rise_u, trib_u, thick_u, rib_d_u, rib_h_u,
-            density_u, load_total_u, finish_u
-        )
-        if ustrip(u"MPa", asym.σ) > eval_result.σ_max * 0.99  # Allow small tolerance
-            governing_case = :asymmetric
-        end
-    end
-    
+
     VaultResult(
         thickness, rise, arc_length,
         thrust_dead, thrust_live,
         volume_per_area, self_weight,
-        eval_result.σ_max, governing_case,
-        stress_check, deflection_check, convergence_check
+        eval_result.σ_max, eval_result.governing,
+        stress_check, deflection_check, convergence_check, eval_result.kern
     )
 end
 
@@ -472,11 +394,10 @@ end
 # Kept for compatibility; the solver uses _convert_objective
 # for efficiency during grid search.
 
-"""Volume-based objective for vault: arc_length × thickness × trib_depth."""
+"""Volume-based objective for vault: concrete volume of one bay ([`_vault_volume`](@ref))."""
 function objective_value(::MinVolume, p::VaultNLPProblem, x::Vector{Float64})
     h, t = x
-    arc_len = parabolic_arc_length(p.span_m, h)
-    return arc_len * t * p.trib_m
+    return _vault_volume(p, h, t)
 end
 
 """Weight-based objective for vault: volume × density."""

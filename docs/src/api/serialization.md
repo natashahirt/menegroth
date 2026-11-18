@@ -98,7 +98,7 @@ Additional behavior implemented in `StructuralSynthesizer/src/api/deserialize.jl
 | `floor_options.method` | `"EFM_HARDY_CROSS"` | `EFM(solver=:hardy_cross)` |
 | `floor_options.method` | `"FEA"` | `FEA(target_edge = floor_options.target_edge_m * u"m")` when provided; otherwise `FEA(target_edge = nothing)` and the mesher uses an adaptive default (`clamp(min_span_m/20, 0.15, 0.75)` m). |
 | `column_sizing_strategy` | `"discrete"` / `"nlp"` | Sets `ConcreteColumnOptions(...; sizing_strategy=...)` and `SteelColumnOptions(...; sizing_strategy=...)` |
-| `beam_sizing_strategy` | `"discrete"` / `"nlp"` | Sets `ConcreteBeamOptions(...; sizing_strategy=...)` and `SteelBeamOptions(...; sizing_strategy=...)` |
+| `beam_sizing_strategy` | `"discrete"` / `"nlp"` | Sets the beam option strategy. `"nlp"` is accepted only for non-composite steel W/HSS beams; RC, PixelFrame, and composite beams require `"discrete"`. |
 | `mip_time_limit_sec` | — | Sets `time_limit_sec` on discrete column/beam options (defaults to 30s when omitted/`null`) |
 | `beam_catalog` | `"custom"` + `beam_catalog_bounds` | Builds `custom_catalog = rc_beam_catalog_from_bounds(...)` and sets `ConcreteBeamOptions(catalog=:standard, custom_catalog=custom_catalog)` |
 | `pixelframe_options.fc_preset` | `"standard"`, `"low"`, `"high"`, `"extended"` | Selects preset `fc_values` (MPa) for PixelFrame catalogs |

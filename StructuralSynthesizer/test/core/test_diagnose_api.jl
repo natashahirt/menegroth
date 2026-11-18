@@ -5,7 +5,8 @@ using Unitful
 using JSON3
 
 @testset "Diagnose API" begin
-    skel = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 2, 2, 1)
+    # Three continuous spans each way (ACI 318-11 §13.6.1.1).
+    skel = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 3, 3, 1)
     struc = BuildingStructure(skel)
     params = DesignParameters(
         floor = FlatPlateOptions(

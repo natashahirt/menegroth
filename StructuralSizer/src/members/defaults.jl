@@ -59,7 +59,7 @@ default_release(role::Symbol, mat::AbstractMaterial, lateral_role::Symbol = :gra
 # ENGINEERING JUDGMENT: keep that neutral (moment-continuous) default so a design
 # assembled without an explicit beam material still resolves rather than erroring.
 # Not a code requirement.
-default_release(::Symbol, ::Nothing, lateral_role::Symbol = :gravity) = (:fixed, :fixed)
+default_release(::Symbol, ::Nothing, ::Symbol = :gravity) = (:fixed, :fixed)
 
 # AbstractMaterial fallback — undeclared combination.
 function default_release(::Val{R}, mat::AbstractMaterial, ::Val{L}) where {R, L}

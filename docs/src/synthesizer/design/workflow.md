@@ -101,14 +101,11 @@ After `prepare!` builds the structure and analysis model, `design_building` runs
 
 ### Uniform column sizing
 
-If `params.uniform_column_sizing` is not `:off`, `design_building` performs a post-sizing harmonization pass via `harmonize_uniform_column_sizes!` **after** all sizing stages and **before** `capture_design`. This promotes columns within each group (per story or building-wide) to the governing size and re-solves the Asap model when any columns grow.
+If `params.uniform_column_sizing` is not `:off`, harmonization runs at the end of the member stage (`_harmonize_columns!`), before ordinary walls and foundations, so those stages see the final column sections. Flat-plate slabs whose punching check is stale after a column grows are redesigned in the same stage.
 
-### P-Δ Second-Order Analysis
+### Second-order effects
 
-When second-order effects are significant, P-Δ analysis is triggered:
-- **Trigger condition:** story drift ratio δs > 1.5 per ACI 318-11 §6.6.4.6.2 (§10.10 in older editions)
-- **Method:** iterative geometric stiffness update via `p_delta_iterate!`
-- **Implementation:** after each sizing pass, `compute_story_properties!` computes ΣPu, ΣPc, Vus, and Δo for each story, and the sway magnification factor δs = 1 / (1 - ΣPu/0.75ΣPc) per ACI 318-11 §10.10.7
+The member stage designs columns as braced against sidesway, with the nonsway moment magnifier. It does not run a story P-Δ step. Wind and seismic cases are solved in the ordinary wall stage on a story geometric stiffness (`story_geometric_stiffness`), which also checks frame members when walls and frames share the lateral load. `p_delta_iterate!` remains available as a standalone analysis utility.
 
 ### Column Reconciliation
 

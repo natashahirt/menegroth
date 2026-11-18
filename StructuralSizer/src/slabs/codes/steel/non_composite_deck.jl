@@ -14,5 +14,5 @@ Select non-composite deck for given span and load.
 """
 function _size_span_floor(::NonCompositeDeck, span::L, sdl::F, live::F;
                     material::Metal=A992_Steel) where {L, F}
-    error("NonCompositeDeck sizing not yet implemented")
+    throw(UnsupportedFloorSystemError(NonCompositeDeck))
 end

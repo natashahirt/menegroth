@@ -19,7 +19,7 @@ const MOI = JuMP.MOI
     Muy_kipft = [40.0, 50.0, 60.0, 30.0]     # factored moment about y (kip-ft)
     
     # Convert to SI for steel (N, N*m)
-    Pu_N = Pu_kip .* 4448.22
+    Pu_N = Pu_kip .* KIP_TO_N
     Mux_Nm = Mux_kipft .* 1355.82
     Muy_Nm = Muy_kipft .* 1355.82
     

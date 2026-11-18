@@ -2,7 +2,7 @@
 
 julia_version = "1.12.1"
 manifest_format = "2.0"
-project_hash = "8034c223c65aed3fdb75bdddfa29de12b939b2c7"
+project_hash = "c1762ff6aac1c59decd6835bc6e89ac5198acb6e"
 
 [[deps.ASL_jll]]
 deps = ["Artifacts", "JLLWrappers", "Libdl", "Pkg"]
@@ -1960,7 +1960,7 @@ uuid = "9d8e7f6a-5b4c-3d2e-1f0a-9b8c7d6e5f4a"
 version = "0.1.0"
 
 [[deps.StructuralSynthesizer]]
-deps = ["Accessors", "Asap", "Dates", "GeometryBasics", "Graphs", "HTTP", "Interpolations", "JSON", "JSON3", "JuMP", "LinearAlgebra", "Logging", "Meshes", "OrderedCollections", "Oxygen", "PrecompileTools", "Printf", "Random", "Reexport", "SHA", "SparseArrays", "Statistics", "StructTypes", "StructuralSizer", "Unitful", "XLSX"]
+deps = ["Accessors", "Asap", "CodecZlib", "Dates", "GeometryBasics", "Graphs", "HTTP", "Interpolations", "JSON", "JSON3", "JuMP", "LinearAlgebra", "Logging", "Meshes", "OrderedCollections", "Oxygen", "PrecompileTools", "Printf", "Random", "Reexport", "SHA", "Serialization", "SparseArrays", "Statistics", "StructTypes", "StructuralSizer", "Unitful", "XLSX"]
 path = "../StructuralSynthesizer"
 uuid = "fc54e8a9-dab1-4bea-a64f-f8e9b3ce8a89"
 version = "0.1.0"

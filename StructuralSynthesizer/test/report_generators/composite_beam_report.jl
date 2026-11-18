@@ -18,6 +18,7 @@
                           δ_limit_ratio=1/360,
                           δ_const_limit=nothing,
                           Cb=1.0,
+                          reference_ΣQn=nothing,
                           io::IO=stdout) -> NamedTuple
 
 Print a comprehensive composite beam design report and return a summary of
@@ -39,6 +40,9 @@ all check results.
 - `δ_limit_ratio`: Live load deflection limit (default `L/360`)
 - `δ_const_limit`: Absolute construction deflection limit (e.g. `2.5u"inch"`)
 - `Cb`: Moment gradient factor (default 1.0)
+- `reference_ΣQn`: A comparison compression force, such as a published
+  example's operating point. It is reported beside the minimum count and
+  does not change the studs the report installs.
 - `io`: Output stream (default `stdout`)
 """
 function report_composite_beam(
@@ -55,6 +59,7 @@ function report_composite_beam(
     δ_limit_ratio=1/360,
     δ_const_limit=nothing,
     Cb=1.0,
+    reference_ΣQn=nothing,
     io::IO=stdout
 )
     Mu_const  = something(Mu_const, Mu)
@@ -168,12 +173,35 @@ function report_composite_beam(
     composite_ratio = ustrip(u"N", ΣQn) / ustrip(u"N", Cf_max)
 
     _blank()
-    _row2("Required ΣQn", ustrip(u"kip", ΣQn), "kips")
+    _row2("Minimum ΣQn for ϕMn ≥ Mu", ustrip(u"kip", ΣQn), "kips")
     _row2("Composite ratio (ΣQn/Cf_max)", composite_ratio * 100, "%")
-    _row("Studs per half-span", string(n_studs_half))
-    _row("Total studs", string(n_studs_total))
-    _chk("ΣQn ≥ 0.25 Cf_max (I3.2d(5))", ΣQn >= 0.25 * Cf_max)
+    _row("Studs per half-span (minimum)", string(n_studs_half))
+    _row("Total studs (minimum)", string(n_studs_total))
+    # Eqs. C-I3-3 and C-I3-4 are not used below ΣQn/Cf = 0.25. That limit is
+    # on the effective-inertia expressions, not on this plastic strength
+    # (AISC 360-22 Commentary §I3, corpus: aisc-360-22, page 502).
     _chk("Full composite sufficient", partial.sufficient)
+
+    # A published operating point is a different question from the minimum
+    # count above. Strength here is plastic; it is not installed.
+    reference_ϕMn = nothing
+    reference_a = nothing
+    reference_n_half = nothing
+    reference_ok = nothing
+    if reference_ΣQn !== nothing
+        _sub("Reference compression force (comparison only)")
+        reference_Cf = get_Cf(section, material, slab, b_eff, reference_ΣQn)
+        reference_a = reference_Cf / (0.85 * slab.fc′ * b_eff)
+        reference_result = get_ϕMn_composite(section, material, slab, b_eff, reference_ΣQn)
+        reference_ϕMn = reference_result.ϕMn
+        reference_n_half = ceil(Int, ustrip(u"N", reference_ΣQn) / ustrip(u"N", Qn))
+        _row2("Reference ΣQn", ustrip(u"kip", reference_ΣQn), "kips")
+        _row2("a at reference ΣQn", ustrip(u"inch", reference_a), "in.")
+        _row2("ϕMn at reference ΣQn", ustrip(u"kip*ft", reference_ϕMn), "kip-ft")
+        _row("Studs per half-span at reference", string(reference_n_half))
+        reference_ok = reference_ϕMn >= Mu
+        _chk("ϕMn at reference ΣQn ≥ Mu", reference_ok)
+    end
 
     # ======================================================================
     # Stress Block Depth
@@ -378,6 +406,8 @@ function report_composite_beam(
         b_eff, Cf=Cf, a, ΣQn,
         n_studs_half, n_studs_total,
         composite_ratio,
+        reference_ΣQn, reference_ϕMn, reference_a,
+        reference_n_half, reference_ok,
         I_LB, I_tr,
         δ_DL=defl.δ_DL, δ_LL=defl.δ_LL, δ_total=defl.δ_total,
     )

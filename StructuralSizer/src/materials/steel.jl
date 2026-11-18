@@ -94,7 +94,10 @@ default_torsion_released(::Val{:joist}, ::StructuralSteel) = true
 # corpus): the top-of-girder centroid offset `+z = (host_depth + member_depth) / 2`
 # is a MODELING DEFAULT reflecting OWSJ seat-on-girder practice. AISC 360-16 does
 # not prescribe a joist seat offset; this is a modeling assumption, not a code
-# requirement. Designers using a different detail (for example, pocketed joists,
+# requirement. The returned slot 3 is that physical upward offset (positive =
+# global up). `Asap.orient_up_eccentricity` signs it for the member chord and
+# roll where the element is built; this function cannot see the member
+# direction. Designers using a different detail (for example, pocketed joists,
 # top-copes, or embedded plates) should override the FramingLevel seat
 # eccentricity for that group.
 default_seat_eccentricity(::Val{:joist}, ::StructuralSteel, host_depth, member_depth) =

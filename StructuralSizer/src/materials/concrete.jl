@@ -74,6 +74,12 @@ const NWC_4000 = let fc = 4000u"psi", ρ = 2380.0u"kg/m^3"
     Concrete(_aci_Ec(fc, ρ), fc, ρ, 0.20, 0.127u"kgCO2e/kg"; color = "#C8C8C8")
 end
 
+"""Normal-weight concrete, f'c = 4000 psi at 145 lb/ft³, the density the Vulcraft
+composite deck tables are printed for. ECC as `NWC_4000`."""
+const NWC_4000_145 = let fc = 4000u"psi", ρ = uconvert(u"kg/m^3", 145.0u"lb/ft^3")
+    Concrete(_aci_Ec(fc, ρ), fc, ρ, 0.20, 0.127u"kgCO2e/kg"; color = "#C8C8C8")
+end
+
 """Normal-weight concrete, f'c = 5000 psi (ECC = 0.142 kgCO₂e/kg, RMC EPD median, n = 156)."""
 const NWC_5000 = let fc = 5000u"psi", ρ = 2385.0u"kg/m^3"
     Concrete(_aci_Ec(fc, ρ), fc, ρ, 0.20, 0.142u"kgCO2e/kg"; color = "#C8C8C8")
@@ -245,6 +251,7 @@ const Earthen_8000 = Concrete(
 
 register_material!(NWC_3000, "NWC_3000")
 register_material!(NWC_4000, "NWC_4000")
+register_material!(NWC_4000_145, "NWC_4000_145")
 register_material!(NWC_5000, "NWC_5000")
 register_material!(NWC_6000, "NWC_6000")
 register_material!(NWC_GGBS, "NWC_GGBS")

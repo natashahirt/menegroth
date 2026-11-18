@@ -7,13 +7,14 @@ import theme from "./theme.json"
 import { assembleVariant, variantNeighbors, type DecodedScene, type SceneHeader, type SceneVariant, type VariantFile } from "./decode"
 import { buildFrame, type FrameView } from "./frame"
 import { buildGlyphs, type GlyphSet } from "./glyphs"
-import { buildBuilding, buildMemberSolids, buildShellVolumes, buildStressMesh, buildTributary, deflectionColor, SHELL_KIND_NAME, type BuildingParts } from "./building"
+import { buildBuilding, buildMemberSolids, buildShellVolumes, buildStressMesh, buildTributary, CATEGORY_COLOR, deflectionColor, memberCategory, omittedMembers, seatBeamsUnderSlab, shellCategory, SHELL_KIND_NAME, utilizationColor, withoutOmittedSolids, type BuildingParts } from "./building"
 import { applyDimensionCuts, buildDimensions, disposeDimensions, type DimensionGroups, type DimensionView } from "./dimensions"
 import { matchFooting, matchFrame, matchShell, matchWall, readComponents, renderDetail, type ComponentRecord } from "./detail"
 import type { OverlayMode, OverlayScene } from "./detail-overlay"
 import { SectionHatch } from "./section"
 import { analysisCut } from "./cut-lines"
 import { buildDeckSolids, type DeckFloor } from "./deck"
+import { conformSlabToFrame, expandTriangles, grillageSlab, type SlabSheet } from "./shell-mesh"
 
 CameraControls.install({ THREE })
 
@@ -45,25 +46,29 @@ const detailTitle = document.querySelector("#detail-title") as HTMLElement
 const detailFacts = document.querySelector("#detail-facts") as HTMLElement
 
 type ViewMode = "geometry" | "analysis"
-type GeometryVariant = "sized" | "initialization"
-type AnalysisVariant = "deflection" | "stress" | "axial" | "tributary"
+type GeometryVariant = "sized" | "categories" | "initialization"
+type AnalysisVariant = "deflection" | "utilization" | "stress" | "axial" | "tributary"
 let mode: ViewMode = "geometry"
 let geometryVariant: GeometryVariant = "sized"
 let analysisVariant: AnalysisVariant = "deflection"
 const fieldNote = document.querySelector("#field-note") as HTMLElement
 const VARIANT_LABEL: Record<GeometryVariant | AnalysisVariant, string> = {
   sized: "Sized",
+  categories: "Categories",
   initialization: "Initialization",
   deflection: "Deflection",
+  utilization: "Utilization",
   stress: "Stress",
   axial: "Axial loads",
   tributary: "Tributary areas",
 }
 const ABSENT_FIELD: Partial<Record<AnalysisVariant, string>> = {
+  utilization: "Utilization is not in this scene.",
   stress: "Stress is not in this scene.",
   axial: "Axial loads are not in this scene.",
   tributary: "Tributary areas are not in this scene.",
 }
+const CATEGORY_NOTE = "Columns are blue. Beams are gold. Braces are pink. Slabs are green. Walls are purple. Footings are light blue."
 const fileInput = document.querySelector("#file") as HTMLInputElement
 
 const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, stencil: true })
@@ -138,6 +143,16 @@ let deckGroup: THREE.Group | null = null
 let stressMesh: THREE.Mesh | null = null
 let tributaryGroup: THREE.Group | null = null
 let elementAxial = new Float32Array()
+let elementRatio = new Float32Array()
+let footingRatio = new Float32Array()
+let hasUtilization = false
+let utilizationPeak = 0
+let memberBase: Float32Array | null = null
+let memberCategoryColors: Float32Array | null = null
+let volumeBase: Float32Array | null = null
+let volumeCategory: Float32Array | null = null
+let shellNodeBase: Float32Array | null = null
+let shellNodeUtilization: Float32Array | null = null
 let maxAxial = 0
 let maxStress = 0
 let shellAxialPresent = false
@@ -605,7 +620,38 @@ function deckFloors(): DeckFloor[] {
       sheet: typeof fields.sheet_m === "number" ? fields.sheet_m : null,
     })
   }
-  return floors
+  // One story is several bay records. The same profile is one deck, so the flutes
+  // run straight across the floor. Two different profiles at one elevation still fail.
+  const kept: DeckFloor[] = []
+  for (const floor of floors) {
+    const same = kept.find((item) => Math.abs(item.elevation - floor.elevation) <= 0.5)
+    if (!same) {
+      kept.push(floor)
+      continue
+    }
+    if (!sameDeck(same, floor)) throw new Error("two deck profiles share one slab elevation")
+  }
+  return kept
+}
+
+/** Designed slabs that are a plate, not a solid head. Elevation is structural Z. */
+function slabSheets(records: ComponentRecord[]): SlabSheet[] {
+  const sheets: SlabSheet[] = []
+  for (const record of records) {
+    if (record.kind !== "slab" || record.drawing?.solid_head === true) continue
+    const thickness = Number(record.drawing?.thickness_m)
+    const elevation = record.bind?.elevation_m
+    if (!(thickness > 0) || typeof elevation !== "number") continue
+    sheets.push({ elevation, thickness })
+  }
+  return sheets
+}
+
+function sameDeck(a: DeckFloor, b: DeckFloor): boolean {
+  const close = (x: number, y: number) => Math.abs(x - y) <= 1e-6
+  return close(a.hr, b.hr) && close(a.ribTop, b.ribTop) && close(a.ribBottom, b.ribBottom)
+    && close(a.pitch, b.pitch) && close(a.fill, b.fill) && close(a.sheet ?? 0, b.sheet ?? 0)
+    && close(a.direction[0], b.direction[0]) && close(a.direction[1], b.direction[1])
 }
 
 function show(decoded: DecodedScene, refit = true) {
@@ -636,6 +682,34 @@ function show(decoded: DecodedScene, refit = true) {
   loadElementIndex = typed(decoded.arrays, "load_element", "u32") as Uint32Array<ArrayBuffer>
   loadParticular = typed(decoded.arrays, "load_particular", "f32") as Float32Array<ArrayBuffer>
   solvedStations = Number(decoded.header.stations ?? 0)
+  supportIndex = typed(decoded.arrays, "support_index", "u32") as Uint32Array<ArrayBuffer>
+  supportFixity = typed(decoded.arrays, "support_fixity", "u8") as Uint8Array<ArrayBuffer>
+  shellFaces = typed(decoded.arrays, "shell_faces", "u32") as Uint32Array<ArrayBuffer>
+  shellKinds = typed(decoded.arrays, "shell_kind", "u8") as Uint8Array<ArrayBuffer>
+  const shellCount = Math.min(shellKinds.length, Math.floor(shellFaces.length / 3))
+  // A grillage file stores the rib frame and no slab. The slab surface is the
+  // rib bays themselves, so it deflects on the nodes that were solved.
+  let grillageThickness: Float32Array | null = null
+  const analysisModelName = String((decoded.header as { analysis_model?: unknown }).analysis_model ?? "")
+  if (shellCount === 0 && analysisModelName === "grillage") {
+    const built = grillageSlab(position, elementNodes, elementType, slabSheets(componentRecords))
+    if (built) {
+      shellFaces = built.faces as Uint32Array<ArrayBuffer>
+      shellKinds = built.kinds as Uint8Array<ArrayBuffer>
+      grillageThickness = built.thickness
+    }
+  }
+  // A corner fan has no surface stress. Pull in the beam nodes that already
+  // lie on its edges so the slab and the beam share those displacements.
+  // The grillage surface is already those nodes, one bay at a time.
+  let shellFrom: Uint32Array | null = null
+  if (!grillageThickness && !decoded.arrays.shell_surface_stress) {
+    const refined = conformSlabToFrame(shellFaces, shellKinds, position, elementNodes, elementType)
+    shellFaces = refined.faces as Uint32Array<ArrayBuffer>
+    shellKinds = refined.kinds as Uint8Array<ArrayBuffer>
+    shellFrom = refined.from
+  }
+  const hiddenMembers = omittedMembers(position, elementNodes, elementType, shellFaces, shellKinds)
   frameView = buildFrame({
     position,
     elementNodes,
@@ -645,16 +719,12 @@ function show(decoded: DecodedScene, refit = true) {
     loadElement: loadElementIndex,
     particular: loadParticular,
     stations: solvedStations,
+    hidden: hiddenMembers,
   })
   scene.add(frameView.ghost)
   scene.add(frameView.high)
   scene.add(frameView.low)
   scene.add(frameView.rods)
-
-  supportIndex = typed(decoded.arrays, "support_index", "u32") as Uint32Array<ArrayBuffer>
-  supportFixity = typed(decoded.arrays, "support_fixity", "u8") as Uint8Array<ArrayBuffer>
-  shellFaces = typed(decoded.arrays, "shell_faces", "u32") as Uint32Array<ArrayBuffer>
-  shellKinds = typed(decoded.arrays, "shell_kind", "u8") as Uint8Array<ArrayBuffer>
   glyphs = buildGlyphs({
     position,
     elementNodes,
@@ -701,22 +771,52 @@ function show(decoded: DecodedScene, refit = true) {
   if (building.footings) scene.add(building.footings)
   const solidPosition = typed(decoded.arrays, "member_solid_position", "f32") as Float32Array
   swapYZ(solidPosition, 3)
-  memberSolids = buildMemberSolids(
-    solidPosition,
+  const shellThickness = grillageThickness ?? expandTriangles(
+    typed(decoded.arrays, "shell_thickness", "f32") as Float32Array,
+    shellFrom, shellCount,
+  )
+  const sectionHeader = (decoded.header as { element_section?: unknown }).element_section
+  elementSection = Array.isArray(sectionHeader) ? sectionHeader.map(String) : []
+  const nFrame = elementNodes.length / 2
+  const loadRow = new Int32Array(nFrame)
+  loadRow.fill(-1)
+  for (let i = 0; i < loadElementIndex.length; i++) {
+    const element = loadElementIndex[i] ?? 0
+    if (element < nFrame) loadRow[element] = i
+  }
+  const solidKept = withoutOmittedSolids(
     typed(decoded.arrays, "member_solid_faces", "u32") as Uint32Array,
     typed(decoded.arrays, "member_solid_element", "u32") as Uint32Array,
+    hiddenMembers,
+  )
+  const solidFaces = solidKept.faces
+  const solidOwner = solidKept.owner
+  seatBeamsUnderSlab(
+    solidPosition, solidFaces, solidOwner, elementSection,
+    elementNodes, elementType, nodePosition, position, shellFaces, shellKinds, shellThickness,
+  )
+  memberSolids = buildMemberSolids(
+    solidPosition,
+    solidFaces,
+    solidOwner,
+    elementSection,
+    {
+      nodePosition,
+      nodeDisplacement,
+      elementNodes,
+      scale: frameView.uniforms.uScale,
+      localDof,
+      lcs: elementLcs,
+      loadRow,
+      particular: loadParticular,
+      stations: solvedStations,
+    },
   )
   if (memberSolids) scene.add(memberSolids)
   const deck = buildDeckSolids(position, shellFaces, shellKinds, deckFloors())
   deckGroup = deck?.group ?? null
   if (deckGroup) scene.add(deckGroup)
-  shellVolumes = buildShellVolumes(
-    position,
-    shellFaces,
-    shellKinds,
-    typed(decoded.arrays, "shell_thickness", "f32") as Float32Array,
-    deck?.skip ?? null,
-  )
+  shellVolumes = buildShellVolumes(position, shellFaces, shellKinds, shellThickness, deck?.skip ?? null)
   if (shellVolumes) scene.add(shellVolumes)
   elementAxial = typed(decoded.arrays, "element_axial", "f32") as Float32Array<ArrayBuffer>
   if (decoded.arrays.element_axial && elementAxial.length !== frameView.elementCount) {
@@ -733,12 +833,18 @@ function show(decoded: DecodedScene, refit = true) {
   }
   stressPresent = Boolean(decoded.arrays.shell_surface_stress) && shellStress.length === triangleCount && triangleCount > 0
   maxStress = Math.abs(Number(decoded.header.max_surface_stress_pa ?? 0))
-  shellAxial = typed(decoded.arrays, "shell_axial", "f32") as Float32Array<ArrayBuffer>
+  shellAxial = expandTriangles(
+    typed(decoded.arrays, "shell_axial", "f32") as Float32Array<ArrayBuffer>,
+    shellFrom, shellCount,
+  )
   if (decoded.arrays.shell_axial && shellAxial.length !== triangleCount) {
     throw new Error(`shell_axial has ${shellAxial.length} values for ${triangleCount} shell triangles`)
   }
   shellAxialPresent = Boolean(decoded.arrays.shell_axial) && shellAxial.length === triangleCount && triangleCount > 0
-  shellWall = typed(decoded.arrays, "shell_wall", "u32") as Uint32Array<ArrayBuffer>
+  shellWall = expandTriangles(
+    typed(decoded.arrays, "shell_wall", "u32") as Uint32Array<ArrayBuffer>,
+    shellFrom, shellCount,
+  )
   if (decoded.arrays.shell_wall && shellWall.length !== triangleCount) {
     throw new Error(`shell_wall has ${shellWall.length} values for ${triangleCount} shell triangles`)
   }
@@ -767,8 +873,6 @@ function show(decoded: DecodedScene, refit = true) {
     throw new Error("tributary buffers are present but do not describe a polygon")
   }
   if (tributaryGroup) scene.add(tributaryGroup)
-  const sections = (decoded.header as { element_section?: unknown }).element_section
-  elementSection = Array.isArray(sections) ? sections.map(String) : []
   modelBounds = boundsOf(position, footingCenter, footingSize)
   legendMax.textContent = `${(building.maxDisplacement * 1000).toFixed(1)} mm`
 
@@ -780,6 +884,7 @@ function show(decoded: DecodedScene, refit = true) {
 
   baseScale = Number(decoded.header.suggested_scale ?? 1) || 1
   if (refit) scaleInput.value = "1"
+  prepareAppearance()
   applyView()
   if (refit) fit()
   const nodes = position.length / 3
@@ -825,16 +930,231 @@ function applyScale() {
   if (selected) rebuildOutline()
 }
 
+/** Copy a mesh color attribute, or null when the mesh has no vertex colors. */
+function colorCopy(mesh: THREE.Mesh | null): Float32Array | null {
+  const attr = mesh?.geometry.getAttribute("color") as THREE.BufferAttribute | undefined
+  return attr ? new Float32Array(attr.array as Float32Array) : null
+}
+
+/** Write `colors` into the mesh's color attribute. */
+function paintColors(mesh: THREE.Mesh | null, colors: Float32Array | null) {
+  if (!mesh || !colors) return
+  const attr = mesh.geometry.getAttribute("color") as THREE.BufferAttribute | undefined
+  if (!attr || attr.array.length !== colors.length) return
+  ;(attr.array as Float32Array).set(colors)
+  attr.needsUpdate = true
+}
+
+/** The analysis shells share one color attribute. One write updates every kind. */
+function paintShellNodes(colors: Float32Array | null) {
+  paintColors(building?.shells[0] ?? null, colors)
+}
+
+function paintDeck(categories: boolean) {
+  if (!deckGroup) return
+  for (const child of deckGroup.children) {
+    const material = (child as THREE.Mesh).material as THREE.MeshLambertMaterial
+    const concrete = child.userData.deckRole === "deck-concrete"
+    material.color.set(concrete && categories ? CATEGORY_COLOR.slab : concrete ? theme.slab : theme.charcoal)
+  }
+}
+
+function paintFootings(which: "concrete" | "category" | "utilization") {
+  const mesh = building?.footings
+  if (!mesh) return
+  const ink = new THREE.Color()
+  for (let i = 0; i < mesh.count; i++) {
+    if (which === "category") ink.set(CATEGORY_COLOR.footing)
+    else if (which === "utilization") utilizationColor(footingRatio[i] ?? Number.NaN, ink)
+    else ink.set(theme.concrete)
+    mesh.setColorAt(i, ink)
+  }
+  if (mesh.instanceColor) mesh.instanceColor.needsUpdate = true
+}
+
+/** Category hues for the sized solids, and demand/capacity for the analysis mesh. */
+function prepareAppearance() {
+  memberBase = colorCopy(memberSolids)
+  memberCategoryColors = memberSolids && memberBase ? categoryMembers(memberSolids, memberBase.length) : null
+  volumeBase = colorCopy(shellVolumes)
+  volumeCategory = shellVolumes && volumeBase ? categoryVolume(shellVolumes, volumeBase.length) : null
+  const shell = building?.shells[0] ?? null
+  shellNodeBase = colorCopy(shell)
+  collectUtilization()
+}
+
+function categoryMembers(mesh: THREE.Mesh, length: number): Float32Array {
+  const out = new Float32Array(length)
+  const owner = mesh.userData.owner as Uint32Array
+  const index = mesh.geometry.getIndex()
+  if (!index) return out
+  const ink = new THREE.Color()
+  for (let t = 0; t < owner.length; t++) {
+    const element = owner[t] ?? 0
+    ink.set(memberCategory(elementType[element] ?? 0, elementSection[element] ?? ""))
+    for (let k = 0; k < 3; k++) {
+      const vertex = index.getX(t * 3 + k)
+      out[vertex * 3] = ink.r
+      out[vertex * 3 + 1] = ink.g
+      out[vertex * 3 + 2] = ink.b
+    }
+  }
+  return out
+}
+
+function categoryVolume(mesh: THREE.Mesh, length: number): Float32Array {
+  const out = new Float32Array(length)
+  const source = mesh.userData.vertexSource as Uint32Array
+  const kinds = mesh.userData.kinds as Uint8Array
+  const ink = new THREE.Color()
+  for (let vertex = 0; vertex < source.length; vertex++) {
+    ink.set(shellCategory(kinds[source[vertex] ?? 0] ?? 0))
+    out[vertex * 3] = ink.r
+    out[vertex * 3 + 1] = ink.g
+    out[vertex * 3 + 2] = ink.b
+  }
+  return out
+}
+
+/** Governing ratio of each frame element, shell node, and footing. */
+function collectUtilization() {
+  const nElem = frameView?.elementCount ?? 0
+  elementRatio = new Float32Array(nElem)
+  elementRatio.fill(Number.NaN)
+  const nFoot = (building?.footingCount ?? 0)
+  footingRatio = new Float32Array(nFoot)
+  footingRatio.fill(Number.NaN)
+  const slabs: { ratio: number, elevation: number, rings: number[][][], kinds: number[] }[] = []
+  const walls = new Map<number, number>()
+  let peak = 0
+  let any = false
+  for (const record of componentRecords) {
+    const ratio = record.governing?.ratio
+    if (typeof ratio !== "number" || !Number.isFinite(ratio)) continue
+    any = true
+    if (ratio > peak) peak = ratio
+    if (record.kind === "beam" || record.kind === "column" || record.kind === "brace") {
+      for (const element of record.bind?.frame_elements ?? []) {
+        if (element < 0 || element >= nElem) continue
+        const prev = elementRatio[element]
+        elementRatio[element] = Number.isFinite(prev) ? Math.max(prev, ratio) : ratio
+      }
+    } else if (record.kind === "footing") {
+      const index = record.bind?.footing
+      if (typeof index === "number" && index >= 0 && index < nFoot) footingRatio[index] = ratio
+    } else if (record.kind === "wall" && typeof record.design_index === "number") {
+      walls.set(record.design_index, ratio)
+    } else if (record.kind === "slab" && typeof record.bind?.elevation_m === "number") {
+      slabs.push({
+        ratio,
+        elevation: record.bind.elevation_m,
+        rings: planRings(record.bind.plan_m),
+        kinds: record.bind.shell_kinds ?? [0, 2],
+      })
+    }
+  }
+  hasUtilization = any
+  utilizationPeak = peak
+  if (!shellNodeBase) {
+    shellNodeUtilization = null
+    return
+  }
+  const ghost = new THREE.Color(theme.ghost)
+  shellNodeUtilization = new Float32Array(shellNodeBase.length)
+  for (let i = 0; i < shellNodeUtilization.length; i += 3) {
+    shellNodeUtilization[i] = ghost.r
+    shellNodeUtilization[i + 1] = ghost.g
+    shellNodeUtilization[i + 2] = ghost.b
+  }
+  const ink = new THREE.Color()
+  const nTri = shellFaces.length / 3
+  for (let pass = 0; pass < 2; pass++) {
+    for (let t = 0; t < nTri; t++) {
+      const kind = shellKinds[t] ?? 0
+      const wall = shellKindOf(kind) === 1
+      if ((pass === 0) === wall) continue
+      const ratio = wall ? (shellWall[t] ? walls.get(shellWall[t]) : undefined) : slabRatio(t, slabs)
+      if (typeof ratio !== "number" || !Number.isFinite(ratio)) continue
+      utilizationColor(ratio, ink)
+      for (let k = 0; k < 3; k++) {
+        const vertex = shellFaces[t * 3 + k] ?? 0
+        shellNodeUtilization[vertex * 3] = ink.r
+        shellNodeUtilization[vertex * 3 + 1] = ink.g
+        shellNodeUtilization[vertex * 3 + 2] = ink.b
+      }
+    }
+  }
+}
+
+function slabRatio(
+  triangle: number,
+  slabs: { ratio: number, elevation: number, rings: number[][][], kinds: number[] }[],
+): number {
+  const kind = shellKindOf(shellKinds[triangle] ?? 0)
+  let x = 0, y = 0, z = 0
+  for (let k = 0; k < 3; k++) {
+    const vertex = shellFaces[triangle * 3 + k] ?? 0
+    x += nodePosition[vertex * 3] ?? 0
+    y += nodePosition[vertex * 3 + 1] ?? 0
+    z += nodePosition[vertex * 3 + 2] ?? 0
+  }
+  x /= 3; y /= 3; z /= 3
+  let nearest = Infinity
+  let ratio = Number.NaN
+  for (const slab of slabs) {
+    if (!slab.kinds.includes(kind)) continue
+    if (Math.abs(slab.elevation - y) > 0.5) continue
+    if (slab.rings.some((ring) => ringContains(ring, x, z))) return slab.ratio
+    for (const ring of slab.rings) {
+      let cx = 0, cz = 0
+      for (const p of ring) { cx += p[0]; cz += p[1] }
+      cx /= ring.length; cz /= ring.length
+      const d = Math.hypot(cx - x, cz - z)
+      if (d < nearest) { nearest = d; ratio = slab.ratio }
+    }
+  }
+  return nearest < 8 ? ratio : Number.NaN
+}
+
+function planRings(value: unknown): number[][][] {
+  if (!Array.isArray(value)) return []
+  const rings: number[][][] = []
+  for (const ring of value) {
+    if (!Array.isArray(ring)) continue
+    const pts: number[][] = []
+    for (const point of ring) {
+      if (Array.isArray(point) && typeof point[0] === "number" && typeof point[1] === "number") {
+        pts.push([point[0], point[1]])
+      }
+    }
+    if (pts.length >= 3) rings.push(pts)
+  }
+  return rings
+}
+
+function ringContains(ring: number[][], x: number, z: number): boolean {
+  let inside = false
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const xi = ring[i][0], zi = ring[i][1]
+    const xj = ring[j][0], zj = ring[j][1]
+    const cross = (zi > z) !== (zj > z)
+    if (cross && x < (xj - xi) * (z - zi) / ((zj - zi) || 1e-12) + xi) inside = !inside
+  }
+  return inside
+}
+
 /**
- * Geometry / Sized is the undeflected building. Initialization drops the
- * sized extrusions and the footings and keeps the centerlines and shell
- * surfaces. Analysis / Deflection is the solved shape. Stress, axial force,
- * and tributary area draw their buffers when the scene has them.
+ * Geometry / Sized is the undeflected building. Categories is that same
+ * building with one hue per element type. Initialization drops the sized
+ * extrusions and the footings and keeps the centerlines and shell surfaces.
+ * Analysis / Deflection is the solved shape. Utilization, stress, axial force,
+ * and tributary area draw their fields when the scene has them.
  */
 function applyView() {
   if (!frameView) return
   const factor = Number(scaleInput.value)
-  const sized = mode === "geometry" && geometryVariant === "sized"
+  const sized = mode === "geometry" && geometryVariant !== "initialization"
+  const categories = sized && geometryVariant === "categories"
   const sticks = mode === "geometry" && geometryVariant === "initialization"
   const analysis = mode === "analysis"
   const deflection = analysis && analysisVariant === "deflection"
@@ -844,7 +1164,13 @@ function applyView() {
   const hasTributary = tributaryGroup !== null
   const stressOn = analysis && analysisVariant === "stress" && hasStress
   const axialOn = analysis && analysisVariant === "axial" && hasAxial
+  const utilizationOn = analysis && analysisVariant === "utilization" && hasUtilization
   const tributaryOn = analysis && analysisVariant === "tributary" && hasTributary
+  paintColors(memberSolids, categories ? memberCategoryColors : memberBase)
+  paintColors(shellVolumes, categories ? volumeCategory : volumeBase)
+  paintDeck(categories)
+  paintFootings(categories ? "category" : utilizationOn ? "utilization" : "concrete")
+  paintShellNodes(utilizationOn ? shellNodeUtilization : shellNodeBase)
   frameView.uniforms.uScale.value = deflection ? baseScale * factor : 0
   frameView.uniforms.uColorMode.value = colored ? 1 : 0
   scaleLabel.textContent = deflection ? `${(baseScale * factor).toFixed(2)}×` : "off"
@@ -853,26 +1179,27 @@ function applyView() {
   ghostInput.disabled = !analysis
   animateInput.disabled = !deflection
 
-  // Sized geometry draws the solids. Initialization and a scene without
-  // solids fall back to centerlines.
+  // Sized geometry draws the solids. Deflection draws the beam network in
+  // the solved shape, colored by magnitude, so the ribs stay a frame.
   const solidsOn = sized && memberSolids !== null
   if (memberSolids) memberSolids.visible = solidsOn
   if (shellVolumes) shellVolumes.visible = sized
   const membersOn = !solidsOn
   const coarse = moving && membersOn && !axialOn && frameView.elementCount > ORBIT_LOD_MEMBERS
-  const showRods = axialOn || (membersOn && colored && !coarse)
+  const showRods = axialOn || utilizationOn || (membersOn && colored && !coarse)
   frameView.rods.visible = showRods
-  frameView.high.visible = membersOn && !coarse && !axialOn && !(membersOn && colored)
+  frameView.high.visible = membersOn && !coarse && !axialOn && !utilizationOn && !(membersOn && colored)
   frameView.low.visible = membersOn && coarse
   frameView.ghost.visible = membersOn && !coarse && deflection && ghostInput.checked && !selected
-  if (axialOn) frameView.paintElements(elementAxial, maxAxial)
+  if (utilizationOn) frameView.paintRatios(elementRatio)
+  else if (axialOn) frameView.paintElements(elementAxial, maxAxial)
   else frameView.paint(frameView.maxDisplacement)
   if (glyphGroup) glyphGroup.visible = loadsInput.checked
 
   for (const mesh of building?.shells ?? []) {
     const kind = Number(mesh.userData.kind)
     mesh.visible = (!sized || (shellVolumes === null && deckGroup === null)) && !stressOn
-    mesh.material = colored ? building!.mappedFor(kind) : building!.solidFor(kind)
+    mesh.material = colored || utilizationOn ? building!.mappedFor(kind) : building!.solidFor(kind)
   }
   building?.shells.forEach((mesh, i) => {
     const ghost = building?.ghosts[i]
@@ -911,19 +1238,36 @@ function applyView() {
     )
   }
   placeFootings()
+  const analysisModel = String((header as { analysis_model?: unknown } | null)?.analysis_model ?? "")
   const absent = analysis && (
+    (analysisVariant === "utilization" && !hasUtilization) ||
     (analysisVariant === "stress" && !hasStress) ||
     (analysisVariant === "axial" && !hasAxial) ||
     (analysisVariant === "tributary" && !hasTributary)
-  ) ? ABSENT_FIELD[analysisVariant] : undefined
-  fieldNote.hidden = !absent && !tributaryOn
-  fieldNote.textContent = absent ?? (tributaryOn ? "Column areas are cerulean. Wall areas are iris. Beam areas are gold." : "")
-  legendEl.hidden = !(colored || stressOn || axialOn)
+  ) ? (
+    analysisVariant === "stress" && analysisModel === "grillage"
+      ? "This floor is a rib grillage. The panel load is on the ribs, and there is no slab shell."
+      : ABSENT_FIELD[analysisVariant]
+  ) : undefined
+  const note = absent ?? (
+    tributaryOn ? "Each outline is one assigned area. Column areas are cerulean. Wall areas are iris. Beam areas are gold."
+    : categories ? CATEGORY_NOTE
+    : ""
+  )
+  fieldNote.hidden = note === ""
+  fieldNote.textContent = note
+  legendEl.hidden = !(colored || stressOn || axialOn || utilizationOn)
   legendEl.classList.toggle("stress", stressOn)
   if (colored) {
     legendMin.textContent = "0"
     legendMax.textContent = `${((building?.maxDisplacement ?? frameView.maxDisplacement) * 1000).toFixed(1)} mm`
     legendCaption.textContent = "Deflection magnitude"
+  } else if (utilizationOn) {
+    legendMin.textContent = "0"
+    legendMax.textContent = "1.00"
+    legendCaption.textContent = utilizationPeak > 1
+      ? `Demand / capacity. Red is the limit. Peak ${utilizationPeak.toFixed(2)}.`
+      : "Demand / capacity. Red is the limit."
   } else if (stressOn) {
     const mpa = maxStress / 1e6
     legendMin.textContent = `−${mpa.toFixed(2)} MPa`
@@ -1098,17 +1442,21 @@ function decodeInWorker(buffer: ArrayBuffer): Promise<DecodedScene> {
 
 let variantFile: VariantFile | null = null
 let variantId = ""
+let sceneName = ""
 
-async function openBuffer(buffer: ArrayBuffer, name: string) {
+async function openBuffer(buffer: ArrayBuffer, name: string): Promise<boolean> {
   setStatus(`Reading ${name}…`)
+  sceneName = name
   try {
     const decoded = await decodeInWorker(buffer)
     variantFile = decoded.variants ?? null
     variantId = decoded.variantId ?? ""
     show(decoded)
     renderDesign()
+    return true
   } catch (error) {
     setStatus(error instanceof Error ? error.message : String(error))
+    return false
   }
 }
 
@@ -1422,15 +1770,58 @@ window.addEventListener("pointerdown", (event) => {
   if (event.target instanceof Node && variantMenu.contains(event.target)) return
   hideVariantMenu()
 })
+interface FloorScene {
+  file: string
+  name: string
+}
+
+/** Solved floor systems of this building. Written as each design finishes. */
+async function showFloorMenu(clientX: number, clientY: number) {
+  const response = await fetch("/core_office_floors.json", { cache: "no-store" })
+  if (!response.ok) {
+    hideVariantMenu()
+    return
+  }
+  const data = await response.json() as { scenes?: FloorScene[] }
+  const scenes = data.scenes ?? []
+  if (!scenes.some((item) => item.file === sceneName)) {
+    hideVariantMenu()
+    return
+  }
+  variantMenu.replaceChildren()
+  const current = scenes.find((item) => item.file === sceneName)
+  const note = document.createElement("p")
+  note.textContent = current?.name ?? "Core office"
+  variantMenu.append(note)
+  for (const other of scenes) {
+    if (other.file === sceneName) continue
+    const button = document.createElement("button")
+    button.type = "button"
+    button.textContent = other.name
+    button.addEventListener("click", () => {
+      location.search = `?scene=${encodeURIComponent(other.file)}`
+    })
+    variantMenu.append(button)
+  }
+  variantMenu.hidden = false
+  const width = 420
+  variantMenu.style.left = `${Math.min(clientX, window.innerWidth - width - 8)}px`
+  variantMenu.style.top = `${Math.min(clientY, window.innerHeight - 80)}px`
+}
+
 canvas.addEventListener("contextmenu", (event) => {
   event.preventDefault()
   const hit = pickComponent(event.clientX, event.clientY)
   const anchor = hit?.record?.kind
-  if (!variantFile || !anchor || !["slab", "column", "beam", "wall", "footing"].includes(anchor)) {
-    hideVariantMenu()
+  if (variantFile && anchor && ["slab", "column", "beam", "wall", "footing"].includes(anchor)) {
+    showVariantMenu(event.clientX, event.clientY, anchor)
     return
   }
-  showVariantMenu(event.clientX, event.clientY, anchor)
+  if (anchor === "slab") {
+    void showFloorMenu(event.clientX, event.clientY)
+    return
+  }
+  hideVariantMenu()
 })
 canvas.addEventListener("dblclick", (event) => {
   const hit = pickComponent(event.clientX, event.clientY)
@@ -1645,7 +2036,7 @@ function memberHit(element: number): ComponentHit | null {
   const mid = frameView.midDisplacement(element).length() * 1000
   const section = elementSection[element]
   const lines = [
-    section ? `Section ${section}` : "No sized section in this scene",
+    section === "solid head" ? "Solid head" : section ? `Section ${section}` : "No sized section in this scene",
     `Length ${length.toFixed(2)} m`,
     `Midspan deflection ${mid.toFixed(2)} mm`,
   ]
@@ -2216,11 +2607,41 @@ window.addEventListener("resize", resize)
 resize()
 loop()
 
+/** `?view=` opens one geometry or analysis variant after the scene loads. */
+function requestedView() {
+  const params = new URLSearchParams(location.search)
+  const view = params.get("view")
+  if (view === "sized" || view === "categories" || view === "initialization") selectVariant("geometry", view)
+  else if (view === "deflection" || view === "utilization" || view === "stress" || view === "axial" || view === "tributary") {
+    selectVariant("analysis", view)
+  }
+  if (params.get("elev") === "side") {
+    setOrtho(true)
+    controls.rotateTo(Math.PI / 2, Math.PI / 2, false)
+    renderDirty = true
+  }
+  const open = params.get("open")
+  if (open === "deck" || open === "slab") {
+    const record = componentRecords.find((item) => item.kind === "slab" && (open === "slab" || item.drawing?.deck))
+    if (record) reselect(record.id)
+  }
+}
+
+/** A `?scene=` name in this page's folder, or the usual default. */
+function requestedScene(): string | null {
+  const name = new URLSearchParams(location.search).get("scene")
+  if (!name || !/^[\w.-]+\.mgscene$/.test(name)) return null
+  return name
+}
+
 async function loadDefault() {
-  for (const name of ["core_office_v7.mgscene", "core_office.mgscene", "demo.mgscene"]) {
+  const names = requestedScene()
+    ? [requestedScene()!]
+    : ["core_office_v7.mgscene", "core_office.mgscene", "demo.mgscene"]
+  for (const name of names) {
     const response = await fetch(`/${name}`)
     if (response.ok) {
-      await openBuffer(await response.arrayBuffer(), name)
+      if (await openBuffer(await response.arrayBuffer(), name)) requestedView()
       return
     }
   }

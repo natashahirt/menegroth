@@ -157,6 +157,23 @@ girders (index 2, 3, …).
 - `end_fixity`: optional 2-element per-end release override, e.g.
   `["pinned", "pinned"]`. Accepted values: `"default"`, `"pinned"`, `"fixed"`,
   `"free"`. `"default"` defers to the `(role, material, lateral_role)` dispatch.
+- `analysis`: optional panel-load owner, `"tributary"` or `"grillage"`.
+  Omitted means `"tributary"`, unless `n_xi`/`n_eta` or `module_spacing_in` is
+  set, which is a grillage. Any other value is an error.
+- `n_xi`, `n_eta`: optional rib-bay counts for a grillage, on framing level 1
+  only. Both are required together, each at least 1. They replace `spacing_in`:
+  a level that sends both is an error, and so is `"tributary"` together with
+  bay counts. The ribs are laid on a four-sided panel; a boundary that is not
+  a quadrilateral errors when the grid is built, before member sizing.
+- `module_spacing_in`: optional `[s1, s2]` rib spacings, in inches, of a module
+  grid on framing level 1. The grid covers any slab outline, including holes,
+  and the boundary cuts the edge modules. It replaces `n_xi`/`n_eta` and
+  `spacing_in`; sending either with it is an error.
+- `module_angle_deg`: optional direction of the first rib family, degrees from
+  the plan x axis. Goes with `module_spacing_in`; omitted means 0.
+- `solid_head`: optional fraction of the panel, from each corner, cast solid
+  around the columns. Level 1 grillage with `n_xi`/`n_eta` only, in `[0, 1/2)`.
+  It is snapped up to a whole rib module. Omitted means no solid head.
 
 A level's sizing options (`beam_options`) are set on the Julia `framing_opts`
 NamedTuple, not on this wire struct. A restricted catalog is
@@ -169,6 +186,12 @@ Base.@kwdef mutable struct APIFramingLevel
     axis::Union{Vector{Float64}, Nothing} = nothing
     count::Union{Int, Nothing} = nothing
     end_fixity::Union{Vector{String}, Nothing} = nothing
+    analysis::Union{String, Nothing} = nothing
+    n_xi::Union{Int, Nothing} = nothing
+    n_eta::Union{Int, Nothing} = nothing
+    module_spacing_in::Union{Vector{Float64}, Nothing} = nothing
+    module_angle_deg::Union{Float64, Nothing} = nothing
+    solid_head::Union{Float64, Nothing} = nothing
 end
 
 """Design parameters block from JSON."""

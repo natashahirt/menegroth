@@ -234,6 +234,8 @@ store `section::Union{AbstractSection, Nothing}` non-parametrically).
   [`grow_building_solid_heads!`](@ref) resolves them. While it is empty, a
   positive `solid_head` fraction is those corner bays.
 - `solid_head_report`: the resolver's ratios, or `nothing` before it runs.
+- `piece_group_ids`: one member group per grillage rib piece (node to node).
+  Empty for a one-way joist level, which still shares `group_id`.
 """
 @kwdef mutable struct FramingLevel{T}
     slab_idx::Int
@@ -251,6 +253,7 @@ store `section::Union{AbstractSection, Nothing}` non-parametrically).
     solid_group_id::Union{UInt64, Nothing} = nothing
     solid_heads::Vector{StructuralSizer.ColumnSolidHead} = StructuralSizer.ColumnSolidHead[]
     solid_head_report::Union{Nothing, NamedTuple} = nothing
+    piece_group_ids::Vector{UInt64} = UInt64[]
 end
 
 """`:tributary` or `:grillage`. Anything else is an error."""
@@ -273,13 +276,30 @@ end
 rib_analysis(name::AbstractString) = rib_analysis(Symbol(lowercase(strip(name))))
 rib_analysis(fl::FramingLevel) = rib_analysis(fl.analysis)
 
-"""Member-group ids of a materialized framing level (empty when unmaterialized)."""
-level_group_ids(fl::FramingLevel) =
-    UInt64[g for g in (fl.group_id, fl.edge_group_id, fl.solid_group_id) if g !== nothing]
+"""Groups the beam catalog sizes. The solid-head group is claimed, not sized.
 
-"""Groups the beam catalog sizes. The solid-head group is claimed, not sized."""
-level_sizing_group_ids(fl::FramingLevel) =
-    UInt64[g for g in (fl.group_id, fl.edge_group_id) if g !== nothing]
+A grillage level sizes each rib piece on its own (`piece_group_ids`). The
+level's `group_id` stays as the materialized marker and is not a sizing group
+while those pieces exist.
+"""
+function level_sizing_group_ids(fl::FramingLevel)
+    if !isempty(fl.piece_group_ids)
+        ids = copy(fl.piece_group_ids)
+        fl.edge_group_id !== nothing && push!(ids, fl.edge_group_id)
+        return ids
+    end
+    return UInt64[g for g in (fl.group_id, fl.edge_group_id) if g !== nothing]
+end
+
+"""Member-group ids of a materialized framing level (empty when unmaterialized)."""
+function level_group_ids(fl::FramingLevel)
+    ids = level_sizing_group_ids(fl)
+    fl.solid_group_id !== nothing && push!(ids, fl.solid_group_id)
+    if fl.group_id !== nothing && !(fl.group_id in ids)
+        push!(ids, fl.group_id)
+    end
+    return ids
+end
 
 """
     level_member_indices(struc, fl) -> Vector{Int}

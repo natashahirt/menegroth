@@ -30,23 +30,38 @@ const _LOAD_COMBOS = (
 # Solve for a Single Load Case
 # =============================================================================
 
-"""
-    _solve_load_case!(cache, q; verbose=false) -> Vector{ElementMoments}
+"""Id of the drop-projection self-weight `AreaLoad` on the `:drop_panel` shells."""
+const FEA_DROP_LOAD_ID = :drop_panel_weight
 
-Set the model's area load to `q`, re-solve, and extract per-element moments.
+"""
+    _set_fea_area_loads!(model, q, q_drop)
+
+Set every slab `AreaLoad` to `q` and the drop-projection load
+(`FEA_DROP_LOAD_ID`) to `q_drop`. The drop load sits on top of `q` over the
+drop patches only.
+"""
+function _set_fea_area_loads!(model, q::Pressure, q_drop::Pressure)
+    for load in model.loads
+        load isa Asap.AreaLoad || continue
+        load.pressure = uconvert(u"Pa", load.id === FEA_DROP_LOAD_ID ? q_drop : q)
+    end
+    return model
+end
+
+"""
+    _solve_load_case!(cache, q; q_drop=0 Pa, verbose=false) -> Vector{ElementMoments}
+
+Set the model's area load to `q` (and the drop patches' extra load to
+`q_drop`), re-solve, and extract per-element moments.
 Returns a fresh `Vector{ElementMoments}` (Mxx, Myy, Mxy in N·m/m).
 
 The model's stiffness matrix is unchanged — only the load vector is updated.
 """
-function _solve_load_case!(cache::FEAModelCache, q::Pressure; verbose::Bool = false)
+function _solve_load_case!(cache::FEAModelCache, q::Pressure;
+                           q_drop::Pressure = 0.0u"Pa", verbose::Bool = false)
     model = cache.model
 
-    # Update area load pressure
-    for load in model.loads
-        if load isa Asap.AreaLoad
-            load.pressure = uconvert(u"Pa", q)
-        end
-    end
+    _set_fea_area_loads!(model, q, q_drop)
 
     # Stiffness is unchanged — only AreaLoad pressure moved. `loads_only` keeps
     # the CHOLMOD factor. Exact match to `values_only` is locked by
@@ -87,10 +102,13 @@ end
 
 Solve the FEA model separately for dead load (`qD`) and live load (`qL`).
 Stores results in `cache.element_data_D` and `cache.element_data_L`.
+The dead case includes the drop projection (`cache.q_drop`) on the drop
+patches; the live case does not.
 
 After extracting D/L moments, the model is restored to the governing factored
 state `qu = max(1.2D+1.6L, 1.4D)` so that displacement, reaction, and
-column-stub force fields are consistent with the factored state.
+column-stub force fields are consistent with the factored state. The drop
+takes that combination's dead factor ([`governing_dead_factor`](@ref)).
 
 When `U_qu` is provided (e.g. from the initial build solve), the factored
 state is restored via a cheap back-substitution instead of a full re-solve,
@@ -102,18 +120,15 @@ per-element factored moments into `cache.element_data`.
 function _solve_dl_cases!(cache::FEAModelCache, qD::Pressure, qL::Pressure;
                           verbose::Bool = false,
                           U_qu::Union{Nothing, Vector{Float64}} = nothing)
-    cache.element_data_D = _solve_load_case!(cache, qD; verbose=verbose)
+    q_drop = cache.q_drop * u"Pa"
+    cache.element_data_D = _solve_load_case!(cache, qD; q_drop, verbose)
     # Snapshot dead-load displacement field for pattern loading superposition
     cache.U_D = copy(cache.model.u)
-    cache.element_data_L = _solve_load_case!(cache, qL; verbose=verbose)
+    cache.element_data_L = _solve_load_case!(cache, qL; verbose)
 
     # Restore model to factored state for consistent displacements/reactions.
     qu_restore = max(1.2 * qD + 1.6 * qL, 1.4 * qD)
-    for load in cache.model.loads
-        if load isa Asap.AreaLoad
-            load.pressure = uconvert(u"Pa", qu_restore)
-        end
-    end
+    _set_fea_area_loads!(cache.model, qu_restore, governing_dead_factor(qD, qL) * q_drop)
 
     if !isnothing(U_qu)
         # Fast path: restore cached factored displacement without re-solving.

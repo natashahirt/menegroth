@@ -25,6 +25,120 @@ function _host_landing(skel, host_edges, xy::NTuple{2, Float64}; tol::Float64 = 
     return best
 end
 
+"""How many skeleton edges meet at `v`."""
+_vertex_degree(skel, v::Int) = count(e -> v == e[1] || v == e[2], skel.edge_indices)
+
+"""
+Split the level-0 beam that `v` already lies on, when `v` is not on any edge yet.
+
+A joist end can sit on a girder without being one of that girder's vertices.
+The girder is cut there so the joist and the girder share the node.
+"""
+function _land_loose_end!(struc, v::Int; tol::Float64 = 1e-3)
+    skel = struc.skeleton
+    _vertex_degree(skel, v) > 0 && return nothing
+    xy = _vertex_xy_m(skel, v)
+    best = nothing
+    best_d = tol
+    for beam in struc.beams
+        beam.level > 0 && continue
+        for si in segment_indices(beam)
+            si <= length(struc.segments) || continue
+            e = struc.segments[si].edge_idx
+            1 <= e <= length(skel.edge_indices) || continue
+            v1, v2 = skel.edge_indices[e]
+            (v == v1 || v == v2) && return nothing
+            p1 = _vertex_xy_m(skel, v1)
+            p2 = _vertex_xy_m(skel, v2)
+            dx, dy = p2[1] - p1[1], p2[2] - p1[2]
+            L2 = dx * dx + dy * dy
+            L2 < 1e-12 && continue
+            u = ((xy[1] - p1[1]) * dx + (xy[2] - p1[2]) * dy) / L2
+            (-0.02 <= u <= 1.02) || continue
+            u = clamp(u, 0.0, 1.0)
+            d = hypot(xy[1] - (p1[1] + u * dx), xy[2] - (p1[2] + u * dy))
+            d < best_d || continue
+            best = (beam, e)
+            best_d = d
+        end
+    end
+    best === nothing && return nothing
+    beam, e = best
+    _split_host_edge!(struc, beam, e, [v])
+    return e
+end
+
+"""
+Put `v` on the host edge it already lies on, so a later split shares the node.
+
+A joist end within `tol` metres of a host segment is recorded as a landing.
+An end that is already a host endpoint is left alone.
+"""
+function _weld_vertex_onto_host!(skel, v::Int, host_edges, edge_mids; tol::Float64 = 1e-3)
+    xy = _vertex_xy_m(skel, v)
+    best = nothing
+    best_d = tol
+    best_u = 0.0
+    for e in host_edges
+        v1, v2 = skel.edge_indices[e]
+        (v == v1 || v == v2) && return nothing
+        p1 = _vertex_xy_m(skel, v1)
+        p2 = _vertex_xy_m(skel, v2)
+        dx, dy = p2[1] - p1[1], p2[2] - p1[2]
+        L2 = dx * dx + dy * dy
+        L2 < 1e-12 && continue
+        u = ((xy[1] - p1[1]) * dx + (xy[2] - p1[2]) * dy) / L2
+        (-0.02 <= u <= 1.02) || continue
+        u = clamp(u, 0.0, 1.0)
+        d = hypot(xy[1] - (p1[1] + u * dx), xy[2] - (p1[2] + u * dy))
+        d <= best_d || continue
+        best = e
+        best_d = d
+        best_u = u
+    end
+    best === nothing && return nothing
+    mids = get!(Vector{Tuple{Float64, Int}}, edge_mids, best)
+    any(m -> m[2] == v, mids) && return best
+    push!(mids, (best_u, v))
+    return best
+end
+
+"""
+A vertex within `tol` of `v` that already lies on more beams, or `v`.
+
+Used after hosts are split. A joist end a fraction of a millimetre off the
+beam is moved onto the beam's node.
+"""
+function _snap_to_connected(skel, v::Int; tol::Float64 = 1e-3)
+    xy = _vertex_xy_m(skel, v)
+    z = _vertex_z_m(skel, v)
+    best = v
+    best_d = tol
+    deg = _vertex_degree(skel, v)
+    for u in eachindex(skel.vertices)
+        u == v && continue
+        du = _vertex_degree(skel, u)
+        du > deg || continue
+        abs(_vertex_z_m(skel, u) - z) <= tol || continue
+        p = _vertex_xy_m(skel, u)
+        d = hypot(p[1] - xy[1], p[2] - xy[2])
+        d <= best_d || continue
+        best = u
+        best_d = d
+        deg = du
+    end
+    return best
+end
+
+"""True when two skeleton vertices are the same point within `tol` metres."""
+function _vertices_coincide(skel, a::Int, b::Int; tol::Float64 = 1e-3)
+    a == b && return true
+    pa = _vertex_xy_m(skel, a)
+    pb = _vertex_xy_m(skel, b)
+    hypot(pa[1] - pb[1], pa[2] - pb[2]) <= tol || return false
+    return abs(_vertex_z_m(skel, a) - _vertex_z_m(skel, b)) <= tol
+end
+
 """
 Finite vertex chains for a `CustomPattern` whose sagitta is positive.
 
@@ -60,6 +174,25 @@ function _append_curved_joist_chains!(struc, slab, level, skel, z_m, host_edges,
     return true
 end
 
+"""One joist beam on `indices`, appended to the level's bookkeeping."""
+function _push_joist_beam!(struc::BuildingStructure{T}, level::FramingLevel{T},
+                           indices::Vector{Int}, beam_indices, beam_solid, created,
+                           is_solid::Bool) where {T}
+    L_beam_T = sum(struc.segments[si].L for si in indices)
+    Lb_beam_T = maximum(struc.segments[si].Lb for si in indices)
+    beam = Beam(indices, L_beam_T; Lb = Lb_beam_T,
+                role = level.role, level = level.level,
+                lateral_role = :gravity, torsion_released = level.torsion_released)
+    # Zero volume until sizing. `_volume_key` unwraps reinforced concrete so
+    # `element_ec` can read `mat.ρ`.
+    set_volumes!(beam, MaterialVolumes(_volume_key(level.material) => zero(VolumeType)))
+    push!(struc.beams, beam)
+    push!(beam_indices, length(struc.beams))
+    push!(beam_solid, is_solid)
+    push!(created, beam)
+    return beam
+end
+
 """
     materialize_level!(struc::BuildingStructure, slab::Slab{T}, level::FramingLevel{T}) -> Vector{Beam{T}}
 
@@ -78,17 +211,19 @@ joist beams (empty if the pattern lays out no joists on this slab).
    landing and the host edge is split into a multi-segment `edge_chains` chain
    (same surgery as `api/deserialize.jl`). Host member indices are recorded in
    `level.supports`.
-3. **Joist Segments.** One `Segment` per joist, with `release_start`/`release_end`
+3. **Joist Segments.** One `Segment` per joist piece, with `release_start`/`release_end`
    taken from `level.end_fixity` (`:default` ⇒ resolved later by Phase 2's
    `resolve_release` through the Phase-3 `default_release` dispatch — no release
    mechanics are decided here).
-4. **Joist Beams.** `Beam{T}` with `role = level.role`, `level = level.level`,
-   `lateral_role = :gravity`, `torsion_released = level.torsion_released`. The
-   member material is recorded as a zero-volume `MaterialVolumes(level.material
-   => 0 m³)` entry (sizing overwrites it), so the beam's material is discoverable
-   before sizing.
-5. **MemberGroup.** One group per level, `hash`ed from
+4. **Joist Beams.** A one-way chain is one `Beam{T}` over its supports. A
+   grillage rib is one beam per segment, so each piece borders a single cell
+   and meets the next piece with a rigid joint. `role = level.role`,
+   `level = level.level`, `lateral_role = :gravity`,
+   `torsion_released = level.torsion_released`. The member material is recorded
+   as a zero-volume `MaterialVolumes` entry (sizing overwrites it).
+5. **MemberGroup.** A one-way level shares one group, `hash`ed from
    `(slab_idx, level, role, material)` and stamped on `level.group_id`.
+   A grillage gives each rib piece its own group (`piece_group_ids`).
    Sizing options for the level, when they differ from the building, live on
    `level.beam_options`.
 
@@ -135,6 +270,7 @@ function materialize_level!(struc::BuildingStructure, slab::Slab{T},
     isempty(extra_hosts) || (host_edges = unique!(sort!(vcat(host_edges, extra_hosts))))
     if isempty(host_edges) || isempty(extent_edges)
         level.group_id = _framing_group_id(level)   # mark materialized (idempotent)
+        grillage && @warn "a grillage slab has no host or no boundary, so it grew no ribs" slab = level.slab_idx hosts = length(host_edges) extent = length(extent_edges)
         return created
     end
 
@@ -240,7 +376,23 @@ function materialize_level!(struc::BuildingStructure, slab::Slab{T},
     # analysis for compatibility as well as equilibrium; two ribs that pass
     # through each other without a node would deflect independently.
     landings = Set{Int}(v for mids in values(edge_mids) for (_, v) in mids)
-    joist_chains = _node_chain_crossings!(skel, joist_chains, z_m; keep = landings)
+    joist_chains = _node_chain_crossings!(skel, joist_chains, z_m; tol = 1e-3, keep = landings)
+
+    # A joist end that lies on a beam but is not yet one of its vertices would
+    # stop a fraction of a millimetre off that beam. The beam may belong to
+    # the next slab, so it is not always in this slab's host list. Weld the
+    # end onto whichever beam it already lies on, before the split.
+    beam_edges = Int[]
+    for beam in struc.beams, si in segment_indices(beam)
+        1 <= si <= length(struc.segments) || continue
+        push!(beam_edges, struc.segments[si].edge_idx)
+    end
+    unique!(beam_edges)
+    for chain in joist_chains
+        length(chain) < 2 && continue
+        _weld_vertex_onto_host!(skel, chain[1], beam_edges, edge_mids)
+        _weld_vertex_onto_host!(skel, chain[end], beam_edges, edge_mids)
+    end
 
     # 2b. Split each host edge once with all its (sorted) landing vertices.
     for (host_edge, mids) in edge_mids
@@ -252,17 +404,39 @@ function materialize_level!(struc::BuildingStructure, slab::Slab{T},
         _split_host_edge!(struc, host, host_edge, mid_vertices)
     end
 
-    # 3–4. Create a Segment + Beam per joist chain. A joist chain with `k`
-    #      vertices produces `k-1` sub-segments threaded into a single Beam;
-    #      interior joints (`k > 2`) stay continuous (`:fixed`) so the joist
-    #      is a continuous beam over its intermediate hosts, and only the two
-    #      chain endpoints honor `level.end_fixity`.
+    # 3–4. Segments and beams. A one-way chain with `k` vertices is one Beam
+    #      of `k-1` segments: interior joints stay `:fixed`, and only the two
+    #      chain ends honor `level.end_fixity`. A grillage rib is one beam per
+    #      segment, rigid at every node it shares with the next piece, so each
+    #      piece can take its own section. A solid-head chain stays one beam.
     joist_group = level.level == 1 ? :joists : :secondary
     beam_indices = Int[]
-    for (ci, chain_vs) in enumerate(joist_chains)
+    beam_solid = Bool[]
+    for (ci, raw_chain) in enumerate(joist_chains)
+        raw_chain = length(raw_chain) < 2 ? raw_chain :
+            [ _snap_to_connected(skel, raw_chain[1]);
+              raw_chain[2:end-1];
+              _snap_to_connected(skel, raw_chain[end]) ]
+        _land_loose_end!(struc, raw_chain[1])
+        _land_loose_end!(struc, raw_chain[end])
+        chain_vs = Int[raw_chain[1]]
+        for v in raw_chain[2:end]
+            if _vertices_coincide(skel, chain_vs[end], v)
+                # Keep the vertex that already lies on a beam. The other is a
+                # landing a fraction of a millimetre off that beam.
+                _vertex_degree(skel, v) > _vertex_degree(skel, chain_vs[end]) &&
+                    (chain_vs[end] = v)
+                continue
+            end
+            push!(chain_vs, v)
+        end
+        length(chain_vs) < 2 && continue
         n_seg = length(chain_vs) - 1
         seg_indices = Int[]
         rel = joist_releases[ci]
+        # A solid-head run stays one beam. Every other grillage run is one
+        # beam per bay so the pieces can take different sections.
+        split_pieces = grillage && !joist_solid[ci]
         for k in 1:n_seg
             v_a = chain_vs[k]
             v_b = chain_vs[k + 1]
@@ -274,41 +448,42 @@ function materialize_level!(struc::BuildingStructure, slab::Slab{T},
                           release_start = rs, release_end = re)
             push!(struc.segments, seg)
             push!(seg_indices, length(struc.segments))
+            split_pieces && _push_joist_beam!(struc, level, seg_indices[end:end],
+                                              beam_indices, beam_solid, created, false)
         end
-        L_beam_T = sum(struc.segments[si].L for si in seg_indices)
-        Lb_beam_T = maximum(struc.segments[si].Lb for si in seg_indices)
-        beam = Beam(seg_indices, L_beam_T; Lb = Lb_beam_T,
-                    role = level.role, level = level.level,
-                    lateral_role = :gravity, torsion_released = level.torsion_released)
-        # Record the member material (zero volume until sizing fills it in).
-        # `_volume_key` unwraps ReinforcedConcreteMaterial → Concrete so downstream
-        # `element_ec` can read `mat.ρ` (RC has no ρ field).
-        set_volumes!(beam, MaterialVolumes(_volume_key(level.material) => zero(VolumeType)))
-        push!(struc.beams, beam)
-        push!(beam_indices, length(struc.beams))
-        push!(created, beam)
+        split_pieces && continue
+        _push_joist_beam!(struc, level, seg_indices, beam_indices, beam_solid,
+                          created, joist_solid[ci])
     end
 
-    # 5. One MemberGroup per level. Sizing reads `level.beam_options`. A concrete
-    #    joist level splits off its two outermost joists (see `edge_group_id`).
+    # 5. Member groups. A one-way level shares one group and splits off its two
+    #    outermost joists. A grillage gives each rib piece its own group.
     gid = _framing_group_id(level)
     level.group_id = gid
-    edge_idxs = _outermost_concrete_joists(struc, level, beam_indices)
-    solid_idxs = [bi for (bi, flag) in zip(beam_indices, joist_solid) if flag]
-    interior_idxs = setdiff(beam_indices, edge_idxs, solid_idxs)
-    for bi in interior_idxs
-        set_group_id!(struc.beams[bi], gid)
-    end
-    if !isempty(interior_idxs)
-        struc.member_groups[gid] = MemberGroup(gid, interior_idxs, nothing)
-    end
-    if !isempty(edge_idxs)
-        egid = _framing_edge_group_id(level)
-        level.edge_group_id = egid
-        for bi in edge_idxs
-            set_group_id!(struc.beams[bi], egid)
+    empty!(level.piece_group_ids)
+    solid_idxs = [bi for (bi, flag) in zip(beam_indices, beam_solid) if flag]
+    rib_idxs = [bi for (bi, flag) in zip(beam_indices, beam_solid) if !flag]
+    if grillage
+        for bi in rib_idxs
+            _claim_rib_piece!(struc, level, bi)
         end
-        struc.member_groups[egid] = MemberGroup(egid, edge_idxs, nothing)
+    else
+        edge_idxs = _outermost_concrete_joists(struc, level, rib_idxs)
+        interior_idxs = setdiff(rib_idxs, edge_idxs)
+        for bi in interior_idxs
+            set_group_id!(struc.beams[bi], gid)
+        end
+        if !isempty(interior_idxs)
+            struc.member_groups[gid] = MemberGroup(gid, interior_idxs, nothing)
+        end
+        if !isempty(edge_idxs)
+            egid = _framing_edge_group_id(level)
+            level.edge_group_id = egid
+            for bi in edge_idxs
+                set_group_id!(struc.beams[bi], egid)
+            end
+            struc.member_groups[egid] = MemberGroup(egid, edge_idxs, nothing)
+        end
     end
     # Perimeter girders were split with the joist landings. Pull the piece
     # inside each head off the girder so it is not catalog-sized with it.
@@ -339,6 +514,7 @@ function materialize_level!(struc::BuildingStructure, slab::Slab{T},
             "head claims stays a ribbed void." maxlog = 4
     end
 
+    grillage && isempty(created) && @warn "a grillage slab grew no ribs" slab = level.slab_idx hosts = length(host_edges) lines = length(lines) chains = length(joist_chains)
     return created
 end
 
@@ -370,7 +546,10 @@ function _node_chain_crossings!(skel, chains::Vector{Vector{Int}}, z_m::Float64;
         for (q, v) in created
             hypot(q[1] - p[1], q[2] - p[2]) <= tol && return v
         end
-        v = add_vertex!(skel, [p[1], p[2], z_m]; group = :framing_landings)
+        v = _nearest_story_vertex(skel, p, z_m; tol = tol)
+        if v === nothing
+            v = add_vertex!(skel, [p[1], p[2], z_m]; group = :framing_landings)
+        end
         push!(created, (p, v))
         return v
     end

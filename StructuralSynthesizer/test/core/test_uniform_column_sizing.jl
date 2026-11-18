@@ -31,8 +31,8 @@ println("Testing uniform column sizing...")
 
     # ─── per_story: all columns on same story match after design ──────────
     @testset "per_story harmonization (flat plate)" begin
-        # 2×2 bay, 1 story → 9 columns (interior/edge/corner have different demands)
-        skel = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 2, 2, 1)
+        # 3×3 bay, 1 story → 16 columns (interior/edge/corner have different demands)
+        skel = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 3, 3, 1)
         struc = BuildingStructure(skel)
 
         design = design_building(struc, DesignParameters(
@@ -62,7 +62,7 @@ println("Testing uniform column sizing...")
 
     # ─── per_story: manual pipeline check ─────────────────────────────────
     @testset "per_story: columns uniform after harmonize (manual pipeline)" begin
-        skel = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 2, 2, 1)
+        skel = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 3, 3, 1)
         struc = BuildingStructure(skel)
         params = DesignParameters(
             floor = FlatPlateOptions(method = DDM()),
@@ -93,14 +93,14 @@ println("Testing uniform column sizing...")
             length(dims) <= 1 && continue
             c1_set = Set(d[1] for d in dims)
             c2_set = Set(d[2] for d in dims)
-            @test length(c1_set) == 1  "Story $story: expected uniform c1, got $c1_set"
-            @test length(c2_set) == 1  "Story $story: expected uniform c2, got $c2_set"
+            @test (story, collect(c1_set)) == (story, [first(c1_set)])
+            @test (story, collect(c2_set)) == (story, [first(c2_set)])
         end
     end
 
     # ─── building mode: every column the same ─────────────────────────────
     @testset "building: all columns uniform (manual pipeline)" begin
-        skel = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 2, 2, 2)
+        skel = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 3, 3, 2)
         struc = BuildingStructure(skel)
         params = DesignParameters(
             floor = FlatPlateOptions(method = DDM()),
@@ -126,13 +126,13 @@ println("Testing uniform column sizing...")
             push!(all_c2, col.c2)
         end
 
-        @test length(all_c1) == 1  "Expected single c1 across building, got $all_c1"
-        @test length(all_c2) == 1  "Expected single c2 across building, got $all_c2"
+        @test collect(all_c1) == [first(all_c1)]
+        @test collect(all_c2) == [first(all_c2)]
     end
 
     # ─── off mode: no harmonization ───────────────────────────────────────
     @testset "off mode: harmonize is a no-op" begin
-        skel = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 2, 2, 1)
+        skel = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 3, 3, 1)
         struc = BuildingStructure(skel)
         params = DesignParameters(
             floor = FlatPlateOptions(method = DDM()),

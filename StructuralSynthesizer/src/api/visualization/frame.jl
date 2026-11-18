@@ -170,6 +170,14 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
     edge_to_column_id = Dict{Int, Int}()
     edge_to_beam_id = Dict{Int, Int}()
 
+    # Finite ratios only. A failing member with no finite ratio still draws at 1.
+    # Row F ratios live on `seismic_frame` and are included by the caller.
+    function _member_display_ratio(ratios, ok::Bool)
+        finite_ratios = filter(isfinite, ratios)
+        ratio = isempty(finite_ratios) ? 0.0 : maximum(finite_ratios)
+        return !ok && ratio < 1.0 ? 1.0 : ratio
+    end
+
     # Material color cache: same material object → same hex string
     _mat_color_cache = Dict{UInt64, String}()
     _cached_mat_color(mat) = isnothing(mat) ? "" :
@@ -186,11 +194,11 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
         # NaN from the aggregate so it can never poison the max, then force a failing sentinel
         # (≥ 1.0) for a not-ok element so the element renders as failing/attention — never as
         # `0.0` (which would read as safe). Mirrors `_compute_design_summary!` / `_diagnose_column`.
-        finite_ratios = filter(!isnan, (result.axial_ratio, result.interaction_ratio))
-        ratio = isempty(finite_ratios) ? 0.0 : maximum(finite_ratios)
-        if !result.ok && ratio < 1.0
-            ratio = 1.0
-        end
+        ratio = _member_display_ratio(
+            (result.axial_ratio, result.interaction_ratio, result.shear_ratio,
+             isnothing(result.punching) ? 0.0 : result.punching.ratio,
+             _seismic_frame_ratio(result.seismic_frame)),
+            result.ok)
         sec_obj = result.section_obj
         mat_obj = !isnothing(col.concrete) ? col.concrete :
                   (!isnothing(sec_obj) && hasproperty(sec_obj, :material) ? getproperty(sec_obj, :material) : nothing)
@@ -212,7 +220,10 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
     for (beam_idx, result) in design.beams
         beam_idx > length(struc.beams) && continue
         beam = struc.beams[beam_idx]
-        ratio = max(result.flexure_ratio, result.shear_ratio)
+        ratio = _member_display_ratio(
+            (result.flexure_ratio, result.shear_ratio, result.governing_ratio,
+             _seismic_frame_ratio(result.seismic_frame)),
+            result.ok)
         sec_obj = result.section_obj
         mat_obj = !isnothing(sec_obj) && hasproperty(sec_obj, :material) ? getproperty(sec_obj, :material) : nothing
         mat_color = _cached_mat_color(mat_obj)
@@ -284,6 +295,8 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
     _sec_geom_cache = Dict{UInt64, Tuple{String, Float64, Float64, Float64, Float64, Float64}}()
     _sec_poly_cache = Dict{UInt64, Vector{Vector{Float64}}}()
     _sec_poly_inner_cache = Dict{UInt64, Vector{Vector{Float64}}}()
+    _sec_rebar_cache = Dict{UInt64, Tuple{Vector{Vector{Float64}}, Float64}}()
+    studs_by_element = stud_positions_by_element(struc)
 
     for (elem_idx, elem) in enumerate(model.frame_elements)
         node_start_id = elem.nodeStart.nodeID
@@ -322,6 +335,11 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
         section_poly_inner = get!(_sec_poly_inner_cache, sec_key) do
             _serialize_section_polygon_inner(sec_obj, du, elem_idx)
         end
+        rebar_pts, rebar_dia = get!(_sec_rebar_cache, sec_key) do
+            _serialize_section_rebar(sec_obj, du)
+        end
+        stud_pts, stud_dia, stud_len = _serialize_element_studs(
+            get(studs_by_element, elem.elementID, nothing), du)
 
         # Extract interpolated deflected curve points (cubic interpolation).
         # basepositions and uglobal are Matrix{Float64} in SI meters — avoid
@@ -382,6 +400,11 @@ function _serialize_visualization_frame_elements(design::BuildingDesign, model, 
             orientation_angle = orient_angle,
             section_polygon = section_poly,
             section_polygon_inner = section_poly_inner,
+            rebar_positions = rebar_pts,
+            rebar_diameter = rebar_dia,
+            stud_positions = stud_pts,
+            stud_diameter = stud_dia,
+            stud_length = stud_len,
             original_points = original_points,
             displacement_vectors = displacement_vectors,
             max_axial_force = _round_val(max_P; digits=4),
@@ -518,6 +541,41 @@ function _serialize_section_polygon(sec_obj, du::DisplayUnits, elem_idx::Int)
     end
 end
 
+"""
+Width and depth axes of a frame element, or `nothing` when it has no length.
+
+`y` is the section width axis and `z` the depth axis. `orient_angle` rotates
+them about the member axis. This is the frame [`_build_frame_element_mesh`](@ref)
+sweeps, so a drawing that moves the flange uses the same side as the solid.
+"""
+function _section_frame(p1::Vector{Float64}, p2::Vector{Float64}, orient_angle::Float64)
+    (length(p1) < 3 || length(p2) < 3) && return nothing
+    axis = [p2[i] - p1[i] for i in 1:3]
+    len = sqrt(sum(abs2, axis))
+    len < 1e-10 && return nothing
+    axis = axis ./ len
+    up = abs(axis[3]) < 0.9 ? [0.0, 0.0, 1.0] : [1.0, 0.0, 0.0]
+    y_local = [up[2] * axis[3] - up[3] * axis[2],
+               up[3] * axis[1] - up[1] * axis[3],
+               up[1] * axis[2] - up[2] * axis[1]]
+    n2 = sqrt(sum(abs2, y_local))
+    n2 < 1e-10 && return nothing
+    y_local = y_local ./ n2
+    z_local = [axis[2] * y_local[3] - axis[3] * y_local[2],
+               axis[3] * y_local[1] - axis[1] * y_local[3],
+               axis[1] * y_local[2] - axis[2] * y_local[1]]
+    n3 = sqrt(sum(abs2, z_local))
+    n3 < 1e-10 && return nothing
+    z_local = z_local ./ n3
+    if abs(orient_angle) > 1e-9
+        c, s = cos(orient_angle), sin(orient_angle)
+        y_new = [c * y_local[i] - s * z_local[i] for i in 1:3]
+        z_new = [s * y_local[i] + c * z_local[i] for i in 1:3]
+        y_local, z_local = y_new, z_new
+    end
+    return (y = y_local, z = z_local)
+end
+
 """Build extruded prism mesh from section polygon and path. Returns (vertices, faces) or empty on failure.
 Solid sections only (no inner polygon). Vertices and faces use 1-based indexing."""
 function _build_frame_element_mesh(
@@ -527,35 +585,9 @@ function _build_frame_element_mesh(
     orient_angle::Float64,
 )
     (length(section_poly) < 3 || length(p1) < 3 || length(p2) < 3) && return (Vector{Vector{Float64}}(), Vector{Vector{Int}}())
-
-    axis = [p2[i] - p1[i] for i in 1:3]
-    len = sqrt(sum(axis .^ 2))
-    len < 1e-10 && return (Vector{Vector{Float64}}(), Vector{Vector{Int}}())
-    axis = axis ./ len
-
-    # Local frame: X = axis, Y and Z perpendicular. Apply orientation_angle about X.
-    up = abs(axis[3]) < 0.9 ? [0.0, 0.0, 1.0] : [1.0, 0.0, 0.0]
-    y_local = [up[2] * axis[3] - up[3] * axis[2],
-               up[3] * axis[1] - up[1] * axis[3],
-               up[1] * axis[2] - up[2] * axis[1]]
-    n2 = sqrt(sum(y_local .^ 2))
-    n2 < 1e-10 && return (Vector{Vector{Float64}}(), Vector{Vector{Int}}())
-    y_local = y_local ./ n2
-
-    z_local = [axis[2] * y_local[3] - axis[3] * y_local[2],
-               axis[3] * y_local[1] - axis[1] * y_local[3],
-               axis[1] * y_local[2] - axis[2] * y_local[1]]
-    n3 = sqrt(sum(z_local .^ 2))
-    n3 < 1e-10 && return (Vector{Vector{Float64}}(), Vector{Vector{Int}}())
-    z_local = z_local ./ n3
-
-    # Apply orientation: rotate Y and Z about axis
-    if abs(orient_angle) > 1e-9
-        c, s = cos(orient_angle), sin(orient_angle)
-        y_new = [c * y_local[i] - s * z_local[i] for i in 1:3]
-        z_new = [s * y_local[i] + c * z_local[i] for i in 1:3]
-        y_local, z_local = y_new, z_new
-    end
+    frame = _section_frame(p1, p2, orient_angle)
+    frame === nothing && return (Vector{Vector{Float64}}(), Vector{Vector{Int}}())
+    y_local, z_local = frame.y, frame.z
 
     # Transform [y,z] local to global: p + y*y_local + z*z_local
     to_global(pos, y, z) = [pos[i] + y * y_local[i] + z * z_local[i] for i in 1:3]
@@ -589,6 +621,47 @@ function _build_frame_element_mesh(
     end
 
     return (vertices, faces)
+end
+
+"""
+`(positions, diameter, length)` for one element's studs.
+
+`positions` are `[[s, y, z], ...]` in display length units. `s` is the
+distance from the element's start. `y` and `z` are the shank base in the
+section frame, `z` at the top of steel. The shank extends `length` in the
+`+z` direction. Empty and zeros when `entry` is `nothing`.
+"""
+function _serialize_element_studs(entry, du::DisplayUnits)
+    entry === nothing && return (Vector{Float64}[], 0.0, 0.0)
+    pts = entry.pts
+    isempty(pts) && return (Vector{Float64}[], 0.0, 0.0)
+    z = _round_val(_to_display_length(du, entry.z_flange * u"m"); digits=6)
+    out = Vector{Vector{Float64}}(undef, length(pts))
+    for (i, (s, y)) in enumerate(pts)
+        out[i] = [_round_val(_to_display_length(du, s * u"m"); digits=6),
+                  _round_val(_to_display_length(du, y * u"m"); digits=6),
+                  z]
+    end
+    dia = _round_val(_to_display_length(du, entry.d_sa); digits=6)
+    len = _round_val(_to_display_length(du, entry.l_sa); digits=6)
+    return (out, dia, len)
+end
+
+"""
+    _serialize_section_rebar(sec_obj, du) -> (positions, diameter)
+
+Longitudinal bar centres `[[y, z], ...]` and the equivalent-area bar diameter,
+in display length units and the same centroid-origin frame as
+`_serialize_section_polygon`. Empty and `0.0` for sections without rebar.
+"""
+function _serialize_section_rebar(sec_obj, du::DisplayUnits)
+    empty = (Vector{Float64}[], 0.0)
+    (isnothing(sec_obj) || !StructuralSizer.has_rebar(sec_obj)) && return empty
+    pts = [[_round_val(_to_display_length(du, y); digits=6),
+            _round_val(_to_display_length(du, z); digits=6)]
+           for (y, z) in StructuralSizer.section_rebar_positions(sec_obj)]
+    dia = _round_val(_to_display_length(du, 2 * StructuralSizer.section_rebar_radius(sec_obj)); digits=6)
+    return (pts, dia)
 end
 
 """Serialize inner section polygon for hollow sections (HSS rect/round). Empty for solid sections."""

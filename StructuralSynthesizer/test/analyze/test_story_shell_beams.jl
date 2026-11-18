@@ -115,13 +115,17 @@ function _one_bay_building(; Lx = 6.0, Ly = 4.0, z = 3.0)
                              release = release_of[k])
                 for (k, (a, b)) in enumerate(skel.edge_indices)]
     col_els = [Asap.Element(ground[k], floor[k], col_sec) for k in 1:4]
-    loads = Asap.AbstractLoad[Asap.TributaryLoad(el, [0.0, 1.0], [1.0u"m", 1.0u"m"],
-                                                 10_000.0u"Pa", (0.0, 0.0, -1.0))
-                              for el in beam_els]
+    tribs = [Asap.TributaryLoad(el, [0.0, 1.0], [1.0u"m", 1.0u"m"],
+                                10_000.0u"Pa", (0.0, 0.0, -1.0))
+             for el in beam_els]
+    loads = Asap.AbstractLoad[tribs...]
     model = Asap.Model(vcat(floor, ground), vcat(beam_els, col_els), loads)
     Asap.solve!(model)
     struc.asap_model = model
     compute_cell_tributaries!(struc)
+    # Production `to_asap!` records these. Service deflection splits dead and
+    # live from the record, and throws when the model has slab loads without one.
+    struc.cell_tributary_loads[1] = tribs
     return struc, corners
 end
 

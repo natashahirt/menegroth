@@ -9,6 +9,8 @@
 # comparison. Rectangular bays are dominated by the short span and mask the
 # real differences between analysis methods.
 #
+using Asap: FT_TO_M, IN_TO_M, PSF_TO_PA
+
 # Usage:
 #   include("src/flat_plate_methods/vis.jl")
 #   df = load_results("path/to/dual_sweep.csv")
@@ -126,12 +128,29 @@ _marker(m) = get(METHOD_MARKERS, m, :circle)
 
 _at_ll(df, ll) = filter(r -> r.live_psf ≈ ll, df)
 
-"""Pick a single min_h_rule variant for line/bar plots (avoids duplicate rows)."""
-function _pick_variant(df)
+"""
+    _pick_variant(df; min_h_rule=nothing)
+
+Keep one thickness regime. A frame with a single `min_h_rule` is unchanged.
+A frame with several regimes and no `min_h_rule` errors, so a computed-deflection
+block cannot disappear under a silent `"ACI"` filter. `"ACI"` is accepted as
+an alias of `"table_minimum"` for older CSVs.
+"""
+function _pick_variant(df; min_h_rule::Union{Nothing,AbstractString}=nothing)
     hasproperty(df, :min_h_rule) || return df
-    variants = sort(unique(df.min_h_rule))
-    preferred = "ACI" in variants ? "ACI" : first(variants)
-    return filter(r -> r.min_h_rule == preferred, df)
+    variants = unique(String.(df.min_h_rule))
+    length(variants) <= 1 && return df
+    if isnothing(min_h_rule)
+        error("min_h_rule has values $(sort(variants)). Pass min_h_rule= " *
+              "(\"table_minimum\", \"computed_deflection\", or \"practical_floor\"). " *
+              "Computed-deflection rows are not dropped.")
+    end
+    chosen = min_h_rule == "ACI" ? "table_minimum" : String(min_h_rule)
+    if !(chosen in variants)
+        chosen == "table_minimum" && "ACI" in variants && (chosen = "ACI")
+    end
+    chosen in variants || error("min_h_rule=$(min_h_rule) is not among $(sort(variants))")
+    return filter(r -> String(r.min_h_rule) == chosen, df)
 end
 
 """
@@ -201,8 +220,9 @@ function _grid_plot(df, col::Symbol, ylabel::String,
                     limit_line::Union{Nothing,Float64} = nothing,
                     yscale = identity,
                     bay_filter::Function = _square_bays,
-                    concrete::String = "NWC_4000")
-    work = bay_filter(_pick_concrete(_pick_variant(_ensure_span(df));
+                    concrete::String = "NWC_4000",
+                    min_h_rule::Union{Nothing,AbstractString} = nothing)
+    work = bay_filter(_pick_concrete(_pick_variant(_ensure_span(df); min_h_rule);
                                       preferred = concrete))
     fp_all, fs_all = _split_ft(work)
 
@@ -305,32 +325,32 @@ end
 # ── Square bay versions (default) ──
 
 """Slab thickness grid (square bays)."""
-plot_thickness(df) =
-    _grid_plot(df, :h_in, "h (in)", "Slab Thickness (Square Bays)", "01_thickness.png")
+plot_thickness(df; min_h_rule=nothing) =
+    _grid_plot(df, :h_in, "h (in)", "Slab Thickness (Square Bays)", "01_thickness.png"; min_h_rule)
 
 """Static moment M₀ grid (square bays)."""
-plot_moments(df) =
-    _grid_plot(df, :M0_kipft, "M₀ (kip-ft)", "Static Moment M₀ (Square Bays)", "02_M0.png")
+plot_moments(df; min_h_rule=nothing) =
+    _grid_plot(df, :M0_kipft, "M₀ (kip-ft)", "Static Moment M₀ (Square Bays)", "02_M0.png"; min_h_rule)
 
 """Punching shear ratio grid (square bays)."""
-plot_punching(df) =
+plot_punching(df; min_h_rule=nothing) =
     _grid_plot(df, :punch_ratio, "Punch ratio (vu / φvc)", "Punching Shear (Square Bays)",
-               "03_punching.png"; limit_line = 1.0)
+               "03_punching.png"; limit_line = 1.0, min_h_rule)
 
 """Deflection ratio grid (square bays)."""
-plot_deflection(df) =
+plot_deflection(df; min_h_rule=nothing) =
     _grid_plot(df, :defl_ratio, "Defl ratio (Δ / Δ_limit)", "Deflection (Square Bays)",
-               "04_deflection.png"; limit_line = 1.0)
+               "04_deflection.png"; limit_line = 1.0, min_h_rule)
 
 """Total rebar area grid (square bays)."""
-plot_rebar(df) =
+plot_rebar(df; min_h_rule=nothing) =
     _grid_plot(df, :As_total_in2, "Total As (in²)", "Total Rebar Area (Square Bays)",
-               "06_rebar.png")
+               "06_rebar.png"; min_h_rule)
 
 """Runtime grid (square bays, log scale)."""
-plot_runtime(df) =
+plot_runtime(df; min_h_rule=nothing) =
     _grid_plot(df, :runtime_s, "Runtime (s)", "Runtime (Square Bays)",
-               "07_runtime.png"; yscale = log10)
+               "07_runtime.png"; yscale = log10, min_h_rule)
 
 # ── Embodied carbon (Section 1) ──
 
@@ -341,15 +361,15 @@ EC = element_ec(slab.volumes) in `_extract_results`, normalized by slab
 footprint area. ECC source: empirical median of the RMC EPD dataset
 (NRMCA-listed plants 2021–2025, A1–A3, n = 1078) — see
 `StructuralSizer/src/materials/ecc/data/README.md` and `concrete.jl`."""
-plot_slab_ec(df) =
+plot_slab_ec(df; min_h_rule=nothing) =
     _grid_plot(df, :slab_ec_per_m2, "Slab EC (kgCO₂e/m²)",
-               "Slab Embodied Carbon Intensity (Square Bays)", "12_slab_ec.png")
+               "Slab Embodied Carbon Intensity (Square Bays)", "12_slab_ec.png"; min_h_rule)
 
 """Slab embodied carbon intensity grid (rectangular bays)."""
-plot_slab_ec_rect(df) =
+plot_slab_ec_rect(df; min_h_rule=nothing) =
     _grid_plot(df, :slab_ec_per_m2, "Slab EC (kgCO₂e/m²)",
                "Slab Embodied Carbon Intensity (Rectangular Bays)",
-               "12_slab_ec_rect.png"; bay_filter = _rect_bays)
+               "12_slab_ec_rect.png"; bay_filter = _rect_bays, min_h_rule)
 
 # ── Material Use Intensity (Section 1) ──
 
@@ -357,24 +377,24 @@ plot_slab_ec_rect(df) =
 
 Plots `mui_kg_per_m2` (total slab mass / floor area) — the material-quantity
 analog of EC, decoupled from the ECC assumption."""
-plot_slab_mui(df) =
+plot_slab_mui(df; min_h_rule=nothing) =
     _grid_plot(df, :mui_kg_per_m2, "Slab MUI (kg/m²)",
-               "Slab Material Use Intensity (Square Bays)", "13_slab_mui.png")
+               "Slab Material Use Intensity (Square Bays)", "13_slab_mui.png"; min_h_rule)
 
 """Slab Material Use Intensity grid (rectangular bays)."""
-plot_slab_mui_rect(df) =
+plot_slab_mui_rect(df; min_h_rule=nothing) =
     _grid_plot(df, :mui_kg_per_m2, "Slab MUI (kg/m²)",
                "Slab Material Use Intensity (Rectangular Bays)",
-               "13_slab_mui_rect.png"; bay_filter = _rect_bays)
+               "13_slab_mui_rect.png"; bay_filter = _rect_bays, min_h_rule)
 
 """Concrete equivalent thickness grid (square bays).
 
 `concrete_t_eq_m` = concrete volume / floor area = effective uniform slab
 thickness in metres. Method-agnostic mass proxy (independent of rebar)."""
-plot_slab_t_eq(df) =
+plot_slab_t_eq(df; min_h_rule=nothing) =
     _grid_plot(df, :concrete_t_eq_m, "Concrete t_eq (m)",
                "Equivalent Concrete Thickness (Square Bays)",
-               "13b_concrete_t_eq.png")
+               "13b_concrete_t_eq.png"; min_h_rule)
 
 # ── Concrete-axis overlays (Section 1 sensitivity) ──
 #
@@ -394,13 +414,14 @@ function _concrete_grid_plot(df, col::Symbol, ylabel::String,
                              suptitle::String, filename::String;
                              limit_line::Union{Nothing,Float64} = nothing,
                              yscale = identity,
-                             floor_type::String = "flat_plate")
+                             floor_type::String = "flat_plate",
+                             min_h_rule::Union{Nothing,AbstractString} = nothing)
     hasproperty(df, :concrete) || begin
         @info "Skipping $filename — DataFrame has no `concrete` column"
         return nothing
     end
 
-    work = _square_bays(_pick_variant(_ensure_span(df)))
+    work = _square_bays(_pick_variant(_ensure_span(df); min_h_rule))
     hasproperty(work, :floor_type) && (work = filter(r -> r.floor_type == floor_type, work))
     isempty(work) && return nothing
 
@@ -485,26 +506,26 @@ end
 
 """Slab EC intensity grid faceted by concrete preset (rows) × LL (columns).
 Use this to read off the dominant axis of EC variability for Section 1."""
-plot_slab_ec_by_concrete(df) =
+plot_slab_ec_by_concrete(df; min_h_rule=nothing) =
     _concrete_grid_plot(df, :slab_ec_per_m2, "Slab EC (kgCO₂e/m²)",
                         "Slab EC by Concrete Preset (Square Bays, Flat Plate)",
-                        "14_slab_ec_by_concrete.png")
+                        "14_slab_ec_by_concrete.png"; min_h_rule)
 
 """Slab MUI grid faceted by concrete preset (rows) × LL (columns)."""
-plot_slab_mui_by_concrete(df) =
+plot_slab_mui_by_concrete(df; min_h_rule=nothing) =
     _concrete_grid_plot(df, :mui_kg_per_m2, "Slab MUI (kg/m²)",
                         "Slab MUI by Concrete Preset (Square Bays, Flat Plate)",
-                        "15_slab_mui_by_concrete.png")
+                        "15_slab_mui_by_concrete.png"; min_h_rule)
 
 """Slab equivalent concrete thickness grid faceted by concrete preset.
 
 Diagnostic: if `concrete_t_eq_m` is invariant across rows for a given
 (method, span, LL), then differences in EC-by-concrete are driven entirely
 by ECC × ρ, not by sizing changes — useful for separating the two effects."""
-plot_slab_t_eq_by_concrete(df) =
+plot_slab_t_eq_by_concrete(df; min_h_rule=nothing) =
     _concrete_grid_plot(df, :concrete_t_eq_m, "Concrete t_eq (m)",
                         "Equivalent Concrete Thickness by Preset (Square Bays, Flat Plate)",
-                        "15b_concrete_t_eq_by_concrete.png")
+                        "15b_concrete_t_eq_by_concrete.png"; min_h_rule)
 
 # ==============================================================================
 # Section 2 — ECC Monte Carlo bands (post-hoc on Section 1 MUI table)
@@ -528,14 +549,15 @@ plot_slab_t_eq_by_concrete(df) =
 
 """Filter `df` to square bays + ACI minimum-thickness variant and drop rows
 whose required columns are missing. Returns `nothing` if nothing is left."""
-function _section2_clean(df, required_cols; floor_type::String = "flat_plate")
+function _section2_clean(df, required_cols; floor_type::String = "flat_plate",
+                         min_h_rule::Union{Nothing,AbstractString} = nothing)
     for col in required_cols
         col in propertynames(df) || begin
             @info "Section 2 plot — DataFrame missing `$col`; skipping"
             return nothing
         end
     end
-    work = _square_bays(_pick_variant(_ensure_span(df)))
+    work = _square_bays(_pick_variant(_ensure_span(df); min_h_rule))
     hasproperty(work, :floor_type) &&
         (work = filter(r -> r.floor_type == floor_type, work))
     isempty(work) ? nothing : work
@@ -642,10 +664,10 @@ span trend remains readable without overlapping translucent bands.
 
 Input must come from `sweep_ecc(df_section1)` (Monte Carlo bootstrap of
 the empirical RMC EPD distribution)."""
-function plot_slab_ec_errorbars(df)
+function plot_slab_ec_errorbars(df; min_h_rule=nothing)
     required = (:slab_ec_p10, :slab_ec_p25, :slab_ec_p50,
                 :slab_ec_p75, :slab_ec_p90, :concrete, :live_psf, :method)
-    work = _section2_clean(df, required)
+    work = _section2_clean(df, required; min_h_rule)
     work === nothing && return nothing
     work = filter(r -> !isnan(r.slab_ec_p10) && !isnan(r.slab_ec_p90), work)
     isempty(work) && return nothing
@@ -715,10 +737,10 @@ procurement uncertainty from method variation visually:
 This is the cleanest figure for the journal claim *"procurement
 variability dominates method variability"* — the grey band is fixed,
 the lines fan out within it."""
-function plot_slab_ec_envelope(df)
+function plot_slab_ec_envelope(df; min_h_rule=nothing)
     required = (:slab_ec_p10, :slab_ec_p50, :slab_ec_p90,
                 :concrete, :live_psf, :method)
-    work = _section2_clean(df, required)
+    work = _section2_clean(df, required; min_h_rule)
     work === nothing && return nothing
     work = filter(r -> !isnan(r.slab_ec_p10) && !isnan(r.slab_ec_p90), work)
     isempty(work) && return nothing
@@ -795,9 +817,9 @@ The shape is bootstrapped from the empirical EPD distribution, so it
 shows the same skew / multi-modality that the underlying procurement
 data carries (e.g. PLC vs non-PLC sub-populations). Provided as
 diagnostic context for the headline errorbar / envelope figures."""
-function plot_slab_ec_violins(df)
+function plot_slab_ec_violins(df; min_h_rule=nothing)
     required = (:slab_ec_samples, :concrete, :live_psf, :method, :slab_ec_p90)
-    work = _section2_clean(df, required)
+    work = _section2_clean(df, required; min_h_rule)
     work === nothing && return nothing
     # Drop rows with empty samples (e.g. non-converged sizing).
     work = filter(r -> r.slab_ec_samples isa AbstractVector &&
@@ -844,34 +866,34 @@ end
 # ── Rectangular bay versions ──
 
 """Slab thickness grid (rectangular bays, x-axis = short span)."""
-plot_thickness_rect(df) =
+plot_thickness_rect(df; min_h_rule=nothing) =
     _grid_plot(df, :h_in, "h (in)", "Slab Thickness (Rectangular Bays)",
-               "01_thickness_rect.png"; bay_filter = _rect_bays)
+               "01_thickness_rect.png"; bay_filter = _rect_bays, min_h_rule)
 
 """Static moment M₀ grid (rectangular bays)."""
-plot_moments_rect(df) =
+plot_moments_rect(df; min_h_rule=nothing) =
     _grid_plot(df, :M0_kipft, "M₀ (kip-ft)", "Static Moment M₀ (Rectangular Bays)",
-               "02_M0_rect.png"; bay_filter = _rect_bays)
+               "02_M0_rect.png"; bay_filter = _rect_bays, min_h_rule)
 
 """Punching shear ratio grid (rectangular bays)."""
-plot_punching_rect(df) =
+plot_punching_rect(df; min_h_rule=nothing) =
     _grid_plot(df, :punch_ratio, "Punch ratio (vu / φvc)", "Punching Shear (Rectangular Bays)",
-               "03_punching_rect.png"; limit_line = 1.0, bay_filter = _rect_bays)
+               "03_punching_rect.png"; limit_line = 1.0, bay_filter = _rect_bays, min_h_rule)
 
 """Deflection ratio grid (rectangular bays)."""
-plot_deflection_rect(df) =
+plot_deflection_rect(df; min_h_rule=nothing) =
     _grid_plot(df, :defl_ratio, "Defl ratio (Δ / Δ_limit)", "Deflection (Rectangular Bays)",
-               "04_deflection_rect.png"; limit_line = 1.0, bay_filter = _rect_bays)
+               "04_deflection_rect.png"; limit_line = 1.0, bay_filter = _rect_bays, min_h_rule)
 
 """Total rebar area grid (rectangular bays)."""
-plot_rebar_rect(df) =
+plot_rebar_rect(df; min_h_rule=nothing) =
     _grid_plot(df, :As_total_in2, "Total As (in²)", "Total Rebar Area (Rectangular Bays)",
-               "06_rebar_rect.png"; bay_filter = _rect_bays)
+               "06_rebar_rect.png"; bay_filter = _rect_bays, min_h_rule)
 
 """Runtime grid (rectangular bays, log scale)."""
-plot_runtime_rect(df) =
+plot_runtime_rect(df; min_h_rule=nothing) =
     _grid_plot(df, :runtime_s, "Runtime (s)", "Runtime (Rectangular Bays)",
-               "07_runtime_rect.png"; yscale = log10, bay_filter = _rect_bays)
+               "07_runtime_rect.png"; yscale = log10, bay_filter = _rect_bays, min_h_rule)
 
 # ==============================================================================
 # 05 — Column sizes (grouped bar chart): rows = floor type, columns = PSF
@@ -879,8 +901,9 @@ plot_runtime_rect(df) =
 
 """Column size bar chart grid: rows = floor type, columns = PSF."""
 function _plot_columns_impl(df; bay_filter::Function = _square_bays,
-                                title_suffix::String = "", filename::String = "05_columns.png")
-    work = bay_filter(_pick_variant(_ensure_span(df)))
+                                title_suffix::String = "", filename::String = "05_columns.png",
+                                min_h_rule::Union{Nothing,AbstractString} = nothing)
+    work = bay_filter(_pick_variant(_ensure_span(df); min_h_rule))
     fp_all, fs_all = _split_ft(work)
 
     live_loads = sort(unique(work.live_psf))
@@ -967,11 +990,13 @@ function _plot_columns_impl(df; bay_filter::Function = _square_bays,
 end
 
 """Column size bar chart (square bays)."""
-plot_columns(df) = _plot_columns_impl(df; title_suffix = " (Square Bays)")
+plot_columns(df; min_h_rule=nothing) =
+    _plot_columns_impl(df; title_suffix = " (Square Bays)", min_h_rule)
 
 """Column size bar chart (rectangular bays)."""
-plot_columns_rect(df) = _plot_columns_impl(df;
-    bay_filter = _rect_bays, title_suffix = " (Rectangular Bays)", filename = "05_columns_rect.png")
+plot_columns_rect(df; min_h_rule=nothing) = _plot_columns_impl(df;
+    bay_filter = _rect_bays, title_suffix = " (Rectangular Bays)",
+    filename = "05_columns_rect.png", min_h_rule)
 
 # ==============================================================================
 # 08 — Drop panel dimensions (flat slab only)
@@ -984,8 +1009,8 @@ Show drop panel depth (h_drop) and extent (a_drop) vs span for the flat slab
 data.  Left axis = h_drop (in), right axis = a_drop (ft).
 Only plots flat_slab rows; requires `h_drop_in`, `a_drop1_ft` columns.
 """
-function plot_drop_panels(df; ll = 50.0)
-    sub = _pick_variant(_at_ll(_ensure_span(df), ll))
+function plot_drop_panels(df; ll = 50.0, min_h_rule::Union{Nothing,AbstractString} = nothing)
+    sub = _pick_variant(_at_ll(_ensure_span(df), ll); min_h_rule)
     fs_all = hasproperty(sub, :floor_type) ? filter(r -> r.floor_type == "flat_slab", sub) : sub
     (isempty(fs_all) || !hasproperty(fs_all, :h_drop_in)) && begin
         println("  Skipping drop panel plot — no flat_slab data with drop panel columns")
@@ -1158,7 +1183,9 @@ function plot_depth_heatmap(df; floor_type::String = "flat_plate",
                                 h_range = nothing,
                                 title_suffix::String = "",
                                 file_suffix::String = "",
-                                metric::Bool = false)
+                                metric::Bool = false,
+                                min_h_rule=nothing)
+    df = _pick_variant(df; min_h_rule)
     work = hasproperty(df, :floor_type) ? filter(r -> r.floor_type == floor_type, df) : df
     isempty(work) && begin
         println("  Skipping heatmap for $floor_type — no data")
@@ -1168,12 +1195,12 @@ function plot_depth_heatmap(df; floor_type::String = "flat_plate",
     ft_label = floor_type == "flat_slab" ? "Flat Slab" : "Flat Plate"
 
     # Unit conversion factors
-    span_k  = metric ? 0.3048  : 1.0   # ft → m
-    depth_k = metric ? 25.4    : 1.0   # in → mm
+    span_k  = metric ? FT_TO_M : 1.0          # ft → m
+    depth_k = metric ? IN_TO_M * 1000 : 1.0   # in → mm
     span_u  = metric ? "m"     : "ft"
     depth_u = metric ? "mm"    : "in"
     ll_u    = metric ? "kPa"   : "psf"
-    psf2kpa = 0.047880258      # 1 psf ≈ 0.04788 kPa
+    psf2kpa = PSF_TO_PA / 1000      # Pa per psf → kPa per psf
 
     methods    = METHOD_ORDER
     live_loads = sort(unique(work.live_psf))
@@ -1329,7 +1356,7 @@ end
 
 """Generate both heatmap images with matched color range."""
 function plot_dual_heatmaps(df; title_suffix::String = "", file_suffix::String = "",
-                                metric::Bool = false)
+                                metric::Bool = false, min_h_rule=nothing)
     valid_h = filter(!isnan, df.h_in)
     if isempty(valid_h)
         println("  Skipping heatmaps — no valid h_in values")
@@ -1338,8 +1365,8 @@ function plot_dual_heatmaps(df; title_suffix::String = "", file_suffix::String =
     h_lo = 0.0
     h_hi = ceil(maximum(valid_h))
     h_range = (h_lo, h_hi)
-    plot_depth_heatmap(df; floor_type = "flat_plate", h_range, title_suffix, file_suffix, metric)
-    plot_depth_heatmap(df; floor_type = "flat_slab",  h_range, title_suffix, file_suffix, metric)
+    plot_depth_heatmap(df; floor_type = "flat_plate", h_range, title_suffix, file_suffix, metric, min_h_rule)
+    plot_depth_heatmap(df; floor_type = "flat_slab",  h_range, title_suffix, file_suffix, metric, min_h_rule)
 end
 
 # ==============================================================================
@@ -1362,7 +1389,9 @@ colorbar across companion plots (same pattern as `plot_depth_heatmap`).
 function plot_ec_heatmap(df; floor_type::String = "flat_plate",
                               ec_range = nothing,
                               title_suffix::String = "",
-                              file_suffix::String = "")
+                              file_suffix::String = "",
+                              min_h_rule=nothing)
+    df = _pick_variant(df; min_h_rule)
     work = hasproperty(df, :floor_type) ? filter(r -> r.floor_type == floor_type, df) : df
     isempty(work) && begin
         println("  Skipping EC heatmap for $floor_type — no data")
@@ -1487,19 +1516,21 @@ end
 
 """Generate flat-plate + flat-slab EC heatmaps with a matched colorbar."""
 function plot_dual_ec_heatmaps(df; title_suffix::String = "",
-                                    file_suffix::String = "")
+                                    file_suffix::String = "",
+                                    min_h_rule=nothing)
     hasproperty(df, :slab_ec_per_m2) || begin
         println("  Skipping EC heatmaps — no slab_ec_per_m2 column")
         return nothing
     end
+    df = _pick_variant(df; min_h_rule)
     valid = filter(!isnan, df.slab_ec_per_m2)
     isempty(valid) && begin
         println("  Skipping EC heatmaps — no valid slab_ec_per_m2 values")
         return nothing
     end
     ec_range = (0.0, ceil(maximum(valid)))
-    plot_ec_heatmap(df; floor_type = "flat_plate", ec_range, title_suffix, file_suffix)
-    plot_ec_heatmap(df; floor_type = "flat_slab",  ec_range, title_suffix, file_suffix)
+    plot_ec_heatmap(df; floor_type = "flat_plate", ec_range, title_suffix, file_suffix, min_h_rule)
+    plot_ec_heatmap(df; floor_type = "flat_slab",  ec_range, title_suffix, file_suffix, min_h_rule)
 end
 
 # ==============================================================================
@@ -1605,7 +1636,9 @@ Uses discrete colors for each failure category.
 function plot_failure_heatmap(df; floor_type::String = "flat_plate",
                                   title_suffix::String = "",
                                   file_suffix::String = "",
-                                  col_overlay_threshold::Union{Nothing, Float64} = nothing)
+                                  col_overlay_threshold::Union{Nothing, Float64} = nothing,
+                                  min_h_rule=nothing)
+    df = _pick_variant(df; min_h_rule)
     work = hasproperty(df, :floor_type) ? filter(r -> r.floor_type == floor_type, df) : df
     isempty(work) && begin
         println("  Skipping failure heatmap for $floor_type — no data")
@@ -1791,11 +1824,12 @@ end
 
 """Generate both failure heatmap images."""
 function plot_dual_failure_heatmaps(df; title_suffix::String = "", file_suffix::String = "",
-                                       col_overlay_threshold::Union{Nothing, Float64} = nothing)
+                                       col_overlay_threshold::Union{Nothing, Float64} = nothing,
+                                       min_h_rule=nothing)
     plot_failure_heatmap(df; floor_type = "flat_plate", title_suffix, file_suffix,
-                             col_overlay_threshold)
+                             col_overlay_threshold, min_h_rule)
     plot_failure_heatmap(df; floor_type = "flat_slab",  title_suffix, file_suffix,
-                             col_overlay_threshold)
+                             col_overlay_threshold, min_h_rule)
 end
 
 # ==============================================================================
@@ -1810,7 +1844,8 @@ Grid layout: rows = floor type (Flat Plate / Flat Slab), columns = PSF values.
 
 Set `include_rect=true` (default) to also generate rectangular bay versions.
 """
-function generate_all(df; include_rect::Bool = true)
+function generate_all(df; include_rect::Bool = true, min_h_rule=nothing)
+    df = _pick_variant(df; min_h_rule)
     live_loads = sort(unique(df.live_psf))
     println("\nGenerating Flat Plate vs Flat Slab figures...")
     println("  PSF values: ", join(Int.(live_loads), ", "))
@@ -1893,7 +1928,8 @@ and column sizes across stud strategies.
 
 Expects `stud_strategy` column from `stud_sweep`.
 """
-function plot_stud_comparison(df; ll = 50.0)
+function plot_stud_comparison(df; ll = 50.0, min_h_rule=nothing)
+    df = _pick_variant(df; min_h_rule)
     hasproperty(df, :stud_strategy) || begin
         println("  Skipping stud comparison — no stud_strategy column")
         return nothing
@@ -1989,11 +2025,10 @@ const SECTION3_SYSTEM_COLOR = Dict(
 # entries above), so a single colour family is consistent across the paper.
 
 """Return the converged-rows-only subset filtered by `n_stories`."""
-function _section3_filter(df::DataFrame, n_stories::Int)
+function _section3_filter(df::DataFrame, n_stories::Int; min_h_rule=nothing)
     work = filter(r -> r.converged === true && r.n_stories == n_stories, df)
     isempty(work) && return work
-    # Drop fully-empty system columns so stacks don't show an all-zero band.
-    return work
+    return _pick_variant(work; min_h_rule)
 end
 
 """
@@ -2004,8 +2039,8 @@ point. Layout: rows = spans, cols = concretes; within each cell one bar per
 method, stacked by system (slabs / columns / beams / foundations / fireproof).
 """
 function plot_building_ec_stacked(df::DataFrame; n_stories::Int = 6,
-                                   file_suffix::String = "")
-    work = _section3_filter(df, n_stories)
+                                   file_suffix::String = "", min_h_rule=nothing)
+    work = _section3_filter(df, n_stories; min_h_rule)
     if isempty(work)
         println("  Skipping stacked EC — no converged rows at n_stories=$n_stories")
         return nothing
@@ -2079,8 +2114,8 @@ Shows directly how going DDM → FEA cascades from slab → columns → foundati
 """
 function plot_building_ec_cascade(df::DataFrame; n_stories::Int = 6,
                                    baseline_method::String = "ACI Min",
-                                   file_suffix::String = "")
-    work = _section3_filter(df, n_stories)
+                                   file_suffix::String = "", min_h_rule=nothing)
+    work = _section3_filter(df, n_stories; min_h_rule)
     if isempty(work)
         println("  Skipping cascade — no converged rows at n_stories=$n_stories")
         return nothing
@@ -2186,8 +2221,8 @@ Span × concrete intensity heatmap (kgCO₂e/m²), one panel per method. Annotat
 each cell with the value so absolute numbers are readable alongside the colour.
 """
 function plot_building_ec_intensity(df::DataFrame; n_stories::Int = 6,
-                                     file_suffix::String = "")
-    work = _section3_filter(df, n_stories)
+                                     file_suffix::String = "", min_h_rule=nothing)
+    work = _section3_filter(df, n_stories; min_h_rule)
     if isempty(work)
         println("  Skipping intensity heatmap — no converged rows at n_stories=$n_stories")
         return nothing
@@ -2249,8 +2284,8 @@ EC intensity. One marker per (span, method, concrete). The slope above the
 that gets multiplied through column and foundation downsizing.
 """
 function plot_slab_vs_building_ec(df::DataFrame; n_stories::Int = 6,
-                                   file_suffix::String = "")
-    work = _section3_filter(df, n_stories)
+                                   file_suffix::String = "", min_h_rule=nothing)
+    work = _section3_filter(df, n_stories; min_h_rule)
     if isempty(work)
         println("  Skipping slab-vs-building scatter — no converged rows at n_stories=$n_stories")
         return nothing
@@ -2295,15 +2330,16 @@ end
 Render all four Section 3 figures. When `n_stories` is omitted, generates one
 copy per unique value of `df.n_stories`, suffixed with `_<n>st`.
 """
-function plot_section3_all(df::DataFrame; n_stories::Union{Int, Nothing} = nothing)
+function plot_section3_all(df::DataFrame; n_stories::Union{Int, Nothing} = nothing,
+                           min_h_rule=nothing)
     isempty(df) && return nothing
     heights = isnothing(n_stories) ? sort(unique(df.n_stories)) : [n_stories]
     for h in heights
         sfx = length(heights) > 1 ? "_$(h)st" : ""
-        plot_building_ec_stacked(df;   n_stories = h, file_suffix = sfx)
-        plot_building_ec_cascade(df;   n_stories = h, file_suffix = sfx)
-        plot_building_ec_intensity(df; n_stories = h, file_suffix = sfx)
-        plot_slab_vs_building_ec(df;   n_stories = h, file_suffix = sfx)
+        plot_building_ec_stacked(df;   n_stories = h, file_suffix = sfx, min_h_rule)
+        plot_building_ec_cascade(df;   n_stories = h, file_suffix = sfx, min_h_rule)
+        plot_building_ec_intensity(df; n_stories = h, file_suffix = sfx, min_h_rule)
+        plot_slab_vs_building_ec(df;   n_stories = h, file_suffix = sfx, min_h_rule)
     end
     return nothing
 end

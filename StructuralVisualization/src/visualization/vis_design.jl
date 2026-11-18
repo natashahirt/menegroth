@@ -264,7 +264,7 @@ function visualize(design::BuildingDesign;
             # Frame elements (batched)
             orig_frame_pts = GLMakie.Point3f[]
             nan_pt = GLMakie.Point3f(NaN, NaN, NaN)
-            for element in model.elements
+            for element in model.frame_elements
                 p1, p2 = get_drawing_pts(element, 0.0)
                 push!(orig_frame_pts, GLMakie.Point3f(p1...), GLMakie.Point3f(p2...), nan_pt)
             end
@@ -296,7 +296,7 @@ function visualize(design::BuildingDesign;
         end
         
         # Calculate displacement data
-        avg_len_unitful = model.nElements > 0 ? sum(getproperty.(model.elements, :length)) / model.nElements : 1.0u"m"
+        avg_len_unitful = model.nFrameElements > 0 ? sum(getproperty.(model.frame_elements, :length)) / model.nFrameElements : 1.0u"m"
         avg_len = ustrip(u"m", avg_len_unitful)
         increment = avg_len_unitful / resolution
         
@@ -437,7 +437,7 @@ function visualize(design::BuildingDesign;
             # For local mode: identify support nodes (shared with frame elements)
             support_nodes = Set{Asap.Node}()
             if color_by == :displacement_local
-                for el in model.elements
+                for el in model.frame_elements
                     push!(support_nodes, el.nodeStart)
                     push!(support_nodes, el.nodeEnd)
                 end
@@ -483,7 +483,7 @@ function visualize(design::BuildingDesign;
                     end
                 end
                 if max_shell_disp > 1e-12
-                    avg_len = model.nElements > 0 ? avg_len : 5.0
+                    avg_len = model.nFrameElements > 0 ? avg_len : 5.0
                     deflection_scale = (avg_len * 0.1) / max_shell_disp
                 end
             end
@@ -604,7 +604,7 @@ function visualize(design::BuildingDesign;
     # =========================================================================
     else  # mode == :sized (default)
         # Draw elements with design-based coloring and optional section geometry
-        for (i, element) in enumerate(model.elements)
+        for (i, element) in enumerate(model.frame_elements)
             p1_raw, p2_raw = get_drawing_pts(element, 0.0)
             p1 = GLMakie.Point3f(p1_raw...)
             p2 = GLMakie.Point3f(p2_raw...)

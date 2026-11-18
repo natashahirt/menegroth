@@ -121,6 +121,36 @@ end
         split_tee_junctions!(straight)
         @test length(straight) == 2
 
+        # The through-wall's tributary is divided onto the two pieces. Each
+        # piece keeps the outline across its own length, and the edge strip
+        # follows by length.
+        carried = _jwall(0, 0, 8, 0)
+        carried.tributary_polygons[1] = [[(0.0, 0.0), (8.0, 0.0), (8.0, 2.5), (0.0, 2.5)]]
+        carried.tributary_cell_areas[1] = 24.0
+        carried.tributary_polygons[2] = [[(0.0, 0.0), (3.0, 0.0), (3.0, -1.0), (0.0, -1.0)]]
+        carried.tributary_cell_areas[2] = 3.0
+        cache = Dict{Any, Dict{Int, Float64}}(carried => Dict(1 => 4.0))
+        owned = [carried, _jwall(3, 0, 3, 4)]
+        split_tee_junctions!(owned; strip_walls = cache)
+        near, far = owned[1], owned[2]
+        @test near.tributary_cell_areas[1] ≈ 2.5 * 3 + 4.0 * 3 / 8 atol = 1e-9
+        @test far.tributary_cell_areas[1] ≈ 2.5 * 5 + 4.0 * 5 / 8 atol = 1e-9
+        @test near.tributary_cell_areas[1] + far.tributary_cell_areas[1] ≈ 24 atol = 1e-9
+        @test maximum(p[1] for p in only(near.tributary_polygons[1])) ≈ 3 atol = 1e-9
+        @test minimum(p[1] for p in only(far.tributary_polygons[1])) ≈ 3 atol = 1e-9
+        @test !haskey(far.tributary_cell_areas, 2)
+        @test !haskey(far.tributary_polygons, 2)
+        @test near.tributary_cell_areas[2] ≈ 3 atol = 1e-9
+        @test cache[near][1] ≈ 1.5 atol = 1e-9
+        @test cache[far][1] ≈ 2.5 atol = 1e-9
+
+        # Slab past the wall's end stays with the end piece.
+        past = _jwall(0, 0, 8, 0)
+        past.tributary_polygons[1] = [[(-2.0, 0.0), (8.0, 0.0), (8.0, 1.0), (-2.0, 1.0)]]
+        past.tributary_cell_areas[1] = 10.0
+        split_tee_junctions!([past, _jwall(3, 0, 3, 4)])
+        @test past.tributary_cell_areas[1] ≈ 5 atol = 1e-9
+
         # Ends of neither wall lie on the other. An X is not a T.
         cross = [_jwall(0, 0, 4, 0), _jwall(2, -2, 2, 2)]
         split_tee_junctions!(cross)

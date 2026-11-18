@@ -8,12 +8,12 @@ title: 'Joist floor: re-check swapped rib sections; size girders on the intended
 node_label: Re-check ribs, hierarchy demand
 tags: joist,collinear-ribs,member-check,load-path,girder,story-shell
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-ffd44328
 created_at: '2026-11-16T02:27:58.810552+00:00'
-updated_at: '2026-11-16T02:27:58.810552+00:00'
+updated_at: '2026-11-16T16:40:49.622811+00:00'
 has_child_rationale: The 1.25 m concrete module (one-way joists at 34 in) printed
   63 of 120 beams OK with ratio 0
 ---

@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Menegroth viewer</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@420;560&display=swap" rel="stylesheet" />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <canvas></canvas>
+    <aside>
+      <h1>Menegroth</h1>
+      <section class="group">
+        <h2>View</h2>
+        <div class="choice">
+          <button id="mode-geometry" type="button" class="on">
+            <span>Geometry</span>
+            <span class="variant" id="geometry-variant">Sized</span>
+          </button>
+          <button type="button" class="caret" aria-expanded="false" aria-controls="geometry-menu" aria-label="Geometry views"></button>
+          <div id="geometry-menu" class="menu" hidden>
+            <button type="button" data-variant="sized" class="on">Sized</button>
+            <button type="button" data-variant="categories">Categories</button>
+            <button type="button" data-variant="initialization">Initialization</button>
+          </div>
+        </div>
+        <div class="choice">
+          <button id="mode-analysis" type="button">
+            <span>Analysis</span>
+            <span class="variant" id="analysis-variant">Deflection</span>
+          </button>
+          <button type="button" class="caret" aria-expanded="false" aria-controls="analysis-menu" aria-label="Analysis views"></button>
+          <div id="analysis-menu" class="menu" hidden>
+            <button type="button" data-variant="deflection" class="on">Deflection</button>
+            <button type="button" data-variant="utilization">Utilization</button>
+            <button type="button" data-variant="stress">Stress</button>
+            <button type="button" data-variant="axial">Axial loads</button>
+            <button type="button" data-variant="tributary">Tributary areas</button>
+          </div>
+        </div>
+        <div class="row">
+          <button id="fit" type="button">Fit</button>
+          <button id="iso" type="button">Iso</button>
+          <button id="top" type="button">Top</button>
+          <button id="front" type="button">Section</button>
+        </div>
+        <div class="pill" role="group" aria-label="Projection">
+          <button id="proj-perspective" type="button" class="on">Perspective</button>
+          <button id="proj-ortho" type="button">Orthographic</button>
+        </div>
+      </section>
+      <section class="group" id="design-group" hidden>
+        <h2>Design</h2>
+        <div id="design-axes"></div>
+      </section>
+      <section class="group">
+        <h2>Rendering</h2>
+        <p id="field-note" hidden></p>
+        <div id="legend" hidden>
+          <div class="bar"></div>
+          <div class="ends"><span id="legend-min">0</span><span id="legend-max">max</span></div>
+          <p id="legend-caption">Deflection magnitude</p>
+        </div>
+        <label class="slider">Deflection <span id="scale-label">1.00×</span>
+          <input id="scale" type="range" min="0" max="3" step="0.01" value="1" />
+        </label>
+        <label><input id="color-mode" type="checkbox" checked /> Deflected colour</label>
+        <label><input id="ghost" type="checkbox" checked /> Undeformed</label>
+        <label><input id="animate" type="checkbox" /> Animate deflection</label>
+        <label><input id="loads" type="checkbox" checked /> Loads and supports</label>
+        <label><input id="dimensions" type="checkbox" checked /> Dimensions</label>
+        <label class="inline-range">Cut X
+          <input id="cut-x" type="range" min="0" max="1" step="0.05" value="1" disabled />
+          <span id="cut-x-label">off</span>
+        </label>
+        <label class="inline-range">Cut Z
+          <input id="cut-z" type="range" min="0" max="1" step="0.05" value="1" disabled />
+          <span id="cut-z-label">off</span>
+        </label>
+      </section>
+      <section class="group">
+        <h2>I/O</h2>
+        <p id="status">Drop a .mgscene file</p>
+        <label class="file">
+          Import
+          <input id="file" type="file" accept=".mgscene" />
+        </label>
+        <button id="png" type="button">Export PNG</button>
+        <label><input id="transparent" type="checkbox" /> Transparent background</label>
+      </section>
+      <p id="info">Double-click a component. F fits the view.</p>
+    </aside>
+    <aside id="detail" hidden>
+      <div class="detail-head">
+        <div>
+          <h2 id="detail-title">Component</h2>
+          <p id="detail-governing"></p>
+        </div>
+        <button id="detail-close" type="button">Close</button>
+      </div>
+      <p id="detail-facts"></p>
+      <h3>Drawing</h3>
+      <div id="detail-drawing"></div>
+      <h3>Checks</h3>
+      <div id="detail-checks"></div>
+      <h3>Path</h3>
+      <div id="detail-path"></div>
+    </aside>
+    <div id="variant-menu" class="context-menu" hidden></div>
+    <p id="perf"></p>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

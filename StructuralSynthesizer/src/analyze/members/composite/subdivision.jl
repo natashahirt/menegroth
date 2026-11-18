@@ -18,9 +18,10 @@ end
 Record the section names accepted on one composite sizing pass.
 
 `:section_passes` is a vector of `(pass, names)` pairs. Pass 2 confirms
-the pass-1 section on its own deflection. A third entry exists only when
-that confirmation failed and a later catalog choice was confirmed on its
-own solve. A failed confirmation is not kept.
+the section on its own solved deflection. That section may be the pass-1
+choice or the same steel shape with the stud layout the deflection check
+counted. A third entry is the confirmation of a section the catalog chose
+after that confirmation failed. A failed confirmation is not kept.
 """
 function _note_composite_section_pass!(struc::BuildingStructure, pass::Int, sections)
     mesh = _composite_mesh(struc)
@@ -116,8 +117,26 @@ function _split_element_load(ld, children)
     return nothing
 end
 
+"""
+Load list wide enough for a split edge.
+
+[`_child_releases`](@ref) keeps a released end on the child that touches it
+and fixes the pieces in between, so one parent load becomes loads of more
+than one release. A vector typed on the parent's release cannot store them.
+Lists that already accept every load (`AbstractLoad`, an unparameterized
+`TributaryLoad`) are returned as they are.
+"""
+function _loads_for_split(loads)
+    isconcretetype(eltype(loads)) || return loads
+    widened = Asap.AbstractLoad[]
+    sizehint!(widened, length(loads))
+    append!(widened, loads)
+    return widened
+end
+
 """Move every load that names `parent` onto `children`. Unknown load types stay."""
 function _retarget_element_loads!(loads, parent, children)
+    loads = _loads_for_split(loads)
     i = 1
     while i <= length(loads)
         ld = loads[i]
@@ -140,14 +159,14 @@ function _retarget_element_loads!(loads, parent, children)
 end
 
 function _retarget_parent_loads!(struc::BuildingStructure, parent, children)
-    _retarget_element_loads!(struc.asap_model.loads, parent, children)
+    model = struc.asap_model
+    model.loads = _retarget_element_loads!(model.loads, parent, children)
     for dict in (struc.cell_tributary_loads, struc.cell_dead_loads, struc.cell_live_loads)
         for (k, loads) in dict
-            _retarget_element_loads!(loads, parent, children)
-            dict[k] = loads
+            dict[k] = _retarget_element_loads!(loads, parent, children)
         end
     end
-    struc.asap_model._elemental_loads = nothing
+    model._elemental_loads = nothing
     return struc
 end
 
@@ -234,7 +253,76 @@ function _clear_unshored_stage!(mesh)
     return mesh
 end
 
-"""Cell-dead, self-weight, and wall weight stay on the steel section.
+"""
+Child element indices sized unshored.
+
+The set is per element, so one building can mix shored and unshored composite
+beams. A mesh that still carries the old single `:shored` flag and no set
+treats every child as unshored when that flag is false.
+"""
+function _unshored_indices(mesh)
+    haskey(mesh, :unshored) && return mesh[:unshored]::Set{Int}
+    s = Set{Int}()
+    get(mesh, :shored, true) && return s
+    children = get(mesh, :children, nothing)
+    children === nothing && return s
+    for idxs in values(children)
+        for i in idxs
+            push!(s, i)
+        end
+    end
+    return s
+end
+
+_has_unshored(mesh) = !isempty(_unshored_indices(mesh))
+
+function _ensure_unshored!(mesh)
+    haskey(mesh, :unshored) && return mesh[:unshored]::Set{Int}
+    s = _unshored_indices(mesh)
+    mesh[:unshored] = s
+    delete!(mesh, :shored)
+    return s
+end
+
+"""Record whether these child elements are shored. Shored leaves the unshored set."""
+function _note_shoring!(mesh, idxs, shored::Bool)
+    s = _ensure_unshored!(mesh)
+    if shored
+        for i in idxs
+            delete!(s, i)
+        end
+    else
+        for i in idxs
+            push!(s, i)
+        end
+    end
+    return s
+end
+
+"""Composite child element indices of these member groups. Parents are omitted."""
+function _composite_child_ids(struc::BuildingStructure, group_ids)
+    ids = Set{Int}()
+    for gid in group_ids
+        mg = get(struc.member_groups, gid, nothing)
+        mg === nothing && continue
+        for m_idx in mg.member_indices
+            m_idx > length(struc.beams) && continue
+            for si in segment_indices(struc.beams[m_idx])
+                edge = struc.segments[si].edge_idx
+                for i in _frame_element_indices(struc, edge)
+                    i == edge && continue
+                    push!(ids, i)
+                end
+            end
+        end
+    end
+    return ids
+end
+
+"""Cell-dead, self-weight, wall, drop-panel, and fire-coating weight stay on the steel section.
+
+Fire coating is taken as applied before the slab is composite (user decision
+2026-11-09), so the bare steel carries it.
 
 A patterned live load is everything else in the case. ACI 318-11 §13.7.6.3
 reduces that live load to three-quarters on the alternate-span cases
@@ -254,6 +342,8 @@ end
 function _is_pattern_dead_load(ld, dead_ids::Set{UInt})
     objectid(ld) in dead_ids && return true
     ld isa Asap.GravityLoad && return true
+    ld isa Asap.NodeForce && ld.id === DROP_PANEL_LOAD_ID && return true
+    ld isa Asap.LineLoad && ld.id === FIRE_COATING_LOAD_ID && return true
     return ld isa Asap.AreaLoad && ld.id === :wall_self_weight
 end
 
@@ -320,7 +410,7 @@ pattern solve exists, or when the steel-stage dead load was not captured.
 function _unshored_pattern_forces(struc::BuildingStructure; resolution::Int = 200)
     mesh = _composite_mesh(struc)
     mesh === nothing && return nothing
-    get(mesh, :shored, true) && return nothing
+    _has_unshored(mesh) || return nothing
     _get_pattern_solve_cache(struc) === nothing && return nothing
     cached = get(mesh, :pattern_forces, nothing)
     if cached !== nothing && cached.resolution == resolution
@@ -359,28 +449,49 @@ function _recapture_unshored_pattern_dead!(struc::BuildingStructure;
                                            resolution::Int = 200)
     mesh = _composite_mesh(struc)
     mesh === nothing && return nothing
-    get(mesh, :shored, true) && return nothing
+    _has_unshored(mesh) || return nothing
     children = get(mesh, :children, nothing)
     (children === nothing || isempty(children)) && return nothing
-    model = struc.asap_model
-    steel = get(mesh, :steel, Dict{Int, Asap.Section}())
-    saved = Dict{Int, Asap.Section}()
-    for idxs in values(children)
-        for i in idxs
-            el = model.frame_elements[i]
-            saved[i] = el.section
-            haskey(steel, i) && (el.section = steel[i])
-        end
+    _with_bare_steel(struc) do model
+        _capture_pattern_dead!(struc; resolution = resolution)
     end
-    Asap.update!(model; values_only = true)
-    _capture_pattern_dead!(struc; resolution = resolution)
-    for (i, sec) in saved
-        model.frame_elements[i].section = sec
-    end
-    Asap.update!(model; values_only = true)
     delete!(mesh, :pattern_forces)
     return get(mesh, :pattern_dead, nothing)
 end
+"""
+Run `f(model)` with the stored steel section on every unshored composite child,
+then put the sections back.
+
+Shored children stay on their composite section. No unshored children runs `f`
+on the model as it is. A throw still restores the sections.
+"""
+function _with_bare_steel(f, struc::BuildingStructure)
+    model = struc.asap_model
+    mesh = _composite_mesh(struc)
+    steel = mesh === nothing ? nothing : get(mesh, :steel, nothing)
+    unshored = mesh === nothing ? Set{Int}() : _unshored_indices(mesh)
+    if isempty(unshored) || steel === nothing
+        return f(model)
+    end
+    saved = Dict{Int, Asap.Section}()
+    for i in unshored
+        haskey(steel, i) || continue
+        el = model.frame_elements[i]
+        saved[i] = el.section
+        el.section = steel[i]
+    end
+    isempty(saved) && return f(model)
+    Asap.update!(model; values_only = true)
+    try
+        return f(model)
+    finally
+        for (i, sec) in saved
+            model.frame_elements[i].section = sec
+        end
+        Asap.update!(model; values_only = true)
+    end
+end
+
 """
 Dead on the steel inertia, live on the composite inertia.
 
@@ -396,7 +507,7 @@ Displacements are not added and then pushed back through one stiffness.
 function _unshored_stage!(struc::BuildingStructure; resolution::Int = 200)
     mesh = _composite_mesh(struc)
     mesh === nothing && return nothing
-    get(mesh, :shored, true) && return nothing
+    _has_unshored(mesh) || return nothing
     children = get(mesh, :children, nothing)
     (children === nothing || isempty(children)) && return nothing
     cached = get(mesh, :stage, nothing)
@@ -420,39 +531,32 @@ function _unshored_stage!(struc::BuildingStructure; resolution::Int = 200)
         mesh[:stage] = stage
         return stage
     end
+    # Pattern dead load and the dead-load forces, on the steel section.
+    u_D, forces_D = _with_bare_steel(struc) do model
+        _capture_pattern_dead!(struc; resolution = resolution)
+        u_D = isempty(dead) ? zeros(model.nDOFs) : Asap.solve(model, dead)
+        by_D = _loads_by_id(dead)
+        forces_D = Dict{Int, NamedTuple}()
+        unshored = _unshored_indices(mesh)
+        for idxs in values(children)
+            for i in idxs
+                i in unshored || continue
+                el = model.frame_elements[i]
+                forces_D[el.elementID] = _element_forces_from_u(
+                    el, u_D, get(by_D, el.elementID, Asap.AbstractLoad[]);
+                    resolution = resolution)
+            end
+        end
+        return (u_D, forces_D)
+    end
     model = struc.asap_model
-    steel = get(mesh, :steel, Dict{Int, Asap.Section}())
-    saved = Dict{Int, Asap.Section}()
-    for idxs in values(children)
-        for i in idxs
-            el = model.frame_elements[i]
-            saved[i] = el.section
-            haskey(steel, i) && (el.section = steel[i])
-        end
-    end
-    Asap.update!(model; values_only = true)
-    # Pattern dead load, while this steel factorization is current.
-    _capture_pattern_dead!(struc; resolution = resolution)
-    u_D = isempty(dead) ? zeros(model.nDOFs) : Asap.solve(model, dead)
-    by_D = _loads_by_id(dead)
-    forces_D = Dict{Int, NamedTuple}()
-    for idxs in values(children)
-        for i in idxs
-            el = model.frame_elements[i]
-            forces_D[el.elementID] = _element_forces_from_u(
-                el, u_D, get(by_D, el.elementID, Asap.AbstractLoad[]);
-                resolution = resolution)
-        end
-    end
-    for (i, sec) in saved
-        model.frame_elements[i].section = sec
-    end
-    Asap.update!(model; values_only = true)
     u_L = isempty(live) ? zeros(model.nDOFs) : Asap.solve(model, live)
     by_L = _loads_by_id(live)
     summed = Dict{Int, NamedTuple}()
+    unshored = _unshored_indices(mesh)
     for idxs in values(children)
         for i in idxs
+            i in unshored || continue
             el = model.frame_elements[i]
             id = el.elementID
             d = forces_D[id]
@@ -464,6 +568,41 @@ function _unshored_stage!(struc::BuildingStructure; resolution::Int = 200)
     stage = (u_D = u_D, u_L = u_L, forces = summed, resolution = resolution)
     mesh[:stage] = stage
     return stage
+end
+
+"""
+    _unshored_service_profiles(struc, dead, live, idxs; resolution) -> Union{Nothing, NamedTuple}
+
+Service deflection profiles of frame elements `idxs` for an unshored composite
+floor: `dead` solved and sampled with the bare steel section on every unshored
+child, `live` solved and sampled on the current (composite) sections. Returns
+`(D = Dict(i => profile), L = Dict(i => profile))`, or `nothing` when no beam is
+unshored (one stiffness carries both cases).
+
+AISC 360-22 Commentary §I3.1b (corpus: aisc-360-22, PDF p. 500): load applied
+before the concrete has cured is resisted by the steel section alone. `dead` is
+the full unfactored dead set of `_service_dead_live_loads` (slab, self-weight,
+fire coating, drop panels, walls), so all of it is placed on the steel. Each
+case is sampled while its own section is on the element, because the member-load
+part of the deflection divides by that section's `EI`.
+"""
+function _unshored_service_profiles(struc::BuildingStructure, dead, live, idxs;
+                                    resolution::Int)
+    mesh = _composite_mesh(struc)
+    (mesh === nothing || !_has_unshored(mesh)) && return nothing
+    model = struc.asap_model
+    links = struc.asap_rigid_links
+    by_D = Asap.frame_loads_by_element(model, dead)
+    by_L = Asap.frame_loads_by_element(model, live)
+    D = _with_bare_steel(struc) do m
+        u_D = Asap.solve(m, Vector{Asap.AbstractLoad}[dead], links)[1]
+        Dict(i => Asap.element_deflection_profile(m.frame_elements[i], u_D, by_D[i];
+                                                  resolution = resolution) for i in idxs)
+    end
+    u_L = Asap.solve(model, Vector{Asap.AbstractLoad}[live], links)[1]
+    L = Dict(i => Asap.element_deflection_profile(model.frame_elements[i], u_L, by_L[i];
+                                                  resolution = resolution) for i in idxs)
+    return (D = D, L = L)
 end
 
 function _loads_by_id(loads)
@@ -488,11 +627,11 @@ Returns true when a confirmation pass should run.
 """
 function _install_composite_analysis!(struc::BuildingStructure, result, group_ids,
                                       payloads, material, shored::Bool;
-                                      resolution::Int = 200)
+                                      resolution::Int = 200, service = nothing)
     jobs = NamedTuple[]
     grew = false
+    installed = Int[]
     mesh = _composite_mesh!(struc)
-    mesh[:shored] = shored
     _clear_unshored_stage!(mesh)
     for (g_idx, gid) in enumerate(group_ids)
         payload = payloads[g_idx]
@@ -501,18 +640,20 @@ function _install_composite_analysis!(struc::BuildingStructure, result, group_id
         mg = struc.member_groups[gid]
         beams = [struc.beams[i] for i in mg.member_indices]
         brace = _group_flexure_bracing(struc, mg.member_indices)
+        svc = service === nothing ? nothing : service[g_idx]
         for (bi, beam) in enumerate(beams)
             for si in segment_indices(beam)
                 edge = struc.segments[si].edge_idx
                 before = haskey(get(mesh, :children, Dict{Int, Vector{Int}}()), edge)
-                _subdivide_composite_edge!(struc, edge)
+                append!(installed, _subdivide_composite_edge!(struc, edge))
                 grew |= !before
             end
             push!(jobs, (; beam, chosen, field = payload.fields[bi],
-                         ctx = payload.ctx, brace))
+                         ctx = payload.ctx, brace, service = svc))
         end
     end
     isempty(jobs) && return false
+    _note_shoring!(mesh, installed, shored)
     model = struc.asap_model
     # New nodes need a full process before the moment field can see the children.
     # Children are still steel. This solve places hogging and sagging.
@@ -526,16 +667,64 @@ function _install_composite_analysis!(struc::BuildingStructure, result, group_id
     Asap.solve!(model)
     for job in jobs
         _write_beam_composite_ix!(struc, job.beam, job.chosen, material, job.field, job.ctx;
-                                  _brace_kwargs(job.brace)...)
+                                  _brace_kwargs(job.brace)..., service = job.service)
     end
     if shored
         Asap.update!(model; values_only = true)
         Asap.solve!(model)
     else
         # Steel factorization is still current: writing Ix does not rebuild K.
-        _seed_unshored_stage!(struc; resolution = resolution)
+        # `installed` is that factorization. Other unshored beams are not.
+        _seed_unshored_stage!(struc; resolution = resolution,
+                              steel_k_ids = Set(installed))
     end
     return true
+end
+
+"""
+Put bare steel on unshored children that are composite in the current factorization.
+
+`skip` are children whose element section may already be the composite inertia
+while the factorization is still steel (the pass just installed). They are
+included in the update only when some other unshored child needs one. Returns
+the sections to restore. Empty when the factorization was already right.
+"""
+function _hold_unshored_steel!(struc::BuildingStructure, skip::Set{Int})
+    saved = Dict{Int, Asap.Section}()
+    mesh = _composite_mesh(struc)
+    mesh === nothing && return saved
+    steel = get(mesh, :steel, nothing)
+    steel === nothing && return saved
+    model = struc.asap_model
+    others = Int[]
+    for i in _unshored_indices(mesh)
+        i in skip && continue
+        haskey(steel, i) || continue
+        model.frame_elements[i].section === steel[i] && continue
+        push!(others, i)
+    end
+    isempty(others) && return saved
+    for i in others
+        el = model.frame_elements[i]
+        saved[i] = el.section
+        el.section = steel[i]
+    end
+    for i in skip
+        haskey(steel, i) || continue
+        el = model.frame_elements[i]
+        el.section === steel[i] && continue
+        saved[i] = el.section
+        el.section = steel[i]
+    end
+    Asap.update!(model; values_only = true)
+    return saved
+end
+
+function _restore_held!(model, held)
+    for (i, sec) in held
+        model.frame_elements[i].section = sec
+    end
+    return model
 end
 
 """
@@ -545,10 +734,13 @@ Dead on the steel factorization already in hand, live on one composite factoriza
 holds the split so a later demand pass does not factorize either stiffness again.
 Shored construction does not call this.
 """
-function _seed_unshored_stage!(struc::BuildingStructure; resolution::Int = 200)
+function _seed_unshored_stage!(struc::BuildingStructure; resolution::Int = 200,
+                               steel_k_ids = nothing)
     mesh = _composite_mesh!(struc)
     model = struc.asap_model
     children = mesh[:children]
+    skip = steel_k_ids === nothing ? Set{Int}() : steel_k_ids
+    held = _hold_unshored_steel!(struc, skip)
     dead = Asap.AbstractLoad[]
     for loads in values(struc.cell_dead_loads)
         append!(dead, loads)
@@ -560,6 +752,7 @@ function _seed_unshored_stage!(struc::BuildingStructure; resolution::Int = 200)
     if isempty(dead) && isempty(live)
         # Pattern dead load, while the steel factorization from install is current.
         _capture_pattern_dead!(struc; resolution = resolution)
+        _restore_held!(model, held)
         Asap.update!(model; values_only = true)
         Asap.solve!(model)
         n = model.nDOFs
@@ -568,25 +761,31 @@ function _seed_unshored_stage!(struc::BuildingStructure; resolution::Int = 200)
         mesh[:stage] = stage
         return stage
     end
-    # Element K is still the steel mesh. Sample dead before rebuilding it.
+    # Element K is still the steel mesh for `skip`. Other unshored beams were
+    # swapped to steel by `_hold_unshored_steel!` when they were not. Sample
+    # dead before rebuilding K on the composite inertia.
     _capture_pattern_dead!(struc; resolution = resolution)
     u_D = isempty(dead) ? zeros(model.nDOFs) : Asap.solve(model, dead)
     by_D = _loads_by_id(dead)
     forces_D = Dict{Int, NamedTuple}()
+    unshored = _unshored_indices(mesh)
     for idxs in values(children)
         for i in idxs
+            i in unshored || continue
             el = model.frame_elements[i]
             forces_D[el.elementID] = _element_forces_from_u(
                 el, u_D, get(by_D, el.elementID, Asap.AbstractLoad[]);
                 resolution = resolution)
         end
     end
+    _restore_held!(model, held)
     Asap.update!(model; values_only = true)
     u_L = isempty(live) ? zeros(model.nDOFs) : Asap.solve(model, live)
     by_L = _loads_by_id(live)
     summed = Dict{Int, NamedTuple}()
     for idxs in values(children)
         for i in idxs
+            i in unshored || continue
             el = model.frame_elements[i]
             id = el.elementID
             d = forces_D[id]
@@ -609,12 +808,17 @@ factorization then carries live load and the full-load displacement.
 """
 function _reanalyze_changed_composite!(struc::BuildingStructure, result, group_ids,
                                        payloads, material, shored::Bool;
-                                       resolution::Int = 200)
-    _refresh_composite_ix!(struc, result, group_ids, payloads, material)
+                                       resolution::Int = 200, service = nothing)
+    _refresh_composite_ix!(struc, result, group_ids, payloads, material; service = service)
     mesh = _composite_mesh!(struc)
     model = struc.asap_model
-    for (i, sec) in mesh[:steel]
-        model.frame_elements[i].section = sec
+    # Only this pass's children go back to steel. Other composite beams keep
+    # the stiffness the previous pass installed.
+    own = _composite_child_ids(struc, group_ids)
+    steel_map = get(mesh, :steel, Dict{Int, Asap.Section}())
+    for i in own
+        haskey(steel_map, i) || continue
+        model.frame_elements[i].section = steel_map[i]
     end
     Asap.update!(model; values_only = true)
     Asap.solve!(model)
@@ -624,17 +828,18 @@ function _reanalyze_changed_composite!(struc::BuildingStructure, result, group_i
         chosen = result.sections[g_idx]
         mg = struc.member_groups[gid]
         brace = _group_flexure_bracing(struc, mg.member_indices)
+        svc = service === nothing ? nothing : service[g_idx]
         for (bi, m_idx) in enumerate(mg.member_indices)
             _write_beam_composite_ix!(struc, struc.beams[m_idx], chosen, material,
                                       payload.fields[bi], payload.ctx;
-                                      _brace_kwargs(brace)...)
+                                      _brace_kwargs(brace)..., service = svc)
         end
     end
     if shored
         Asap.update!(model; values_only = true)
         Asap.solve!(model)
     else
-        _seed_unshored_stage!(struc; resolution = resolution)
+        _seed_unshored_stage!(struc; resolution = resolution, steel_k_ids = own)
     end
     return struc
 end
@@ -660,7 +865,7 @@ end
 
 """Put the new steel section on the children, then the composite inertia."""
 function _refresh_composite_ix!(struc::BuildingStructure, result, group_ids,
-                                payloads, material)
+                                payloads, material; service = nothing)
     mesh = _composite_mesh(struc)
     mesh === nothing && return struc
     _clear_unshored_stage!(mesh)
@@ -687,8 +892,9 @@ function _refresh_composite_ix!(struc::BuildingStructure, result, group_ids,
                 end
                 parent.section = _zero_wall_frame_section(asap_sec.E, asap_sec.G)
             end
+            svc = service === nothing ? nothing : service[g_idx]
             _write_beam_composite_ix!(struc, beam, chosen, material, field, payload.ctx;
-                                      _brace_kwargs(brace)...)
+                                      _brace_kwargs(brace)..., service = svc)
         end
     end
     return struc
@@ -719,17 +925,69 @@ _brace_kwargs(::Nothing) = (;)
 _brace_kwargs(brace) = (; Lb = brace.Lb, Cb = brace.Cb)
 
 """
-    _write_beam_composite_ix!(struc, beam, section, material, field, ctx; Lb, Cb)
+Per-group inputs for the stud `I_need` the catalog counted.
 
-Write each element's composite inertia from the studs the strength check
-will detail.
+`variable_inertia` is the flag on that group's payload. When it is true the
+checker used the solved deflection and `I_need` stays unset. Otherwise
+`_I_required_for_composite` uses this group's δ, `I_ref`, and span with the
+beam options' deflection limits, the same call as `is_feasible`.
+"""
+function _composite_install_service(demands, geometries, opts, payloads)
+    checker = AISCChecker(;
+        deflection_limit = opts.deflection_limit,
+        total_deflection_limit = opts.total_deflection_limit)
+    return map(enumerate(payloads)) do (i, payload)
+        payload isa PerStationComposite || return nothing
+        d = demands[i]
+        return (
+            checker = checker,
+            variable_inertia = payload.variable_inertia,
+            shored = payload.ctx.shored,
+            L_m = to_meters(geometries[i].L),
+            I_ref = Asap.to_meters_fourth(d.I_ref),
+            δ_LL = to_meters(d.δ_max_LL),
+            δ_total = to_meters(d.δ_max_total),
+        )
+    end
+end
+
+"""
+`I_LB` the stud layout has to reach, or `nothing` when the check used the solved deflection.
+
+The service check on a continuous beam is Eq. C-I3-5, so the layout is asked
+for the positive inertia that produces that service inertia. A beam with one
+sagging region, and the region of greatest positive moment when there are
+several, is the region the checker applies this to.
+"""
+function _composite_I_need(section, field, ctx, regions, service)
+    (service === nothing || service.variable_inertia || isempty(regions)) && return nothing
+    # AISC 360-22 Commentary Eq. C-I3-1 (corpus: aisc-360-22, PDF p. 502):
+    # I_LB grows with ΣQn between the maximum positive moment and the adjacent
+    # zero. Eq. C-I3-5 on the same page checks a continuous beam on
+    # 0.6 I_LB + 0.4 I_neg. Same two calls as is_feasible.
+    I_need = StructuralSizer._I_required_for_composite(
+        service.checker, service.shored, service.L_m, service.I_ref,
+        service.δ_LL, service.δ_total)
+    if I_need !== nothing && StructuralSizer.moment_field_has_negative(field.demand_of_s)
+        I_neg = composite_negative_inertia(section, ctx)
+        I_need = positive_inertia_for_service(I_need, I_neg; continuous = true)
+    end
+    return I_need
+end
+
+"""
+    _write_beam_composite_ix!(struc, beam, section, material, field, ctx; Lb, Cb, service)
+
+Write each element's composite inertia from the studs the check counted.
 
 `Lb` and `Cb` are the group values from [`_group_flexure_bracing`](@ref).
 When they are omitted, the steel strength is taken at the member span with
-`Cb = 1`.
+`Cb = 1`. `service` is one entry from [`_composite_install_service`](@ref).
+The region of greatest positive moment is asked for that `I_LB`. The other
+regions stay on strength, as the checker does.
 """
 function _write_beam_composite_ix!(struc, beam, section, material, field, ctx;
-                                   Lb = nothing, Cb = nothing)
+                                   Lb = nothing, Cb = nothing, service = nothing)
     L = field.L_beam === nothing ? _beam_span_length(beam) : field.L_beam
     slab = field.slab === nothing ? ctx.slab : field.slab
     # Same ϕMn the checker caches. AISC 360-16 §F1, ϕ_b = 0.90
@@ -741,7 +999,12 @@ function _write_beam_composite_ix!(struc, beam, section, material, field, ctx;
     Cb_use = Cb === nothing ? 1.0 : Cb
     ϕMn_steel = get_ϕMn(section, material; Lb = Lb_use, Cb = Cb_use,
                         axis = :strong, ϕ = 0.9)
-    ΣQn_at = region -> begin
+    M_of_s, _ = beam_signed_moment_field(struc, beam)
+    regions = positive_moment_regions(M_of_s)
+    I_need = _composite_I_need(section, field, ctx, regions, service)
+    primary_peak = isempty(regions) ? nothing : argmax(r -> r.M_peak, regions).s_peak
+    I_for(region) = (I_need === nothing || region.s_peak != primary_peak) ? nothing : I_need
+    function anchors(region)
         b = b_eff_at_station(slab, L, region.s_peak;
                              left = field.left, right = field.right,
                              supports = field.supports)
@@ -749,9 +1012,27 @@ function _write_beam_composite_ix!(struc, beam, section, material, field, ctx;
                                    region.M_peak * u"N*m";
                                    ϕMn_steel = ϕMn_steel,
                                    shear_spans = region_shear_spans(region, L),
-                                   slip_checked = ctx.slip_checked)
-        return lay.ΣQn
+                                   slip_checked = ctx.slip_checked,
+                                   I_need = I_for(region))
+        # A failing probe is the minimum row count. Installing it after the
+        # catalog counted a higher I_LB would put too few studs on the beam.
+        if I_for(region) !== nothing && !lay.ok
+            throw(ArgumentError(
+                "Shear anchors for this composite beam do not reach the I_LB " *
+                "the deflection check counted ($(lay.reason))."))
+        end
+        return lay
     end
+    layouts = Dict{Any, Any}()
+    for region in regions
+        layouts[region] = anchors(region)
+    end
+    ΣQn_at = region -> begin
+        lay = get(layouts, region, nothing)
+        return (lay === nothing ? anchors(region) : lay).ΣQn
+    end
+    _store_stud_placement!(struc, beam, place_shear_anchors(
+        section, ctx.anchor, slab, regions, [layouts[r] for r in regions], L))
     _record_composite_stiffness!(struc, beam, section, material, slab, ΣQn_at;
                                  left = field.left, right = field.right,
                                  supports = field.supports,
@@ -761,5 +1042,81 @@ function _write_beam_composite_ix!(struc, beam, section, material, field, ctx;
                                        supports = field.supports,
                                        Asr = ctx.Asr, d_rebar = ctx.d_rebar)
     return struc
+end
+
+"""Keep the stud stations written with the composite stiffness of `beam`."""
+function _store_stud_placement!(struc::BuildingStructure, beam::Beam,
+                                layout::StructuralSizer.ShearAnchorLayout)
+    mesh = _composite_mesh!(struc)
+    placed = get!(() -> IdDict{Beam, StructuralSizer.ShearAnchorLayout}(),
+                  mesh, :stud_placements)
+    placed[beam] = layout
+    # The beam object can be replaced after sizing. The index survives that.
+    by_index = get!(() -> Dict{Int, StructuralSizer.ShearAnchorLayout}(),
+                    mesh, :stud_placement_index)
+    idx = findfirst(b -> b === beam, struc.beams)
+    idx === nothing || (by_index[idx] = layout)
+    return layout
+end
+
+"""Stud stations for `beam`, or `nothing` when composite stiffness was not written."""
+function composite_stud_placement(struc::BuildingStructure, beam::Beam)
+    mesh = _composite_mesh(struc)
+    mesh === nothing && return nothing
+    placed = get(mesh, :stud_placements, nothing)
+    if placed !== nothing
+        hit = get(placed, beam, nothing)
+        hit === nothing || return hit
+    end
+    by_index = get(mesh, :stud_placement_index, nothing)
+    by_index === nothing && return nothing
+    idx = findfirst(b -> b === beam, struc.beams)
+    if idx === nothing
+        segs = segment_indices(beam)
+        idx = findfirst(b -> segment_indices(b) == segs, struc.beams)
+    end
+    idx === nothing && return nothing
+    return get(by_index, idx, nothing)
+end
+
+"""
+    stud_positions_by_element(struc) -> Dict{Int, NamedTuple}
+
+Each entry is `(pts, d_sa, l_sa, z_flange)`. `pts` are `(s_local, y)` in
+metres for one analysis element. `s_local` is measured from that element's
+start node, along the same station axis as [`beam_signed_moment_field`](@ref).
+The last element of a beam includes a stud that lands on its end. `d_sa` and
+`l_sa` are the shank diameter and length. `z_flange` is the top of steel in
+the section frame, metres.
+"""
+function stud_positions_by_element(struc::BuildingStructure)
+    out = Dict{Int, NamedTuple}()
+    mesh = _composite_mesh(struc)
+    mesh === nothing && return out
+    placed = get(mesh, :stud_placements, nothing)
+    placed === nothing && return out
+    model = struc.asap_model
+    model === nothing && return out
+    for (beam, layout) in placed
+        isempty(layout.s) && continue
+        spans = Tuple{Int, Float64, Float64}[]
+        acc = 0.0
+        for si in segment_indices(beam)
+            seg = struc.segments[si]
+            for el_idx in _frame_element_indices(struc, seg.edge_idx)
+                el = model.frame_elements[el_idx]
+                L = Float64(Asap.ElementProps(el).L)
+                push!(spans, (el.elementID, acc, acc + L))
+                acc += L
+            end
+        end
+        for (k, (eid, s0, s1)) in enumerate(spans)
+            pts = studs_on_interval(layout, s0, s1; include_end = k == length(spans))
+            isempty(pts) && continue
+            out[eid] = (pts = pts, d_sa = layout.d_sa, l_sa = layout.l_sa,
+                        z_flange = layout.z_flange)
+        end
+    end
+    return out
 end
 

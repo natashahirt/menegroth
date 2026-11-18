@@ -33,13 +33,14 @@ const TEST_PARAMS = DesignParameters(
     floor = FlatPlateOptions(
         method = DDM(),
         deflection_limit = :L_360,
-        punching_strategy = :grow_columns,
-        shear_studs = :never,
+        shear_studs = :if_needed,
     ),
     materials = MaterialOptions(
         concrete = StructuralSizer.NWC_4000,
     ),
-    max_iterations = 3,
+    # 25 ft bays reach the 30 in column cap with studs still short, so the
+    # slab has to thicken past the first few ½ in steps.
+    max_iterations = 20,
 )
 
 const TEST_DESIGN = design_building(TEST_STRUC, TEST_PARAMS)

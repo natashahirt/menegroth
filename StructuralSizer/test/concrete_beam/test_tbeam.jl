@@ -83,6 +83,16 @@ using Asap: kip, ksi
             bar_size=9, n_bars=3,
         )
 
+        # A flange that is the web, added to a zero length in metres, converts
+        # a few ulps under 12 in and 24 in. That is still the web.
+        for bw in (12.0u"inch", 24.0u"inch")
+            sec_web = RCTBeamSection(
+                bw = bw, h = 30u"inch", bf = bw + 0.0u"m", hf = 2.5u"inch",
+                bar_size = 5, n_bars = 2,
+            )
+            @test sec_web.bf == sec_web.bw
+        end
+
         # hf ≥ h should throw
         @test_throws ArgumentError RCTBeamSection(
             bw=12u"inch", h=24u"inch", bf=48u"inch", hf=24u"inch",
@@ -351,6 +361,25 @@ using Asap: kip, ksi
         # T-shape area > rectangular web area
         A_web = 12 * 24 * (0.0254)^2  # m²
         @test asap_sec.A > A_web * u"m^2"
+    end
+
+    @testset "T-beam weighs only its stem; the flange is the slab" begin
+        sec = RCTBeamSection(
+            bw=12u"inch", h=24u"inch", bf=48u"inch", hf=5u"inch",
+            bar_size=9, n_bars=3,
+        )
+        mat = NWC_4000
+        stem = 12u"inch" * (24u"inch" - 5u"inch")
+        @test self_weight_area(sec) ≈ stem
+        @test section_area(sec) ≈ stem + 48u"inch" * 5u"inch"
+
+        # Asap frame self-weight is ρ·A·g: it must equal the stem's weight.
+        asap_sec = to_asap_section(sec, mat)
+        @test asap_sec.ρ * asap_sec.A ≈ uconvert(u"kg/m", mat.ρ * stem)
+        @test asap_sec.A ≈ uconvert(u"m^2", section_area(sec))
+
+        rect = RCBeamSection(b=12u"inch", h=24u"inch", bar_size=9, n_bars=3)
+        @test self_weight_area(rect) == section_area(rect)
     end
 
 end

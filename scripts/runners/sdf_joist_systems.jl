@@ -99,8 +99,8 @@ function _print_numbers(io, numbers)
                 "concrete=$(numbers.concrete)")
 end
 
-"""Design the three joist systems of each plan. One scene per plan."""
-function design_joist_systems(plans)
+"""Design the joist systems of each plan. One scene per plan."""
+function design_joist_systems(plans, systems = JOIST_SYSTEMS)
     stamp = Dates.format(now(), "yyyymmdd_HHMMSS")
     csv_path = joinpath(REPORT_DIR, "joist_systems_$(stamp).csv")
     mkpath(REPORT_DIR)
@@ -114,7 +114,7 @@ function design_joist_systems(plans)
             isfile(scene) && rm(scene)
             report_dir = joinpath(REPORT_DIR, _slug(plan_name) * "_joist_systems")
             mkpath(report_dir)
-            for system in JOIST_SYSTEMS
+            for system in systems
                 params = joist_system_parameters(plan_name, system)
                 println("  $plan_name  $(params.name)")
                 report = joinpath(report_dir, "$(system).txt")
@@ -169,4 +169,7 @@ function design_joist_systems(plans)
     return csv_path
 end
 
-design_joist_systems(isempty(ARGS) ? JOIST_PLANS : String.(ARGS))
+_systems = haskey(ENV, "JOIST_SYSTEMS") ?
+    [Symbol(strip(s)) for s in split(ENV["JOIST_SYSTEMS"], ",") if !isempty(strip(s))] :
+    JOIST_SYSTEMS
+design_joist_systems(isempty(ARGS) ? JOIST_PLANS : String.(ARGS), _systems)

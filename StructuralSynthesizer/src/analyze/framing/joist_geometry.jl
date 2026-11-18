@@ -16,6 +16,66 @@ _framing_edge_group_id(level::FramingLevel) = hash((:framing_level_edge, _framin
 """Member-group id of the pieces inside a solid head."""
 _framing_solid_group_id(level::FramingLevel) = hash((:framing_solid_head, _framing_group_id(level)))
 
+"""Group id of one grillage rib piece, from its two end vertices."""
+function _framing_piece_group_id(level::FramingLevel, va::Int, vb::Int)
+    a, b = va < vb ? (va, vb) : (vb, va)
+    return hash((:framing_piece, _framing_group_id(level), a, b))
+end
+
+"""
+The two vertices that end `beam`.
+
+A vertex on one edge of the beam is an end. A vertex on two edges is an
+interior joint. `nothing` when the beam is branched or closed.
+"""
+function _beam_terminals(struc, beam)
+    counts = Dict{Int, Int}()
+    for si in segment_indices(beam)
+        a, b = struc.skeleton.edge_indices[struc.segments[si].edge_idx]
+        counts[a] = get(counts, a, 0) + 1
+        counts[b] = get(counts, b, 0) + 1
+    end
+    ends = [v for (v, c) in counts if c == 1]
+    length(ends) == 2 || return nothing
+    return (ends[1], ends[2])
+end
+
+"""
+Put beam `bi` in its own grillage rib group.
+
+The section is sized from that piece's demand. Collinear pieces still share
+a bar size later; they do not share this group.
+"""
+function _claim_rib_piece!(struc, level::FramingLevel, bi::Int)
+    beam = struc.beams[bi]
+    terminals = _beam_terminals(struc, beam)
+    pg = if terminals === nothing
+        edges = sort!(Int[struc.segments[si].edge_idx for si in segment_indices(beam)])
+        hash((:framing_piece, _framing_group_id(level), edges))
+    else
+        _framing_piece_group_id(level, terminals[1], terminals[2])
+    end
+    old = group_id(beam)
+    old == pg && return pg
+    _drop_beam_from_its_group!(struc, bi)
+    if old !== nothing && old in level.piece_group_ids
+        mg = get(struc.member_groups, old, nothing)
+        (mg === nothing || isempty(mg.member_indices)) &&
+            filter!(i -> i != old, level.piece_group_ids)
+    end
+    set_group_id!(beam, pg)
+    pg in level.piece_group_ids || push!(level.piece_group_ids, pg)
+    mg = get!(struc.member_groups, pg) do
+        MemberGroup(pg)
+    end
+    bi in mg.member_indices || push!(mg.member_indices, bi)
+    return pg
+end
+
+"""A grillage rib of this level, as opposed to a girder on the same story."""
+_level_rib(level::FramingLevel, beam) =
+    rib_analysis(level) == :grillage && beam.role == level.role
+
 """
     _slab_boundary_edges(struc, slab) -> Vector{Int}
 
@@ -84,30 +144,90 @@ end
 
 Host-edge candidates for a level's joist landings (Phase 10).
 
-- **Level 1** → all slab boundary sub-edges (perimeter girders + any prior joist
-  landings on the boundary).
-- **Level `N ≥ 2`** → boundary sub-edges ∪ every edge of every level-`N-1` beam.
+- **Level 1** → slab boundary sub-edges, the girders shared by this slab's own
+  cells, and this slab's walls. A tributary joist that crosses an interior
+  girder or a wall lands on it.
+- **Level `N ≥ 2`** → those same edges ∪ every edge of every level-`N-1` beam.
   A level-`N` joist crossing a level-`N-1` beam therefore lands on it as an
   interior support (the joist becomes a continuous chain over its host lattice).
 
 The boundary is always included so a level-`N ≥ 2` joist can span from perimeter
 to perimeter over interior level-`N-1` supports (the standard secondary-beam
-convention). Returned indices are unique and sorted for determinism.
+convention). A previous-level beam on another story, or in another slab, is
+not a host: its edge must sit at this slab's elevation and its midpoint must
+lie in this slab. Returned indices are unique and sorted for determinism.
 """
 function _level_host_edges(struc::BuildingStructure, slab::Slab, level_idx::Int)
     boundary = _slab_boundary_sub_edges(struc, slab)
-    level_idx == 1 && return unique!(sort!(boundary))
+    hosts = vcat(boundary, _slab_interior_sub_edges(struc, slab),
+                 _slab_wall_edges(struc, slab))
+    level_idx == 1 && return unique!(sort!(hosts))
 
     prev = level_idx - 1
+    z = _slab_elevation_m(struc, slab)
+    poly = _slab_interior_polygon_m(struc, slab)
     prev_edges = Int[]
     for b in struc.beams
         level_of(b) == prev || continue
         for si in segment_indices(b)
             si <= length(struc.segments) || continue
-            push!(prev_edges, struc.segments[si].edge_idx)
+            e = struc.segments[si].edge_idx
+            _edge_on_this_slab(struc, e, z, poly) || continue
+            push!(prev_edges, e)
         end
     end
-    return unique!(sort!(vcat(boundary, prev_edges)))
+    return unique!(sort!(vcat(hosts, prev_edges)))
+end
+
+"""
+Wall edges of this slab: the `:walls` group, at this slab's elevation, with
+the midpoint in the slab. A wall on another story is not a joist host.
+"""
+function _slab_wall_edges(struc::BuildingStructure, slab::Slab)
+    skel = struc.skeleton
+    z = _slab_elevation_m(struc, slab)
+    poly = _slab_interior_polygon_m(struc, slab)
+    out = Int[]
+    for e in get(skel.groups_edges, :walls, Int[])
+        _edge_on_this_slab(struc, e, z, poly) || continue
+        push!(out, e)
+    end
+    return out
+end
+
+"""Beam or wall that owns `edge`, or `nothing` when the edge is only geometry."""
+function _member_for_edge(struc::BuildingStructure, edge::Int)
+    for member in Iterators.flatten((struc.beams, struc.walls))
+        for si in segment_indices(member)
+            si <= length(struc.segments) || continue
+            struc.segments[si].edge_idx == edge && return member
+        end
+    end
+    return nothing
+end
+
+"""Elevation (m) of the slab boundary, or `nothing` when it has no edge."""
+function _slab_elevation_m(struc::BuildingStructure, slab::Slab)
+    edges = _slab_boundary_edges(struc, slab)
+    isempty(edges) && return nothing
+    v1, _ = struc.skeleton.edge_indices[first(edges)]
+    return _vertex_z_m(struc.skeleton, v1)
+end
+
+"""
+`edge` belongs to this slab: both ends are within 1 cm of `z`, and the
+midpoint lies in `poly`. `poly === nothing` keeps the elevation test only.
+"""
+function _edge_on_this_slab(struc::BuildingStructure, edge::Int, z, poly)
+    z === nothing && return false
+    v1, v2 = struc.skeleton.edge_indices[edge]
+    abs(_vertex_z_m(struc.skeleton, v1) - z) <= 0.01 || return false
+    abs(_vertex_z_m(struc.skeleton, v2) - z) <= 0.01 || return false
+    poly === nothing && return true
+    a = _vertex_xy_m(struc.skeleton, v1)
+    b = _vertex_xy_m(struc.skeleton, v2)
+    mid = ((a[1] + b[1]) / 2, (a[2] + b[2]) / 2)
+    return _point_in_polygon(mid, poly)
 end
 
 """Map each host beam's edges to its beam index (for subdivision bookkeeping)."""
@@ -249,6 +369,19 @@ function _pattern_joist_lines(struc::BuildingStructure, slab::Slab,
     return _isoparametric_rib_lines(poly, pattern.n_xi, pattern.n_eta)
 end
 
+"""Both rib families of a module grid, over the slab's true outline."""
+function _pattern_joist_lines(struc::BuildingStructure, slab::Slab,
+                              _host_edges::Vector{Int},
+                              pattern::ModularRibPattern)
+    poly = _slab_interior_polygon_m(struc, slab)
+    poly === nothing && throw(ArgumentError(
+        "ModularRibPattern needs the slab boundary, and this slab has none."))
+    lines = StructuralSizer.modular_rib_lines(poly; angle = pattern.angle,
+                                              spacing = pattern.spacing,
+                                              origin = pattern.origin)
+    return [(l.point, l.direction) for l in lines]
+end
+
 function _pattern_joist_lines(struc::BuildingStructure, slab::Slab,
                               host_edges::Vector{Int},
                               pattern::RadialPattern)
@@ -343,6 +476,68 @@ function _slab_interior_polygon_m(struc::BuildingStructure, slab::Slab)
     return NTuple{2, Float64}[_vertex_xy_m(struc.skeleton, v) for v in boundary_vis]
 end
 
+"""Skeleton vertex loops of the beam rings inside the slab's faces."""
+function _slab_hole_vertex_loops(struc::BuildingStructure, slab::Slab)
+    loops = Vector{Int}[]
+    for ci in slab.cell_indices
+        append!(loops, get(struc.skeleton.face_hole_vertices, struc.cells[ci].face_idx,
+                           Vector{Int}[]))
+    end
+    return loops
+end
+
+"""Plan loops (metres) of the beam rings inside the slab. Ribs stop at them."""
+_slab_hole_loops_m(struc::BuildingStructure, slab::Slab) =
+    [NTuple{2, Float64}[_vertex_xy_m(struc.skeleton, v) for v in loop]
+     for loop in _slab_hole_vertex_loops(struc, slab)]
+
+"""
+Skeleton edges on the sides of the slab's hole rings, including the pieces a
+landing has already split off. Ribs land on these members.
+"""
+function _slab_hole_edges(struc::BuildingStructure, slab::Slab; tol::Float64 = 1e-6)
+    loops = _slab_hole_loops_m(struc, slab)
+    isempty(loops) && return Int[]
+    skel = struc.skeleton
+    z = _vertex_z_m(skel, first(_slab_hole_vertex_loops(struc, slab))[1])
+    out = Int[]
+    for (e, (v1, v2)) in enumerate(skel.edge_indices)
+        abs(_vertex_z_m(skel, v1) - z) <= tol || continue
+        abs(_vertex_z_m(skel, v2) - z) <= tol || continue
+        p1 = _vertex_xy_m(skel, v1)
+        p2 = _vertex_xy_m(skel, v2)
+        on = any(loops) do loop
+            n = length(loop)
+            any(1:n) do i
+                a, b = loop[i], loop[mod1(i + 1, n)]
+                _param_on_segment(p1, a, b; tol = tol) !== nothing &&
+                    _param_on_segment(p2, a, b; tol = tol) !== nothing
+            end
+        end
+        on && push!(out, e)
+    end
+    return out
+end
+
+"""
+Edges shared by two of the slab's own faces, following landing splits. These
+are the girders inside a multi-cell slab. A grillage rib lands on them.
+"""
+function _slab_interior_sub_edges(struc::BuildingStructure, slab::Slab)
+    skel = struc.skeleton
+    counts = Dict{Int, Int}()
+    for ci in slab.cell_indices, e in skel.face_edge_indices[struc.cells[ci].face_idx]
+        counts[e] = get(counts, e, 0) + 1
+    end
+    out = Int[]
+    for (E, c) in counts
+        c >= 2 || continue
+        key = hash((:framing_host_chain, E))
+        haskey(skel.edge_chains, key) ? append!(out, skel.edge_chains[key]) : push!(out, E)
+    end
+    return sort!(out)
+end
+
 """
     _point_on_polygon_boundary(px, py, poly; tol) -> Bool
 
@@ -386,13 +581,15 @@ on-boundary rejection make the classification deterministic when a joist line is
 collinear with a boundary edge (a single midpoint could land exactly on-edge,
 where the ray cast is undefined) and robust for angled / non-rectilinear spans. A
 span with any exterior or on-boundary sample (a re-entrant notch, or beyond the
-plate) breaks the chain and that segment is dropped. Returns index runs into
+plate) breaks the chain and that segment is dropped. A span inside or along one
+of `holes` (a beam ring around an atrium) is dropped the same way. Returns index runs into
 `chain_xy`; single-vertex runs are discarded by the caller. Pure geometry — no
 mechanics. (Only invoked for non-convex bays; convex/rectilinear layouts skip the
 clip entirely in the caller, so their behavior is unchanged.)
 """
 function _interior_subchains(chain_xy::Vector{NTuple{2, Float64}},
-                             poly::Vector{NTuple{2, Float64}})
+                             poly::Vector{NTuple{2, Float64}};
+                             holes::Vector{Vector{NTuple{2, Float64}}} = Vector{NTuple{2, Float64}}[])
     n = length(chain_xy)
     runs = Vector{Int}[]
     n < 2 && return runs
@@ -424,7 +621,9 @@ function _interior_subchains(chain_xy::Vector{NTuple{2, Float64}},
             sx = ax + t * (bx - ax)
             sy = ay + t * (by - ay)
             if _point_on_polygon_boundary(sx, sy, poly; tol = bnd_tol) ||
-               !_point_in_polygon_xy(sx, sy, poly)
+               !_point_in_polygon_xy(sx, sy, poly) ||
+               any(h -> _point_on_polygon_boundary(sx, sy, h; tol = bnd_tol) ||
+                        _point_in_polygon_xy(sx, sy, h), holes)
                 span_interior = false
                 break
             end
@@ -459,4 +658,217 @@ function _line_seg_intersect(p0::NTuple{2, Float64}, dir::NTuple{2, Float64},
     (u < -tol || u > 1.0 + tol) && return nothing
     return (t, clamp(u, 0.0, 1.0))
 end
+
+"""
+Plan outlines of the slab openings on this slab's story.
+
+A framed opening is still listed. Its edges are supports
+([`_edges_along_loops`](@ref)); an unframed opening is only this outline,
+and the joist stops there.
+"""
+function _slab_opening_loops_m(struc::BuildingStructure, slab::Slab)
+    skel = struc.skeleton
+    isempty(skel.openings) && return Vector{NTuple{2, Float64}}[]
+    poly = _slab_interior_polygon_m(struc, slab)
+    poly === nothing && return Vector{NTuple{2, Float64}}[]
+    z = _slab_elevation_m(struc, slab)
+    z === nothing && return Vector{NTuple{2, Float64}}[]
+    level = story_index_at(skel, z)
+    level === nothing && return Vector{NTuple{2, Float64}}[]
+    loops = Vector{NTuple{2, Float64}}[]
+    for op in skel.openings
+        op.story == level || continue
+        n = length(op.loop)
+        n < 3 && continue
+        cx = sum(p[1] for p in op.loop) / n
+        cy = sum(p[2] for p in op.loop) / n
+        inside = _point_in_polygon_xy(cx, cy, poly) ||
+            any(p -> _point_in_polygon_xy(p[1], p[2], poly), op.loop)
+        inside && push!(loops, op.loop)
+    end
+    return loops
+end
+
+"""Skeleton edges that lie on an edge of one of `loops`."""
+function _edges_along_loops(skel, loops; tol::Float64 = 1e-4)
+    isempty(loops) && return Int[]
+    out = Int[]
+    for (e, (v1, v2)) in enumerate(skel.edge_indices)
+        p1 = _vertex_xy_m(skel, v1)
+        p2 = _vertex_xy_m(skel, v2)
+        hypot(p2[1] - p1[1], p2[2] - p1[2]) <= tol && continue
+        on = false
+        for loop in loops
+            n = length(loop)
+            for i in 1:n
+                a = loop[i]
+                b = loop[mod1(i + 1, n)]
+                _param_on_segment(p1, a, b; tol = tol) === nothing && continue
+                _param_on_segment(p2, a, b; tol = tol) === nothing && continue
+                on = true
+                break
+            end
+            on && break
+        end
+        on && push!(out, e)
+    end
+    return out
+end
+
+"""A new plan vertex, in the same coordinate type the skeleton already uses."""
+function _opening_stop_vertex!(skel, xy::NTuple{2, Float64}, z_m::Float64)
+    sample = Meshes.coords(skel.vertices[1]).x
+    if sample isa Unitful.Quantity
+        pt = Meshes.Point(xy[1] * u"m", xy[2] * u"m", z_m * u"m")
+        return add_vertex!(skel, pt; group = :opening_stops)
+    end
+    return add_vertex!(skel, [xy[1], xy[2], z_m]; group = :opening_stops)
+end
+
+"""
+Insert a vertex wherever `chain` crosses an opening edge, and return the
+chain split into the pieces that stay outside every opening.
+
+Each piece is `(vertices, starts_at_chain_start, ends_at_chain_end)`.
+"""
+function _opening_pieces(skel, chain::Vector{Int}, loops, z_m::Float64; tol::Float64 = 1e-6)
+    verts = _insert_loop_crossings!(skel, chain, loops, z_m; tol = tol)
+    xy = [_vertex_xy_m(skel, v) for v in verts]
+    runs = Vector{Int}[]
+    current = Int[]
+    for i in 1:(length(verts) - 1)
+        if _span_outside_openings(xy[i], xy[i + 1], loops; tol = tol)
+            isempty(current) && push!(current, i)
+            push!(current, i + 1)
+        else
+            length(current) >= 2 && push!(runs, current)
+            current = Int[]
+        end
+    end
+    length(current) >= 2 && push!(runs, current)
+    pieces = Tuple{Vector{Int}, Bool, Bool}[]
+    for run in runs
+        vs = verts[run]
+        push!(pieces, (vs, vs[1] == chain[1], vs[end] == chain[end]))
+    end
+    return pieces
+end
+
+"""Chain with a vertex added at every opening-edge crossing that is not already an end."""
+function _insert_loop_crossings!(skel, chain::Vector{Int}, loops, z_m::Float64; tol::Float64 = 1e-6)
+    out = Int[chain[1]]
+    for i in 1:(length(chain) - 1)
+        a = _vertex_xy_m(skel, chain[i])
+        b = _vertex_xy_m(skel, chain[i + 1])
+        dir = (b[1] - a[1], b[2] - a[2])
+        L = hypot(dir[1], dir[2])
+        cuts = Tuple{Float64, NTuple{2, Float64}}[]
+        if L > 1e-4
+            for loop in loops
+                n = length(loop)
+                for k in 1:n
+                    hit = _line_seg_intersect(a, dir, loop[k], loop[mod1(k + 1, n)]; tol = tol)
+                    hit === nothing && continue
+                    t, _ = hit
+                    dist = min(t, 1 - t) * L
+                    dist <= 1e-4 && continue
+                    p = (a[1] + t * dir[1], a[2] + t * dir[2])
+                    any(c -> hypot(c[2][1] - p[1], c[2][2] - p[2]) <= 1e-4, cuts) && continue
+                    push!(cuts, (t, p))
+                end
+            end
+        end
+        sort!(cuts; by = first)
+        for (_, p) in cuts
+            push!(out, _opening_stop_vertex!(skel, p, z_m))
+        end
+        last(out) == chain[i + 1] || push!(out, chain[i + 1])
+    end
+    return out
+end
+
+"""`true` when the open segment from `a` to `b` stays out of every opening."""
+function _span_outside_openings(a::NTuple{2, Float64}, b::NTuple{2, Float64}, loops; tol::Float64 = 1e-6)
+    for loop in loops
+        _span_meets_loop(a, b, loop; tol = tol) && return false
+    end
+    return true
+end
+
+"""`true` when samples of `a→b` lie in `loop`, or the whole span lies on its boundary."""
+function _span_meets_loop(a::NTuple{2, Float64}, b::NTuple{2, Float64}, loop; tol::Float64 = 1e-6)
+    on = 0
+    for t in (0.2, 0.5, 0.8)
+        s = (a[1] + t * (b[1] - a[1]), a[2] + t * (b[2] - a[2]))
+        if _point_on_polygon_boundary(s[1], s[2], loop; tol = max(tol, 1e-6))
+            on += 1
+            continue
+        end
+        _point_in_polygon_xy(s[1], s[2], loop) && return true
+    end
+    return on == 3
+end
+
+"""
+Releases of one joist piece after an opening cut.
+
+Both ends on a support keep `end_fixity` (a new end at a framed header is
+`:fixed`, continuous into that support). One supported end is a cantilever:
+`:fixed` at the support, so the seat takes the moment, and `:pinned` at the
+opening. No support returns `nothing` and the piece is omitted.
+"""
+function _opening_piece_release(verts::Vector{Int}, landings::Set{Int},
+                                end_fixity::NTuple{2, Symbol},
+                                at_start::Bool, at_end::Bool)
+    n_host = count(v -> v in landings, verts)
+    n_host == 0 && return nothing
+    s_host = verts[1] in landings
+    e_host = verts[end] in landings
+    if s_host && e_host
+        rs = at_start ? end_fixity[1] : :fixed
+        re = at_end ? end_fixity[2] : :fixed
+        return (rs, re)
+    elseif s_host
+        return (:fixed, :pinned)
+    elseif e_host
+        return (:pinned, :fixed)
+    else
+        return (:pinned, :pinned)
+    end
+end
+
+"""
+Stop each joist chain at the slab openings.
+
+Returns the kept chains and one release pair each. A piece with one support
+is a cantilever. A piece with none is omitted, with a warning.
+"""
+function _clip_chains_at_openings!(skel, chains::Vector{Vector{Int}}, loops, z_m::Float64,
+                                  landings::Set{Int}, end_fixity::NTuple{2, Symbol})
+    out_chains = Vector{Int}[]
+    out_rel = NTuple{2, Symbol}[]
+    for chain in chains
+        pieces = _opening_pieces(skel, chain, loops, z_m)
+        if isempty(pieces)
+            @warn "a joist lies in an unframed opening and has no support, so it is omitted" maxlog = 4
+            continue
+        end
+        for (verts, at_start, at_end) in pieces
+            length(verts) < 2 && continue
+            rel = _opening_piece_release(verts, landings, end_fixity, at_start, at_end)
+            if rel === nothing
+                @warn "a joist lies in an unframed opening and has no support, so it is omitted" maxlog = 4
+                continue
+            end
+            if !_joist_ends_supported(verts, landings)
+                @warn "a joist stops at an unframed opening and is checked as a cantilever" maxlog = 4
+            end
+            push!(out_chains, verts)
+            push!(out_rel, rel)
+        end
+    end
+    return out_chains, out_rel
+end
+
+_joist_ends_supported(verts, landings) = (verts[1] in landings) && (verts[end] in landings)
 

@@ -85,6 +85,39 @@ function _resolve_rectangle(kw)
     return arr, res
 end
 
+@testset "column punching chooses the side; failing ribs grow the head otherwise" begin
+    east = (ok = false, ratio = 4.0, outward = (1.0, 0.0))
+    north = (ok = false, ratio = 3.95, outward = (0.0, 1.0))
+    passing = (ok = true, ratio = 0.5, outward = (0.0, -1.0))
+    # Column punching fails and names no face: a ring, whatever the ribs say.
+    ring = (direction = (1.0, 0.0), ribs = [east],
+            column = (ok = false, ratio = 1.2, direction = nothing))
+    @test SY._head_grows(ring)
+    @test SY._head_growth_direction(ring) === nothing
+    faced = (direction = (1.0, 0.0), ribs = [east],
+             column = (ok = false, ratio = 1.2, direction = (0.0, 1.0)))
+    @test SY._head_growth_direction(faced) == (0.0, 1.0)
+    # When the column face is the slab edge, the ribs' side, then a ring.
+    @test SY._head_growth_directions(faced) == [(0.0, 1.0), (1.0, 0.0), nothing]
+    @test SY._head_growth_directions(ring) == [nothing, (1.0, 0.0)]
+    # Column punching passes and a rib fails one-way shear: the head grows
+    # toward that rib. The step is judged on the larger ratio.
+    rib = (direction = nothing, ribs = [east, passing],
+           column = (ok = true, ratio = 0.6, direction = nothing))
+    @test SY._head_grows(rib)
+    @test SY._head_growth_direction(rib) == (1.0, 0.0)
+    @test SY._head_growth_ratio(rib) ≈ 4.0
+    # Two failing ribs leaving in different directions name no side.
+    split = (direction = nothing, ribs = [east, north],
+             column = (ok = true, ratio = 0.6, direction = nothing))
+    @test SY._head_growth_direction(split) === nothing
+    # Only stem compression fails: the head does not grow.
+    hog = (direction = (1.0, 0.0), ribs = [passing],
+           column = (ok = true, ratio = 0.6, direction = nothing))
+    @test !SY._head_grows(hog)
+    @test SY._head_growth_ratio(hog) ≈ 0.6
+end
+
 @testset "a rectangle's corner heads grow on the bays" begin
     # A light panel passes on the seed bays, so the frame is solved once.
     light = _head_kwargs(; pressure = 1000.0)
@@ -109,6 +142,9 @@ end
     @test isempty(intersect(stuck.heads[1].bays, stuck.heads[3].bays))
     @test any(c -> !c.ok, stuck.checks)
 
+    # Column punching is under 1. Ribs leaving two heads are over 1 in
+    # one-way shear on concrete alone. The head grows toward them until the
+    # section at d from its face passes.
     wide = _head_kwargs(; nξ = 8, nη = 8, pressure = 4_500.0,
                         bw = 0.10u"m", h_rib = 0.25u"m", d_rib = 0.20u"m",
                         d_head = 0.25u"m", column = 0.50u"m")
@@ -119,8 +155,47 @@ end
             " dir=", [c.direction for c in grew.checks],
             " ratio=", [round(c.ratio; digits = 2) for c in grew.checks])
     @test grew.ok && grew.stop === :passed
-    @test grew.steps >= 1
-    @test all(c -> c.ratio < 1, grew.checks)
+    @test grew.steps > 0
+    @test any(h -> length(h.bays) > 1, grew.heads)
+    @test all(c -> c.column.ok && all(r -> r.ok, c.ribs), grew.checks)
+end
+
+@testset "a solid-area cap stops a head that still fails" begin
+    heavy = _head_kwargs(; pressure = 20_000.0, bw = 0.05u"m", h_rib = 0.20u"m",
+                         d_rib = 0.16u"m", d_head = 0.20u"m", column = 0.50u"m")
+    Lx, Ly = heavy.Lx, heavy.Ly
+    outline = [(0.0, 0.0), (Lx, 0.0), (Lx, Ly), (0.0, Ly)]
+    arr = SS.modular_rib_arrangement(outline; angle = 0.0,
+                                     spacing = (Lx / heavy.nξ, Ly / heavy.nη),
+                                     origin = (0.0, 0.0))
+    capped = SY.resolve_arrangement_heads(arr, outline, heavy.pressure;
+        outline = outline, concrete = heavy.concrete, depth = heavy.depth,
+        d_head = heavy.d_head, bw = heavy.bw, d_rib = heavy.d_rib, h_rib = heavy.h_rib,
+        fy = Rebar_60.Fy, topping = heavy.topping, column_size = heavy.column_x,
+        max_solid_fraction = 0.05)
+    @test !capped.ok && capped.stop === :solid_cap
+    @test capped.steps == 0
+end
+
+@testset "a tight void joins a head only along a shared edge" begin
+    Lx, Ly = 6.0, 4.0
+    outline = [(0.0, 0.0), (Lx, 0.0), (Lx, Ly), (0.0, Ly)]
+    arr = SS.modular_rib_arrangement(outline; angle = 0.0,
+                                     spacing = (Lx / 4, Ly / 4),
+                                     origin = (0.0, 0.0))
+    corner = argmin(eachindex(arr.bays)) do bi
+        pts = [arr.nodes[k] for k in arr.bays[bi].loop]
+        sum(p[1] + p[2] for p in pts)
+    end
+    head = SS.ColumnSolidHead((0.0, 0.0), [corner])
+    # Every bay is narrower than the void minimum. The cap keeps the seed.
+    held = SY._close_tight_voids(arr, [head], fill(1.0, length(arr.edges)), 10.0, 0.05)
+    @test held[1].bays == [corner]
+    # With room to grow, tight bays fill in from the seed and stay one piece.
+    closed = SY._close_tight_voids(arr, [head], fill(1.0, length(arr.edges)), 10.0, 1.0)
+    @test corner in closed[1].bays
+    @test length(closed[1].bays) > 1
+    @test length(SS._head_sides(arr, closed[1])) > 0
 end
 
 function _head_panel_stub(; Lx = 8.0, Ly = 6.0, n = 8, s = 0.25,

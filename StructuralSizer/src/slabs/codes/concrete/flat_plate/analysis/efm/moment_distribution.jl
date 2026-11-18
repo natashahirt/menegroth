@@ -4,7 +4,8 @@
 
 """
     solve_moment_distribution(spans, joint_Kec, joint_positions, qu;
-                              COF=0.507, max_iterations=20, tolerance=0.01)
+                              COF=nothing, max_iterations=20, tolerance=0.01,
+                              drop_loads=nothing)
 
 Solve EFM using Hardy Cross moment distribution method.
 
@@ -41,9 +42,13 @@ StructurePoint Table 5 (exact match) and ASAP column-stub model (within 2%).
 - `qu`: Factored uniform load (pressure)
 
 # Keyword Arguments  
-- `COF`: Carry-over factor (default 0.507 from PCA Table A1)
+- `COF`: Carry-over factor for every span; `nothing` uses each span's own
+  (PCA Table A1, or Tables A2–A5 for a flat slab)
 - `max_iterations`: Maximum iterations (default 20)
 - `tolerance`: Convergence tolerance in kip-ft (default 0.01)
+- `drop_loads`: per-span drop line loads `(w, a_left, a_right)` of a flat slab
+  (see `_frame_drop_loads`), added to the FEM by the patch coefficients of
+  Tables A2–A5 and to the midspan statics
 
 # Returns
 Vector of named tuples matching `extract_span_moments` format:
@@ -58,10 +63,11 @@ function solve_moment_distribution(
     joint_Kec::Vector{<:Moment},
     joint_positions::Vector{Symbol},
     qu::Union{Pressure, Vector{<:Pressure}};
-    COF::Float64 = spans[1].COF,  # Use span's COF (prismatic or non-prismatic)
+    COF::Union{Nothing, Float64} = nothing,  # nothing → each span's own COF
     max_iterations::Int = 20,
     tolerance::Float64 = 0.01,
-    verbose::Bool = false
+    verbose::Bool = false,
+    drop_loads = nothing,
 )
     n_spans = length(spans)
     n_joints = n_spans + 1
@@ -96,25 +102,35 @@ function solve_moment_distribution(
     # Compute Fixed-End Moments
     # For flat plate: FEM = m × w × l₁²  (single uniform load)
     # For flat slab:  FEM = m₁ × w_slab × l₂ × l₁² + m₂ × w_drop × b_drop × l₁² + m₃ × w_drop × b_drop × l₁²
-    m_factor = spans[1].m_factor
-    has_drops = has_drop_panels(spans[1])
-    
+    # (PCA Tables A2–A5; `drop_loads[s].w` is w_drop × b_drop.)
     FEM = Vector{Float64}(undef, n_members)
     w_kipft = Vector{Float64}(undef, n_spans)
     l1_ft_arr = Vector{Float64}(undef, n_spans)
-    
+    COF_span = Vector{Float64}(undef, n_spans)
+
     @inbounds for span in 1:n_spans
         sp = spans[span]
         l1_f = ustrip(u"ft", sp.l1)
         l1_ft_arr[span] = l1_f
         w_kf = ustrip(kip/u"ft", qu_per_span[span] * sp.l2)
         w_kipft[span] = w_kf
-        fem = m_factor * w_kf * l1_f^2
-        
+        COF_span[span] = something(COF, sp.COF)
+        fem_left = fem_right = sp.m_factor * w_kf * l1_f^2
+        dl = isnothing(drop_loads) ? nothing : drop_loads[span]
+        if !isnothing(dl) && has_drop_panels(sp)
+            wd = ustrip(kip/u"ft", dl.w)
+            mL = pca_np_fem_coefficients(sp.c1_left, sp.l1, sp.c2_left, sp.l2,
+                                         sp.drop.h_drop, sp.h, dl.a_left; a_far = dl.a_right)
+            mR = pca_np_fem_coefficients(sp.c1_right, sp.l1, sp.c2_right, sp.l2,
+                                         sp.drop.h_drop, sp.h, dl.a_right; a_far = dl.a_left)
+            fem_left  += (mL.m_near + mL.m_far) * wd * l1_f^2
+            fem_right += (mR.m_near + mR.m_far) * wd * l1_f^2
+        end
+
         left_idx = 2*span - 1
         right_idx = 2*span
-        FEM[left_idx] = fem
-        FEM[right_idx] = -fem
+        FEM[left_idx] = fem_left
+        FEM[right_idx] = -fem_right
     end
     
     # Compute Distribution Factors at each joint
@@ -249,7 +265,7 @@ function solve_moment_distribution(
                 # Find far end for carry-over
                 # Odd idx (left end) → far is idx+1; Even idx (right end) → far is idx-1
                 far_idx = isodd(idx) ? idx + 1 : idx - 1
-                co_val = COF * dist_increments[idx]
+                co_val = COF_span[(idx + 1) ÷ 2] * dist_increments[idx]
                 co_increments[far_idx] = co_val
                 
                 # Track which joint received this CO (O(1) lookup)
@@ -286,18 +302,19 @@ function solve_moment_distribution(
         left_idx = 2*span - 1
         right_idx = 2*span
         
-        M_left = abs(M[left_idx])
-        M_right = abs(M[right_idx])
-        
-        # Midspan moment from statics: M_mid = M0 - (M_left + M_right)/2
-        M0 = w_kipft[span] * l1_ft_arr[span]^2 / 8
-        M_mid = M0 - (M_left + M_right) / 2
-        
+        M_left = abs(M[left_idx]) * kip*u"ft"
+        M_right = abs(M[right_idx]) * kip*u"ft"
+
+        # Midspan moment from statics: M0 − (M_left + M_right)/2, plus the drop
+        dl = isnothing(drop_loads) ? nothing : drop_loads[span]
+        M_mid = efm_midspan_moment(M_left, M_right, w_kipft[span] * kip/u"ft",
+                                   l1_ft_arr[span] * u"ft"; drop = dl)
+
         push!(span_moments, (
             span_idx = span,
-            M_neg_left = M_left * kip*u"ft",
-            M_pos = M_mid * kip*u"ft",
-            M_neg_right = M_right * kip*u"ft"
+            M_neg_left = M_left,
+            M_pos = uconvert(kip*u"ft", M_mid),
+            M_neg_right = M_right
         ))
     end
     
@@ -325,21 +342,24 @@ function solve_efm_frame!(model; full_process::Bool=true, loads_only::Bool=false
 end
 
 """
-    extract_span_moments(model, span_elements, spans; qu=nothing)
+    extract_span_moments(model, span_elements, spans; qu=nothing, drop_loads=nothing)
 
 Extract moments at key locations from solved ASAP model.
 
-With the 3-sub-element-per-span layout (rigid_L, clear, rigid_R), end moments
-are taken from the **outer ends** of the rigid zone elements (at column
-centerlines).  The midspan moment is computed from statics:
-    M_pos = M0 - (M_neg_left + M_neg_right) / 2
+End moments are taken from the **outer ends** of each span's first and last
+sub-elements (the rigid zones, at column centerlines). The midspan moment is
+computed from statics ([`efm_midspan_moment`](@ref)):
+    M_pos = M0 - (M_neg_left + M_neg_right) / 2   (plus the drop, if any)
 
 # Arguments
 - `model`: Solved ASAP model
-- `span_elements`: Vector of slab-beam elements (3 per span in order:
-  [rigid_L₁, clear₁, rigid_R₁, rigid_L₂, clear₂, rigid_R₂, ...])
+- `span_elements`: slab-beam elements in build order (3 per span for a flat
+  plate: [rigid_L₁, clear₁, rigid_R₁, …]; a flat slab adds drop segments),
+  or one element per span (legacy)
 - `spans`: Vector of EFMSpanProperties
-- `qu`: Optional factored pressure (for midspan moment calculation from statics)
+- `qu`: Optional factored pressure, or one per span under a load pattern
+  (for midspan moment calculation from statics)
+- `drop_loads`: the drop line loads the model was built with
 
 # Returns
 Vector of named tuples with:
@@ -351,47 +371,32 @@ Vector of named tuples with:
 - elem.forces[6]  = Mz at node 1 (start node, in N·m for SI model)
 - elem.forces[12] = Mz at node 2 (end node, in N·m for SI model)
 """
-function extract_span_moments(model, span_elements, spans; qu::Union{Nothing, Pressure}=nothing)
+function extract_span_moments(model, span_elements, spans;
+                              qu::Union{Nothing, Pressure, AbstractVector{<:Pressure}}=nothing,
+                              drop_loads = nothing)
     n_spans = length(spans)
-    n_elems_per_span = length(span_elements) ÷ n_spans  # 3 for sub-element model, 1 for legacy
+    ranges = length(span_elements) == n_spans ? [i:i for i in 1:n_spans] :
+        _efm_span_ranges(spans, drop_loads)
+    last(ranges[end]) == length(span_elements) || error(
+        "EFM span elements ($(length(span_elements))) do not match the span layout")
 
     span_moments = NamedTuple{(:span_idx, :M_neg_left, :M_pos, :M_neg_right), Tuple{Int, Moment, Moment, Moment}}[]
 
     for i in 1:n_spans
         sp = spans[i]
+        # Column centerlines: node 1 of the span's first element, node 2 of its last
+        M_neg_left  = to_kipft(abs(span_elements[first(ranges[i])].forces[6]) * u"N*m") * kip*u"ft"
+        M_neg_right = to_kipft(abs(span_elements[last(ranges[i])].forces[12]) * u"N*m") * kip*u"ft"
 
-        if n_elems_per_span == 3
-            # 3-sub-element layout: rigid_L, clear, rigid_R
-            idx_base = 3 * (i - 1)
-            e_rigid_L = span_elements[idx_base + 1]
-            e_rigid_R = span_elements[idx_base + 3]
-
-            # Left support moment: node 1 of rigid_L (column centerline)
-            M_neg_left_kipft  = to_kipft(abs(e_rigid_L.forces[6]) * u"N*m")
-            # Right support moment: node 2 of rigid_R (column centerline)
-            M_neg_right_kipft = to_kipft(abs(e_rigid_R.forces[12]) * u"N*m")
-        else
-            # Legacy single-element layout (backward compatibility)
-            elem = span_elements[i]
-            M_neg_left_kipft  = to_kipft(abs(elem.forces[6]) * u"N*m")
-            M_neg_right_kipft = to_kipft(abs(elem.forces[12]) * u"N*m")
-        end
-
-        # Midspan moment from statics: M_pos = M0 - (M_left + M_right)/2
-        if !isnothing(qu)
-            w_kipft = ustrip(kip/u"ft", qu * sp.l2)
-        else
-            w_kipft = 0.0
-        end
-        l_ft = ustrip(u"ft", sp.l1)
-        M0 = w_kipft * l_ft^2 / 8
-        M_pos_kipft = M0 - (M_neg_left_kipft + M_neg_right_kipft) / 2
+        q_span = isnothing(qu) ? 0.0psf : (qu isa AbstractVector ? qu[i] : qu)
+        M_pos = efm_midspan_moment(M_neg_left, M_neg_right, q_span * sp.l2, sp.l1;
+                                   drop = _span_drop(drop_loads, i))
 
         push!(span_moments, (
             span_idx = i,
-            M_neg_left  = M_neg_left_kipft * kip*u"ft",
-            M_pos       = M_pos_kipft * kip*u"ft",
-            M_neg_right = M_neg_right_kipft * kip*u"ft"
+            M_neg_left  = M_neg_left,
+            M_pos       = uconvert(kip*u"ft", M_pos),
+            M_neg_right = M_neg_right
         ))
     end
 

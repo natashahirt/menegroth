@@ -56,7 +56,8 @@ Named tuple with fields:
 - `integrity`: Structural integrity reinforcement demand (ACI 8.7.4.2)
 - `integrity_check`: Pass/fail for integrity reinforcement vs provided bottom steel
 - `transfer_results::Vector{Union{Nothing, NamedTuple}}`: Moment transfer reinforcement at each column (ACI 8.4.2.3)
-- `ρ_prime::Float64`: Estimated compression reinforcement ratio for long-term deflection
+- `ρ_prime::Float64`: Midspan compression reinforcement ratio used for long-term
+  deflection (`FLAT_PLATE_MIDSPAN_RHO_PRIME`, 0: no top steel passes through midspan)
 - `method_requested`: The `method` passed in
 - `method_used`: The analysis method the design was actually run with (`FEA()` when
   the requested DDM/EFM is not permitted and `opts.on_inapplicable == :fallback`)
@@ -194,17 +195,12 @@ function _design_flat_plate_request(
         )
     end
 
-    reason = String(get(raw, :failure_reason, "design_failed"))
-    failing_check = String(get(raw, :failing_check, ""))
-    status = reason == "non_convergence" ?
-        FLOOR_DESIGN_NOT_CONVERGED :
-        FLOOR_DESIGN_INFEASIBLE
-    message = isempty(failing_check) ? reason : "$reason ($failing_check)"
+    status, code, message = floor_design_failure(raw)
     return FloorDesignOutcome{Nothing, typeof(raw)}(
         status,
         nothing,
         raw,
-        [FloorDesignDiagnostic(Symbol(reason), message)],
+        [FloorDesignDiagnostic(code, message)],
         iterations,
     )
 end

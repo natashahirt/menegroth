@@ -18,6 +18,21 @@ Base.@kwdef mutable struct PunchingDesignResult
 end
 
 """
+Row F frame check for one column or beam (ASCE 7-22 §12.2.5.8).
+
+`ratio` is the governing demand/capacity ratio from the member checker.
+`NaN` means the member was recorded as failing without a checked section.
+"""
+Base.@kwdef struct SeismicFrameCheck
+    passed::Bool = true
+    governing_check::String = ""
+    ratio::Float64 = 0.0
+    case_label::String = ""
+    detail::String = ""
+    clause::String = "ASCE 7-22 12.2.5.8"
+end
+
+"""
 Design result for a column.
 """
 Base.@kwdef mutable struct ColumnDesignResult
@@ -44,8 +59,32 @@ Base.@kwdef mutable struct ColumnDesignResult
     # Capacity ratios
     axial_ratio::Float64 = 0.0
     interaction_ratio::Float64 = 0.0
+    # The sizer's own governing check, when the column was sized by one.
+    # Empty means the ratios above are the screen in `_populate_column_results!`.
+    governing_check::String = ""
+    governing_ratio::Float64 = 0.0
+    governing_clause::String = ""
     ok::Bool = true
+    # Sizing outcomes that are not a failed check: a full-load loop that did
+    # not settle, or a column left smaller than the one above.
+    notes::Vector{String} = String[]
     
     # Punching (if supporting flat slab)
     punching::Union{PunchingDesignResult, Nothing} = nothing
+
+    # One-way shear, ACI 318-19 §10.5.3.1 / §22.5. Steel columns leave the
+    # defaults: `shear_ok` stays true and `shear_clause` stays empty, so the
+    # scene does not invent a concrete shear check. `Vu_x` is parallel to the
+    # section width and `Vu_y` to the depth, in the assignment that governed.
+    Vu_x::typeof(1.0u"kN") = 0.0u"kN"
+    Vu_y::typeof(1.0u"kN") = 0.0u"kN"
+    ϕVn_x::typeof(1.0u"kN") = 0.0u"kN"
+    ϕVn_y::typeof(1.0u"kN") = 0.0u"kN"
+    shear_ratio::Float64 = 0.0
+    shear_ok::Bool = true
+    tie_spacing::typeof(1.0u"m") = 0.0u"m"
+    tie_bar_size::Int = 0
+    shear_clause::String = ""
+    # Row F 25% frame check. `nothing` when this column was not in that check.
+    seismic_frame::Union{SeismicFrameCheck, Nothing} = nothing
 end

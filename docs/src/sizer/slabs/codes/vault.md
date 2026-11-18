@@ -155,20 +155,52 @@ Horizontal thrust:
 H = \frac{w \, L^2}{8 f}
 ```
 
-Maximum compressive stress at crown:
+Working stress from the springing resultant (`VaultStress.m`):
 
 ```math
-\sigma = \frac{H}{t \cdot b}
+\sigma = \frac{\sqrt{H^2 + V^2}}{t \cdot b}, \qquad V = \frac{w L}{2}
 ```
 
-where ``w`` is the total load per unit area and ``b`` is the tributary depth.
+where ``w`` is the total load per unit length of span and ``b`` is the tributary depth.
 
-**Asymmetric loading** (dead on full span, live on half span):
-- Produces bending moments in the arch due to the antisymmetric live load
-  component
-- `vault_stress_asymmetric` computes the maximum combined stress including both
-  axial and flexural effects
-- Often governs for moderate live-to-dead ratios
+**Asymmetric loading** (dead and superimposed dead on the full span, live on
+half the span, `VaultStress_Asymmetric.m`):
+
+```math
+H = \frac{L^2}{16 f}\,(2 q_D + q_L), \qquad
+V_{\text{loaded}} = \frac{q_D L}{2} + \frac{3 q_L L}{8}
+```
+
+- The working stress is the larger springing resultant over ``t \cdot b``.
+
+**Thrust-line kern check** (`vault_kern_check`; not in Haile's reference). The
+vault is unreinforced, so the half-span thrust line must stay in the middle
+third (ENGINEERING JUDGMENT, project choice). The check always runs and has no
+option to switch it off. Full-span load is funicular, so
+only the live half bends the three-hinge arch, most at the quarter points:
+
+```math
+M = \frac{q_L L^2}{64}, \quad
+N = H\cos\theta + \frac{(2 q_D + q_L) L}{8}\sin\theta, \quad
+\tan\theta = \frac{2f}{L}, \quad
+e = \frac{M}{N} \le \frac{t\cos\theta}{6}
+```
+
+The hinges fix the thrust line through the springings and crown, so this is a
+sufficient check, not the most favorable admissible thrust line.
+
+**Ribs.** The kern check covers the plain shell only. A rib (`rib_depth` and
+`rib_apex_rise` both positive) makes the section a T with an uneven kern, and
+its weight is not uniform over the span, so the full-span load bends the arch
+too. Ribbed vaults throw an `ArgumentError`.
+
+**Default limits.** Both are ENGINEERING JUDGMENT, not code limits, and are
+defined once in `vault_allowable_stress` and `vault_rise_loss_limit`.
+``0.45 f'_c`` is a project choice: it is not in Haile's MATLAB, and no code in
+the corpus gives it for arches. The ``L/240`` rise loss is Haile's reference
+choice (`reference/BasePlotsWithLim.m`). ACI 318-11 §22.2.1(b) permits plain
+concrete where arch action keeps it in compression under all loading; the kern
+check is what enforces that here.
 
 ### Elastic Shortening Iteration
 
@@ -185,6 +217,9 @@ considering axial shortening of the arch:
    where ``S`` is arc length and ``A = t \cdot b``
 3. Reduce rise to account for shortening
 4. Repeat until convergence (within `deflection_limit`)
+
+Only a failed root search (`Roots.ConvergenceFailed`, `DomainError`) is
+reported as non-convergence. Any other error propagates.
 
 The result reports `converged` status and iteration count in the
 `convergence_check` field.
@@ -203,7 +238,9 @@ The result reports `converged` status and iteration count in the
 The `_size_span_floor(::Vault, ...)` function:
 
 1. Resolves rise from lambda (rise-to-span ratio) or explicit value
-2. Optionally searches for minimum thickness via `_find_min_thickness`
+2. Optionally searches for minimum thickness via `_find_min_thickness`, which
+   bisects a 5 mm grid within `thickness_bounds`. Every check eases as the
+   thickness grows, and the returned thickness has passed all of them.
 3. Calls `solve_equilibrium_rise` for the final geometry
 4. Evaluates symmetric and asymmetric stresses
 5. Checks stress ratio, deflection, and convergence
@@ -260,7 +297,6 @@ VaultOptions(
     # Design checks
     allowable_stress = nothing,  # Default: 0.45 fc'
     deflection_limit = nothing,  # Default: span/240
-    check_asymmetric = true,
 
     # Optimization
     objective = MinVolume(),     # MinWeight, MinCarbon, MinCost
@@ -290,7 +326,6 @@ Additional options:
 | `thickness` | `nothing` | Fixed thickness (skips optimization) |
 | `allowable_stress` | ``0.45 f'_c`` | Maximum compressive stress |
 | `deflection_limit` | ``L/240`` | Maximum allowable rise deflection |
-| `check_asymmetric` | `true` | Include half-span live load case |
 | `rib_depth` | `0.0` | Depth of stiffening ribs |
 | `rib_apex_rise` | `0.0` | Rise of rib at apex |
 | `finishing_load` | `0.0 kPa` | Additional finishing dead load |

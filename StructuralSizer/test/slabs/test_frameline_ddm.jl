@@ -22,6 +22,7 @@ struct TestFrameLine{T, C}
     span_lengths::Vector{T}
     joint_positions::Vector{Symbol}
     column_projections::Vector{Float64}
+    center_spans::Vector{T}
 end
 
 """Helper functions for TestFrameLine."""
@@ -65,6 +66,7 @@ function TestFrameLine(
     
     # Compute clear spans (positions in feet, column widths in inches)
     span_lengths = T[]
+    center_spans = T[]
     for i in 1:(n-1)
         c_to_c_ft = sorted_proj[i+1] - sorted_proj[i]  # feet
         c_left = get_width_fn(sorted_cols[i], dir)      # unitful (inches)
@@ -75,6 +77,7 @@ function TestFrameLine(
         c_right_ft = ustrip(u"ft", c_right)
         ln_ft = c_to_c_ft - c_left_ft/2 - c_right_ft/2
         
+        push!(center_spans, c_to_c_ft * u"ft")
         push!(span_lengths, ln_ft * u"ft")
     end
     
@@ -84,8 +87,8 @@ function TestFrameLine(
         push!(joint_positions, (i == 1 || i == n) ? :exterior : :interior)
     end
     
-    return TestFrameLine{T, C}(dir, sorted_cols, tributary_width, span_lengths, 
-                               joint_positions, sorted_proj)
+    return TestFrameLine{T, C}(dir, sorted_cols, tributary_width, span_lengths,
+                               joint_positions, sorted_proj, center_spans)
 end
 
 # =============================================================================
@@ -334,6 +337,32 @@ end
         for ln in fl.span_lengths
             @test ustrip(u"ft", ln) ≈ 12.5 rtol=0.05
         end
+    end
+
+    @testset "Eq. (13-4) uses max(ℓn, 0.65 ℓ1) on a frame line" begin
+        # 10 ft centers, 6 ft columns: ℓn = 4 ft < 0.65 × 10 ft.
+        # ACI 318-11 §13.6.2.5 (corpus: aci-318-11, page 253).
+        cols = [
+            (vertex_idx=1, c1=72u"inch", c2=72u"inch", position=:exterior,
+             base=(L=10u"ft",), pos=(0.0, 0.0)),
+            (vertex_idx=2, c1=72u"inch", c2=72u"inch", position=:interior,
+             base=(L=10u"ft",), pos=(10.0, 0.0)),
+            (vertex_idx=3, c1=72u"inch", c2=72u"inch", position=:exterior,
+             base=(L=10u"ft",), pos=(20.0, 0.0)),
+        ]
+        l2 = 12.0u"ft"
+        fl = TestFrameLine(:x, cols, l2, c -> c.pos, (c, dir) -> c.c1)
+        @test ustrip(u"ft", fl.span_lengths[1]) ≈ 4.0 rtol=1e-6
+        @test ustrip(u"ft", fl.center_spans[1]) ≈ 10.0 rtol=1e-6
+
+        qu = 200.0u"lbf/ft^2"
+        qD = 100.0u"lbf/ft^2"
+        qL = 50.0u"lbf/ft^2"
+        struc = (tributaries = (vertex = Dict{Int, Dict{Int, Any}}(),), skeleton = (vertices = [],))
+        result = StructuralSizer.run_moment_analysis(DDM(), fl, struc, qu, qD, qL;
+                                                     on_inapplicable = :proceed)
+        M0 = StructuralSizer.total_static_moment(qu, l2, 0.65 * 10.0u"ft")
+        @test ustrip(kip * u"ft", result.M0) ≈ ustrip(kip * u"ft", M0) rtol=1e-6
     end
 end
 

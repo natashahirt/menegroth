@@ -94,7 +94,10 @@ function _service_loads(shells, panel_index, designs, frames, α::Float64)
     loads = Asap.AbstractLoad[]
     groups = Dict{Int, Vector{Asap.ShellElement}}()
     for (k, el) in enumerate(shells)
-        push!(get!(() -> Asap.ShellElement[], groups, panel_index[k]), el)
+        k <= length(panel_index) || continue
+        i = panel_index[k]
+        i == 0 && continue
+        push!(get!(() -> Asap.ShellElement[], groups, i), el)
     end
     for (i, els) in groups
         q = ustrip(u"Pa", designs[i].q_dead) + α * ustrip(u"Pa", designs[i].q_live)
@@ -215,6 +218,7 @@ end
 function _plates_in_strip(shells, xy, s0, s1, half_width)
     hits = Tuple{Int, Float64, Float64}[]
     for (k, el) in enumerate(shells)
+        el.id === :wall && continue
         x, y = StructuralSizer._triangle_centroid(el)
         dist, s_m = StructuralSizer._station_on_polyline(x, y, xy)
         total = StructuralSizer.polyline_length(xy)
@@ -431,12 +435,16 @@ cracks it again. The one-way scale settles, on the soft side.
 Returns `spans`, one vector per beam id: [`StructuralSizer.RCShellSpan`](@ref)s
 for reinforced concrete and [`StructuralSizer.SteelShellSpan`](@ref)s (live
 load only) for steel and composite. Also `iterations` and `converged`.
+With `keep = true`, `service_model` is a copy of the model in its settled
+dead-plus-live state: cracked stiffness, service loads and column springs.
+Solving that copy again gives the displacements the deflection check read.
 """
 function story_cracked_service(model, built, designs, beams::AbstractVector{ShellServiceBeam};
                               concrete, rebar = Rebar_60,
                               bars = nothing,
                               sustained_live_fraction::Real = 0.0,
-                              max_iter::Int = 6, tol::Float64 = 0.02)
+                              max_iter::Int = 6, tol::Float64 = 0.02,
+                              keep::Bool = false)
     max_iter >= 1 || throw(ArgumentError("max_iter must be at least 1"))
     ψ = StructuralSizer._as_sustained_live_fraction(sustained_live_fraction)
     shells = model.shell_elements
@@ -452,6 +460,7 @@ function story_cracked_service(model, built, designs, beams::AbstractVector{Shel
     levels_of = Dict{Symbol, Dict{Symbol, Vector{NamedTuple}}}()
     iterations = 0
     converged = true
+    kept = nothing
     try
         for (name, α) in ((:D, 0.0), (:DL, 1.0), (:S, ψ))
             name === :S && (ψ == 0.0 || ψ == 1.0) && continue
@@ -480,6 +489,7 @@ function story_cracked_service(model, built, designs, beams::AbstractVector{Shel
             end
             converged &= settled
             levels_of[name] = reading.beams
+            keep && name === :DL && (kept = copy_solved_model(model))
         end
     finally
         for (el, E) in zip(shells, base_E)
@@ -511,7 +521,28 @@ function story_cracked_service(model, built, designs, beams::AbstractVector{Shel
             spans[beam.id] = collect(Any, _assemble_steel_spans(levels, beam))
         end
     end
-    return (spans = spans, iterations = iterations, converged = converged)
+    return (spans = spans, iterations = iterations, converged = converged,
+            service_model = kept)
+end
+
+"""
+    copy_solved_model(model) -> Asap.Model
+
+Independent copy of `model`, without its factorization or elemental-load
+cache. The factorization holds a C pointer that `deepcopy` must not touch.
+Both caches are rebuilt on the copy's next solve.
+"""
+function copy_solved_model(model)
+    fact = model._factorization
+    eloads = model._elemental_loads
+    model._factorization = nothing
+    model._elemental_loads = nothing
+    try
+        return deepcopy(model)
+    finally
+        model._factorization = fact
+        model._elemental_loads = eloads
+    end
 end
 
 # -----------------------------------------------------------------------------
@@ -533,21 +564,26 @@ end
 """
 ACI 318-11 §8.12 flange. `half` is the wider side's overhang, because a plate's
 distance to the centreline is unsigned. `full` is the flange width `bf`.
+`sides` is `(; left, right, left_clear, right_clear, one_side)` from
+[`_service_flange_sides`](@ref).
 """
-function _rc_flange_widths(bw, hf, xy, support_xy, left, right)
+function _rc_flange_widths(bw, hf, xy, support_xy, sides)
+    (; left, right, left_clear, right_clear) = sides
+    one = something(sides.one_side, isnothing(left) || isnothing(right))
     function overhangs(s)
         ln = _service_span_length(xy, support_xy, s)
-        one = isnothing(left) || isnothing(right)
-        ol = ustrip(u"m", StructuralSizer._aci_side_overhang(left, s, hf, ln, one))
-        orr = ustrip(u"m", StructuralSizer._aci_side_overhang(right, s, hf, ln, one))
+        ol = ustrip(u"m", StructuralSizer._aci_side_overhang(left, s, hf, ln, one, left_clear))
+        orr = ustrip(u"m", StructuralSizer._aci_side_overhang(right, s, hf, ln, one, right_clear))
         return ol, orr
     end
     half = function (s)
         ol, orr = overhangs(s)
         return max(ol, orr)
     end
-    full = s -> ustrip(u"m", StructuralSizer.flange_width_at_station(
-        bw, hf, _service_span_length(xy, support_xy, s), s; left = left, right = right))
+    full = function (s)
+        ol, orr = overhangs(s)
+        return ustrip(u"m", bw) + ol + orr
+    end
     return half, full
 end
 
@@ -598,6 +634,7 @@ a hogging strip and no span inertia.
 function service_beams(struc, shell_beams, beam_index, beam_demands,
                        support_points, thickness_of_face)
     specs = ShellServiceBeam[]
+    ctx = _flange_context(struc)
     for shell_beam in shell_beams
         i = get(beam_index, shell_beam.id, nothing)
         i === nothing && continue
@@ -611,8 +648,12 @@ function service_beams(struc, shell_beams, beam_index, beam_demands,
         xy = shell_beam.xy
         if _service_rc(sec)
             web = StructuralSizer._shell_web(sec)
-            left, right = beam_side_profiles(struc, beam)
-            half, full = _rc_flange_widths(web.bw, hf * u"m", xy, support_points, left, right)
+            sides = _service_flange_sides(struc, i, web.bw, ctx)
+            sides === nothing && (sides = (left = nothing, right = nothing,
+                left_clear = nothing, right_clear = nothing, one_side = nothing, hf = nothing))
+            # A framing-level member bears the topping of the slab it frames.
+            sides.hf === nothing || (hf = ustrip(u"m", sides.hf))
+            half, full = _rc_flange_widths(web.bw, hf * u"m", xy, support_points, sides)
             push!(specs, ShellServiceBeam(shell_beam.id, xy, sec, support_points;
                 half_width = half, flange_width = full, hf = hf, mu_neg = mu_neg,
                 hogging_strip = false))

@@ -121,8 +121,10 @@ end
 function _column_drop_outline(col, drop_panel::DropPanelGeometry, span_axis)
     position = hasproperty(col, :position) ? col.position : :interior
     swapped = position === :edge && _infer_free_edge_parallel(col) === :c1
+    kind = hasproperty(col, :corner_kind) ? col.corner_kind : :convex
     return drop_outline(col.c1, col.c2, drop_panel.a_drop_1, drop_panel.a_drop_2,
-                        position, col_orientation(col), span_axis; swapped = swapped)
+                        position, col_orientation(col), span_axis;
+                        swapped = swapped, corner_kind = kind)
 end
 
 """
@@ -509,44 +511,69 @@ function _slab_mesh_nodes(shells)
 end
 
 """
-Restrain a shell node that lies on a wall cast with the slab.
+Join slab nodes on each wall to a wall shell. The slab nodes are not fixed.
 
-ACI 318-11 R13.6.3.3 (corpus: aci-318-11, page 254): that joint has little
-rotation. `false` in `node.dof` is fixed (Asap `fixDict`). uz is fixed, and
-so is rotation about the wall's longitudinal axis (rx for a wall along x,
-ry for a wall along y). Rotation about the axis normal to the wall stays
-free. The dof vector is replaced, because nodes may share one array.
+ACI 318-11 R13.6.3.3 (corpus: aci-318-11, page 254) is a direct-design moment
+coefficient for an edge cast with a stiff wall. It is not a support. The
+wall hangs `drop_m` below the slab. Its base translations are held and its
+rotations are not. The wall shell uses the slab analysis section's modulus.
+
+Returns the number of slab nodes joined, and the new base nodes. Wall
+triangles are appended to `shells` with id `:wall`.
 """
-function _hold_slab_on_walls!(shells, segments)
-    isempty(segments) && return 0
-    seen = Set{UInt64}()
-    n = 0
-    for sh in shells
-        for node in sh.nodes
-            id = objectid(node)
-            id in seen && continue
-            push!(seen, id)
+function _attach_slab_walls!(shells, struc, slab, section)
+    piers = flat_plate_wall_piers(struc, slab)
+    isempty(piers) && return 0, Asap.Node[]
+    nodes = _slab_mesh_nodes(shells)
+    bases = Dict{NTuple{3, Int}, Asap.Node}()
+    joined = IdDict{Asap.Node, Nothing}()
+    E = section.E * u"Pa"
+    for pier in piers
+        seg = ((pier.x1, pier.y1), (pier.x2, pier.y2))
+        seen = IdDict{Asap.Node, Nothing}()
+        d = (pier.x2 - pier.x1, pier.y2 - pier.y1)
+        L2 = d[1] * d[1] + d[2] * d[2]
+        L2 > 0 || continue
+        hits = Tuple{Float64, Asap.Node}[]
+        for node in nodes
+            haskey(seen, node) && continue
+            abs(ustrip(u"m", node.position[3])) > 1e-3 && continue
             pt = (ustrip(u"m", node.position[1]), ustrip(u"m", node.position[2]))
-            hit = findfirst(seg -> _point_on_segment(pt, seg[1], seg[2]), segments)
-            hit === nothing && continue
-            seg = segments[hit]
-            dof = copy(node.dof)
-            dof[3] && (n += 1)
-            dof[3] = false
-            dx = abs(seg[2][1] - seg[1][1])
-            dy = abs(seg[2][2] - seg[1][2])
-            if dx >= 4 * dy
-                dof[4] = false
-            elseif dy >= 4 * dx
-                dof[5] = false
-            else
-                dof[4] = false
-                dof[5] = false
+            _point_on_segment(pt, seg[1], seg[2]) || continue
+            seen[node] = nothing
+            s = ((pt[1] - pier.x1) * d[1] + (pt[2] - pier.y1) * d[2]) / L2
+            push!(hits, (s, node))
+        end
+        sort!(hits; by = first)
+        tops = Asap.Node[n for (_, n) in hits]
+        length(tops) < 2 && continue
+        z_local = -pier.drop_m
+        row = Asap.Node[]
+        for n in tops
+            joined[n] = nothing
+            x = ustrip(u"m", n.position[1])
+            y = ustrip(u"m", n.position[2])
+            key = (round(Int, 1000 * x), round(Int, 1000 * y), round(Int, 1000 * z_local))
+            b = get(bases, key, nothing)
+            if b === nothing
+                b = Asap.Node([x * u"m", y * u"m", z_local * u"m"], :free)
+                b.dof = Bool[false, false, false, true, true, true]
+                bases[key] = b
             end
-            node.dof = dof
+            push!(row, b)
+        end
+        t = pier.thickness_m * u"m"
+        for i in 1:(length(tops) - 1)
+            dx = ustrip(u"m", tops[i + 1].position[1] - tops[i].position[1])
+            dy = ustrip(u"m", tops[i + 1].position[2] - tops[i].position[2])
+            hypot(dx, dy) < 1e-4 && continue
+            push!(shells, Asap.ShellTri3((tops[i], tops[i + 1], row[i + 1]), t, E,
+                                         section.ν; id = :wall, ρ = section.ρ))
+            push!(shells, Asap.ShellTri3((tops[i], row[i + 1], row[i]), t, E,
+                                         section.ν; id = :wall, ρ = section.ρ))
         end
     end
-    return n
+    return length(joined), collect(values(bases))
 end
 
 """
@@ -601,10 +628,8 @@ function _build_fea_slab_model(
     node_map = mesh.node_map
     target_edge = mesh.target_edge
 
-    # R13.1 (corpus: aci-318-11, page 243): a wall supporting the panel edge
-    # holds that edge. Vertical displacement is fixed, and so is rotation
-    # about the wall axis.
-    _hold_slab_on_walls!(shells, supporting_wall_segments(struc, slab))
+    # The slab edge is joined to the wall. It is not held in space.
+    _, wall_bases = _attach_slab_walls!(shells, struc, slab, shell_section)
 
     # ─── Column stub frame elements ───
     col_stubs = Dict{Int, Any}()
@@ -701,8 +726,9 @@ function _build_fea_slab_model(
         end
     end
 
-    # One area load on every shell, including the edge strip already in `shells`.
-    loads = Asap.AbstractLoad[Asap.AreaLoad(shells, uconvert(u"Pa", qu))]
+    # Slab pressure stays off the wall shells.
+    slab_shells = [s for s in shells if s.id !== :wall]
+    loads = Asap.AbstractLoad[Asap.AreaLoad(slab_shells, uconvert(u"Pa", qu))]
     # Flat slab: the drop projection's self-weight on the drop patches only.
     if !isnothing(drop_panel)
         drop_shells = [s for s in shells if s.id === :drop_panel]
@@ -711,7 +737,7 @@ function _build_fea_slab_model(
     end
 
     # ─── Build, process, solve ───
-    all_nodes = vcat(collect(values(node_map)), fixed_nodes)
+    all_nodes = vcat(collect(values(node_map)), fixed_nodes, wall_bases)
     model = Asap.Model(all_nodes, frame_elements, shells, loads)
     Asap.process!(model)
     Asap.solve!(model)

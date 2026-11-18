@@ -69,10 +69,13 @@ Construct a circular RC column section with automatic bar placement.
 - `n_bars`: Total number of longitudinal bars (evenly spaced around circle)
 - `cover`: Clear cover to spiral (default 1.5")
 - `tie_type`: :spiral (default) or :tied
+- `d_agg`: Nominal maximum aggregate size for the §25.2.3 clear-spacing check
 - `name`: Optional section name
 
 # Returns
-RCCircularSection with bars automatically placed around circumference.
+RCCircularSection with bars automatically placed around circumference. Throws
+`ArgumentError` when ρg is outside the §10.9.1 limits, the bars do not fit
+inside the cover, or adjacent bars are closer than the §25.2.3 clear spacing.
 """
 function RCCircularSection(;
     D::Length,
@@ -80,6 +83,7 @@ function RCCircularSection(;
     n_bars::Int,
     cover::Length = 1.5u"inch",
     tie_type::Symbol = :spiral,
+    d_agg::Length = DEFAULT_AGGREGATE_SIZE,
     name::Union{String, Nothing} = nothing
 )
     # Convert to inches (Float64)
@@ -105,6 +109,8 @@ function RCCircularSection(;
     # Radius to bar centers
     # R_bar = D/2 - cover - spiral_diameter - bar_diameter/2
     R_bar = D_in / 2 - cover_in - d_spiral_in - d_bar / 2
+    R_bar > zero(R_bar) || throw(ArgumentError(
+        "D = $(D_in) is too small for cover $(cover_in), spiral, and #$(bar_size) bars."))
     
     # Generate bar positions (evenly spaced around circle)
     # Start at top (y = R_bar) and go counterclockwise
@@ -126,12 +132,9 @@ function RCCircularSection(;
     # Reinforcement ratio
     ρg = ustrip(As_total) / ustrip(Ag)
     
-    # Validate ACI requirements
-    if ρg < 0.01
-        @warn "Reinforcement ratio ρg = $(round(ρg, digits=4)) is below ACI minimum of 0.01"
-    elseif ρg > 0.08
-        @warn "Reinforcement ratio ρg = $(round(ρg, digits=4)) exceeds ACI maximum of 0.08"
-    end
+    # ACI 318-11 §10.9.1 (aci-318-11, page 148).
+    _check_compression_rho(ρg)
+    _check_column_bar_spacing(bars, d_agg)
     
     if n_bars < 6
         @warn "ACI requires minimum 6 bars for spiral columns"
@@ -171,7 +174,8 @@ function RCCircularSection(
     Ag = π * D_in^2 / 4
     As_total = sum(b.As for b in bars)
     ρg = ustrip(As_total) / ustrip(Ag)
-    
+    _check_compression_rho(ρg)
+
     RCCircularSection{typeof(D_in), typeof(Ag)}(
         name, D_in, Ag, bars, As_total, ρg, cover_in, tie_type
     )

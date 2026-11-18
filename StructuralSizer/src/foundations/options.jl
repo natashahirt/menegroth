@@ -137,7 +137,7 @@ Base.@kwdef struct SpreadParams
     # Checks to perform
     check_bearing::Bool      = true              # ACI 22.8 bearing at column-footing joint
     check_dowels::Bool       = true              # Design dowel reinforcement
-    check_development::Bool  = true              # Verify Ld ≤ available anchorage
+    check_development::Bool  = true              # ACI 318-11 §12.2 / §15.6.3
 
     # Objective for optimization
     objective::AbstractObjective = MinVolume()
@@ -184,7 +184,7 @@ Base.@kwdef struct StripParams
     fc_col::Union{Pressure, Nothing} = nothing
 
     # Checks to perform
-    check_development::Bool  = true              # ACI 25.4.2 development length
+    check_development::Bool  = true              # ACI 318-11 §12.2 / §15.6.3
     check_bearing::Bool      = true              # ACI 22.8 bearing at column-footing joint
     check_dowels::Bool       = true              # Design dowel reinforcement if bearing insufficient
 
@@ -215,7 +215,10 @@ Base.@kwdef struct MatParams
     # Geometry
     min_depth::Length         = 24.0u"inch"      # Mats typically thicker
     depth_increment::Length   = 1.0u"inch"
+    size_increment::Length    = 3.0u"inch"      # Grow the overhang when bars do not develop
     edge_overhang::Union{Length, Nothing} = nothing  # nothing → auto (d or 0.5× avg span)
+    # Flexural bars, ACI 318-11 §12.2 and §15.6.3. Dowel embedment is separate.
+    check_development::Bool   = true
 
     # Analysis method
     analysis_method::AbstractMatMethod = RigidMat()

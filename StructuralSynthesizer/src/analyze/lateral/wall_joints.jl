@@ -26,8 +26,19 @@ the other wall.
 The original through-wall object becomes the first piece and keeps its
 segment indices and `wall_above`. Each added piece copies thickness, story,
 reinforcement, concrete, height, and `wall_above`, and owns no segment.
+An opening that straddles a split point is refused. Openings on each piece
+are measured from that piece's start.
+
+Tributary area is divided with the wall. Each piece keeps the parts of the
+share outlines that lie across its own length, cut perpendicular to the
+wall, and the cell area they cover; the end pieces also keep what lies past
+the wall's ends. Area stored beyond the outlines, the edge strip, is divided
+by length. `strip_walls` is the edge-strip cache
+(`_tributary_caches.strip_walls`); pass it so a later refresh removes each
+piece's own share.
 """
-function split_tee_junctions!(walls::AbstractVector; tol::Real=WALL_CORNER_TOL_M)
+function split_tee_junctions!(walls::AbstractVector; tol::Real=WALL_CORNER_TOL_M,
+                             strip_walls=nothing)
     n0 = length(walls)
     n0 == 0 && return walls
     hits = Dict{Int, Vector{NTuple{2, Float64}}}()
@@ -46,7 +57,7 @@ function split_tee_junctions!(walls::AbstractVector; tol::Real=WALL_CORNER_TOL_M
     rebuilt = Vector{eltype(walls)}()
     for i in 1:n0
         if haskey(hits, i)
-            append!(rebuilt, _split_wall_at_points(walls[i], hits[i], Float64(tol)))
+            append!(rebuilt, _split_wall_at_points(walls[i], hits[i], Float64(tol), strip_walls))
         else
             push!(rebuilt, walls[i])
         end
@@ -84,17 +95,7 @@ function joined_clear_length(wall::Wall, walls::AbstractVector, wall_index::Int;
     overlap = 0.0
     tol_m = Float64(tol)
     for (x, y) in ((wall.x1, wall.y1), (wall.x2, wall.y2))
-        worst = 0.0
-        for (j, other) in enumerate(walls)
-            j == wall_index && continue
-            other.story == wall.story || continue
-            _end_meets_wall(other, x, y, tol_m) || continue
-            φ = _folded_angle(_wall_dir(wall), _wall_dir(other))
-            φ <= _WALL_COLINEAR_RAD && continue
-            t_other = ustrip(u"m", other.thickness)
-            worst = max(worst, (t_other / 2) / sin(φ))
-        end
-        overlap += worst
+        overlap += _joined_end_overlap(wall, walls, wall_index, x, y, tol_m)
     end
     clear = L - overlap
     clear > 1e-6 || throw(ArgumentError(
@@ -301,7 +302,123 @@ function _end_meets_wall(wall, x::Float64, y::Float64, tol::Float64)
     return false
 end
 
-function _split_wall_at_points(w, pts, tol::Float64)
+"""
+Largest corner overlap at one end, in metres.
+
+The overlap is `(t_other / 2) / sin(φ)` for the thickest neighbour that
+meets this end and is not colinear. No neighbour gives zero.
+"""
+function _joined_end_overlap(wall, walls, wall_index::Int, x::Float64, y::Float64,
+                             tol::Float64)
+    worst = 0.0
+    for (j, other) in enumerate(walls)
+        j == wall_index && continue
+        other.story == wall.story || continue
+        _end_meets_wall(other, x, y, tol) || continue
+        φ = _folded_angle(_wall_dir(wall), _wall_dir(other))
+        φ <= _WALL_COLINEAR_RAD && continue
+        t_other = ustrip(u"m", other.thickness)
+        worst = max(worst, (t_other / 2) / sin(φ))
+    end
+    return worst
+end
+
+"""
+    refuse_openings_in_joined_corners!(walls; tol=WALL_CORNER_TOL_M) -> nothing
+
+Throw when an opening enters the strip of a leg that lies inside the wall
+it frames into.
+
+The strip is the same overlap [`joined_clear_length`](@ref) subtracts:
+`(t_other / 2) / sin(φ)` at each joined end. An opening there is not a pier
+between the walls; it cuts the joint. A wall with no openings is left alone.
+"""
+function refuse_openings_in_joined_corners!(walls::AbstractVector;
+                                           tol::Real=WALL_CORNER_TOL_M)
+    tol_m = Float64(tol)
+    for (i, wall) in enumerate(walls)
+        isempty(wall.openings) && continue
+        L = wall_length(wall)
+        for (x, y, at_start) in ((wall.x1, wall.y1, true), (wall.x2, wall.y2, false))
+            zone = _joined_end_overlap(wall, walls, i, x, y, tol_m)
+            zone > tol_m || continue
+            z0 = at_start ? 0.0 : L - zone
+            z1 = at_start ? zone : L
+            for op in wall.openings
+                _interval_separation(op.s0, op.s0 + op.width, z0, z1) < tol_m || continue
+                throw(ArgumentError(
+                    "wall opening: an opening at s = $(op.s0) m on wall $i enters " *
+                    "the joined corner at ($(x), $(y)) m. That strip is $(zone) m " *
+                    "of this leg lying inside the wall it frames into."))
+            end
+        end
+    end
+    return nothing
+end
+
+"""
+Parts of the loops `polys` between the lines across the wall at `u0` and
+`u1` (metres from `origin` along `dir`), and their area. An infinite bound
+is open.
+"""
+function _tributary_segment(polys, origin, dir, u0, u1)
+    kept = Vector{NTuple{2, Float64}}[]
+    geom = 0.0
+    for poly in polys
+        part = poly
+        isfinite(u0) && (part = _clip_halfplane(part, _add(origin, _mul(dir, u0)), dir))
+        isfinite(u1) && length(part) >= 3 &&
+            (part = _clip_halfplane(part, _add(origin, _mul(dir, u1)), _mul(dir, -1.0)))
+        length(part) >= 3 || continue
+        a = abs(_shoelace(part))
+        a > 1e-12 || continue
+        push!(kept, part)
+        geom += a
+    end
+    return kept, geom
+end
+
+"""
+Give each piece the tributary that falls across its own length. `stations`
+are fractions of `L` from `origin` along `dir`. The first and last pieces
+also take what lies past the wall's ends.
+"""
+function _divide_wall_tributary!(pieces, stations, L, strip_walls, origin, dir)
+    source = pieces[1]
+    polys = copy(source.tributary_polygons)
+    areas = copy(source.tributary_cell_areas)
+    strips = strip_walls === nothing ? nothing : get(strip_walls, source, nothing)
+    strip_walls === nothing || delete!(strip_walls, source)
+    empty!(source.tributary_polygons)
+    empty!(source.tributary_cell_areas)
+    n = length(pieces)
+    for (k, piece) in enumerate(pieces)
+        u0 = k == 1 ? -Inf : stations[k] * L
+        u1 = k == n ? Inf : stations[k + 1] * L
+        span = (stations[k + 1] - stations[k]) * L
+        for (ci, src) in polys
+            whole = sum(p -> abs(_shoelace(p)), src; init = 0.0)
+            kept, geom = _tributary_segment(src, origin, dir, u0, u1)
+            total = get(areas, ci, 0.0)
+            # An opening makes the loops larger than the area; the edge strip
+            # makes the area larger than the loops, and goes by length.
+            a = (whole > 0 ? min(total, whole) * geom / whole : 0.0) +
+                max(total - whole, 0.0) * span / L
+            isempty(kept) || (piece.tributary_polygons[ci] = kept)
+            a > 1e-12 && (piece.tributary_cell_areas[ci] = a)
+        end
+        for (ci, a) in areas
+            haskey(polys, ci) && continue
+            a > 0 || continue
+            piece.tributary_cell_areas[ci] = a * span / L
+        end
+        strips === nothing && continue
+        strip_walls[piece] = Dict{Int, Float64}(ci => v * span / L for (ci, v) in strips)
+    end
+    return pieces
+end
+
+function _split_wall_at_points(w, pts, tol::Float64, strip_walls=nothing)
     dx = w.x2 - w.x1
     dy = w.y2 - w.y1
     L = hypot(dx, dy)
@@ -315,12 +432,23 @@ function _split_wall_at_points(w, pts, tol::Float64)
     end
     isempty(ss) && return [w]
     sort!(ss)
+    kept = w.openings
+    for station in ss
+        sm = station * L
+        for op in kept
+            op.s0 < sm - tol && op.s0 + op.width > sm + tol &&
+                throw(ArgumentError(
+                    "split_tee_junctions!: an opening at s = $(op.s0) m straddles " *
+                    "the stem at $(sm) m. Move the opening off the junction."))
+        end
+    end
     x1, y1, x2, y2 = w.x1, w.y1, w.x2, w.y2
     stations = vcat(0.0, ss, 1.0)
     at(s) = (x1 + s * (x2 - x1), y1 + s * (y2 - y1))
     a = at(stations[1])
     b = at(stations[2])
     w.x1, w.y1, w.x2, w.y2 = a[1], a[2], b[1], b[2]
+    w.openings = openings_on_segment(kept, 0.0, stations[2] * L)
     pieces = [w]
     above = w.wall_above
     for k in 2:(length(stations) - 1)
@@ -329,10 +457,12 @@ function _split_wall_at_points(w, pts, tol::Float64)
         piece = Wall(Int[], w.base.L; thickness=w.thickness,
                      x1=p[1], y1=p[2], x2=q[1], y2=q[2],
                      story=w.story, ρl=w.ρl, ρt=w.ρt,
-                     concrete=w.concrete, group_id=w.base.group_id)
+                     concrete=w.concrete, group_id=w.base.group_id,
+                     openings=openings_on_segment(kept, stations[k] * L, stations[k + 1] * L))
         piece.wall_above = above
         push!(pieces, piece)
     end
+    _divide_wall_tributary!(pieces, stations, L, strip_walls, (x1, y1), (dx / L, dy / L))
     return pieces
 end
 
@@ -343,9 +473,14 @@ Governing factored vertical shear at one corner.
 the same strength readings as pier shear (`_gravity_readings`, `_wind_readings`,
 `_seismic_readings`): `Eh = ρ QE` scales it, and `Ev` does not. The
 second-order displacement of each component is the one solved on that
-combination's factored-gravity stiffness.
+combination's factored-gravity stiffness. A flexible floor passes first-order
+displacements under every key ([`_build_first_order`](@ref)). Its seismic
+shear is the shear of the displacements scaled by each term's `1/(1−θ)`
+(ASCE 7-22 §12.8.7, corpus: asce-7-22, PDF page 188). Gravity and wind are
+not scaled.
 """
-function _governing_joint_vu(vu, basic, second, wind, effects, rho, SDS)
+function _governing_joint_vu(vu, struc, basic, second, wind, effects, rho, SDS;
+                             elf=nothing, wall=nothing)
     roof = basic.symbols[3]
     best = (case=:D, combination=:strength_1_4D, alternative=:only, Vu=0.0)
     function keep(case, action::CombinedWallAction)
@@ -374,12 +509,30 @@ function _governing_joint_vu(vu, basic, second, wind, effects, rho, SDS)
     for k in eachindex(effects)
         for (combo, alt, key) in _seismic_readings(roof)
             set = second[key]
-            qe = WallAction(0.0, vu(set.u[3 + nwind + k]), 0.0)
+            qe = if elf === nothing
+                WallAction(0.0, vu(set.u[3 + nwind + k]), 0.0)
+            else
+                level = _elf_level_index(struc, elf, wall)
+                WallAction(0.0, _pdelta_joint_shear(vu, elf, effects[k], level), 0.0)
+            end
             keep(effects[k].label,
                  combine_wall_action(combo, grav(set); qe, rho, SDS, alternative=alt))
         end
     end
     return best
+end
+
+"Corner shear of the ELF terms, each scaled by its story's `1/(1−θ)`, then combined."
+function _pdelta_joint_shear(vu, elf, effect, level)
+    length(elf.displacements) == length(elf.cases) || throw(ArgumentError(
+        "ordinary wall stage: P-delta scaling needs one stored displacement per ELF case."))
+    u = zeros(Float64, length(first(elf.displacements)))
+    for (j, f) in effect.terms
+        c = elf.cases[j]
+        m = f * _drift_multiplier(elf, c.direction, c.torsion, level)
+        u .+= m .* elf.displacements[j]
+    end
+    return vu(u)
 end
 
 """
@@ -440,7 +593,13 @@ not carry, so it is stated on the record and not checked. The extra corner
 bars are not in the quantity takeoff.
 """
 function _record_joined_joints!(checks, struc, basic, wind, second, effects, inputs,
-                               plan_axis)
+                               plan_axis; elf=nothing)
+    if second === nothing
+        any(a -> a.joined, struc.wall_mesh.assemblies) && throw(ArgumentError(
+            "ordinary wall stage: a joined wall corner needs the component " *
+            "displacements, and none were passed."))
+        return nothing
+    end
     material = inputs.material
     fc_mat = ustrip(u"Pa", material.concrete.fc′)
     fy = ustrip(u"Pa", material.transverse.Fy)
@@ -457,8 +616,9 @@ function _record_joined_joints!(checks, struc, basic, wind, second, effects, inp
             end
             piers = [_pier_by_wall_index(struc.wall_mesh, i) for i in corner.wall_indices]
             vu = u -> corner_vertical_shear(piers, u, corner.x, corner.y)
-            governed = _governing_joint_vu(vu, basic, second, wind, effects,
-                                           inputs.rho, inputs.SDS)
+            governed = _governing_joint_vu(vu, struc, basic, second, wind, effects,
+                                           inputs.rho, inputs.SDS;
+                                           elf, wall=struc.walls[first(corner.wall_indices)])
             sel = select_corner_ratio(fc, fy, plane.Ac, plane.ρt, governed.Vu; λ=λ)
             result = sel.check
             host = minimum(corner.wall_indices)

@@ -45,6 +45,7 @@ end
 """Physical foundation element (one or more supports share a foundation)."""
 mutable struct Foundation{T, R<:AbstractFoundationResult}
     support_indices::Vector{Int}  # Indices into struc.supports
+    wall_indices::Vector{Int}     # Grade walls on this footing. Empty for a column footing.
     result::R
     foundation_type::Symbol
     group_id::Union{UInt64, Nothing}
@@ -56,11 +57,12 @@ end
 
 Construct a `Foundation` linking one or more supports to a sizing result.
 """
-function Foundation(support_indices::Vector{Int}, result::R; 
+function Foundation(support_indices::Vector{Int}, result::R;
                     foundation_type=:spread, group_id=nothing,
-                    volumes::MaterialVolumes=MaterialVolumes()) where {R<:AbstractFoundationResult}
+                    volumes::MaterialVolumes=MaterialVolumes(),
+                    wall_indices::Vector{Int}=Int[]) where {R<:AbstractFoundationResult}
     T = typeof(result.B)
-    Foundation{T, R}(support_indices, result, foundation_type, group_id, volumes)
+    Foundation{T, R}(support_indices, wall_indices, result, foundation_type, group_id, volumes)
 end
 
 """Single-support foundation convenience: wraps the index in a vector."""

@@ -93,8 +93,11 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("analyze/test_opening_downstream.jl")
         include("analyze/test_beam_rings.jl")
         include("analyze/test_solid_head_check.jl")
+        include("analyze/test_slab_joint_demand.jl")
         include("analyze/test_solid_head_story.jl")
         include("analyze/test_column_heads.jl")
+        include("analyze/test_service_deflection.jl")
+        include("analyze/test_framing_levels.jl")
     end
 
     # ─── Scene packets (web viewer) ──────────────────────────────────────

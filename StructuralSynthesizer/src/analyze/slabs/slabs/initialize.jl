@@ -17,7 +17,9 @@ Compute SpanInfo for a skeleton face. Slab openings overlapping the face
   the short axis.
 - `plan_axis`: First plan axis of the building. Auto-detection compares the span
   along it with the span along it turned 90° counterclockwise and keeps the shorter
-  (the first on a tie). `(1.0, 0.0)` is the global X/Y comparison of `SpanInfo`.
+  (the first on a tie). `(1.0, 0.0)` leaves the choice to `SpanInfo`, which uses
+  the face's orthogonal edge frame and falls back to global X/Y when the edges
+  do not share one.
 - `cache`: Optional `Dict` shared across calls. Faces with the same plan shape and
   openings (up to translation, see [`_span_shape_key`](@ref)) reuse one span calculation.
 
@@ -94,6 +96,7 @@ end
     initialize_cells!(struc; loads=GravityLoads(), plan_axis=(1.0, 0.0))
 
 Initialize cells from skeleton faces with service-level SDL and LL.
+A face whose openings cover it gets no cell.
 
 Loads are taken from the `GravityLoads` struct.  In the `design_building`
 pipeline, `params.loads` is passed here automatically.
@@ -123,6 +126,8 @@ function initialize_cells!(struc::BuildingStructure{T, A, P};
             push!(processed_faces, face_idx)
             
             area_raw = face_net_area(skel, face_idx)
+            # A face its openings fill is a void: no slab, no load, no sizing.
+            ustrip(u"m^2", area_raw) <= OPENING_OVERLAP_TOL_M2 && continue
             area = convert(A, area_raw)   # ensure area matches BuildingStructure type A
             spans = get_cell_spans(skel, face_idx; plan_axis, cache=span_cache)
             position = classify_cell_position(skel, face_idx)
@@ -157,7 +162,7 @@ Initialize slabs from cells.
 - `:auto` (default): Use the grouping mode from floor type options (e.g., `FlatPlateOptions.grouping`)
 - `:individual`: One slab per cell (traditional behavior)
 - `:by_floor`: Group all cells on each floor into a single continuous slab
-- `:building_wide`: Group all cells into one slab (for PT post-tensioned systems)
+- `:building_wide`: Group all cells into one slab
 - `Vector{Vector{Int}}`: Explicit cell index groupings
 
 # Examples
@@ -169,9 +174,14 @@ initialize!(struc; floor_type = :flat_plate)
 # Override to individual slabs per cell
 initialize!(struc; floor_type = :flat_plate, cell_groupings = :individual)
 
-# Explicit groupings
-initialize!(struc; cell_groupings = [[1,2,3], [4,5,6]])
+# Explicit groupings (a grouped slab needs an explicit floor_type)
+initialize!(struc; floor_type = :flat_plate, cell_groupings = [[1,2,3], [4,5,6]])
 ```
+
+A slab whose floor type the building-wide `floor_opts` do not describe (an
+inferred `:one_way` cell, or `floor_type = :vault` with the default flat-plate
+options) is sized with that type's default options; see
+[`_default_floor_options`](@ref).
 
 # Notes
 - `Cell` stores **service** `sdl`/`live_load`. Slab sizing computes service self-weight.
@@ -185,7 +195,10 @@ function initialize_slabs!(struc::BuildingStructure{T};
                            cell_groupings::Union{Symbol, Vector{Vector{Int}}}=:auto,
                            slab_group_ids::Union{Nothing, AbstractVector}=nothing,
                            scoped_floor_overrides::Vector{ScopedFloorOverride}=ScopedFloorOverride[],
-                           col_I_factor::Real = 0.70) where T  # ACI 318-11 §10.10.4.1
+                           col_I_factor::Real = 0.70,  # ACI 318-11 §10.10.4.1
+                           topping_span = nothing,
+                           rib_bays = nothing,
+                           joists_planned::Bool = false) where T
     empty!(struc.slabs)
     empty!(struc.slab_parallel_batches)
     
@@ -217,15 +230,21 @@ function initialize_slabs!(struc::BuildingStructure{T};
 
     # 2. Assign fallback deterministic group IDs
     _assign_deterministic_group_ids!(slab_specs)
+    # A :two_way panel with no beams is a flat plate. An interior gap throws.
+    slab_specs = _apply_two_way_supports!(struc, slab_specs, floor_opts;
+                                          joists_planned=joists_planned)
 
     # 3. Group specs by ID
     groups = _group_slab_specs(slab_specs)
 
     # 4. Size once per slab group
-    group_results, group_sw, group_spans, group_material = _size_slab_groups(groups, slab_specs, struc, material, floor_opts; col_I_factor=col_I_factor)
+    group_results, group_sw, group_spans, group_material, group_toppings, group_opts = _size_slab_groups(
+        groups, slab_specs, struc, material, floor_opts;
+        col_I_factor=col_I_factor, topping_span=topping_span, rib_bays=rib_bays)
 
     # 5. Fan out results to cells and create Slab objects (with volumes)
-    _apply_slab_results!(struc, slab_specs, group_results, group_sw, group_spans, group_material, material, floor_opts)
+    _apply_slab_results!(struc, slab_specs, group_results, group_sw, group_spans, group_material,
+                         group_opts; group_toppings=group_toppings)
 
     # 6. Finalize grouping structure
     build_slab_groups!(struc)

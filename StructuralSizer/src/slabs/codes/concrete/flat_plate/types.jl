@@ -51,7 +51,18 @@ ACI 318-11 §13.6.4/.6 transverse distribution.
 - `c_avg::Length`: Average column dimension
 - `column_moments::Vector{<:Moment}`: **Primary** per-column M⁻ (unitful)
 - `column_shears::Vector{<:Force}`: Shear at each column
-- `unbalanced_moments::Vector{<:Moment}`: Unbalanced moment at each column
+- `unbalanced_moments::Vector{<:Moment}`: Joint unbalanced moment at each
+  column. Punching and the later column check use this full moment.
+- `stub_moments_below`, `stub_moments_above`: Moment in the column stub
+  below and above the slab, from a shell analysis. Their sum is the joint
+  moment. The column below is designed for the first, and the column
+  above is checked at its bottom end with the second (zero with no column
+  above). `nothing` for DDM and EFM, which take a stiffness share of
+  `unbalanced_moments` instead.
+- `wall_transfer`: moment the slab transfers to each wall it bears on, about
+  the wall's axis, for punching at the wall reaction. Entries
+  `(seg = ((x1, y1), (x2, y2)), M)` with `seg` in plan metres and `M ≥ 0`
+  the total along the wall. `nothing` when the analysis did not report it.
 - `Vu_max::Force`: Maximum shear demand
 - `secondary::Union{Nothing, NamedTuple}`: Perpendicular direction moments (FEA only).
   NamedTuple `(M_neg_ext, M_neg_int, M_pos, M0)` — all in kip·ft.  `nothing` for DDM/EFM.
@@ -85,6 +96,19 @@ struct MomentAnalysisResult{M<:Moment, P<:Pressure, F<:Force}
     unbalanced_moments::Vector{M}        # Unbalanced moment at each column
     Vu_max::F
 
+    # Negative moment at a wall support, frame-strip level. An end wall of
+    # the frame is exterior; a wall between columns is interior. Zero when
+    # the frame has no wall support. These are not folded into M_neg_ext
+    # or M_neg_int.
+    M_wall_ext::M
+    M_wall_int::M
+
+    # EFM only: M_neg_ext / M_neg_int at the §13.7.7.1 critical section,
+    # from each span's statics. `nothing` for other methods, and for a
+    # result whose negative moments are already at the face.
+    M_neg_ext_face::Union{Nothing, M}
+    M_neg_int_face::Union{Nothing, M}
+
     # Optional: secondary (perpendicular) direction moments
     # NamedTuple with fields: M0, M_neg_ext, M_neg_int, M_pos, l1, l2, ln,
     #   column_moments, column_shears, unbalanced_moments
@@ -100,6 +124,16 @@ struct MomentAnalysisResult{M<:Moment, P<:Pressure, F<:Force}
     # (EFM, FEA).  DDM coefficients already account for this implicitly.
     pattern_loading::Bool
 
+    # Moment in the column stubs below and above the slab, one entry per
+    # supporting column, from a shell analysis. `nothing` means each
+    # column's share is `unbalanced_moments` times the §13.6.9.2 factor.
+    # Punching keeps `unbalanced_moments` either way.
+    stub_moments_below::Union{Nothing, Vector{M}}
+    stub_moments_above::Union{Nothing, Vector{M}}
+
+    # Moment transferred to each wall (see docstring), or `nothing`.
+    wall_transfer::Union{Nothing, Vector{Any}}
+
     function MomentAnalysisResult(
         M0::M, M_neg_ext::M, M_neg_int::M, M_pos::M,
         qu::P, qD::P, qL::P,
@@ -111,13 +145,26 @@ struct MomentAnalysisResult{M<:Moment, P<:Pressure, F<:Force}
         secondary::Union{Nothing, NamedTuple} = nothing,
         fea_Δ_panel::Union{Nothing, Length} = nothing,
         pattern_loading::Bool = false,
+        M_wall_ext::M = zero(M0),
+        M_wall_int::M = zero(M0),
+        M_neg_ext_face::Union{Nothing, M} = nothing,
+        M_neg_int_face::Union{Nothing, M} = nothing,
+        stub_moments_below::Union{Nothing, Vector{M}} = nothing,
+        stub_moments_above::Union{Nothing, Vector{M}} = nothing,
+        wall_transfer::Union{Nothing, AbstractVector} = nothing,
     ) where {M<:Moment, P<:Pressure, F<:Force}
+        (stub_moments_below === nothing) == (stub_moments_above === nothing) ||
+            throw(ArgumentError("stub_moments_below and stub_moments_above are set together"))
+        (M_neg_ext_face === nothing) == (M_neg_int_face === nothing) ||
+            throw(ArgumentError("M_neg_ext_face and M_neg_int_face are set together"))
         new{M,P,F}(
             M0, M_neg_ext, M_neg_int, M_pos,
             qu, qD, qL, l1, l2, ln, c_avg,
             column_moments, column_shears, unbalanced_moments,
-            Vu_max, secondary, fea_Δ_panel,
-            pattern_loading,
+            Vu_max, M_wall_ext, M_wall_int, M_neg_ext_face, M_neg_int_face,
+            secondary, fea_Δ_panel,
+            pattern_loading, stub_moments_below, stub_moments_above,
+            wall_transfer === nothing ? nothing : Vector{Any}(wall_transfer),
         )
     end
 end

@@ -139,3 +139,78 @@ end
     @test !squash.converged
     @test squash.φMn == 0.0
 end
+
+@testset "Return bars in the flange zone raise the tension-side moment" begin
+    psi = Asap.PSI_TO_PA
+    fc = 4000.0 * psi
+    fy = 60000.0 * psi
+    Es = 29000000.0 * psi
+    lw = 3.0
+    tw = 0.30
+    tf = 0.30
+    bf = 1.20
+    Ast = 0.0025 * lw * tw
+    c = 0.40
+    bare = wall_flanged_pm_at_c_si(fc, fy, Es, lw, tw, tf, bf, Ast, c;
+                                  flange_in_compression = false)
+    zero = wall_flanged_pm_at_c_si(fc, fy, Es, lw, tw, tf, bf, Ast, c;
+                                  flange_in_compression = false, As_flange = 0.0)
+    @test zero.Pn ≈ bare.Pn
+    @test zero.Mn ≈ bare.Mn
+    # The flange is the tension face. Its bars sit past the neutral axis.
+    with = wall_flanged_pm_at_c_si(fc, fy, Es, lw, tw, tf, bf, Ast, c;
+                                  flange_in_compression = false, As_flange = 0.004)
+    @test with.Mn > bare.Mn
+    # A flange thinner than a layer still places the area on the nearest layer.
+    thin = wall_flanged_pm_at_c_si(fc, fy, Es, lw, tw, 0.02, bf, Ast, c;
+                                  flange_in_compression = true, As_flange = 0.004)
+    none = wall_flanged_pm_at_c_si(fc, fy, Es, lw, tw, 0.02, bf, Ast, c;
+                                  flange_in_compression = true)
+    @test thin.Pn != none.Pn || thin.Mn != none.Mn
+    # Added bars at both ends, the same group the rectangular section uses.
+    ended = wall_flanged_pm_at_c_si(fc, fy, Es, lw, tw, tf, bf, Ast, c;
+                                   flange_in_compression = false, As_flange = 0.004,
+                                   As_end = 0.001, inset = 0.15)
+    @test ended.Mn > with.Mn
+    @test flange_end_compressed(:positive, 1.0)
+    @test !flange_end_compressed(:negative, 1.0)
+    @test flange_end_compressed(:negative, -1.0)
+end
+
+@testset "A flange at each end uses one Whitney block" begin
+    psi = Asap.PSI_TO_PA
+    fc = 4000.0 * psi
+    fy = 60000.0 * psi
+    Es = 29000000.0 * psi
+    lw = 3.0
+    tw = 0.30
+    tf = 0.25
+    bf = 1.20
+    tf_far = 0.20
+    Ast = 0.0025 * lw * tw
+    # A far end as wide as the web, with no bars, is the one-flange section.
+    c = 0.50
+    one = wall_flanged_pm_at_c_si(fc, fy, Es, lw, tw, tf, bf, Ast, c;
+                                 flange_in_compression = true, As_flange = 0.003)
+    same = wall_two_flange_pm_at_c_si(fc, fy, Es, lw, tw, tf, bf, tf_far, tw, Ast, c;
+                                     compress_positive = true, As_pos = 0.003, As_neg = 0.0)
+    @test same.Pn ≈ one.Pn rtol = 1e-8
+    @test same.Mn ≈ one.Mn rtol = 1e-8
+    @test same.block_area ≈ one.block_area rtol = 1e-8
+    # Bars at the far end raise the moment when that end is in tension.
+    both = wall_two_flange_pm_at_c_si(fc, fy, Es, lw, tw, tf, bf, tf_far, 0.90, Ast, c;
+                                     compress_positive = true, As_pos = 0.003, As_neg = 0.004)
+    @test both.Mn > same.Mn
+    # a through both flanges: bf_pos*tf_pos + tw*stem + bf_neg*tf_neg, once.
+    deep = wall_two_flange_pm_at_c_si(fc, fy, Es, lw, tw, tf, bf, tf_far, 0.90, Ast, 2 * lw;
+                                     compress_positive = true)
+    stem = lw - tf - tf_far
+    @test deep.a ≈ lw
+    @test deep.block_area ≈ bf * tf + tw * stem + 0.90 * tf_far rtol = 1e-8
+    gross = wall_two_flange_gross_section(
+        lw * u"m", tw * u"m", tf * u"m", bf * u"m", tf_far * u"m", tw * u"m")
+    one_gross = wall_flanged_gross_section(
+        lw * u"m", tw * u"m", tf * u"m", bf * u"m"; flange_at = :positive)
+    @test ustrip(u"m^2", gross.area) ≈ ustrip(u"m^2", one_gross.area)
+    @test ustrip(u"m", gross.centroid) ≈ ustrip(u"m", one_gross.centroid)
+end

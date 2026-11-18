@@ -46,6 +46,39 @@ function effective_seismic_weight(cell::Cell)
     return dead_pressure * cell.area                # kN (force)
 end
 
+"""A hole loop lies on `poly` when every vertex is inside it or on its boundary."""
+function _loop_inside_face(loop, poly)
+    for p in loop
+        _point_in_polygon_xy(p[1], p[2], poly) && continue
+        _point_on_polygon_boundary(p[1], p[2], poly; tol = 1e-6) && continue
+        return false
+    end
+    return true
+end
+
+"""
+Area centroid of a face, with openings and beam rings taken out.
+
+A hole that is not contained in the face is left in place: its outline is
+not this face's void.
+"""
+function _net_face_centroid(skeleton::BuildingSkeleton, face::Int)
+    pts = _face_plan_vertices(skeleton, face)
+    cx, cy, area = _polygon_area_centroid(pts)
+    numx = cx * area
+    numy = cy * area
+    net = area
+    for h in face_opening_loops(skeleton, face)
+        _loop_inside_face(h, pts) || continue
+        hx, hy, ha = _polygon_area_centroid(h)
+        numx -= hx * ha
+        numy -= hy * ha
+        net -= ha
+    end
+    net <= _WALLS_BRIDGE_DEGEN_TOL && return (cx, cy)
+    return (numx / net, numy / net)
+end
+
 """
     story_center_of_mass(skeleton, story, cells) -> (ex::Float64, ey::Float64)
 
@@ -54,11 +87,11 @@ story's floor cells:
 
     (ex, ey) = Σ(face_centroidᵢ · Wᵢ) / Σ Wᵢ
 
-where `face_centroidᵢ` is the area centroid of cell *i*'s face polygon (read from
-`GeometryCache.vertex_coords`, the same datum/frame as `to_wall_line`), and `Wᵢ`
-is its effective seismic weight ([`effective_seismic_weight`](@ref), ASCE 7-22
-§12.7.2). `cells` is the building's `Cell` vector; cells are matched to the
-story's faces by `Cell.face_idx`.
+where `face_centroidᵢ` is the area centroid of cell *i*'s face, net of the
+openings and beam rings on that face (read from `GeometryCache.vertex_coords`,
+the same datum/frame as `to_wall_line`), and `Wᵢ` is its effective seismic
+weight ([`effective_seismic_weight`](@ref), ASCE 7-22 §12.7.2). `cells` is the
+building's `Cell` vector; cells are matched to the story's faces by `Cell.face_idx`.
 
 The result shares the frame of `story_plate_geometry` / `WallLine`, so the
 eccentricity `(ex, ey) − plate_center` is directly meaningful to the lateral
@@ -93,8 +126,7 @@ function story_center_of_mass(skeleton::BuildingSkeleton, story::Story,
     for f in story.faces
         c = get(cell_by_face, f, nothing)
         c === nothing && continue   # a face with no load cell carries no floor mass
-        pts = _face_plan_vertices(skeleton, f)
-        cx, cy, _ = _polygon_area_centroid(pts)
+        cx, cy = _net_face_centroid(skeleton, f)
         w = ustrip(u"kN", effective_seismic_weight(c))   # bare kN
         sumW  += w
         sumWx += w * cx

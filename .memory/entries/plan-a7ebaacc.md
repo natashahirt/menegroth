@@ -8,14 +8,14 @@ title: 'Irregular slabs: general-polygon rib networks, demand-grown solid heads,
 node_label: Irregular rib floors
 tags: waffle,grillage,solid-head,openings,irregular-geometry,load-routing,plan
 status: active
-open_threads: 10
+open_threads: 11
 success: 'null'
 files: StructuralSynthesizer/src/analyze/slabs/slabs/rib_grillage.jl@7da1320, StructuralSizer/src/slabs/codes/concrete/waffle/rib_network.jl@7da1320,
   StructuralSizer/src/slabs/codes/concrete/waffle/rib_tributary.jl@7da1320, StructuralSynthesizer/src/analyze/framing/joist_geometry.jl@7da1320,
   StructuralSynthesizer/src/analyze/asap/asap/load_routing.jl@7da1320, StructuralSynthesizer/src/core/utils_building_skeleton.jl@7da1320
 session_id: sess-474b9583
 created_at: '2026-11-10T00:41:49.711325+00:00'
-updated_at: '2026-11-12T12:00:36.815623+00:00'
+updated_at: '2026-11-17T23:02:30.526309+00:00'
 ---
 Gap review (2026-11-09): waffle rib layout, grillage, and solid-head cut stop at quadrilaterals (grillage already handles skewed quads via per-bay isotropic skeleton; only the solid-head fallback check is rectangle-only). Per-cell tributaries already handle any polygon, holes, one-way axis.
 

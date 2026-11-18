@@ -52,13 +52,12 @@ The recomputed / restored node sets from the most recent run are observable via
 """
 mutable struct DesignSession
     engine::IncrementalEngine
-    base_params::DesignParameters
+    context::ResolvedDesignContext
     base_design::BuildingDesign
-    framing_opts::NamedTuple
 end
 
 """
-    DesignSession(struc, base_params; framing_opts=NamedTuple(), harmonize=true,
+    DesignSession(struc, base_params; framing_opts=NamedTuple(),
                   target=nothing, tc=nothing) -> DesignSession
 
 Prepare `struc` for incremental design and run the BASE design once.
@@ -71,23 +70,24 @@ left untouched — [`prepare_engine`](@ref) prepares an independent copy — so 
 same `struc` handle can be reused to build another session/engine cleanly.
 
 `target` defaults to the graph's [`terminal_node`](@ref) (a full design).
-`harmonize` mirrors the `design_building` post-pipeline uniform-column pass.
 `snapshot_mode` selects the engine's memo-shrink mode (see [`prepare_engine`](@ref));
-it defaults to [`_default_snapshot_mode`](@ref) (`:whole` unless `SS_SNAPSHOT_MODE`
-opts in), so production is byte-identical and the gates can A/B a shrink mode.
+it defaults to [`_default_snapshot_mode`](@ref) (`:shared` unless `SS_SNAPSHOT_MODE`
+opts into `:whole` or `:composable`). The restored state matches `:whole`.
 """
 function DesignSession(struc::BuildingStructure, base_params::DesignParameters;
                        framing_opts::NamedTuple = NamedTuple(),
-                       harmonize::Bool = true,
                        target::Union{Nothing, NodeKey} = nothing,
                        snapshot_mode::Symbol = _default_snapshot_mode(),
                        tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
-    engine = prepare_engine(struc, base_params;
-                            framing_opts = framing_opts, snapshot_mode = snapshot_mode, tc = tc)
+    context = resolve_design_context(base_params; framing_opts=framing_opts)
+    engine = prepare_engine(
+        struc, context; snapshot_mode=snapshot_mode, tc=tc)
     tgt = target === nothing ? terminal_node(engine.graph) : target
-    run_target!(engine, base_params; target = tgt, framing_opts = framing_opts, tc = tc)
-    base_design = capture_incremental_design(engine, base_params; harmonize = harmonize, tc = tc)
-    return DesignSession(engine, base_params, base_design, framing_opts)
+    run_target!(
+        engine, context.params; target=tgt,
+        framing_opts=context.framing_opts, tc=tc)
+    base_design = capture_incremental_design(engine, context.params; tc=tc)
+    return DesignSession(engine, context, base_design)
 end
 
 """
@@ -102,7 +102,7 @@ base_design(session::DesignSession) = session.base_design
 
 The BASE `DesignParameters` every variation diff is measured against.
 """
-base_params(session::DesignSession) = session.base_params
+base_params(session::DesignSession) = session.context.params
 
 # -----------------------------------------------------------------------------
 # Preview: param-diff -> dirty-frontier resolver (no execution) — deliverable 2.
@@ -116,7 +116,7 @@ shared by the preview and run paths so both interpret overrides identically
 (always relative to the BASE).
 """
 _variant_params(session::DesignSession; overrides...) =
-    with(session.base_params; overrides...)
+    with(session.context.params; overrides...)
 
 """
     changed_param_fields(session::DesignSession; overrides...) -> Vector{Symbol}
@@ -126,7 +126,7 @@ BASE params (content-based; see the graph-level [`changed_param_fields`](@ref)).
 Computed WITHOUT running anything.
 """
 changed_param_fields(session::DesignSession; overrides...) =
-    changed_param_fields(session.base_params, _variant_params(session; overrides...))
+    changed_param_fields(session.context.params, _variant_params(session; overrides...))
 
 """
     dirty_frontier(session::DesignSession; overrides...) -> Vector{NodeKey}
@@ -172,7 +172,7 @@ requires_new_engine(session::DesignSession; overrides...) =
 # -----------------------------------------------------------------------------
 
 """
-    redesign(session::DesignSession; harmonize=true, target=nothing, tc=nothing,
+    redesign(session::DesignSession; target=nothing, tc=nothing,
              overrides...) -> BuildingDesign
 
 Apply `overrides` to the session's BASE params, recompute ONLY the nodes the
@@ -199,7 +199,6 @@ refused fail-loud AT THIS DOOR (using the prepared baseline `struc`) rather than
 silently dropped. An all-unset override is a documented no-op and does not throw.
 """
 function redesign(session::DesignSession;
-                  harmonize::Bool = true,
                   target::Union{Nothing, NodeKey} = nothing,
                   tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
                   overrides...)
@@ -224,8 +223,8 @@ function redesign(session::DesignSession;
     _assert_member_group_overrides_unsupported(variant, session.engine.baseline)
     tgt = target === nothing ? terminal_node(session.engine.graph) : target
     run_target!(session.engine, variant; target = tgt,
-                framing_opts = session.framing_opts, tc = tc)
-    return capture_incremental_design(session.engine, variant; harmonize = harmonize, tc = tc)
+                framing_opts=session.context.framing_opts, tc=tc)
+    return capture_incremental_design(session.engine, variant; tc = tc)
 end
 
 """
@@ -233,8 +232,8 @@ end
 
 NamedTuple-diff form of [`redesign`](@ref): `vary(session, (; foundation_options=fp))`
 is equivalent to `redesign(session; foundation_options=fp)`. Ergonomic for
-research sweeps that carry a `param_diff` as data. `kwargs` (`harmonize`,
-`target`, `tc`) are forwarded to [`redesign`](@ref).
+research sweeps that carry a `param_diff` as data. `kwargs` (`target`,
+`tc`) are forwarded to [`redesign`](@ref).
 """
 vary(session::DesignSession, overrides::NamedTuple; kwargs...) =
     redesign(session; kwargs..., overrides...)

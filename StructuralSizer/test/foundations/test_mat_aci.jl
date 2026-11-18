@@ -50,8 +50,10 @@ function run_all_methods(demands, positions, soil; min_depth=24.0u"inch")
             cover=3.0u"inch", min_depth=min_depth,
             depth_increment=1.0u"inch")
 
-    r_rigid  = design_footing(MatFoundation(), demands, positions, soil;
-        opts=MatParams(; base..., analysis_method=RigidMat()))
+    # The comparison wants the rigid strip numbers even when §6.1.2 Step 3
+    # would send the public method to Winkler.
+    r_rigid  = StructuralSizer._design_mat_rigid(demands, positions, soil;
+        opts=MatParams(; base...))
 
     r_shukla = design_footing(MatFoundation(), demands, positions, soil;
         opts=MatParams(; base..., analysis_method=ShuklaAFM()))
@@ -100,6 +102,25 @@ function check_result(r, min_plan_ft; label="")
     V_exp = B_ft * L_ft * (h_in / 12.0) * 0.0283168
     V_act = ustrip(u"m^3", r.concrete_volume)
     @test abs(V_act - V_exp) / V_exp < 0.01
+end
+
+# The punching start is not allowed to open the thickness grid above
+# min_depth when the estimate itself is thinner than min_depth.
+@testset "Mat punching start does not raise min_depth" begin
+    light = [FoundationDemand(1; Pu=10.0kip, Ps=8.0kip,
+                              c1=18.0u"inch", c2=18.0u"inch")]
+    h_seed = StructuralSizer._mat_punching_h_seed(
+        light, 4000.0u"psi", 1.0, 0.75, 3.0u"inch", 0.5u"inch")
+    @test h_seed < 24.0u"inch"
+    @test StructuralSizer._mat_depth_index(24.0u"inch", 1.0u"inch", h_seed) == 0
+    @test StructuralSizer._mat_depth_index(24.0u"inch", 1.0u"inch", 24.0u"inch") == 0
+    @test StructuralSizer._mat_depth_index(24.0u"inch", 1.0u"inch", 1000.0u"inch") == 59
+
+    # Zero column load: no shear demand, seed stays at cover + db/2.
+    idle = [FoundationDemand(1; Pu=0.0kip, Ps=0.0kip)]
+    h_idle = StructuralSizer._mat_punching_h_seed(
+        idle, 4000.0u"psi", 1.0, 0.75, 3.0u"inch", 0.5u"inch")
+    @test uconvert(u"inch", h_idle) ≈ 3.5u"inch" atol=1e-6u"inch"
 end
 
 # =============================================================================

@@ -107,6 +107,9 @@ end
 
         ms_ext = _groups(md, :top, "middle strip, exterior support")
         @test all(g -> g.count == 4 && _in(g.length) ≈ 20 + 52.8 - 0.75 + hook, ms_ext)
+        @test all(g -> isempty(g.centerlines) || length(g.centerlines) == g.count, md.groups)
+        @test all(w -> abs(_in(w[1][2] * u"m")) <= 60, int_long.centerlines)
+        @test all(w -> 60 <= abs(_in(w[1][2] * u"m")) <= 120, ms_ext[1].centerlines)
         ms_int = only(_groups(md, :top, "middle strip, interior support"))
         @test ms_int.count == 6 && _in(ms_int.length) ≈ 20 + 2 * 52.8
 
@@ -170,6 +173,36 @@ end
         @test any(w -> occursin("ℓdh", w), mdn.warnings)
 
         @test_throws ArgumentError detail_flat_plate_line(; common..., supports = fill(20.0u"inch", 2))
+
+        # Column-strip bars stay inside the strip; middle-strip bars sit outside it.
+        @test all(g -> length(g.centerlines) == g.count, md.groups)
+        col_y = [abs(_in(w[1][2] * u"m")) for g in md.groups if occursin("column strip", g.note) for w in g.centerlines]
+        mid_y = [abs(_in(w[1][2] * u"m")) for g in md.groups if occursin("middle strip", g.note) for w in g.centerlines]
+        @test all(y -> y <= 60, col_y)
+        @test all(y -> 60 < y <= 120, mid_y)
+
+        # Integrity bars inside the column core (§13.3.8.5). Six #5 bars spread
+        # over 120 − 0.625 in. are 23.875 in. apart, the middle two at ±11.94 in.;
+        # a 7.5 in. core half-width (20 in. column, bar centres 2.5 in. in)
+        # moves the pair to ±(7.5 − 0.3125) in.
+        integ_y(md) = sort([_in(w[1][2] * u"m") for w in only(_groups(md, :integrity)).centerlines])
+        @test integ_y(md) ≈ [-11.9375, 11.9375]
+        mdc = detail_flat_plate_line(; common..., core_half_width = 7.5u"inch")
+        @test integ_y(mdc) ≈ [-7.1875, 7.1875]
+        @test isempty(mdc.warnings)
+        @test _group_as(_groups(mdc, :integrity)) + _group_as(_groups(mdc, :bottom, "continuous")) ≈
+              _group_as(_groups(md, :integrity)) + _group_as(_groups(md, :bottom, "continuous"))
+        # A core too narrow for two #5 bars at 1 in. clear is flagged.
+        mdn2 = detail_flat_plate_line(; common..., core_half_width = 1.0u"inch")
+        @test any(w -> occursin("integrity bars", w), mdn2.warnings)
+
+        sec = RCColumnSection(b = 20.0u"inch", h = 16.0u"inch", bar_size = 8, n_bars = 8,
+                              cover = 1.5u"inch", tie_bar_size = 4)
+        col = (base = (section = sec,), θ = 0.0)
+        # Bar centres 1.5 + 0.5 + 0.5 = 2.5 in. inside each face.
+        @test _in(StructuralSizer._integrity_core_half(col, (1.0, 0.0))) ≈ 7.5
+        @test _in(StructuralSizer._integrity_core_half(col, (0.0, 1.0))) ≈ 5.5
+        @test StructuralSizer._integrity_core_half((base = (section = nothing,),), (1.0, 0.0)) === nothing
     end
 
     # ── Beam, 12 × 24 in., 4 #8 bottom, #3 stirrups, 30 ft c/c on 20 in. columns
@@ -189,6 +222,9 @@ end
         @test integ.shape === :hook_both
         @test _in(integ.length) ≈ 380 - 3 + 2hook8
         bot = only(_groups(md, :bottom))
+        iy = [w[1][2] for w in integ.centerlines]
+        by = [w[1][2] for w in bot.centerlines]
+        @test length(unique(round.([iy; by]; digits = 6))) == 4
         @test bot.count == 2 && _in(bot.length) ≈ 377 + 2hook8
         @test any(w -> occursin("bottom bars at exterior support", w), md.warnings)
 
@@ -206,6 +242,8 @@ end
         @test _in(st.length) ≈ 2 * (12 - 3 - 0.375 + 24 - 3 - 0.375) +
                                2 * (3π / 4 * (4 * 0.375 + 0.375) / 2 + 3.0)
         @test st.count == ceil(Int, (358 - 22) / s - 1e-9) + 1
+        @test length(st.centerlines) == st.count
+        @test all(w -> length(w) >= 5 && w[1] == w[end], st.centerlines)
         @test first(st.x_positions) ≈ ustrip(u"m", 22.0u"inch")
         @test last(st.x_positions) ≈ ustrip(u"m", 358.0u"inch")
         @test maximum(diff(st.x_positions)) <= ustrip(u"m", s * u"inch") + 1e-9
@@ -244,6 +282,13 @@ end
         @test mdi.areas["top_placed_in2"] ≈ 3 * ustrip(u"inch^2", bar_area(7))
         @test mdi.areas["top_ideal_in2"] ≈ mdi.areas["top_placed_in2"]
         @test any(n -> occursin("in² placed", n) && occursin("section As", n), md.notes)
+
+        st = only(_groups(md, :stirrup))
+        @test length(st.centerlines) == st.count
+        @test all(w -> length(w) >= 5 && w[1] == w[end], st.centerlines)
+        places = sort([w[1][2] for w in integ.centerlines])
+        append!(places, (w[1][2] for w in bot.centerlines))
+        @test length(unique(round.(places; digits = 6))) == integ.count + bot.count
     end
 
     # ── Columns, 12 ft story under an 8 in. slab ───────────────────────────
@@ -263,6 +308,28 @@ end
         # Ties at 16 in. from 8 in. to 136.75 − 8 = 128.75 in.: ⌈120.75/16⌉ + 1 = 9.
         ties = only(_groups(md, :tie))
         @test ties.count == 9 && ties.bar_size == 3
+        @test length(long.centerlines) == length(section_rebar_positions(sec))
+        @test all(zip(long.centerlines, section_rebar_positions(sec))) do (w, p)
+            w[1][2] ≈ p[1] && w[1][3] ≈ p[2]
+        end
+        @test length(ties.centerlines) == ties.count
+        @test all(w -> length(w) >= 5 && w[1] == w[end], ties.centerlines)
+        @test length(long.centerlines) == long.count
+        @test all(zip(long.centerlines, section_rebar_positions(sec))) do (wire, p)
+            wire[1][2] ≈ p[1] && wire[1][3] ≈ p[2]
+        end
+        @test length(ties.centerlines) == ties.count
+        @test all(wire -> length(wire) >= 5 && wire[1] == wire[end], ties.centerlines)
+        # A shear spacing inside §25.7.2.1 closes the ties up. It does not
+        # space them farther than that clause.
+        tight = detail_column(sec; height = 144.0u"inch", slab_above = 8.0u"inch",
+                              tie_spacing = 6.0u"inch", mats...)
+        tight_ties = only(_groups(tight, :tie))
+        @test tight_ties.count > ties.count
+        @test occursin("10.7.6.5.2", tight_ties.note)
+        loose = detail_column(sec; height = 144.0u"inch", slab_above = 8.0u"inch",
+                              tie_spacing = 24.0u"inch", mats...)
+        @test only(_groups(loose, :tie)).count == ties.count
         @test _in(ties.length) ≈ 4 * (16 - 3 - 0.375) + 2 * (3π / 4 * (4 * 0.375 + 0.375) / 2 + 3.0)
         # Middle face bars sit 5.625 − 1 = 4.6 in. clear from the corners: no crossties.
         @test isempty(_groups(md, :crosstie))
@@ -290,6 +357,13 @@ end
         cts = _groups(mdb, :crosstie)
         @test length(cts) == 2
         @test all(g -> g.count == nt, cts)
+        @test length(long.centerlines) == 8
+        @test all(zip(long.centerlines, section_rebar_positions(sec))) do (wire, p)
+            wire[1][2] ≈ p[1] && wire[1][3] ≈ p[2]
+        end
+        @test length(ties.centerlines) == ties.count
+        @test all(wire -> length(wire) >= 5 && wire[1] == wire[end], ties.centerlines)
+        @test all(g -> length(g.centerlines) == g.count, cts)
 
         # Spiral, D = 20 in.: ρs = 0.45(400/289 − 1)·4000/60000 = 0.01152,
         # #3 pitch s = 4·0.11/(17·ρs) = 2.246 in., 1.871 in. clear.
@@ -345,11 +419,41 @@ end
                                      column = (16.0u"inch", 16.0u"inch"), mats...)
         short = [g for g in rect.groups if g.direction === :short]
         @test sort([g.count for g in short]) == [2, 8]
+        band = only(g for g in short if occursin("central band", g.note) && !occursin("outside", g.note))
+        outside = only(g for g in short if occursin("outside", g.note))
+        gap(g) = begin
+            xs = sort([_in(w[1][1] * u"m") for w in g.centerlines])
+            minimum(diff(xs))
+        end
+        @test gap(band) < gap(outside)
         @test _in(only(g for g in rect.groups if g.direction === :long).length) ≈ 138
         @test rect.areas["short_placed_in2"] ≈ 10 * ustrip(u"inch^2", bar_area(6))
         @test rect.areas["short_ideal_in2"] ≈ rect.areas["short_placed_in2"]
         @test rect.areas["long_placed_in2"] ≈ 10 * ustrip(u"inch^2", bar_area(6))
+        band = only(g for g in short if occursin("central band", g.note) && !occursin("outside", g.note))
+        outside = only(g for g in short if occursin("outside", g.note))
+        gap(g) = minimum(diff(sort([_in(w[1][1] * u"m") for w in g.centerlines])))
+        @test gap(band) < gap(outside)
     end
+end
+
+# The mat drawing uses the same bar count as the steel volume.
+# ACI 318-11 §7.6.5 (corpus: aci-318-11, page 96).
+@testset "mat bars match the steel-volume count" begin
+    B, L, D = 10.0u"m", 10.0u"m", 24.0u"inch"
+    cover = 3.0u"inch"
+    Asx, Asy = 0.01u"m^2", 0.03u"m^2"
+    opts = (bar_size_x = 8, bar_size_y = 8, cover = cover)
+    bars = StructuralSizer.mat_flexure_bar_counts(B, L, D, Asx, Asx, Asy, Asy, opts)
+    md = detail_mat(; B, L, D, cover, bar_size_x = 8, bar_size_y = 8,
+                    As_x_bot = Asx, As_x_top = Asx, As_y_bot = Asy, As_y_top = Asy)
+    counts = Dict(g.mark => g.count for g in md.groups)
+    @test counts["MXB"] == bars.n_xb
+    @test counts["MXT"] == bars.n_xt
+    @test counts["MYB"] == bars.n_yb
+    @test counts["MYT"] == bars.n_yt
+    @test all(g -> length(g.centerlines) == g.count, md.groups)
+    @test md.solid == (0.0, ustrip(u"m", L), 0.0, ustrip(u"m", B), 0.0, ustrip(u"m", D))
 end
 
 # ACI 318-19 §11.7 (corpus: aci-318-19, pp. 173–174) and §18.10.2 (p. 320).
@@ -512,6 +616,143 @@ end
         @test any(n -> occursin("raised to 0.0025", n), thin.notes)
     end
 
+    @testset "boundary hoops are not invented" begin
+        # §18.10.6.4 needs the neutral-axis depth. §18.7.5.2(a)–(d) does not
+        # fix one crosstie arrangement. The web curtain is placed either way.
+        # ρl = 0.01 is above 400/fy at Grade 60, so the tie warning is on,
+        # and still no tie group appears.
+        md = detail_wall(; length = 20.0u"ft", height = 12.0u"ft", thickness = 12.0u"inch",
+                         ρl = 0.01, ρt = 0.0025, special = true, hw = 20.0u"ft",
+                         Vu = 200.0u"kip", foundation_depth = 24.0u"inch", common...)
+        roles = Set(g.role for g in md.groups)
+        @test roles ⊆ Set([:vertical, :horizontal, :dowel, :trim])
+        @test :vertical in roles && :horizontal in roles
+        @test any(n -> occursin("boundary bars are not placed", n), md.notes)
+        @test any(w -> occursin("18.10.6.5(b)", w), md.warnings)
+        ordinary = detail_wall(; length = 20.0u"ft", height = 12.0u"ft",
+                               thickness = 12.0u"inch", ρl = 0.01, ρt = 0.0025,
+                               foundation_depth = 24.0u"inch", common...)
+        @test !any(w -> occursin("18.10.6", w), ordinary.warnings)
+        @test !any(n -> occursin("boundary bars are not placed", n), ordinary.notes)
+        @test Set(g.role for g in ordinary.groups) ⊆ Set([:vertical, :horizontal, :dowel, :trim])
+
+        # A known §18.10.6.4 length places hoops at both ends. 30 in. is
+        # longer than twice the 12 in. thickness, so the hoops overlap.
+        zoned = detail_wall(; length = 20.0u"ft", height = 12.0u"ft", thickness = 12.0u"inch",
+                            ρl = 0.01, ρt = 0.0025, special = true, hw = 20.0u"ft",
+                            Vu = 200.0u"kip", foundation_depth = 24.0u"inch",
+                            boundary_zones = [(zone = 30.0u"inch", bar = 5, spacing = 6.0u"inch")],
+                            critical_reach = 20.0u"ft", common...)
+        hoops = [g for g in zoned.groups if g.role === :tie]
+        @test length(hoops) == 1
+        @test hoops[1].shape === :closed_tie
+        @test hoops[1].count == length(hoops[1].centerlines)
+        @test hoops[1].count > 4
+        @test any(g -> g.role === :crosstie, zoned.groups)
+        @test !any(n -> occursin("boundary bars are not placed", n), zoned.notes)
+    end
+end
+
+@testset "Solid-head piece top bars" begin
+    # 0.30 m deep: under 12 in. of concrete below the top bars, so ψt = 1.
+    kw = (length = 1.5u"m", width = 0.9u"m", depth = 0.30u"m", d = 0.26u"m",
+          cover = 0.75u"inch", fc = 4000.0u"psi", fy = 60_000.0u"psi")
+    Mu = 120.0u"kN*m"
+    # A face end runs ℓd into the rib; a continuous end half a Class B lap.
+    md = StructuralSizer.detail_solid_head_piece(; kw..., Mu_neg = Mu,
+                                                 ends = (:face, :continuous))
+    g = only(md.groups)
+    @test md.kind == :slab
+    @test g.role == :top && g.direction == :primary && g.shape == :straight
+    @test length(g.centerlines) == g.count
+    bs, n = StructuralSizer._hogging_bars(Mu, kw.width, kw.d, kw.fc, kw.fy)
+    @test g.bar_size == bs && g.count == n
+    lam = StructuralSizer._detailing_λ(1.0)
+    ℓd = StructuralSizer.straight_development_length(bs, kw.fc, kw.fy, lam;
+        ψt = 1.0, coating = :uncoated, epoxy_close = true, favorable_cover = false)
+    lap = StructuralSizer.tension_lap_length(bs, kw.fc, kw.fy, lam; as_ratio = 1.0,
+        percent_spliced = 100.0, ψt = 1.0, coating = :uncoated, epoxy_close = true,
+        favorable_cover = false)
+    @test isapprox(g.length, kw.length + ℓd + lap / 2; rtol = 1e-9)
+    @test any(n -> occursin("13.3.7", n), md.notes)
+    @test isempty(md.warnings)
+    # An exterior end is hooked; no moment places no bars.
+    ext = StructuralSizer.detail_solid_head_piece(; kw..., Mu_neg = Mu,
+                                                  ends = (:exterior, :face))
+    @test only(ext.groups).shape == :hook_start
+    none = StructuralSizer.detail_solid_head_piece(; kw..., Mu_neg = nothing,
+                                                   ends = (:face, :face))
+    @test isempty(none.groups)
+    @test_throws ArgumentError StructuralSizer.detail_solid_head_piece(; kw...,
+        Mu_neg = Mu, ends = (:face, :column))
+
+    @testset "Edge-line bars stay on the slab" begin
+        cs = StripLayout(StripBars(5, 8), StripBars(5, 6), StripBars(5, 10), 120.0u"inch")
+        ms = StripLayout(StripBars(5, 4), StripBars(5, 6), StripBars(5, 6), 120.0u"inch")
+        common = (clear_spans = [240.0u"inch", 240.0u"inch"],
+                  supports = fill(20.0u"inch", 3), column_strip = cs, middle_strip = ms,
+                  h = 8.0u"inch", cover = 0.75u"inch",
+                  fc = 4000.0u"psi", fy = 60_000.0u"psi")
+        ys(md) = [w[1][2] for g in md.groups for w in g.centerlines if !isempty(w)]
+        full = detail_flat_plate_line(; common...)
+        @test any(<(0), ys(full)) && any(>(0), ys(full))
+        edge = detail_flat_plate_line(; common..., band = (0.0, ustrip(u"m", 240.0u"inch")))
+        @test all(y -> -1e-8 <= y <= ustrip(u"m", 240.0u"inch") + 1e-6, ys(edge))
+        wide = detail_flat_plate_line(; common..., band = (0.0, ustrip(u"m", 360.0u"inch")))
+        @test maximum(ys(wide)) > maximum(ys(edge)) + 0.2
+        @test minimum(ys(wide)) >= -1e-8
+        # A second placement of the same band does not move a bar.
+        again = detail_flat_plate_line(; common..., band = (0.0, ustrip(u"m", 240.0u"inch")))
+        @test ys(again) == ys(edge)
+
+        n0 = sum(g.count for g in full.groups)
+        StructuralSizer._omit_bars_off_slab!(full, p -> p[2] >= 0.0)
+        @test sum(g.count for g in full.groups) < n0
+        @test all(p -> p[2] >= -1e-9, (p for g in full.groups for w in g.centerlines for p in w))
+        @test any(occursin("outside the slab", w) for w in full.warnings)
+        kept = sum(g.count for g in full.groups)
+        StructuralSizer._omit_bars_off_slab!(full, p -> p[2] >= 0.0)
+        @test sum(g.count for g in full.groups) == kept
+    end
+
+    @testset "Rebar takeoff is the placed bars" begin
+        function strips(n_neg, n_pos; size = 5)
+            ab = bar_area(size)
+            neg = StripReinforcement(:int_neg, 50.0u"kN*m", n_neg * ab, ab, n_neg * ab,
+                                     size, 6.0u"inch", n_neg, true)
+            pos = StripReinforcement(:pos, 30.0u"kN*m", n_pos * ab, ab, n_pos * ab,
+                                     size, 8.0u"inch", n_pos, true)
+            ext = StripReinforcement(:ext_neg, 20.0u"kN*m", ab, ab, ab,
+                                     size, 12.0u"inch", 1, true)
+            return [neg, pos, ext]
+        end
+        function panel(l1, n_neg, n_pos)
+            return FlatPlatePanelResult(
+                l1, 14.0u"ft", 8.0u"inch", 100.0u"kN*m", 9.0u"kN/m^2",
+                7.0u"ft", strips(n_neg, n_pos), 7.0u"ft", strips(max(1, n_neg ÷ 2), n_pos),
+                (ok = true, max_ratio = 0.5, details = Dict()),
+                (ok = true, Δ_total = 0.25u"inch", Δ_limit = 0.9u"inch", ratio = 0.3))
+        end
+        short = panel(18.0u"ft", 10, 6)
+        placed = 2 * StructuralSizer._direction_placed_volume(
+            short.column_strip_reinf, short.middle_strip_reinf,
+            short.column_strip_width, short.middle_strip_width, short.l1, short.thickness)
+        @test volume_per_area(short, :steel) * short.l1 * short.l2 ≈ placed
+        # Every section over the full span, the previous takeoff, is more steel.
+        smeared = 0.0u"m^3"
+        for sr in vcat(short.column_strip_reinf, short.middle_strip_reinf)
+            smeared += uconvert(u"m^2", sr.As_provided) * short.l1
+        end
+        @test placed < 2 * 1.10 * smeared
+        heavy = panel(18.0u"ft", 20, 12)
+        @test volume_per_area(heavy, :steel) > volume_per_area(short, :steel) * 1.8
+        long = panel(30.0u"ft", 10, 6)
+        @test volume_per_area(long, :steel) * long.l1 * long.l2 >
+              volume_per_area(short, :steel) * short.l1 * short.l2
+        again = panel(18.0u"ft", 10, 6)
+        @test volume_per_area(again, :steel) ≈ volume_per_area(short, :steel)
+    end
+
     # ── Gravity column outside the seismic system, SDC D–F ────────────────
     @testset "gravity column and joint (§18.14.3.3)" begin
         mats = (fc = 4000.0u"psi", fy = 60_000.0u"psi", fyt = 60_000.0u"psi")
@@ -568,5 +809,89 @@ end
         @test any(n -> occursin("18.7.6", n), sheared.notes)
         sheared_bottom = _groups(sheared, :tie, "18.7.5.3")[1].x_positions
         @test maximum(diff(sheared_bottom)) <= ustrip(u"m", low.spacing) + 1e-6
+
+        # 24 in. with 12 #8 bars: one crosstie each way in every hoop zone.
+        big = RCColumnSection(; b = 24.0u"inch", h = 24.0u"inch", bar_size = 8, n_bars = 12,
+                              cover = 1.5u"inch", tie_bar_size = 3)
+        mdb = detail_column(big; height = 144.0u"inch", slab_above = 8.0u"inch", mats...,
+                            gravity_seismic = true)
+        zones = [g for g in mdb.groups if g.role === :tie]
+        cts = _groups(mdb, :crosstie)
+        @test length(cts) == 2 * length(zones)
+        for g in cts
+            @test length(g.centerlines) == g.count
+        end
+        @test sum(g.count for g in cts) == 2 * sum(g.count for g in zones)
+
+        # Calculated forces within the design strength stay on §18.14.3.2:
+        # the ordinary lap, and hoops over ℓo plus the full height.
+        # Pu is the earthquake-included axial. Without Pu_gravity, (c) is not applied.
+        within = detail_column(sec; height = height, slab_above = slab, mats...,
+                               induced_within_strength = true, Pu = 100.0u"kip")
+        @test isempty(_groups(within, :longitudinal, "center half"))
+        @test any(n -> occursin("18.14.3.2(b)", n), within.notes)
+        @test !isempty(_groups(within, :tie, "18.14.3.2(b)"))
+        @test any(n -> occursin("was not passed", n), within.notes)
+
+        # §18.14.3.2(c): half of Table 18.7.5.4 (a) and (b) over ℓo.
+        # 2000 kip is above 0.35P0 for this 16 in. column.
+        heavy = detail_column(sec; height = height, slab_above = slab, mats...,
+                              induced_within_strength = true,
+                              Pu_gravity = 2000.0u"kip")
+        @test any(n -> occursin("18.14.3.2(c)", n), heavy.notes)
+        @test !any(w -> occursin("not placed", w), heavy.warnings)
+        ends_c = _groups(heavy, :tie, "18.14.3.2(c)")
+        @test length(ends_c) == 2
+        s_half = StructuralSizer._half_table_hoop_spacing(sec, mats.fc, mats.fyt)
+        @test s_half !== nothing
+        @test ustrip(u"inch", s_half) < 6
+        @test maximum(diff(ends_c[1].x_positions)) <=
+              ustrip(u"m", min(s_half, 6.0u"inch")) + 1e-6
+        light = detail_column(sec; height = height, slab_above = slab, mats...,
+                              induced_within_strength = true,
+                              Pu_gravity = 50.0u"kip")
+        @test any(n -> occursin("does not exceed 0.35P0", n), light.notes)
+        @test isempty(_groups(light, :tie, "18.14.3.2(c)"))
+        @test isempty(_groups(light, :tie, "18.7.5.7"))
+
+        # §18.7.5.7: cover outside the confining hoop above 4 in.
+        deep = RCColumnSection(; b = 20.0u"inch", h = 20.0u"inch", bar_size = 8,
+                               n_bars = 8, cover = 5.0u"inch", tie_bar_size = 3)
+        covered = detail_column(deep; height = height, slab_above = slab, mats...,
+                                induced_within_strength = true,
+                                Pu_gravity = 2000.0u"kip")
+        extra = _groups(covered, :tie, "18.7.5.7")
+        @test length(extra) == 2
+        @test all(g -> maximum(diff(g.x_positions)) <= ustrip(u"m", 12.0u"inch") + 1e-6, extra)
+
+        # §18.14.3.2 with a spiral. D = 60 in., 1.5 in. cover: Ag/Ach = 3600/3249.
+        # (d) = 0.45(Ag/Ach − 1)·4000/60000 = 0.003241, (e) = 0.12·4000/60000 = 0.008.
+        # Half of (e) is 0.004 > (d), so (c) sets ρs and the #3 pitch is
+        # 4·0.11/(57·0.004) = 1.93 in. 0.35P0 with 24 #11 is about 4106 kip.
+        round60 = RCCircularSection(; D = 60.0u"inch", bar_size = 11, n_bars = 24, cover = 1.5u"inch")
+        sp_over = detail_column(round60; height = height, slab_above = slab, mats...,
+                                induced_within_strength = true, Pu_gravity = 5000.0u"kip")
+        sp = only(_groups(sp_over, :spiral))
+        @test occursin("18.14.3.2(c)", sp.note)
+        @test any(n -> occursin("(d) and (e)", n), sp_over.notes)
+        @test !any(w -> occursin("keeps its ordinary", w), sp_over.warnings)
+        @test ustrip(u"inch", sp.x_positions[2] * u"m") ≈ 4 * 0.11 / (57 * 0.004) rtol = 1e-3
+        sp_under = detail_column(round60; height = height, slab_above = slab, mats...,
+                                 induced_within_strength = true, Pu_gravity = 1000.0u"kip")
+        sp2 = only(_groups(sp_under, :spiral))
+        @test !occursin("18.14.3.2(c)", sp2.note)
+        ρd = 0.45 * (3600 / 3249 - 1) * 4000 / 60_000
+        @test ustrip(u"inch", sp2.x_positions[2] * u"m") ≈ 4 * 0.11 / (57 * ρd) rtol = 1e-3
+        @test any(n -> occursin("spiral over the full height", n), sp_under.notes)
+
+        # Circular ties and the §18.14.3.3 path are not detailed; they warn.
+        tied = RCCircularSection(; D = 20.0u"inch", bar_size = 8, n_bars = 8,
+                                 cover = 1.5u"inch", tie_type = :tied)
+        tw = detail_column(tied; height = height, slab_above = slab, mats...,
+                           induced_within_strength = true, Pu_gravity = 50.0u"kip")
+        @test any(w -> occursin("keeps its ordinary ties", w), tw.warnings)
+        sw = detail_column(round60; height = height, slab_above = slab, mats...,
+                           gravity_seismic = true)
+        @test any(w -> occursin("keeps its ordinary spiral", w), sw.warnings)
     end
 end

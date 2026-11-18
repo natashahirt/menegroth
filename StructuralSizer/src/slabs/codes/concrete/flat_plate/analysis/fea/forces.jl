@@ -56,7 +56,9 @@ above it. That sum is the joint unbalanced moment. Punching uses it
 `Mub_below`, `Mx_below`, and `My_below` are the same components from the
 stub below the slab only. The column under the slab is designed for that
 moment. The shell already includes the stub above, so the §13.6.9.2
-stiffness split is not applied again.
+stiffness split is not applied again. `Mub_above`, `Mx_above`, and
+`My_above` are the stub above, zero where there is no column above; that
+column's bottom end is checked with them.
 """
 function _extract_fea_column_forces(col_stubs, span_axis::NTuple{2, Float64}, n_cols::Int)
     ax_len = hypot(span_axis...)
@@ -72,23 +74,21 @@ function _extract_fea_column_forces(col_stubs, span_axis::NTuple{2, Float64}, n_
     Mub_below = Vector{MomentT}(undef, n_cols)
     Mx_below  = Vector{MomentT}(undef, n_cols)
     My_below  = Vector{MomentT}(undef, n_cols)
+    Mub_above = Vector{MomentT}(undef, n_cols)
+    Mx_above  = Vector{MomentT}(undef, n_cols)
+    My_above  = Vector{MomentT}(undef, n_cols)
 
     for i in 1:n_cols
         stubs = col_stubs[i]
 
         # Below stub — slab is nodeEnd
         fb = _extract_stub_forces_at_slab(stubs.below; slab_end=:nodeEnd)
-        Fz_total = fb.Fz
-        Mx_total = fb.Mx
-        My_total = fb.My
-
         # Above stub — slab is nodeStart (if present)
-        if !isnothing(stubs.above)
-            fa = _extract_stub_forces_at_slab(stubs.above; slab_end=:nodeStart)
-            Fz_total += fa.Fz
-            Mx_total += fa.Mx
-            My_total += fa.My
-        end
+        fa = isnothing(stubs.above) ? (Fz = 0.0u"N", Mx = 0.0u"N*m", My = 0.0u"N*m") :
+            _extract_stub_forces_at_slab(stubs.above; slab_end=:nodeStart)
+        Fz_total = fb.Fz + fa.Fz
+        Mx_total = fb.Mx + fa.Mx
+        My_total = fb.My + fa.My
 
         Vu[i]  = uconvert(kip, abs(Fz_total))
         Mu[i]  = uconvert(kip * u"ft", hypot(Mx_total, My_total))
@@ -96,15 +96,19 @@ function _extract_fea_column_forces(col_stubs, span_axis::NTuple{2, Float64}, n_
         Mub[i] = uconvert(kip * u"ft", abs(ax[1] * My_total - ax[2] * Mx_total))
         Mx[i]  = uconvert(kip * u"ft", Mx_total)
         My[i]  = uconvert(kip * u"ft", My_total)
-        # Column under the slab. Not a replacement for Mub.
+        # Each stub on its own. Not a replacement for Mub.
         Mub_below[i] = uconvert(kip * u"ft", abs(ax[1] * fb.My - ax[2] * fb.Mx))
         Mx_below[i]  = uconvert(kip * u"ft", fb.Mx)
         My_below[i]  = uconvert(kip * u"ft", fb.My)
+        Mub_above[i] = uconvert(kip * u"ft", abs(ax[1] * fa.My - ax[2] * fa.Mx))
+        Mx_above[i]  = uconvert(kip * u"ft", fa.Mx)
+        My_above[i]  = uconvert(kip * u"ft", fa.My)
     end
 
     return (
         Vu=Vu, Mu=Mu, Mub=Mub, Mx=Mx, My=My,
         Mub_below=Mub_below, Mx_below=Mx_below, My_below=My_below,
+        Mub_above=Mub_above, Mx_above=Mx_above, My_above=My_above,
     )
 end
 

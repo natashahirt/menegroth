@@ -1,5 +1,5 @@
 import {
-  barElevation, crossSection, deckPitch, dropSection, longitudinalSection, rectangleSheet, ribSection, sectionDrawing, wallPlan,
+  barElevation, cageViews, crossSection, deckSection, dropSection, longitudinalSection, rectangleSheet, ribSection, sectionDrawing, slabPlan, studElevation, wallPlan,
   type SectionMark,
   type BarGroupRecord, type ElevationFrame,
 } from "./detail-draw"
@@ -11,6 +11,7 @@ export interface ComponentRecord {
   id: string
   kind: string
   title: string
+  design_index?: number
   story?: number
   governing?: { check?: string; ratio?: number | null; ok?: boolean | null; clause?: string }
   bind?: {
@@ -18,6 +19,7 @@ export interface ComponentRecord {
     shell_kinds?: number[]
     elevation_m?: number | null
     cell_indices?: number[]
+    plan_m?: unknown
     footing?: number
     plane?: { origin?: number[]; normal?: number[] }
     z0_m?: number | null
@@ -63,7 +65,12 @@ export function matchFooting(records: ComponentRecord[], index: number): Compone
   return records.find((record) => record.bind?.footing === index) ?? null
 }
 
-/** `elevation` is viewer Y, which is structural Z. */
+/** The wall record whose `design_index` is the scene's `shell_wall` value. */
+export function matchWall(records: ComponentRecord[], wallIndex: number): ComponentRecord | null {
+  return records.find((record) => record.kind === "wall" && record.design_index === wallIndex) ?? null
+}
+
+/** `elevation` is viewer Y, which is structural Z. Scenes without `shell_wall` fall back to the plane test for walls. */
 export function matchShell(
   records: ComponentRecord[],
   kind: number,
@@ -168,9 +175,18 @@ function overlayButtons(record: ComponentRecord, mode: OverlayMode, onMode: (mod
   return row
 }
 
+/** A stored deflection of 0 / 0 is the unset default, not a check that ran. */
+function deflectionUnchecked(row: CheckRow | undefined): boolean {
+  if (!row || row.name !== "deflection") return false
+  const empty = (value: number | null | undefined) => value == null || value === 0
+  return empty(row.ratio) && empty(row.demand) && empty(row.capacity)
+}
+
 function governingLine(record: ComponentRecord): string {
   const g = record.governing
   if (!g?.check) return ""
+  const deflection = (record.checks ?? []).find((row) => row.name === "deflection")
+  if (g.check === "deflection" && deflectionUnchecked(deflection)) return "Deflection was not checked"
   const ratio = typeof g.ratio === "number" ? ` · ${g.ratio.toFixed(2)}` : ""
   const state = g.ok === true ? "passes" : g.ok === false ? "fails" : ""
   const clause = g.clause ? ` · ${g.clause}` : ""
@@ -183,11 +199,15 @@ function drawRecord(record: ComponentRecord): HTMLElement {
   const drawing = record.drawing ?? {}
   const detail = recordObject(drawing.detail)
   const placed = detail !== null && Array.isArray(detail.groups) && detail.groups.length > 0
-  const wallPlanReady = placed && detail !== null && record.kind === "wall" && detailDots(detail).length > 0
   const outline = Array.isArray(drawing.outline_m) ? drawing.outline_m as number[][] : null
+  const cage = placed && detail !== null
+    ? cageViews(detail.groups as BarGroupRecord[], Array.isArray(detail.solid_m) ? detail.solid_m as number[] : null,
+                record.kind === "beam" ? outline : null)
+    : []
+  const wallPlanReady = placed && detail !== null && record.kind === "wall" && detailDots(detail).length > 0
   const rebar = Array.isArray(drawing.rebar_m) ? drawing.rebar_m as number[][] : null
   let sectionLetter = ""
-  if (record.kind === "column" || record.kind === "beam") {
+  if (cage.length === 0 && (record.kind === "column" || record.kind === "beam")) {
     const section = outline ? sectionDrawing(outline, rebar, drawing.transverse, text(drawing.section)) : null
     const length = record.kind === "column" ? num(drawing.height_m) : num(drawing.length_m)
     if (section) {
@@ -200,19 +220,38 @@ function drawRecord(record: ComponentRecord): HTMLElement {
       if (across && depth) wrap.append(figure(rectangleSheet(across, depth, text(drawing.section) || "Section", false)))
       if (length && depth) wrap.append(figure(rectangleSheet(length, depth, "Longitudinal section", false)))
     }
-  } else if (record.kind === "footing") {
+    if (record.kind === "beam") {
+      const studs = recordObject(drawing.studs)
+      const studSheet = studs ? studElevation(length ?? 0, studs) : null
+      if (studSheet) wrap.append(figure(studSheet))
+    }
+  } else if (cage.length === 0 && record.kind === "footing") {
     const length = num(drawing.length_m)
     const width = num(drawing.width_m)
     const depth = num(drawing.depth_m)
     if (placed) sectionLetter = "A"
     if (length && width) wrap.append(figure(rectangleSheet(length, width, "Plan", true, true, sectionLetter)))
     if (!placed && length && depth) wrap.append(figure(rectangleSheet(length, depth, "Section", true)))
-  } else if (record.kind === "slab") {
+  }
+  if (record.kind === "slab") {
     const span = num(drawing.span_primary_m)
     const thickness = num(drawing.thickness_m)
     const deck = recordObject(drawing.deck)
+    // A placed bar cage already draws its own plan. The bay plan is for the
+    // floors that have a section and no bars: deck, one-way, and two-way.
+    if (cage.length === 0) {
+      const direction = deck && Array.isArray(deck.direction) ? deck.direction as unknown[] : null
+      const pitch = deck ? num(deck.pitch_m) : null
+      const ribs = direction && direction.length >= 2 && pitch
+        ? { pitch, direction: [Number(direction[0]), Number(direction[1])] as [number, number] }
+        : null
+      const plan = slabPlan(planRings(record.bind?.plan_m), span, num(drawing.span_secondary_m), text(drawing.floor_type), ribs)
+      if (plan) wrap.append(figure(plan))
+    }
     const ribs = recordObject(drawing.ribs)
-    const deckSheet = deck ? deckPitch(deck) : null
+    // Ribs run along the primary axis, so the troughs repeat across the secondary span.
+    const deckSpan = num(drawing.span_secondary_m) ?? num(drawing.span_primary_m)
+    const deckSheet = deck ? deckSection(deck, deckSpan) : null
     if (deckSheet) wrap.append(figure(deckSheet))
     const drop = num(drawing.h_drop_m)
     const dropWidth = num(drawing.a_drop1_m)
@@ -233,10 +272,12 @@ function drawRecord(record: ComponentRecord): HTMLElement {
         }
       }
     }
-    if (!deckSheet && !dropSheet && !ribDrawn && span && thickness) {
+    if (drawing.solid_head === true && span && thickness) {
+      wrap.append(figure(rectangleSheet(span, thickness, "Solid slab", true)))
+    } else if (!deckSheet && !dropSheet && !ribDrawn && cage.length === 0 && span && thickness) {
       wrap.append(figure(rectangleSheet(span, thickness, "Section", true)))
     }
-  } else if (record.kind === "wall") {
+  } else if (cage.length === 0 && record.kind === "wall") {
     const length = num(drawing.length_m)
     const height = num(drawing.height_m)
     const thickness = num(drawing.thickness_m)
@@ -244,7 +285,8 @@ function drawRecord(record: ComponentRecord): HTMLElement {
     if (wallPlanReady) sectionLetter = "A"
     if (!wallPlanReady && thickness && height) wrap.append(figure(rectangleSheet(thickness, height, "Section", true)))
   }
-  if (detail) wrap.append(...barSheets(record.kind, drawing, detail, sectionLetter))
+  for (const svg of cage) wrap.append(figure(svg))
+  if (detail && cage.length === 0) wrap.append(...barSheets(record.kind, drawing, detail, sectionLetter))
   wrap.append(factList(drawingFacts(record.kind, drawing)))
   if (record.kind === "slab") {
     wrap.append(stripTable("Column strip", drawing.column_strip))
@@ -309,6 +351,23 @@ function barSheets(
     }
   }
   return out
+}
+
+/** Stored plan rings, each a list of `[x, y]` in structural plan. */
+function planRings(value: unknown): number[][][] {
+  if (!Array.isArray(value)) return []
+  const rings: number[][][] = []
+  for (const ring of value) {
+    if (!Array.isArray(ring)) continue
+    const pts: number[][] = []
+    for (const point of ring) {
+      if (Array.isArray(point) && typeof point[0] === "number" && typeof point[1] === "number") {
+        pts.push([point[0], point[1]])
+      }
+    }
+    if (pts.length >= 3) rings.push(pts)
+  }
+  return rings
 }
 
 /** Cut through the member, seen looking back toward its start. The section view is titled to match. */
@@ -544,6 +603,13 @@ function drawingFacts(kind: string, drawing: Record<string, unknown>): [string, 
   add("Steel area", area(drawing.As_m2))
   add("ρg", fixed(drawing.rho_g, 4))
   add("Length", meters(drawing.length_m))
+  const studs = recordObject(drawing.studs)
+  if (studs) {
+    add("Studs", studs.count == null ? "" : String(studs.count))
+    add("Stud diameter", meters(studs.diameter_m))
+    add("Stud length", meters(studs.length_m))
+    add("Shear", text(studs.note))
+  }
   add("Depth", meters(drawing.depth_m))
   add("Thickness", meters(drawing.thickness_m))
   add("Floor", text(drawing.floor_type))
@@ -638,10 +704,14 @@ function checkTable(rows: CheckRow[]): HTMLElement {
     const clause = document.createElement("td")
     clause.textContent = text(row.clause)
     const numbers = document.createElement("td")
-    const demand = row.demand == null ? "" : `${fmt(row.demand)} ${text(row.demand_unit)}`.trim()
-    const capacity = row.capacity == null ? "" : `${fmt(row.capacity)} ${text(row.capacity_unit)}`.trim()
-    const ratio = typeof row.ratio === "number" ? row.ratio.toFixed(2) : "—"
-    numbers.textContent = [demand && capacity ? `${demand} / ${capacity}` : demand, ratio].filter(Boolean).join(" · ")
+    if (deflectionUnchecked(row)) {
+      numbers.textContent = "not checked"
+    } else {
+      const demand = row.demand == null ? "" : `${fmt(row.demand)} ${text(row.demand_unit)}`.trim()
+      const capacity = row.capacity == null ? "" : `${fmt(row.capacity)} ${text(row.capacity_unit)}`.trim()
+      const ratio = typeof row.ratio === "number" ? row.ratio.toFixed(2) : "—"
+      numbers.textContent = [demand && capacity ? `${demand} / ${capacity}` : demand, ratio].filter(Boolean).join(" · ")
+    }
     tr.append(name, clause, numbers)
     body.append(tr)
   }

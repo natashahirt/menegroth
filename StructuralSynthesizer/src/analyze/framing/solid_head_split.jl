@@ -308,17 +308,22 @@ _concrete_rib_depth(sec::StructuralSizer.RCBeamSection) = sec.h
 _concrete_rib_depth(::Any) = nothing
 
 """
-Depth of the sized ribs outside the solid head, in metres.
+Depth of the solid head, in metres.
 
-`nothing` when those ribs have no section yet. A sized rib that is not
-concrete, or two concrete ribs that disagree, is an error: the head fills
-to one soffit.
+`nothing` when the ribs outside the head have no section yet. A sized rib
+that is not concrete is an error.
+
+ENGINEERING JUDGMENT: each rib piece is sized on its own, so the ribs around
+a head need not share a depth. The head is one cast region. Its soffit is the
+deepest of those ribs, so every rib meets the head.
 """
 function _sized_rib_depth(struc, level::FramingLevel)
     depths = typeof(1.0u"m")[]
     gid = level.solid_group_id
     for bi in level_member_indices(struc, level)
         gid !== nothing && group_id(struc.beams[bi]) == gid && continue
+        # A girder piece filed under this level is not a rib.
+        _level_rib(level, struc.beams[bi]) || continue
         sec = section(struc.beams[bi])
         sec === nothing && continue
         h = _concrete_rib_depth(sec)
@@ -327,14 +332,31 @@ function _sized_rib_depth(struc, level::FramingLevel)
             "$(typeof(sec)). The head fills to the concrete rib soffit."))
         push!(depths, _as_metres(h))
     end
-    isempty(depths) && return nothing
-    href = depths[1]
-    for h in depths
-        abs(ustrip(u"m", h - href)) <= 1e-6 || throw(ArgumentError(
-            "slab $(level.slab_idx) solid-head ribs do not share one depth " *
-            "($(href) and $(h))"))
+    return isempty(depths) ? nothing : maximum(depths)
+end
+
+"""
+`(bw, d, h)` of the deepest concrete rib outside the head.
+
+The head is cast to that soffit, so its punching depth is that rib's `d`.
+A shallower rib somewhere else on the floor does not reduce it.
+"""
+function _deepest_rib_section(struc, level::FramingLevel)
+    gid = level.solid_group_id
+    best = nothing
+    for bi in level_member_indices(struc, level)
+        gid !== nothing && group_id(struc.beams[bi]) == gid && continue
+        _level_rib(level, struc.beams[bi]) || continue
+        sec = section(struc.beams[bi])
+        sec === nothing && continue
+        one = _rib_web_dims(sec)
+        one === nothing && throw(ArgumentError(
+            "slab $(level.slab_idx) has a solid head, and a sized rib is a $(typeof(sec))."))
+        if best === nothing || one[3] > best[3] || (one[3] == best[3] && one[2] < best[2])
+            best = one
+        end
     end
-    return href
+    return best
 end
 
 """Concrete the solid head is cast in, or `nothing`."""
@@ -580,7 +602,13 @@ function _claim_solid_beam!(struc, level, bi::Int)
     haskey(struc.member_groups, gid) ||
         (struc.member_groups[gid] = MemberGroup(gid, Int[], nothing))
     group_id(struc.beams[bi]) == gid && return
+    old = group_id(struc.beams[bi])
     _drop_beam_from_its_group!(struc, bi)
+    if old !== nothing && old in level.piece_group_ids
+        mg = get(struc.member_groups, old, nothing)
+        (mg === nothing || isempty(mg.member_indices)) &&
+            filter!(i -> i != old, level.piece_group_ids)
+    end
     set_group_id!(struc.beams[bi], gid)
     push!(struc.member_groups[gid].member_indices, bi)
     return
@@ -617,9 +645,13 @@ function _expand_solid_to_heads!(struc, slab, level, arr, owners, heads)
         runs = _flag_runs(flags)
         keep = _run_kept_on_host(flags, runs)
         _retain_segments!(struc, beam, segs[runs[keep]])
-        # The piece that stays on this beam is outside the head. A beam that
-        # was filed under the solid head goes back with the ribs.
-        if host_group == level.solid_group_id && level.group_id !== nothing
+        # The piece that stays on this beam is outside the head. A rib that
+        # was filed under the solid head goes back as its own piece. A girder
+        # goes back to the group it had.
+        if host_group == level.solid_group_id && _level_rib(level, beam)
+            _claim_rib_piece!(struc, level, bi)
+            host_group = group_id(beam)
+        elseif host_group == level.solid_group_id && level.group_id !== nothing
             _drop_beam_from_its_group!(struc, bi)
             set_group_id!(beam, level.group_id)
             host_group = level.group_id
@@ -635,6 +667,8 @@ function _expand_solid_to_heads!(struc, slab, level, arr, owners, heads)
             if flags[first(run)]
                 _claim_solid_beam!(struc, level, new_i)
                 moved += 1
+            elseif _level_rib(level, piece)
+                _claim_rib_piece!(struc, level, new_i)
             elseif host_group !== nothing
                 set_group_id!(piece, host_group)
                 if haskey(struc.member_groups, host_group)
@@ -665,11 +699,12 @@ Cast each concrete grillage's solid concrete from its rib bays, and grow a
 head that fails.
 
 The bays start as the corner fraction, where one is set, plus the bays
-around any column those corners do not already cover
-([`resolve_arrangement_heads`](@ref)). A failing check adds bays, and the
-beams on those bays join the solid-head group. `true` when a head grew or
-a beam moved. A level whose ribs are not sized yet is left alone. A second
-call with the same sections returns the same heads.
+around any column those corners do not already cover. The checks read the
+solved building model ([`resolve_building_heads!`](@ref)). A failing check
+adds bays, the beams on those bays join the solid-head group, and the
+building is solved again. `true` when a head grew or a beam moved. A level
+whose ribs are not sized yet, or a building not yet solved, is left alone.
+A second call with the same sections returns the same heads.
 """
 function grow_building_solid_heads!(struc, params)
     changed = false
@@ -684,28 +719,45 @@ function grow_building_solid_heads!(struc, params)
         web === nothing && continue
         result = slab.result
         result isa StructuralSizer.CIPSlabResult || continue
-        bw, d_rib, h_rib = web
+        # The head is cast to the deepest rib, so punching uses that rib's
+        # effective depth. Each rib leaving the head is checked on its own section.
+        deep = _deepest_rib_section(struc, level)
+        d_head = deep === nothing ? web[2] : deep[2]
         topping = _as_metres(StructuralSizer.total_depth(result))
         arr, owners = grillage_bays(struc, slab, level)
         start = isempty(level.solid_heads) ? _initial_solid_heads(struc, slab, level, arr) :
                 level.solid_heads
         isempty(start) && continue
-        before = [copy(h.bays) for h in start]
-        qu = _panel_factored_pressure(struc, slab, params)
+        min_void = ustrip(u"m", params.min_rib_void)
+        cap = params.solid_fraction_max
+        seeded = [length(h.bays) for h in start]
+        if min_void > 0
+            widths = _arrangement_rib_widths(struc, arr, owners)
+            start = _close_tight_voids(arr, start, widths, min_void, cap)
+        end
+        closed = [length(h.bays) for h in start]
+        before = [copy(h.bays) for h in level.solid_heads]
         outline = _slab_interior_polygon_m(struc, slab)
         holes = _slab_hole_loops_m(struc, slab)
-        resolved = resolve_arrangement_heads(arr, [h.column for h in start],
-                                             ustrip(u"Pa", qu);
-            heads = start, outline = something(outline, ()), holes = holes,
-            concrete = concrete, depth = depth, d_head = d_rib,
-            bw = bw, d_rib = d_rib, h_rib = h_rib,
+        free_loops = outline === nothing ? () : (outline, holes...)
+        # The checks read the building model, so the starting heads are cast
+        # into it and solved before they are checked.
+        level.solid_heads = start
+        moved = _expand_solid_to_heads!(struc, slab, level, arr, owners, start)
+        moved > 0 && (changed = true)
+        apply_solid_head_frame_sections!(struc)
+        model = struc.asap_model
+        (model === nothing || isempty(model.frame_elements) || !model.processed) && continue
+        _ensure_frame_demands!(struc)
+        resolved = resolve_building_heads!(struc, slab, level, arr, owners, start, params;
+            concrete = concrete, d_head = d_head,
             fy = _beam_materials(params)[2].Fy, topping = topping,
-            column_size = _slab_column_size(struc, slab))
+            free_loops = free_loops, max_solid_fraction = cap)
         level.solid_heads = resolved.heads
-        grown = any(zip(before, resolved.heads)) do (was, now)
-            was != now.bays
-        end
-        moved = _expand_solid_to_heads!(struc, slab, level, arr, owners, resolved.heads)
+        grown = length(before) != length(resolved.heads) ||
+                any(zip(before, resolved.heads)) do (was, now)
+                    was != now.bays
+                end
         level.solid_head_report = (
             ok = resolved.ok,
             stop = resolved.stop,
@@ -714,9 +766,26 @@ function grow_building_solid_heads!(struc, params)
             governing = [c.governing for c in resolved.checks],
             vu_psi = maximum(ustrip(u"psi", c.column_check.vu) for c in resolved.checks;
                              init = 0.0),
+            seeded_bays = seeded,
+            closed_bays = closed,
+            column_ratios = [c.column.ratio for c in resolved.checks],
+            one_way_ratios = [isempty(c.ribs) ? 0.0 : maximum(r.ratio for r in c.ribs)
+                              for c in resolved.checks],
+            hogging_ratios = [isempty(c.hogging) ? 0.0 : maximum(r.ratio for r in c.hogging)
+                              for c in resolved.checks],
+            rib_bw_in = [_governing_rib_in(c.ribs, :bw) for c in resolved.checks],
+            rib_d_in = [_governing_rib_in(c.ribs, :d) for c in resolved.checks],
+            head_d_in = ustrip(u"inch", d_head),
         )
         (grown || moved > 0) && (changed = true)
     end
     changed && apply_solid_head_frame_sections!(struc)
     return changed
+end
+
+"""`field` of the rib with the largest one-way ratio, inches, or `NaN`."""
+function _governing_rib_in(ribs, field::Symbol)
+    isempty(ribs) && return NaN
+    r = ribs[argmax([r.ratio for r in ribs])]
+    return hasproperty(r, field) ? ustrip(u"inch", getproperty(r, field)) : NaN
 end

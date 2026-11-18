@@ -47,7 +47,12 @@ println("    Ratio φMnx/φMny: $(round(check_x.φMn_at_Pu / check_y.φMn_at_Pu,
 println("  ✓ Strong axis correctly has higher capacity than weak axis")
 
 println("\n2. Testing ACIColumnChecker cache for rectangular vs square...")
-checker = ACIColumnChecker(; include_biaxial=true, α_biaxial=1.5)
+checker = ACIColumnChecker(;
+    include_biaxial = true,
+    α_biaxial = 1.5,
+    fy_ksi = mat.fy,
+    Es_ksi = mat.Es,
+)
 cache_rect = StructuralSizer.ACIColumnCapacityCache(1)
 cache_square = StructuralSizer.ACIColumnCapacityCache(1)
 
@@ -67,7 +72,7 @@ println("    has y-axis diagram = $(cache_square.diagrams_y[1] !== nothing)")
 @assert cache_rect.is_square[1] == false "Rectangular section should not be flagged as square"
 @assert cache_rect.diagrams_y[1] !== nothing "Rectangular section should have y-axis diagram"
 @assert cache_square.is_square[1] == true "Square section should be flagged as square"
-@assert cache_square.diagrams_y[1] === nothing "Square section should not have y-axis diagram"
+@assert cache_square.diagrams_y[1] !== nothing "Square section should have y-axis diagram (bar layout may be asymmetric)"
 
 println("  ✓ Correct caching behavior for rectangular vs square sections")
 

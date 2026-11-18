@@ -65,8 +65,9 @@ _tributaries(case) = [ld for ld in case if ld isa Asap.TributaryLoad]
     @test !(p_dead ≈ 0.75 * p_live)
 
     cases = StructuralSynthesizer._generate_pattern_cases(struc)
-    @test length(cases) == 3
-    full, pat_a, pat_b = cases
+    # Full, then the two three-quarter checkerboards. Span cases follow them.
+    @test length(cases) >= 3
+    full, pat_a, pat_b = cases[1], cases[2], cases[3]
 
     # Full case reuses the stored objects at full pressure (§13.7.6.4).
     for src in stored_live

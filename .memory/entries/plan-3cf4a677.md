@@ -8,13 +8,13 @@ title: 2024 plans swept across the sized floor systems, with a scene and a repor
 node_label: 2024 floor sweep
 tags: slab,geometry,scene,report
 status: active
-open_threads: 1
+open_threads: 2
 success: 'null'
 files: scripts/runners/sdf_floor_sweep.jl@fa7d31f, StructuralSynthesizer/src/scene/variants.jl@fa7d31f,
   viewer/src/main.ts@fa7d31f, viewer/src/style.css@fa7d31f
 session_id: sess-5e262cd2
 created_at: '2026-11-12T14:21:47.329997+00:00'
-updated_at: '2026-11-12T14:36:24.501170+00:00'
+updated_at: '2026-11-17T14:19:38.478796+00:00'
 has_child_rationale: The user asked to view these plans across the floor systems and
   to keep a report of each one.
 ---

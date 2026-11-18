@@ -190,6 +190,14 @@ end
 
     # At least one check should fail
     @test any(c -> !c.passed, expl.checks)
+
+    msg = StructuralSizer.diagnose_infeasibility(
+        checker, cache, catalog, material, demand_heavy, geometry)
+    @test occursin("Every section fails", msg)
+    @test occursin("W14X22", msg)
+    @test occursin(expl.governing_check, msg)
+    @test occursin("ratio", msg)
+    count(c -> !c.passed, expl.checks) >= 2 && @test occursin("; ", msg)
 end
 
 @testset "explain_feasibility AISC — with deflection checks" begin
@@ -215,6 +223,14 @@ end
     check_names = [c.name for c in expl.checks]
     @test "deflection_ll" in check_names
     @test "deflection_total" in check_names
+
+    msg = StructuralSizer.diagnose_infeasibility(
+        checker, cache, catalog, material, demand, geometry)
+    @test occursin("deflection_ll ratio", msg)
+    @test occursin("limit L/360", msg)
+    @test occursin("deflection_total ratio", msg)
+    @test occursin("limit L/240", msg)
+    @test occursin("; ", msg)
 end
 
 # ==============================================================================

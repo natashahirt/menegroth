@@ -20,5 +20,5 @@ function _size_span_floor(::NLT, span::L, sdl::F, live::F;
                     material::AbstractMaterial=NWC_4000,  # placeholder until Timber type exists
                     lumber_size::Symbol=:auto,
                     fire_rating::Int=1) where {L, F}
-    error("NLT sizing not yet implemented")
+    throw(UnsupportedFloorSystemError(NLT))
 end

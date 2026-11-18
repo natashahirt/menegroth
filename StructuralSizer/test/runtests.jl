@@ -25,6 +25,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("loads/test_seismic_elf.jl")
         include("loads/test_seismic_nehrp_examples.jl")
         include("loads/test_wind_chapter27.jl")
+        include("loads/test_wind_gust.jl")
     end
 
     # ─── Vault ───────────────────────────────────────────────────────────
@@ -86,6 +87,8 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("concrete_beam/test_tbeam_tributary_flange.jl")
         include("concrete_beam/test_tbeam_per_station.jl")
         include("concrete_beam/test_signed_demands.jl")
+        include("concrete_beam/test_beam_catalog_growth.jl")
+        include("concrete_column/test_column_catalog_growth.jl")
     end
 
     # ─── Concrete Columns ────────────────────────────────────────────────

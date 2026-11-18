@@ -82,7 +82,8 @@ function check_pier_segment(wall::Wall, segment::WallSegment,
                            M1_over_M2::Union{Nothing, Real}=nothing,
                            cover::Union{Nothing, Unitful.Length}=nothing,
                            plan_axis::NTuple{2, Float64}=(1.0, 0.0),
-                           Moop::Unitful.Quantity=0.0u"N*m")
+                           Moop::Unitful.Quantity=0.0u"N*m",
+                           slab_basis=nothing)
     segment.kind === :vertical || throw(ArgumentError(
         "pier segment check: the segment is $(segment.kind). A horizontal " *
         "segment is not this check."))
@@ -102,7 +103,7 @@ function check_pier_segment(wall::Wall, segment::WallSegment,
         share = L > 1e-9 ? min(max(segment.s1 - segment.s0, 0.0) / L, 1.0) : 1.0
         return _check_wall_pier_segment(
             wall, bottom, top; material, wall_index, case, boundary, plan_axis,
-            lw=lw * u"m", hw=hw * u"m", Moop=Moop * share)
+            lw=lw * u"m", hw=hw * u"m", Moop=Moop * share, slab_basis=slab_basis)
     end
     return _check_column_pier_segment(
         wall, segment, bottom, top; material, wall_index, case, boundary, plan_axis,
@@ -114,16 +115,20 @@ end
 # ------------------------------------------------------------------------------
 
 function _check_wall_pier_segment(wall, bottom, top; material, wall_index, case,
-                                 boundary, plan_axis, lw, hw, Moop=0.0u"N*m")
+                                 boundary, plan_axis, lw, hw, Moop=0.0u"N*m",
+                                 slab_basis=nothing)
     actions = CombinedWallAction[]
     append!(actions, bottom)
     append!(actions, top)
-    select_ordinary_wall_reinforcement!(wall, actions, material; hw, lw, Moop)
+    select_ordinary_wall_reinforcement!(wall, actions, material; hw, lw, Moop,
+                                       slab_basis=slab_basis)
     records = WallCheckRecord[]
     append!(records, _faced_records(:bottom, check_ordinary_wall(
-        wall, bottom; material, wall_index, case, boundary, hw, lw, plan_axis, Moop)))
+        wall, bottom; material, wall_index, case, boundary, hw, lw, plan_axis,
+        Moop, slab_basis=slab_basis)))
     append!(records, _faced_records(:top, check_ordinary_wall(
-        wall, top; material, wall_index, case, boundary, hw, lw, plan_axis, Moop)))
+        wall, top; material, wall_index, case, boundary, hw, lw, plan_axis,
+        Moop, slab_basis=slab_basis)))
     return records
 end
 
@@ -163,14 +168,13 @@ function _check_column_pier_segment(wall, segment, bottom, top; material, wall_i
         "pier segment check: material must be a ReinforcedConcreteMaterial."))
     direction = _pier_axis_direction(wall, plan_axis)
     records = WallCheckRecord[]
-    section = RCColumnSection(;
-        b=t * u"m", h=lw * u"m", bar_size=8, n_bars=4,
-        cover=cover, tie_type=:tied)
-    geom = ConcreteMemberGeometry(hw * u"m"; Lu=hw * u"m", k=Float64(k), braced=braced)
+    # r = 0.3·dim does not use the bars. A 4-bar section on this outline is
+    # outside §10.9.1, so the neglect test reads the dimensions directly.
     m1 = braced ? Float64(M1_over_M2) : 0.0
-    for (axis, label) in ((StrongAxis(), "in-plane"), (WeakAxis(), "out-of-plane"))
-        slender = should_consider_slenderness(section, geom, axis; M1=m1, M2=1.0)
-        ratio = slenderness_ratio(section, geom, axis)
+    kk = Float64(k)
+    for (dim, label) in ((lw, "in-plane"), (t, "out-of-plane"))
+        ratio = StructuralSizer.rectangular_kLu_over_r(dim, hw, kk)
+        slender = StructuralSizer.slenderness_effects_required(ratio, braced; M1=m1, M2=1.0)
         limit = _slenderness_limit(braced, m1)
         push!(records, WallCheckRecord(
             wall_index, wall.story, direction, case, :slenderness, :only,

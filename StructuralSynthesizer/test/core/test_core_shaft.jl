@@ -71,6 +71,17 @@ end
         @test maximum(rxs) - minimum(rxs) ≈ CORE_BAY
         @test maximum(rys) - minimum(rys) ≈ CORE_BAY
         slabs = StructuralSynthesizer.slab_face_indices(skel)
+        # Story 0 keeps the grade faces. The beams between the column bases
+        # are not there; the ground-story walls took the four core edges.
+        @test length(get(skel.groups_faces, :grade, Int[])) == 9
+        n_grade_beams = 0
+        for eidx in get(skel.groups_edges, :beams, Int[])
+            v1, v2 = skel.edge_indices[eidx]
+            z1 = skel.geometry.vertex_coords[v1, 3]
+            z2 = skel.geometry.vertex_coords[v2, 3]
+            abs(z1) <= 1e-3 && abs(z2) <= 1e-3 && (n_grade_beams += 1)
+        end
+        @test n_grade_beams == 0
         for z in (0.0, 3.6, 7.2, 10.8)
             fi = _core_face(skel, z)
             @test fi !== nothing
@@ -143,8 +154,8 @@ end
             struc, open_slab, cols; throw_on_failure = false)
         @test !appl.ok
         # The lobby is 2.5 m against an 8 m bay, so successive spans on the
-        # shaft wall fail §13.6.1.3. The core-corner columns stay in the
-        # frame, so the floor is not one 24 m panel.
+        # shaft wall fail §13.6.1.3. The core-corner columns are not in this
+        # design, so a column line also crosses the core in one span.
         @test any(v -> occursin("13.6.1.3", v), appl.violations)
         @test !any(v -> occursin("ends at a wall", v), appl.violations)
         efm = StructuralSizer.check_efm_applicability(
@@ -172,16 +183,22 @@ end
         sec = Asap.ShellSection(0.2u"m", 30u"GPa", 0.2)
         mesh = StructuralSizer.build_slab_shell_mesh(
             state, kslab, typeof(state.columns)(), sec; target_edge = 2.0u"m")
-        @test StructuralSizer._hold_slab_on_walls!(mesh.shells, segs) > 4
+        # The kernel carries the piers, so the edge is joined to a wall
+        # instead of being fixed in space.
+        n_joined, bases = StructuralSizer._attach_slab_walls!(mesh.shells, state, kslab, sec)
+        @test n_joined > 4
+        @test !isempty(bases)
+        @test all(n -> n.dof[3] == false && n.dof[4] == true, bases)
     end
 
-    @testset "FEA holds the slab on the core walls and leaves the shaft empty" begin
+    @testset "FEA joins the slab to the core walls and leaves the shaft empty" begin
         sec = Asap.ShellSection(0.2u"m", 30u"GPa", 0.2)
         mesh = StructuralSizer.build_slab_shell_mesh(
             struc, open_slab, typeof(struc.columns)(), sec; target_edge = 2.0u"m")
-        segs = StructuralSizer.supporting_wall_segments(struc, open_slab)
-        n_held = StructuralSizer._hold_slab_on_walls!(mesh.shells, segs)
-        @test n_held > 4
+        n_joined, wall_bases = StructuralSizer._attach_slab_walls!(
+            mesh.shells, struc, open_slab, sec)
+        @test n_joined > 4
+        @test !isempty(wall_bases)
         held = 0
         lobby_held = 0
         lobby_shells = 0
@@ -196,19 +213,31 @@ end
             end
             for n in sh.nodes
                 x, y = ustrip(u"m", n.position[1]), ustrip(u"m", n.position[2])
+                z = ustrip(u"m", n.position[3])
+                on_slab = abs(z) <= 1e-3
                 if abs(y - 8.0) <= 1e-3 && 8.0 - 1e-6 <= x <= 16.0 + 1e-6
-                    @test n.dof[3] == false
-                    @test n.dof[4] == false
-                    @test n.dof[5] == true
-                    held += 1
+                    # The slab edge is free. The wall base, below the slab, is held.
+                    if on_slab
+                        @test n.dof[3] == true
+                        @test n.dof[4] == true
+                        @test n.dof[5] == true
+                        held += 1
+                    else
+                        @test n.dof[3] == false
+                        @test n.dof[4] == true
+                        @test n.dof[5] == true
+                    end
                 elseif abs(y - CORE_LOBBY_Y) <= 1e-3 && 8.0 + 1e-3 < x < 16.0 - 1e-3 &&
                        abs(x - CORE_ELEV_X) > 1e-3 && abs(x - CORE_STAIR_X) > 1e-3
-                    # Clear of the north-south walls. A node that also lies on
-                    # one of those is held about that wall's axis instead.
-                    @test n.dof[3] == false
-                    @test n.dof[4] == false
-                    @test n.dof[5] == true
-                    lobby_held += 1
+                    if on_slab
+                        @test n.dof[3] == true
+                        @test n.dof[4] == true
+                        @test n.dof[5] == true
+                        lobby_held += 1
+                    else
+                        @test n.dof[3] == false
+                        @test n.dof[4] == true
+                    end
                 elseif 1.0 < x < 7.0 && 1.0 < y < 7.0
                     @test n.dof[3] == true
                     free_bay += 1
@@ -266,7 +295,7 @@ end
         end
     end
 
-    @testset "Core corners stay columns, and a column bay draws their stored areas" begin
+    @testset "Core corners are walls, and the bay beside the wall keeps the strip" begin
         corners = ((CORE_BAY, CORE_BAY), (2 * CORE_BAY, CORE_BAY),
                    (2 * CORE_BAY, 2 * CORE_BAY), (CORE_BAY, 2 * CORE_BAY))
         n = 0
@@ -275,8 +304,19 @@ end
             p = (ustrip(u"m", c.x), ustrip(u"m", c.y))
             any(q -> hypot(p[1] - q[1], p[2] - q[2]) < 1e-3, corners) && (n += 1)
         end
-        @test n == 4 * CORE_STORIES
+        @test n == 0
+        parked = skel.groups_edges[:absent]
+        @test length(parked) == 4 * CORE_STORIES
+        @test isempty(intersect(parked, skel.groups_edges[:columns]))
+        parked_set = Set(parked)
+        @test !any(struc.beams) do beam
+            any(si -> struc.segments[si].edge_idx in parked_set, segment_indices(beam))
+        end
 
+        # South of the core: an 8 m square with a wall on its north edge and
+        # columns only on the far edge. Each column keeps 16 m². The north
+        # wall keeps its edge, and the walls that frame into the two corners
+        # from outside keep the side halves. Together that is the 32 m² strip.
         vc = struc.skeleton.geometry.vertex_coords
         cell_idx = findfirst(eachindex(struc.cells)) do i
             vis = struc.skeleton.face_vertex_indices[struc.cells[i].face_idx]
@@ -284,28 +324,83 @@ end
             xs = [vc[v, 1] for v in vis]
             ys = [vc[v, 2] for v in vis]
             all(z -> abs(z - 3.6) < 1e-3, zs) &&
-                all(x -> -1e-3 <= x <= CORE_BAY + 1e-3, xs) &&
+                all(x -> CORE_BAY - 1e-3 <= x <= 2 * CORE_BAY + 1e-3, xs) &&
                 all(y -> -1e-3 <= y <= CORE_BAY + 1e-3, ys)
         end
-        cell_idx === nothing && error("no column bay at the origin")
-        sides = Int[]
-        area = 0.0
+        cell_idx === nothing && error("no bay south of the core")
+        col_area = 0.0
+        npoly = 0
         for col in struc.columns
             poly = get(column_tributary_polygons(struc, col), cell_idx, nothing)
             poly === nothing && continue
-            push!(sides, length(poly))
+            npoly += 1
             xy = [(ustrip(u"m", x), ustrip(u"m", y)) for (x, y) in poly]
-            area += abs(_loop_area(xy))
+            col_area += abs(_loop_area(xy))
         end
-        @test length(sides) == 4
-        @test all(s -> s >= 4, sides)
-        @test area ≈ CORE_BAY * CORE_BAY atol = 0.5
+        wall_area = sum(get(wall.tributary_cell_areas, cell_idx, 0.0) for wall in struc.walls)
+        @test npoly == 2
+        @test col_area ≈ 32 atol = 1e-4
+        @test wall_area ≈ 32 atol = 1e-4
+        @test col_area + wall_area ≈ CORE_BAY * CORE_BAY atol = 1e-4
         host = only(s for s in struc.slabs if cell_idx in s.cell_indices)
         stored = filter(p -> p.cell_idx == cell_idx, host.tributary_polygons)
-        @test length(stored) == 4
-        @test all(p -> p.kind === :column && length(p.xy) >= 4, stored)
-        @test any(p -> p.kind === :wall && length(p.xy) >= 4,
-                  Iterators.flatten(s.tributary_polygons for s in struc.slabs))
+        @test count(p -> p.kind === :column, stored) == 2
+        wall_polys = [p for p in stored if p.kind === :wall]
+        @test length(wall_polys) == 3
+        @test length(unique(p.owner for p in wall_polys)) == 3
+        @test sort!([abs(_loop_area(p.xy)) for p in wall_polys]) ≈ [8.0, 8.0, 16.0] atol = 1e-2
+
+        # Every floor and the roof: column and wall areas add to each cell,
+        # walls hold the slab at their top, and the core sides, split at
+        # the lobby, still take the bays east and west of the core.
+        function _cell_at(z, x0, x1, y0, y1)
+            findfirst(eachindex(struc.cells)) do i
+                vis = struc.skeleton.face_vertex_indices[struc.cells[i].face_idx]
+                all(v -> abs(vc[v, 3] - z) < 1e-3, vis) || return false
+                xs = [vc[v, 1] for v in vis]
+                ys = [vc[v, 2] for v in vis]
+                abs(minimum(xs) - x0) < 1e-3 && abs(maximum(xs) - x1) < 1e-3 &&
+                    abs(minimum(ys) - y0) < 1e-3 && abs(maximum(ys) - y1) < 1e-3
+            end
+        end
+        _col_in(ci) = sum((get(c.tributary_cell_areas, ci, 0.0) for c in struc.columns); init = 0.0)
+        _wall_in(ci) = sum((get(w.tributary_cell_areas, ci, 0.0) for w in struc.walls); init = 0.0)
+        for z in (3.6, 7.2, 10.8, 14.4)
+            for (ci, cell) in enumerate(struc.cells)
+                vis = struc.skeleton.face_vertex_indices[cell.face_idx]
+                all(v -> abs(vc[v, 3] - z) < 1e-3, vis) || continue
+                xy = [(vc[v, 1], vc[v, 2]) for v in vis]
+                @test _col_in(ci) + _wall_in(ci) ≈ abs(_loop_area(xy)) atol = 1e-4
+            end
+            # A wall's share is on the slab at its top.
+            for w in struc.walls, ci in keys(w.tributary_cell_areas)
+                top = StructuralSizer._wall_end_elevations_m(struc.skeleton, w.story)[end]
+                cz = vc[struc.skeleton.face_vertex_indices[struc.cells[ci].face_idx][1], 3]
+                @test abs(top - cz) < 1e-3
+            end
+            west = _cell_at(z, 0.0, CORE_BAY, CORE_BAY, 2 * CORE_BAY)
+            @test _col_in(west) ≈ 32 atol = 1e-4
+            @test _wall_in(west) ≈ 32 atol = 1e-4
+        end
+        lobby = _cell_at(7.2, CORE_BAY, 2 * CORE_BAY, CORE_BAY, CORE_LOBBY_Y)
+        @test _wall_in(lobby) ≈ CORE_BAY * (CORE_LOBBY_Y - CORE_BAY) atol = 1e-4
+        # The closed roof over the core rests on the core walls, the lobby
+        # wall, and the dividers. The lobby wall carries both faces: wall
+        # loops lie along it from below and from above.
+        roof_core = _cell_at(14.4, CORE_BAY, 2 * CORE_BAY, CORE_BAY, 2 * CORE_BAY)
+        @test _col_in(roof_core) ≈ 0 atol = 1e-9
+        @test _wall_in(roof_core) ≈ CORE_BAY * CORE_BAY atol = 1e-4
+        roof_slab = only(s for s in struc.slabs if roof_core in s.cell_indices)
+        function _along_lobby(xy)
+            n = length(xy)
+            any(1:n) do k
+                p, q = xy[k], xy[mod1(k + 1, n)]
+                abs(p[2] - CORE_LOBBY_Y) < 1e-6 && abs(q[2] - CORE_LOBBY_Y) < 1e-6 && abs(q[1] - p[1]) > 1.0
+            end
+        end
+        ys = [sum(q[2] for q in p.xy) / length(p.xy) for p in roof_slab.tributary_polygons
+              if p.kind === :wall && p.cell_idx == roof_core && _along_lobby(p.xy)]
+        @test any(<(CORE_LOBBY_Y), ys) && any(>(CORE_LOBBY_Y), ys)
 
         design = BuildingDesign(struc)
         packet = StructuralSynthesizer.ScenePacket(String[], (0.0, 0.0, 0.0),
@@ -317,7 +412,8 @@ end
         counts = scene_u32(drawn, "tributary_count")
         @test length(kinds) == length(cells) == length(counts)
         bay = [i for i in eachindex(cells) if cells[i] == UInt32(cell_idx - 1)]
-        @test length(bay) == 4
-        @test all(i -> kinds[i] == 0x00 && counts[i] >= 4, bay)
+        @test count(i -> kinds[i] == 0x00, bay) == 2
+        @test count(i -> kinds[i] == 0x02, bay) == 3
+        @test all(i -> counts[i] >= 3, bay)
     end
 end

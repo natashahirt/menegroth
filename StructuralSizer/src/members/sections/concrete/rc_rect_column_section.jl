@@ -518,16 +518,21 @@ function _split_perimeter_proportional(n_int::Int, L_b::Real, L_h::Real)
     return (n_tb_pair, n_lr_pair, extra_bottom)
 end
 
+"""
+ACI 318-11 §10.9.1 (aci-318-11, page 148): Ast of a noncomposite
+compression member is not less than 0.01Ag and not more than 0.08Ag.
+"""
+function _check_compression_rho(ρg::Float64)
+    0.01 <= ρg <= 0.08 && return
+    throw(ArgumentError(
+        "ACI 318-11 §10.9.1 (aci-318-11, page 148): Ast shall be not less " *
+        "than 0.01Ag or more than 0.08Ag (ρg = $(round(ρg, digits=4)))."))
+end
+
 """Validate column section against ACI requirements."""
 function _validate_column_section(ρg::Float64, n_bars::Int, tie_type::Symbol)
-    # ACI 10.6.1.1: 0.01 ≤ ρg ≤ 0.08
-    if ρg < 0.01
-        @warn "Reinforcement ratio ρg = $(round(ρg, digits=4)) < 0.01 (ACI minimum)"
-    end
-    if ρg > 0.08
-        @warn "Reinforcement ratio ρg = $(round(ρg, digits=4)) > 0.08 (ACI maximum)"
-    end
-    
+    _check_compression_rho(ρg)
+
     # ACI 10.7.3.1: Minimum number of bars
     min_bars = tie_type == :spiral ? 6 : 4
     if n_bars < min_bars
@@ -628,9 +633,10 @@ end
 
 Create a new RCColumnSection with updated dimensions, preserving reinforcement layout.
 
-Used when column dimensions are increased beyond the P-M design result (e.g., for 
-span minimum or punching shear requirements). The rebar configuration is preserved,
-giving a conservative design (same steel in larger column = lower ρg).
+Used when column dimensions are increased beyond the P-M design result (e.g., for
+span minimum or punching shear requirements). The rebar configuration is preserved.
+The constructor rejects the result when ρg falls outside ACI 318-11 §10.9.1;
+`resize_column_with_reinforcement` designs a new layout for that case.
 
 # Arguments
 - `section`: Original RCColumnSection from P-M design

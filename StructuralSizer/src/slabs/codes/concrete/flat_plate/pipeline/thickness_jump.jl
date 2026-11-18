@@ -106,8 +106,12 @@ function scale_moment_result(result::MomentAnalysisResult, r, dscale, qD, qu)
         pattern_loading = result.pattern_loading,
         M_wall_ext = result.M_wall_ext * r,
         M_wall_int = result.M_wall_int * r,
+        M_neg_ext_face = scaled(result.M_neg_ext_face),
+        M_neg_int_face = scaled(result.M_neg_int_face),
         stub_moments_below = scaled(result.stub_moments_below),
         stub_moments_above = scaled(result.stub_moments_above),
+        wall_transfer = result.wall_transfer === nothing ? nothing :
+            [(seg = w.seg, M = w.M * r) for w in result.wall_transfer],
     )
 end
 
@@ -168,69 +172,103 @@ function propose_slab_thickness(h::Length, h_increment::Length, h_max::Length,
 end
 
 """
+    FLAT_PLATE_MIDSPAN_RHO_PRIME
+
+Compression-steel ratio ρ′ used in the long-term multiplier
+`λΔ = ξ / (1 + 50ρ′)`, ACI 318-11 §9.5.2.5 Eq. (9-11) (corpus: aci-318-11,
+page 132). The clause takes ρ′ at midspan for simple and continuous spans.
+The flat-plate reinforcement design places top bars only in the negative
+moment regions at the supports and bottom bars at midspan, so no compression
+steel passes through midspan and ρ′ = 0.
+"""
+const FLAT_PLATE_MIDSPAN_RHO_PRIME = 0.0
+
+"""
+    two_way_deflection(results, h, d, fc, fy, Es, Ecs, spans, γ, columns;
+                       drop_panel=nothing, kwargs...) -> NamedTuple
+
+`check_two_way_deflection`, with the composite drop-panel section when
+`drop_panel` is given.
+"""
+function two_way_deflection(results, h, d, fc, fy, Es, Ecs, spans, γ, columns;
+                            drop_panel = nothing, kwargs...)
+    args = (results, h, d, fc, fy, Es, Ecs, spans, γ, columns)
+    drop_panel === nothing && return check_two_way_deflection(args...; kwargs...)
+    return check_two_way_deflection(args..., drop_panel; kwargs...)
+end
+
+"""
+    secondary_two_way_deflection(moment_results, secondary_results, h, d_inner, fc, fy,
+                                 Es, Ecs, spans, γ, columns; drop_panel=nothing, kwargs...)
+
+Deflection along the secondary span: spans swapped, the secondary moments
+on the primary loads (and FEA panel displacement, when present). The
+secondary bars are the inner layer, so `Icr` uses `d_inner`. ρ′ is
+`FLAT_PLATE_MIDSPAN_RHO_PRIME`.
+"""
+function secondary_two_way_deflection(moment_results, secondary_results, h, d_inner,
+                                      fc, fy, Es, Ecs, spans, γ, columns;
+                                      drop_panel = nothing, kwargs...)
+    sec_spans = (primary = spans.secondary, secondary = spans.primary)
+    proxy = (
+        M_pos     = secondary_results.M_pos,
+        M_neg_ext = secondary_results.M_neg_ext,
+        M_neg_int = secondary_results.M_neg_int,
+        qu        = moment_results.qu,
+        qD        = moment_results.qD,
+        qL        = moment_results.qL,
+        fea_Δ_panel = hasproperty(moment_results, :fea_Δ_panel) ?
+                      moment_results.fea_Δ_panel : nothing,
+    )
+    return two_way_deflection(proxy, h, d_inner, fc, fy, Es, Ecs, sec_spans, γ, columns;
+                              drop_panel = drop_panel,
+                              ρ_prime = FLAT_PLATE_MIDSPAN_RHO_PRIME, kwargs...)
+end
+
+"""
     phase_a_depth_passes(moment_results, secondary_results, h, d, ...) -> Bool
 
 Deflection, one-way shear, flexure, and the transfer section at one thickness.
 
-Same functions the Phase A loop uses after column sizes have stopped changing.
-`ρ′` for long-term deflection is estimated the same way, from the moments in
-`moment_results` and this `h`. A check that throws is a failure, matching the
-loop. `struc === nothing` skips the wall shear and the wall-strip flexure.
-`cover` and `bar_diameter`, when given, set the inner-layer depth of the
-secondary transfer moment.
+Same functions the Phase A loop uses after column sizes have stopped changing,
+including the drop panel when one is given. A check that throws is a failure,
+matching the loop. `struc === nothing` skips the wall shear and the
+wall-strip flexure. `cover` and `bar_diameter`, when given, set the
+inner-layer depth used for the secondary deflection, one-way shear and
+transfer moment (otherwise `d`). Deflection and one-way shear are checked in
+both directions. `λ` (required) is the lightweight factor used by the
+modulus of rupture and the shear strengths.
 """
 function phase_a_depth_passes(moment_results, secondary_results, h, d,
                               fc, fy, Es, Ecs, spans, γ, columns;
                               struc = nothing, slab = nothing,
                               limit_type::Symbol = :L_360,
                               deflection_Ie_method::Symbol = :aci318_19,
-                              λ::Float64 = 1.0, φ_shear::Float64 = 0.75,
+                              λ::Real, φ_shear::Float64 = 0.75,
                               βt::Float64 = 0.0, span_axis = nothing,
-                              cover = nothing, bar_diameter = nothing)
-    l2 = moment_results.l2
-    ρ_prime = try
-        As_neg = required_reinforcement(
-            0.75 * _top_bar_moment(moment_results), l2 / 2, d, fc, fy; εt_min = tension_controlled_strain(fy))
-        if isfinite(As_neg)
-            As_neg = max(As_neg, minimum_reinforcement(l2 / 2, h, fy))
-            0.5 * ustrip(u"inch^2", As_neg) /
-                (ustrip(u"inch", l2 / 2) * ustrip(u"inch", d))
-        else
-            0.0
-        end
-    catch
-        0.0
-    end
+                              cover = nothing, bar_diameter = nothing,
+                              drop_panel = nothing)
+    d_inner = cover === nothing || bar_diameter === nothing ? nothing :
+              inner_layer_effective_depth(h, cover, bar_diameter, bar_diameter)
+    defl_kw = (; drop_panel = drop_panel, limit_type = limit_type,
+               deflection_Ie_method = deflection_Ie_method, λ = λ)
 
     defl_ok = try
-        check_two_way_deflection(
-            moment_results, h, d, fc, fy, Es, Ecs, spans, γ, columns;
-            limit_type = limit_type, ρ_prime = ρ_prime,
-            deflection_Ie_method = deflection_Ie_method,
-        ).ok
-    catch
+        two_way_deflection(moment_results, h, d, fc, fy, Es, Ecs, spans, γ, columns;
+                           ρ_prime = FLAT_PLATE_MIDSPAN_RHO_PRIME, defl_kw...).ok
+    catch e
+        @debug "Deflection check (primary) failed" exception = (e, catch_backtrace())
         false
     end
     defl_ok || return false
 
     if secondary_results !== nothing
-        sec_spans = (primary = spans.secondary, secondary = spans.primary)
-        sec_proxy = (
-            M_pos = secondary_results.M_pos,
-            M_neg_ext = secondary_results.M_neg_ext,
-            M_neg_int = secondary_results.M_neg_int,
-            qu = moment_results.qu,
-            qD = moment_results.qD,
-            qL = moment_results.qL,
-            fea_Δ_panel = moment_results.fea_Δ_panel,
-        )
         sec_ok = try
-            check_two_way_deflection(
-                sec_proxy, h, d, fc, fy, Es, Ecs, sec_spans, γ, columns;
-                limit_type = limit_type, ρ_prime = ρ_prime,
-                deflection_Ie_method = deflection_Ie_method,
-            ).ok
-        catch
+            secondary_two_way_deflection(moment_results, secondary_results, h,
+                                         something(d_inner, d), fc, fy, Es, Ecs, spans, γ,
+                                         columns; defl_kw...).ok
+        catch e
+            @debug "Deflection check (secondary) failed" exception = (e, catch_backtrace())
             false
         end
         sec_ok || return false
@@ -238,6 +276,11 @@ function phase_a_depth_passes(moment_results, secondary_results, h, d,
 
     shear = check_one_way_shear(moment_results, d, fc; h = h, fy = fy, λ = λ, φ_shear = φ_shear)
     shear.ok || return false
+    if _has_frame_strip(secondary_results)
+        sec_shear = check_one_way_shear(secondary_results, something(d_inner, d), fc;
+                                        h = h, fy = fy, λ = λ, φ_shear = φ_shear)
+        sec_shear.ok || return false
+    end
     if struc !== nothing && slab !== nothing
         wall_shear = wall_one_way_shear(struc, slab, d, fc, moment_results.qu; h = h, fy = fy,
                                         λ = λ, ϕ = φ_shear)
@@ -246,15 +289,43 @@ function phase_a_depth_passes(moment_results, secondary_results, h, d,
 
     flexure = check_flexural_adequacy(moment_results, columns, d, fc; fy = fy,
                                       βt = βt, struc = struc, slab = slab,
-                                      span_axis = span_axis)
+                                      span_axis = span_axis, drop = drop_panel)
     flexure.ok || return false
-    d_inner = cover === nothing || bar_diameter === nothing ? nothing :
-              inner_layer_effective_depth(h, cover, bar_diameter, bar_diameter)
+    secondary_flexural_adequacy(secondary_results, columns, something(d_inner, d), fc, fy;
+                                βt = βt, struc = struc, slab = slab,
+                                span_axis = span_axis, drop = drop_panel).ok || return false
     return _transfer_sections_adequate(columns, moment_results, secondary_results,
                                        h, d, fc, fy;
                                        span_axis = something(span_axis, (1.0, 0.0)),
                                        d_secondary = d_inner)
 end
+
+"""
+    secondary_flexural_adequacy(secondary_results, columns, d_inner, fc, fy; βt, struc, slab, span_axis)
+
+`check_flexural_adequacy` along the secondary span at the inner-layer depth,
+with the strip classification and the drop panel (`drop`, in primary
+orientation) turned to the perpendicular axis. Passes when there are no
+secondary moments.
+"""
+function secondary_flexural_adequacy(secondary_results, columns, d_inner, fc, fy;
+                                     βt::Float64 = 0.0, struc = nothing, slab = nothing,
+                                     span_axis = nothing, verbose::Bool = false,
+                                     drop = nothing)
+    _has_frame_strip(secondary_results) && hasproperty(secondary_results, :column_moments) ||
+        return (ok = true, max_ratio = 0.0, governing_strip = :none)
+    ax = something(span_axis, (1.0, 0.0))
+    r = check_flexural_adequacy(secondary_results, columns, d_inner, fc; fy = fy,
+                                βt = βt, struc = struc, slab = slab,
+                                span_axis = (-ax[2], ax[1]), verbose = verbose,
+                                drop = _transposed_drop(drop))
+    return (ok = r.ok, max_ratio = r.max_ratio,
+            governing_strip = Symbol("secondary_", r.governing_strip))
+end
+
+"""True when `r` carries the frame-strip quantities `check_one_way_shear` needs."""
+_has_frame_strip(r) = r !== nothing &&
+    all(p -> hasproperty(r, p), (:qu, :l2, :ln, :M_neg_ext, :M_neg_int))
 
 """
     punching_depth_passes(moment_results, secondary_results, columns, h, d, fc, struc, slab; kwargs...) -> Bool
@@ -264,25 +335,41 @@ Every column and every wall reaction passes punching at this depth.
 Column size is the size already chosen. Demand is the scaled analysis.
 Openings use `column_opening_punching` when a structure is supplied.
 This is the last-resort thickness, after column growth and reinforcement
-have already been refused.
+have already been refused. With a `drop_panel` (and the `cover` and
+`bar_diameter` that set its depth) the flat-slab `check_punching` is used,
+as in the Phase B loop.
 """
 function punching_depth_passes(moment_results, secondary_results, columns, h, d, fc,
                                struc, slab; λ::Float64 = 1.0, φ_shear::Float64 = 0.75,
-                               moment_transfer = nothing)
+                               moment_transfer = nothing, drop_panel = nothing,
+                               cover = nothing, bar_diameter = nothing)
+    use_drop = drop_panel !== nothing && cover !== nothing && bar_diameter !== nothing
+    if use_drop
+        h_total = total_depth_at_drop(h, drop_panel)
+        d_total = effective_depth(h_total; cover = cover, bar_diameter = bar_diameter)
+    end
     for (i, col) in enumerate(columns)
         Muy = secondary_results === nothing ? nothing : secondary_results.unbalanced_moments[i]
         kwargs = (struc === nothing || slab === nothing) ? (;) :
                  punching_axis_kwargs(struc, slab, col)
-        result = check_punching_for_column(
-            col, moment_results.column_shears[i], moment_results.unbalanced_moments[i],
-            d, h, fc;
-            verbose = false, col_idx = i, λ = λ, φ_shear = φ_shear, Muy = Muy,
-            moment_transfer = moment_transfer, kwargs...)
+        Vu = moment_results.column_shears[i]
+        Mub = moment_results.unbalanced_moments[i]
+        result = if use_drop
+            check_punching(col, Vu, Mub, h, d, h_total, d_total, fc, drop_panel;
+                           qu = moment_results.qu, Muy = Muy, verbose = false, col_idx = i,
+                           λ = λ, φ_shear = φ_shear, kwargs...)
+        else
+            check_punching_for_column(col, Vu, Mub, d, h, fc;
+                verbose = false, col_idx = i, λ = λ, φ_shear = φ_shear, Muy = Muy,
+                moment_transfer = moment_transfer, kwargs...)
+        end
         result.ok || return false
     end
     if struc !== nothing && slab !== nothing
         checks = wall_reaction_punching(struc, slab, d, fc, moment_results.qu;
-                                        λ = λ, ϕ = φ_shear)
+                                        λ = λ, ϕ = φ_shear,
+                                        wall_transfer = wall_transfer_of(moment_results,
+                                                                         secondary_results))
         all(c -> c.ok, checks) || return false
     end
     return true

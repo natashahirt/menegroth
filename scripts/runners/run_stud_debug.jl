@@ -11,6 +11,11 @@ using StructuralSynthesizer
 const SR = StructuralSizer
 const SS = StructuralSynthesizer
 
+# Both bending directions. Circular columns match; rectangles do not.
+_dist(struc, cols, opts, slab) = SR.column_moment_distribution_factors(
+    struc, cols, opts; span_axis = SR._get_span_axis(slab))
+_both(pred, dist) = all(pred, dist.primary) && all(pred, dist.secondary)
+
 function run_case(; span_ft::Float64, n_bays::Int, n_stories::Int,
                     ll_psf::Float64, sdl_psf::Float64, label::String)
     story_ht = max(12.0, round(span_ft / 3.0))
@@ -73,7 +78,7 @@ function run_case(; span_ft::Float64, n_bays::Int, n_stories::Int,
     for slab in struc.slabs
         slab_cells = Set(slab.cell_indices)
         cols = SR.find_supporting_columns(struc, slab_cells)
-        factors = SR.column_moment_distribution_factors(struc, cols, params.columns)
+        factors = _dist(struc, cols, params.columns, slab)
         stories = [c.story for c in cols]
         println("  Slab (story=$(first(stories))): $(length(cols)) cols, " *
                 "dist_factors = $(round.(factors; digits=3))")
@@ -177,7 +182,7 @@ let
     for slab in struc.slabs
         slab_cells = Set(slab.cell_indices)
         cols = SR.find_supporting_columns(struc, slab_cells)
-        factors = SR.column_moment_distribution_factors(struc, cols, col_opts)
+        factors = _dist(struc, cols, col_opts, slab)
         stories = [c.story for c in cols]
         shapes  = [c.shape for c in cols]
         println("  Slab (story=$(first(stories))): $(length(cols)) cols, " *
@@ -188,13 +193,13 @@ let
     # Verify: equal circular columns → factor ≈ 0.5 on story 1, 1.0 on story 2
     slab1_cells = Set(struc.slabs[1].cell_indices)
     cols1 = SR.find_supporting_columns(struc, slab1_cells)
-    f1 = SR.column_moment_distribution_factors(struc, cols1, col_opts)
+    f1 = _dist(struc, cols1, col_opts, struc.slabs[1])
     slab2_cells = Set(struc.slabs[2].cell_indices)
     cols2 = SR.find_supporting_columns(struc, slab2_cells)
-    f2 = SR.column_moment_distribution_factors(struc, cols2, col_opts)
+    f2 = _dist(struc, cols2, col_opts, struc.slabs[2])
 
-    pass1 = all(f -> 0.45 ≤ f ≤ 0.55, f1)
-    pass2 = all(f -> f ≈ 1.0, f2)
+    pass1 = _both(f -> 0.45 ≤ f ≤ 0.55, f1)
+    pass2 = _both(f -> f ≈ 1.0, f2)
     println("  Story 1 factors ≈ 0.5: $(pass1 ? "✓ PASS" : "✗ FAIL")")
     println("  Story 2 factors = 1.0: $(pass2 ? "✓ PASS" : "✗ FAIL")")
 
@@ -206,11 +211,11 @@ let
             col.c2 = D_small
         end
     end
-    f1_unequal = SR.column_moment_distribution_factors(struc, cols1, col_opts)
+    f1_unequal = _dist(struc, cols1, col_opts, struc.slabs[1])
     println("  Unequal (D_above = 0.75×D_below):")
     println("    Story 1 factors = $(round.(f1_unequal; digits=3))")
     # K ∝ D⁴/L → (0.75)⁴ = 0.3164, so factor_below = 1/(1+0.3164) ≈ 0.76
-    pass3 = all(f -> 0.70 ≤ f ≤ 0.82, f1_unequal)
+    pass3 = _both(f -> 0.70 ≤ f ≤ 0.82, f1_unequal)
     println("    Factors ≈ 0.76 (K_below dominates): $(pass3 ? "✓ PASS" : "✗ FAIL")")
     println()
 end
@@ -283,7 +288,7 @@ let
     for slab in struc.slabs
         slab_cells = Set(slab.cell_indices)
         cols = SR.find_supporting_columns(struc, slab_cells)
-        factors = SR.column_moment_distribution_factors(struc, cols, col_opts)
+        factors = _dist(struc, cols, col_opts, slab)
         stories = [c.story for c in cols]
         concs   = [isnothing(c.concrete) ? "default" : "$(ustrip(u"psi", c.concrete.fc′)) psi"
                    for c in cols]
@@ -295,23 +300,23 @@ let
     # Verify story 1 factors
     slab1_cells = Set(struc.slabs[1].cell_indices)
     cols1 = SR.find_supporting_columns(struc, slab1_cells)
-    f1 = SR.column_moment_distribution_factors(struc, cols1, col_opts)
-    pass1 = all(f -> abs(f - expected) < 0.02, f1)
+    f1 = _dist(struc, cols1, col_opts, struc.slabs[1])
+    pass1 = _both(f -> abs(f - expected) < 0.02, f1)
     println("  Story 1 factors ≈ $(round(expected; digits=3)): $(pass1 ? "✓ PASS" : "✗ FAIL")")
 
     # Story 2 (roof) → 1.0
     slab2_cells = Set(struc.slabs[2].cell_indices)
     cols2 = SR.find_supporting_columns(struc, slab2_cells)
-    f2 = SR.column_moment_distribution_factors(struc, cols2, col_opts)
-    pass2 = all(f -> f ≈ 1.0, f2)
+    f2 = _dist(struc, cols2, col_opts, struc.slabs[2])
+    pass2 = _both(f -> f ≈ 1.0, f2)
     println("  Story 2 factors = 1.0: $(pass2 ? "✓ PASS" : "✗ FAIL")")
 
     # Also test: without per-column concrete, should fall back to default (all 0.5)
     for col in struc.columns
         col.concrete = nothing
     end
-    f1_default = SR.column_moment_distribution_factors(struc, cols1, col_opts)
-    pass3 = all(f -> 0.45 ≤ f ≤ 0.55, f1_default)
+    f1_default = _dist(struc, cols1, col_opts, struc.slabs[1])
+    pass3 = _both(f -> 0.45 ≤ f ≤ 0.55, f1_default)
     println("  Fallback (no per-col concrete) → 0.5: $(pass3 ? "✓ PASS" : "✗ FAIL")")
     println()
 end

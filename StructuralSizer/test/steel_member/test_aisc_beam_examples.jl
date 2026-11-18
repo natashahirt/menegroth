@@ -156,7 +156,7 @@ end
 
         # 4. Loads (pre-factored) - LineLoad expects Unitful quantities
         w_u_si = uconvert(u"N/m", w_u * kip/u"ft")
-        push!(model.loads, Asap.LineLoad(model.elements[e1], [0.0u"N/m", 0.0u"N/m", -w_u_si]))
+        push!(model.loads, Asap.LineLoad(model.frame_elements[e1], [0.0u"N/m", 0.0u"N/m", -w_u_si]))
         
         Asap.process!(model)
         Asap.solve!(model)
@@ -270,9 +270,9 @@ end
         P_u_si = uconvert(u"N", P_u * kip)
         
         # Distributed load on all elements
-        push!(model.loads, Asap.LineLoad(model.elements[e_AB], [0.0u"N/m", 0.0u"N/m", -w_u_si]))
-        push!(model.loads, Asap.LineLoad(model.elements[e_BC], [0.0u"N/m", 0.0u"N/m", -w_u_si]))
-        push!(model.loads, Asap.LineLoad(model.elements[e_CD], [0.0u"N/m", 0.0u"N/m", -w_u_si]))
+        push!(model.loads, Asap.LineLoad(model.frame_elements[e_AB], [0.0u"N/m", 0.0u"N/m", -w_u_si]))
+        push!(model.loads, Asap.LineLoad(model.frame_elements[e_BC], [0.0u"N/m", 0.0u"N/m", -w_u_si]))
+        push!(model.loads, Asap.LineLoad(model.frame_elements[e_CD], [0.0u"N/m", 0.0u"N/m", -w_u_si]))
         
         # Point loads at B and C
         push!(model.loads, Asap.NodeForce(model.nodes[idB], [0.0u"N", 0.0u"N", -P_u_si]))
@@ -360,8 +360,8 @@ end
         w_u_si = uconvert(u"N/m", 4.52 * kip/u"ft")
         P_u_si = uconvert(u"N", 16.0 * kip)
         
-        push!(model.loads, Asap.LineLoad(model.elements[e1], [0.0u"N/m", 0.0u"N/m", -w_u_si]))
-        push!(model.loads, Asap.PointLoad(model.elements[e1], 0.5, [0.0u"N", 0.0u"N", -P_u_si]))
+        push!(model.loads, Asap.LineLoad(model.frame_elements[e1], [0.0u"N/m", 0.0u"N/m", -w_u_si]))
+        push!(model.loads, Asap.PointLoad(model.frame_elements[e1], 0.5, [0.0u"N", 0.0u"N", -P_u_si]))
         
         Asap.process!(model)
         Asap.solve!(model)

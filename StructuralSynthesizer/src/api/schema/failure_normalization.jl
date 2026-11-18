@@ -26,6 +26,7 @@ const API_SLAB_FAILING_CHECKS = (
     "transfer_reinforcement",
     "column_pm",
     "applicability",
+    "structural_integrity",
     "none",
     "",
 )

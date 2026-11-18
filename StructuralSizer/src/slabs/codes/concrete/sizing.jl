@@ -63,7 +63,8 @@ function _size_span_floor(::FlatPlate, span::L, sdl::F, live::F;
                     l2::Union{Nothing, Length} = nothing,
                     c1::Union{Nothing, Length} = nothing,
                     c2::Union{Nothing, Length} = nothing,
-                    position::Symbol = :interior) where {L<:Length, F<:Pressure}
+                    position::Symbol = :interior,
+                    thickness_only::Bool = false) where {L<:Length, F<:Pressure}
     
     opts = options isa FlatSlabOptions ? options.base : options
     
@@ -83,10 +84,19 @@ function _size_span_floor(::FlatPlate, span::L, sdl::F, live::F;
     # =========================================================================
     # Phase 1: Minimum Thickness (ACI 8.3.1.1)
     # =========================================================================
-    h_min = min_thickness(FlatPlate(), ln; discontinuous_edge=discontinuous)
+    h_min = min_thickness(FlatPlate(), ln; discontinuous_edge=discontinuous,
+                          fy=opts.material.rebar.Fy)
     
     # Round up to nearest 0.5 inch (practical)
     h = ceil(ustrip(u"inch", h_min) * 2) / 2 * u"inch"
+
+    # Preparation asks for the code minimum and its weight. The design graph
+    # is the sizing pass that checks moments and punching.
+    if thickness_only
+        sw_final = slab_self_weight(h, material.ρ)
+        h_m = uconvert(u"m", h)
+        return CIPSlabResult(h_m, h_m, uconvert(u"kPa", sw_final))
+    end
     
     # =========================================================================
     # Phase 2: Compute Design Moments
@@ -100,7 +110,7 @@ function _size_span_floor(::FlatPlate, span::L, sdl::F, live::F;
              factored_pressure(strength_1_4D, sw + sdl, live))
     
     # Static moment M0
-    M0 = total_static_moment(qu, l2_val, ln)
+    M0 = total_static_moment(qu, l2_val, eq13_4_clear_span(span, ln))
     
     # Distribute moments based on analysis method
     l2_l1 = l2_val / span  # dimensionless ratio
@@ -200,16 +210,15 @@ function _size_span_floor(::FlatSlab, span::L, sdl::F, live::F;
                     c2::Union{Nothing, Length} = nothing,
                     position::Symbol = :interior) where {L<:Length, F<:Pressure}
     
-    # Flat slab minimum thickness per ACI 318-11 Table 9.5(c) (with drop panels)
-    # h_min = ln/33 (exterior) or ln/36 (interior)
-    fp = options isa FlatSlabOptions ? options : FlatSlabOptions()
+    fp = _require_options(FlatSlabOptions, options, FlatSlab())
     
     # Estimate clear span from center-to-center span
     c = isnothing(c1) ? estimate_column_size_from_span(span; ratio=15.0) : c1
     ln = span - c
     
     discontinuous = (position in (:exterior, :edge, :corner))
-    h_min = min_thickness(FlatSlab(), ln; discontinuous_edge=discontinuous)
+    h_min = min_thickness(FlatSlab(), ln; discontinuous_edge=discontinuous,
+                          fy=fp.base.material.rebar.Fy)
     
     # Round up to nearest 0.5 inch
     h = max(ceil(ustrip(u"inch", h_min) * 2) / 2, 4.0) * u"inch"
@@ -223,26 +232,56 @@ function _size_span_floor(::FlatSlab, span::L, sdl::F, live::F;
 end
 
 """
-    _size_span_floor(::TwoWay, span, sdl, live; kwargs...)
+    _size_span_floor(::TwoWay, span, sdl, live; l2, position, alpha_fm,
+                     edge_beam_alpha_f, kwargs...)
 
-Size a cast-in-place two-way slab with beams per ACI 318.
+Minimum thickness of a cast-in-place two-way slab with beams on all sides,
+ACI 318-11 §9.5.3.3 (corpus: aci-318-11, pages 134–135), through
+[`min_thickness(::TwoWay, ...)`](@ref).
 
-Two-way slabs have beams on all sides, which provide additional support
-and allow for thinner slabs than flat plates.
+`ln` is the longer of `span` and `l2`, and `β` is longer over shorter.
+§9.5.3.3 measures both face-to-face of beams. Spans passed here are
+center-to-center, which gives a longer `ln` and a thicker slab.
+
+`alpha_fm = nothing` (beams not sized yet) uses the bound documented on
+`min_thickness(::TwoWay, ...)`. A `position` other than `:interior` is a
+panel with a discontinuous edge.
 """
 function _size_span_floor(::TwoWay, span::L, sdl::F, live::F;
                     material::Concrete = NWC_4000,
                     options::AbstractFloorOptions = FlatPlateOptions(),
                     l2::Union{Nothing, Length} = nothing,
-                    position::Symbol = :interior) where {L<:Length, F<:Pressure}
-    
+                    position::Symbol = :interior,
+                    alpha_fm::Union{Nothing, Real} = nothing,
+                    edge_beam_alpha_f::Union{Nothing, Real} = nothing,
+                    wall_supported::Bool = false,
+                    missing_edge_beam::Bool = false,
+                    joist_topping::Bool = false) where {L<:Length, F<:Pressure}
+
     l2_val = isnothing(l2) ? span : l2
-    
-    # Two-way with beams: ACI Table 8.3.1.2
-    ln = min(span, l2_val)
+    if joist_topping
+        # The top slab spans rib to rib. ACI 318-11 §8.13.6.1, not §9.5.3
+        # on the beam bay. A spacing §8.13.3 does not allow falls through.
+        h_joist = joist_topping_thickness(max(span, l2_val))
+        if h_joist !== nothing
+            h = ceil(ustrip(u"inch", h_joist) * 2) / 2 * u"inch"
+            sw = slab_self_weight(h, material.ρ)
+            h_m = uconvert(u"m", h)
+            return CIPSlabResult(h_m, h_m, uconvert(u"kPa", sw))
+        end
+    end
+    # ACI 318-11 §9.5.3.3, page 135: ln is the clear span in the long
+    # direction, and β is long over short.
+    ln = max(span, l2_val)
+    beta = Float64(uconvert(NoUnits, ln / min(span, l2_val)))
     fp = options isa FlatSlabOptions ? options.base : options
     fy = fp.material.rebar.Fy
-    h_min = min_thickness(TwoWay(), ln; fy)
+    h_min = min_thickness(TwoWay(), ln; fy, beta,
+                          alpha_fm = alpha_fm,
+                          discontinuous_edge = position !== :interior,
+                          edge_beam_alpha_f = edge_beam_alpha_f,
+                          wall_supported = wall_supported,
+                          missing_edge_beam = missing_edge_beam)
     
     # Round up to nearest 0.5"
     h = ceil(ustrip(u"inch", h_min) * 2) / 2 * u"inch"
@@ -265,9 +304,19 @@ Uses `options.one_way.support` to determine thickness divisor.
 """
 function _size_span_floor(::OneWay, span::L, sdl::F, live::F;
                     material::Concrete = NWC_4000,
-                    options::AbstractFloorOptions = OneWayOptions()) where {L<:Length, F<:Pressure}
-    
-    opts = options isa OneWayOptions ? options : OneWayOptions()
+                    options::AbstractFloorOptions = OneWayOptions(),
+                    joist_topping::Bool = false) where {L<:Length, F<:Pressure}
+
+    if joist_topping
+        h_joist = joist_topping_thickness(span)
+        if h_joist !== nothing
+            h = ceil(ustrip(u"inch", h_joist) * 2) / 2 * u"inch"
+            sw = slab_self_weight(h, material.ρ)
+            h_m = uconvert(u"m", h)
+            return CIPSlabResult(h_m, h_m, uconvert(u"kPa", sw))
+        end
+    end
+    opts = _require_options(OneWayOptions, options, OneWay())
     h_min = min_thickness(OneWay(), span; fy=opts.material.rebar.Fy, support=opts.support)
     
     h_in = ceil(ustrip(u"inch", h_min) * 2) / 2
@@ -323,36 +372,12 @@ end
 """
     _size_span_floor(::PTBanded, span, sdl, live; kwargs...)
 
-Size a post-tensioned banded slab per ACI 318 and PTI.
-
-PT banded slabs allow for longer spans and shallower depths
-through post-tensioning.
+Not implemented. A post-tensioned banded slab needs prestress, flexure, and
+punching design; a span/45 thickness alone is not a design, so this throws
+[`UnsupportedFloorSystemError`](@ref).
 """
-function _size_span_floor(::PTBanded, span::L, sdl::F, live::F;
-                    material::Concrete = NWC_4000,
-                    options::AbstractFloorOptions = FlatSlabOptions(),
-                    l2::Union{Nothing, Length} = nothing,
-                    position::Symbol = :interior) where {L<:Length, F<:Pressure}
-    
-    # PT slabs can be thinner than RC: span/45 to span/50
-    l2_val = isnothing(l2) ? span : l2
-    ln = max(span, l2_val)
-    
-    # PT thickness rules (PTI guidelines)
-    fs = options isa FlatSlabOptions ? options : FlatSlabOptions()
-    has_drops = !isnothing(fs.h_drop) || !isnothing(fs.a_drop_ratio)
-    h_min = min_thickness(PTBanded(), ln; has_drops)
-    
-    # Round up to nearest 0.5"
-    h = ceil(ustrip(u"inch", h_min) * 2) / 2 * u"inch"
-    
-    # Self-weight
-    sw = slab_self_weight(h, material.ρ)
-    h_m = uconvert(u"m", h)
-    vol_per_area = h_m
-    
-    return CIPSlabResult(h_m, vol_per_area, uconvert(u"kPa", sw))
-end
+_size_span_floor(::PTBanded, span, sdl, live; kwargs...) =
+    throw(UnsupportedFloorSystemError(PTBanded))
 
 # =============================================================================
 # Exports

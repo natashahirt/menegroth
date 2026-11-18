@@ -28,6 +28,10 @@ entry per physical pixel piece along the span. When `pixel_design` is set,
     section::Union{AbstractSection, Nothing} = nothing
     pixel_design::Union{Nothing, StructuralSizer.PixelFrameDesign} = nothing
     volumes::MaterialVolumes = MaterialVolumes()
+    # Every check of `section` from the discrete sizer that chose it. Read
+    # through `member_check`, which ignores it once the section changes.
+    check::Union{Nothing, @NamedTuple{section::StructuralSizer.AbstractSection,
+                                      explanation::StructuralSizer.FeasibilityExplanation}} = nothing
 end
 
 # =============================================================================
@@ -192,9 +196,14 @@ so legacy call sites keep working.
     base::MemberBase{T}
     tributary_profile::Union{TributaryProfile{T}, Nothing} = nothing
     role::Symbol = :beam
+    # Support rank from `assign_framing_levels!`. 0 is carried only by columns,
+    # walls, or `:support` vertices. A higher rank lands on a lower one.
     level::Int = 0
     lateral_role::Symbol = :gravity
     torsion_released::Union{Nothing, Bool} = nothing
+    # Factored hogging envelope (N·m, positive) of the beam's group over every
+    # solved case and pattern, from the last RC sizing pass. `nothing` until sized.
+    Mu_neg_envelope::Union{Nothing, Float64} = nothing
 end
 
 """
@@ -339,14 +348,12 @@ populate the `story_properties` field with:
     # Empty for interior columns; 1 direction for edge columns; 2+ for corners.
     # Used for DDM/EFM to determine if column is an exterior support for a given span direction.
     boundary_edge_dirs::Vector{NTuple{2, Float64}} = NTuple{2, Float64}[]
-    # Inward unit normals corresponding to each boundary_edge_dir (populated by
-    # update_structural_offsets!).  Each normal points from the slab edge toward
-    # the slab interior, derived from the adjacent face's CCW winding.
+    # Inward unit normals of the boundary edges at this column (populated by
+    # update_structural_offsets!).  Each normal points from the centerline
+    # toward the slab interior, derived from the adjacent face's CCW winding.
     boundary_inward_normals::Vector{NTuple{2, Float64}} = NTuple{2, Float64}[]
-    # Structural offset (meters) from the architectural vertex to the column
-    # centerline.  For interior columns this is (0,0).  For edge/corner columns
-    # the offset shifts inward by half the column dimension normal to each
-    # boundary edge.  Recomputed whenever column dimensions change.
+    # Kept at (0, 0). The column center is the skeleton vertex. The slab edge
+    # moves out to the column face; the centerline does not move in.
     structural_offset::NTuple{2, Float64} = (0.0, 0.0)
     braced::Bool = true  # Default: braced frame (no sway amplification)
     story_properties::Union{Nothing, @NamedTuple{ΣPu::Float64, ΣPc::Float64, Vus::Float64, Δo::Float64, lc::Float64}} = nothing
@@ -381,7 +388,8 @@ On `[u0, u1]`, the width in metres is
 
     w(u) = a (u - u0)² + b (u - u0) + c
 
-A straight edge has `a == 0`. A column–wall parabola has `a != 0`.
+A straight edge has `a == 0`. [`wall_edge_nodal_forces`](@ref) integrates
+a pressure over these widths.
 """
 struct WallWidthPiece
     u0::Float64
@@ -419,11 +427,11 @@ without reworking `Wall`.
 - `openings`: rectangular holes in this pier, in wall coordinates
   ([`WallOpening`](@ref)). Empty for a solid wall. Copied from the skeleton
   by [`initialize_members!`](@ref).
-- `tributary_cell_areas`: slab area (m²) this wall takes from each cell, the
-  complement of the column regions ([`split_cell_supports`](@ref)).
-- `tributary_widths`: that complement as a width along the wall, one list of
-  [`WallWidthPiece`](@ref) per cell. `w(u) = a (u-u0)² + b (u-u0) + c` with
-  `u` in metres from `(x1, y1)` toward `(x2, y2)`.
+- `tributary_cell_areas`: slab area (m²) this wall takes from each cell: the
+  edge polygons it covers and the halves at its ends
+  ([`split_cell_edges`](@ref)), plus its slab edge strip.
+- `tributary_polygons`: the plan loops (m) of that share, a list per cell. A
+  wall through a cell has a loop on each face.
 
 # Analytic stiffness
 Use [`wall_lateral_stiffness`](@ref) to get the in-plane lateral stiffness
@@ -446,7 +454,8 @@ Table 6.6.3.1.1(a) (corpus: sp-effective-flexural-stiffness-aci318-14; VERIFY).
     wall_above::Union{Nothing, Wall{T}} = nothing
     openings::Vector{WallOpening} = WallOpening[]
     tributary_cell_areas::Dict{Int, Float64} = Dict{Int, Float64}()
-    tributary_widths::Dict{Int, Vector{WallWidthPiece}} = Dict{Int, Vector{WallWidthPiece}}()
+    tributary_polygons::Dict{Int, Vector{Vector{NTuple{2, Float64}}}} =
+        Dict{Int, Vector{Vector{NTuple{2, Float64}}}}()
 end
 
 # -----------------------------------------------------------------------------
@@ -660,6 +669,25 @@ set_pixel_design!(m::AbstractMember, pd) = (m.base.pixel_design = pd)
 set_volumes!(m::AbstractMember, vols) = (m.base.volumes = vols)
 
 """
+    member_check(m) -> Union{Nothing, StructuralSizer.FeasibilityExplanation}
+
+The sizer's checks of the member's current section, or `nothing` when that
+section did not come from a discrete sizing pass that reported them.
+"""
+function member_check(m::AbstractMember)
+    c = m.base.check
+    (c === nothing || c.section !== section(m)) && return nothing
+    return c.explanation
+end
+
+"""Record `result.explanations[g_idx]` against `chosen`; clears the record when the result has none."""
+function _record_member_check!(m::AbstractMember, chosen, result, g_idx::Int)
+    m.base.check = hasproperty(result, :explanations) && chosen !== nothing ?
+        (section = chosen, explanation = result.explanations[g_idx]) : nothing
+    return m
+end
+
+"""
     MemberGroup
 
 Optimization grouping for similar members (pure grouping logic + shared section
@@ -671,44 +699,16 @@ for ASAP).
   (e.g. `struc.beams[idx]`).
 - `section::Union{AbstractSection, Nothing}`: shared section assigned by sizing;
   `nothing` before the group is sized.
-- `catalog_override::Any`: per-group section catalog override, or `nothing`
-  (the default). When non-`nothing`, [`size_member_group!`](@ref) passes this to
-  the material selector as its `catalog` keyword, overriding the material's
-  default catalog for this group only. This is the entry point Phase 5's
-  `materialize_level!` uses to restrict a joist group to a specific catalog
-  (e.g. "only use these W-shapes for the joists") without forking the sizing
-  functions. A value of `nothing` reproduces the pre-Phase-6 behaviour exactly
-  (the material's standard catalog is used).
 
-!!! note "Phase 5 seam"
-    `FramingLevel.catalog_override` (added in Phase 4) is propagated onto the
-    per-level `MemberGroup.catalog_override` by `materialize_level!` in Phase 5
-    (`group.catalog_override = level.catalog_override` before sizing). This
-    struct only carries the override and hands it to the selector; it does not
-    itself generate members.
+A restricted catalog is `FramingLevel.beam_options` (a `custom_catalog` on steel
+options) or the `catalog` keyword of [`size_member_group!`](@ref). It is not
+stored on the group.
 """
 mutable struct MemberGroup
     hash::UInt64
     member_indices::Vector{Int}
     section::Union{AbstractSection, Nothing}  # Shared section for ASAP element updates
-    catalog_override::Any                     # Per-group catalog override (nothing ⇒ material default)
 end
 
-"""
-Back-compat positional constructor: a group with no per-group catalog override
-(`catalog_override = nothing`). Keeps pre-Phase-6 three-argument call sites
-working unchanged.
-"""
-MemberGroup(hash::UInt64, member_indices::Vector{Int},
-            section::Union{AbstractSection, Nothing}) =
-    MemberGroup(hash, member_indices, section, nothing)
-
-"""
-    MemberGroup(hash; catalog_override=nothing) -> MemberGroup
-
-Create an empty `MemberGroup` with the given hash key, no shared section, and an
-optional per-group `catalog_override` (default `nothing` ⇒ use the material's
-standard catalog at sizing time).
-"""
-MemberGroup(hash::UInt64; catalog_override = nothing) =
-    MemberGroup(hash, Int[], nothing, catalog_override)
+"""Empty group: no members and no shared section yet."""
+MemberGroup(hash::UInt64) = MemberGroup(hash, Int[], nothing)

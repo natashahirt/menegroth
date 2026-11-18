@@ -107,6 +107,229 @@ export function rectangleSheet(
   return finish(sheet, title)
 }
 
+/**
+ * Three true-scale views of stored bar centerlines. `solid` is
+ * `[x0, x1, y0, y1, z0, z1]` in the same frame. The section is a cut at
+ * mid-length looking along +x: a bar through the cut is a disk, and a
+ * stirrup is the one nearest the cut. The elevation looks along +y and the
+ * plan along +z; there a bar end-on is a disk and anything else is its
+ * centerline at the bar diameter. Only the section is hatched.
+ *
+ * `outline` is the section polygon `(y, z)` about its centroid, as in
+ * `drawing.outline_m`. When given, the cut draws it, seated on the cage
+ * soffit, instead of the bounding box.
+ */
+export function cageViews(
+  groups: BarGroupRecord[], solid: number[] | null, outline: number[][] | null = null,
+): SVGSVGElement[] {
+  const located = groups.filter((g) => Array.isArray(g.centerlines_m) && g.centerlines_m.length > 0)
+  if (located.length === 0) return []
+  const views: { title: string; u: 0 | 1 | 2; v: 0 | 1 | 2; hatch: boolean }[] = [
+    { title: "Section", u: 1, v: 2, hatch: true },
+    { title: "Elevation", u: 0, v: 2, hatch: false },
+    { title: "Plan", u: 0, v: 1, hatch: false },
+  ]
+  return views.map((view) => view.u === 1 && view.v === 2
+    ? cageSection(located, solid, outline)
+    : cageView(view.title, view.u, view.v, view.hatch, located, solid))
+}
+
+/** `x` where the section is cut: mid-length of the solid, else of the bars. */
+function cutStation(groups: BarGroupRecord[], solid: number[] | null): number | null {
+  if (solid && solid.length >= 6) {
+    const x0 = Number(solid[0]), x1 = Number(solid[1])
+    if (Number.isFinite(x0) && Number.isFinite(x1)) return (x0 + x1) / 2
+  }
+  let lo = Infinity, hi = -Infinity
+  for (const g of groups) for (const w of g.centerlines_m ?? []) for (const p of w) {
+    const x = Number(p[0])
+    if (Number.isFinite(x)) { lo = Math.min(lo, x); hi = Math.max(hi, x) }
+  }
+  return Number.isFinite(lo) ? (lo + hi) / 2 : null
+}
+
+/** Points `(y, z)` where a wire crosses the plane `x = cut`. */
+function wireCrossings(wire: number[][], cut: number): Pt[] {
+  const out: Pt[] = []
+  for (let i = 0; i + 1 < wire.length; i++) {
+    const a = wire[i], b = wire[i + 1]
+    const xa = Number(a[0]), xb = Number(b[0])
+    if (xa === xb || (xa - cut) * (xb - cut) > 0) continue
+    const t = (cut - xa) / (xb - xa)
+    out.push({ x: Number(a[1]) + t * (Number(b[1]) - Number(a[1])),
+               y: -(Number(a[2]) + t * (Number(b[2]) - Number(a[2]))) })
+  }
+  return out
+}
+
+function cageSection(groups: BarGroupRecord[], solid: number[] | null, outline: number[][] | null): SVGSVGElement {
+  const cut = cutStation(groups, solid)
+  const disks: { p: Pt; r: number }[] = []
+  const loops: { line: Pt[]; width: number }[] = []
+  for (const group of groups) {
+    const diameter = Number(group.diameter_m) > 0 ? Number(group.diameter_m) : 0.01
+    const wires = (group.centerlines_m ?? []).filter((w) => w.length >= 2 && w.every((p) => p.length >= 3))
+    const along = (w: number[][]) => Math.max(...w.map((p) => Number(p[0]))) - Math.min(...w.map((p) => Number(p[0])))
+    const flat = wires.filter((w) => along(w) <= diameter)
+    if (flat.length > 0 && cut !== null) {
+      const at = (w: number[][]) => Math.abs(Number(w[0][0]) - cut)
+      const nearest = flat.reduce((best, w) => (at(w) < at(best) ? w : best))
+      loops.push({ line: nearest.map((p) => ({ x: Number(p[1]), y: -Number(p[2]) })), width: diameter })
+    }
+    if (cut === null) continue
+    for (const w of wires) {
+      if (along(w) <= diameter) continue
+      for (const p of wireCrossings(w, cut)) disks.push({ p, r: diameter / 2 })
+    }
+  }
+  let concretePts: Pt[] = []
+  const poly = (outline ?? []).filter((p) => Array.isArray(p) && p.length >= 2).map((p) => [Number(p[0]), Number(p[1])])
+  if (poly.length >= 3 && poly.every(([a, b]) => Number.isFinite(a) && Number.isFinite(b))) {
+    const z0 = solid && solid.length >= 6 && Number.isFinite(Number(solid[4])) ? Number(solid[4]) : 0
+    const zmin = Math.min(...poly.map(([, b]) => b))
+    concretePts = poly.map(([a, b]) => ({ x: a, y: -(b - zmin + z0) }))
+  } else {
+    concretePts = solidCorners(solid, 1, 2).map(([a, b]) => ({ x: a, y: -b }))
+  }
+  const pts: Pt[] = [...concretePts, ...disks.map((d) => d.p), ...loops.flatMap((l) => l.line)]
+  const box = pts.length ? bounds(pts) : { minX: 0, minY: 0, maxX: 1, maxY: 1 }
+  const span = Math.max(box.maxX - box.minX, box.maxY - box.minY, 0.05)
+  const sheet = openSheet(box, span)
+  if (concretePts.length >= 3) concrete(sheet, concretePts, true)
+  for (const l of loops) {
+    sheet.svg.append(node("polyline", {
+      points: l.line.map((p) => `${p.x},${p.y}`).join(" "),
+      fill: "none", stroke: INK, "stroke-width": String(l.width),
+      "stroke-linecap": "round", "stroke-linejoin": "round",
+    }))
+  }
+  for (const d of disks) disk(sheet, d.p.x, d.p.y, Math.max(d.r, 1e-4))
+  if (concretePts.length >= 3) {
+    const cb = bounds(concretePts)
+    dimHorizontal(sheet, cb.minX, cb.maxX, cb.maxY, span, dimText(cb.maxX - cb.minX))
+    dimVertical(sheet, cb.minY, cb.maxY, cb.maxX, span, dimText(cb.maxY - cb.minY))
+  }
+  return finish(sheet, cut === null ? "Section" : `Section at mid-length, x = ${dimText(cut)}`)
+}
+
+function cageView(
+  title: string, u: 0 | 1 | 2, v: 0 | 1 | 2, hatch: boolean,
+  groups: BarGroupRecord[], solid: number[] | null,
+): SVGSVGElement {
+  const project = (p: number[]) => ({ x: Number(p[u]), y: -Number(p[v]) })
+  const pts: Pt[] = []
+  const concretePts = solidCorners(solid, u, v).map(([a, b]) => ({ x: a, y: -b }))
+  pts.push(...concretePts)
+  for (const group of groups) {
+    for (const wire of group.centerlines_m ?? []) {
+      for (const p of wire) if (p.length >= 3) pts.push(project(p))
+    }
+  }
+  const box = pts.length ? bounds(pts) : { minX: 0, minY: 0, maxX: 1, maxY: 1 }
+  const span = Math.max(box.maxX - box.minX, box.maxY - box.minY, 0.05)
+  const sheet = openSheet(box, span)
+  if (concretePts.length >= 3) concrete(sheet, concretePts, hatch)
+  for (const group of groups) {
+    const diameter = Number(group.diameter_m)
+    const width = diameter > 0 ? diameter : span * 0.004
+    const tol = Math.max(1e-4, 0.25 * (diameter > 0 ? diameter : 0))
+    for (const wire of group.centerlines_m ?? []) {
+      const line = wire.filter((p) => Array.isArray(p) && p.length >= 3).map(project)
+        .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y))
+      if (line.length === 0) continue
+      const origin = line[0]
+      const flat = line.every((p) => Math.hypot(p.x - origin.x, p.y - origin.y) <= tol)
+      if (flat) {
+        disk(sheet, origin.x, origin.y, Math.max(width / 2, 1e-4))
+      } else {
+        sheet.svg.append(node("polyline", {
+          points: line.map((p) => `${p.x},${p.y}`).join(" "),
+          fill: "none", stroke: INK, "stroke-width": String(width),
+          "stroke-linecap": "round", "stroke-linejoin": "round",
+        }))
+      }
+    }
+  }
+  if (solid && solid.length >= 6) {
+    const u0 = Number(solid[u * 2]), u1 = Number(solid[u * 2 + 1])
+    const v0 = Number(solid[v * 2]), v1 = Number(solid[v * 2 + 1])
+    if ([u0, u1, v0, v1].every((n) => Number.isFinite(n))) {
+      dimHorizontal(sheet, Math.min(u0, u1), Math.max(u0, u1), -Math.min(v0, v1), span, dimText(Math.abs(u1 - u0)))
+      dimVertical(sheet, -Math.max(v0, v1), -Math.min(v0, v1), Math.max(u0, u1), span, dimText(Math.abs(v1 - v0)))
+    }
+  }
+  if (title === "Plan") reinforcementArrows(sheet, groups, concretePts, box, span)
+  return finish(sheet, title)
+}
+
+/**
+ * Direction of the bars, drawn outside the plan.
+ *
+ * A bar along the member runs across the sheet; a bar across the member runs
+ * down it. The arrows sit on the sides opposite the dimension lines.
+ */
+function reinforcementArrows(
+  sheet: Sheet, groups: BarGroupRecord[], concretePts: Pt[],
+  box: { minX: number; minY: number; maxX: number; maxY: number }, span: number,
+) {
+  let alongX = false
+  let alongY = false
+  for (const group of groups) {
+    for (const wire of group.centerlines_m ?? []) {
+      let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity
+      for (const p of wire) {
+        if (!Array.isArray(p) || p.length < 2) continue
+        const x = Number(p[0]), y = Number(p[1])
+        if (!Number.isFinite(x) || !Number.isFinite(y)) continue
+        minX = Math.min(minX, x)
+        maxX = Math.max(maxX, x)
+        minY = Math.min(minY, y)
+        maxY = Math.max(maxY, y)
+      }
+      const dx = maxX - minX
+      const dy = maxY - minY
+      if (dx > dy * 3 && dx > span * 0.05) alongX = true
+      if (dy > dx * 3 && dy > span * 0.05) alongY = true
+    }
+  }
+  if (!alongX && !alongY) return
+  const cb = concretePts.length >= 3 ? bounds(concretePts) : box
+  const w = cb.maxX - cb.minX
+  const h = cb.maxY - cb.minY
+  const head = Math.max(span * 0.035, 0.04)
+  if (alongX && w > 0) {
+    const y = cb.minY - span * 0.16
+    const x0 = cb.minX + w * 0.12
+    const x1 = cb.maxX - w * 0.12
+    spanArrow(sheet, x0, y, x1, y, span)
+    growSheet(sheet, x0, y, head)
+    growSheet(sheet, x1, y, head)
+  }
+  if (alongY && h > 0) {
+    const x = cb.minX - span * 0.16
+    const y0 = cb.maxY - h * 0.12
+    const y1 = cb.minY + h * 0.12
+    spanArrow(sheet, x, y0, x, y1, span)
+    growSheet(sheet, x, y0, head)
+    growSheet(sheet, x, y1, head)
+  }
+}
+
+function growSheet(sheet: Sheet, x: number, y: number, margin: number) {
+  sheet.minX = Math.min(sheet.minX, x - margin)
+  sheet.minY = Math.min(sheet.minY, y - margin)
+  sheet.maxX = Math.max(sheet.maxX, x + margin)
+  sheet.maxY = Math.max(sheet.maxY, y + margin)
+}
+
+function solidCorners(solid: number[] | null, u: number, v: number): number[][] {
+  if (!solid || solid.length < 6) return []
+  const u0 = Number(solid[u * 2]), u1 = Number(solid[u * 2 + 1])
+  const v0 = Number(solid[v * 2]), v1 = Number(solid[v * 2 + 1])
+  if (![u0, u1, v0, v1].every((n) => Number.isFinite(n))) return []
+  return [[u0, v0], [u1, v0], [u1, v1], [u0, v1]]
+}
+
 /** Drop panel centered on the slab mid-plane. The thickened plate is `thickness + drop`. */
 export function dropSection(span: number, thickness: number, drop: number, width: number): SVGSVGElement | null {
   if (!(span > width && width > 0 && thickness > 0 && drop > 0)) return null
@@ -156,8 +379,14 @@ export function ribSection(
   return finish(sheet, caption)
 }
 
-/** One pitch of a composite deck. Concrete is the fill plus the flute. The sheet is the gage. */
-export function deckPitch(profile: Record<string, unknown>): SVGSVGElement | null {
+/**
+ * Composite deck cut across one bay.
+ *
+ * `span` is the bay width perpendicular to the ribs, the same length a concrete
+ * slab section uses. The flute repeats at the recorded pitch, centered on the
+ * bay. With no span, one pitch is drawn.
+ */
+export function deckSection(profile: Record<string, unknown>, span: number | null): SVGSVGElement | null {
   const pitch = Number(profile.pitch_m)
   const hr = Number(profile.hr_m)
   const fill = Number(profile.fill_m)
@@ -165,32 +394,201 @@ export function deckPitch(profile: Record<string, unknown>): SVGSVGElement | nul
   const bottom = Number(profile.rib_bottom_m)
   const sheetT = Number(profile.sheet_m)
   if (!(pitch > top && top >= bottom && bottom > 0 && hr > 0 && fill >= 0)) return null
+  const across = span !== null && span > pitch * 0.5 ? span : pitch
   const zTop = -(hr + fill)
-  const zDeck = -hr
-  const mid = pitch / 2
-  const pts = [
-    { x: 0, y: zTop }, { x: pitch, y: zTop }, { x: pitch, y: zDeck },
-    { x: mid + top / 2, y: zDeck }, { x: mid + bottom / 2, y: 0 },
-    { x: mid - bottom / 2, y: 0 }, { x: mid - top / 2, y: zDeck }, { x: 0, y: zDeck },
-  ]
+  const mid = across / 2
+  const soffit = (x: number) => deckSoffit(x, mid, pitch, hr, top, bottom)
+  const xs = deckStations(across, mid, pitch, top, bottom)
+  const pts: Pt[] = [{ x: 0, y: zTop }, { x: across, y: zTop }]
+  for (let i = xs.length - 1; i >= 0; i--) pts.push({ x: xs[i], y: soffit(xs[i]) })
   const box = bounds(pts)
-  const reach = Math.max(pitch, hr + fill)
+  const reach = Math.max(across, hr + fill)
   const sheet = openSheet(box, reach)
   concrete(sheet, pts, true)
   if (sheetT > 0) {
-    const line = [
-      [0, zDeck], [mid - top / 2, zDeck], [mid - bottom / 2, 0],
-      [mid + bottom / 2, 0], [mid + top / 2, zDeck], [pitch, zDeck],
-    ]
     sheet.svg.append(node("polyline", {
-      points: line.map(([x, y]) => `${x},${y}`).join(" "),
-      fill: "none", stroke: INK, "stroke-width": String(sheetT), "stroke-linejoin": "miter",
+      points: xs.map((x) => `${x},${soffit(x)}`).join(" "),
+      fill: "none", stroke: INK, "stroke-width": "1.6", "stroke-linejoin": "miter",
+      "vector-effect": "non-scaling-stroke",
     }))
   }
-  dimHorizontal(sheet, 0, pitch, 0, reach, dimText(pitch))
-  dimVertical(sheet, zTop, 0, pitch, reach, dimText(hr + fill))
+  dimHorizontal(sheet, 0, across, 0, reach, dimText(across))
+  dimVertical(sheet, zTop, 0, across, reach, dimText(hr + fill))
   const name = [typeof profile.profile === "string" ? profile.profile : "", typeof profile.gage === "number" ? `${profile.gage} gage` : ""].filter(Boolean).join(" · ")
   return finish(sheet, ["Section", name].filter(Boolean).join(" · "))
+}
+
+/**
+ * Plan of one slab bay, looking down. Structural y is up on the sheet.
+ *
+ * `rings` are the stored plan polygons. With none, the bay is the rectangle
+ * of the two spans, secondary along x and primary along y. One-way draws a
+ * span arrow along the primary span. Two-way draws both. A deck draws the
+ * flutes along the stored rib direction.
+ */
+export function slabPlan(
+  rings: number[][][],
+  primary: number | null,
+  secondary: number | null,
+  floor: string,
+  ribs: { pitch: number; direction: [number, number] } | null,
+): SVGSVGElement | null {
+  const source = rings.filter((ring) => ring.length >= 3)
+  const drawn = source.length > 0 ? source : fallbackBay(primary, secondary)
+  if (drawn.length === 0) return null
+  const pts: Pt[] = []
+  const polys = drawn.map((ring) => ring.map((p) => {
+    const q = { x: p[0], y: -p[1] }
+    pts.push(q)
+    return q
+  }))
+  const box = bounds(pts)
+  const reach = Math.max(box.maxX - box.minX, box.maxY - box.minY, 0.05)
+  const sheet = openSheet(box, reach)
+  for (const poly of polys) concrete(sheet, poly, true)
+  if (ribs && ribs.pitch > 1e-4 && Math.hypot(ribs.direction[0], ribs.direction[1]) > 1e-8) {
+    drawPlanRibs(sheet, polys, ribs)
+  } else if (floor === "one_way" || floor === "two_way") {
+    drawSpanArrows(sheet, box, floor, primary)
+  }
+  dimHorizontal(sheet, box.minX, box.maxX, box.maxY, reach, dimText(box.maxX - box.minX))
+  dimVertical(sheet, box.minY, box.maxY, box.maxX, reach, dimText(box.maxY - box.minY))
+  const caption = floor === "one_way" ? "Plan · one-way"
+    : floor === "two_way" ? "Plan · two-way"
+    : floor === "composite_deck" ? "Plan · deck"
+    : "Plan"
+  return finish(sheet, caption)
+}
+
+function fallbackBay(primary: number | null, secondary: number | null): number[][][] {
+  if (!(primary !== null && primary > 0 && secondary !== null && secondary > 0)) return []
+  return [[[0, 0], [secondary, 0], [secondary, primary], [0, primary]]]
+}
+
+/** Flute centerlines, parallel to the rib direction and centered on the bay. */
+function drawPlanRibs(
+  sheet: Sheet,
+  polys: Pt[][],
+  ribs: { pitch: number; direction: [number, number] },
+) {
+  const len = Math.hypot(ribs.direction[0], ribs.direction[1])
+  const ux = ribs.direction[0] / len
+  const uy = -ribs.direction[1] / len
+  const nx = -uy
+  const ny = ux
+  for (const poly of polys) {
+    let smin = Infinity
+    let smax = -Infinity
+    for (const p of poly) {
+      const s = p.x * nx + p.y * ny
+      if (s < smin) smin = s
+      if (s > smax) smax = s
+    }
+    const mid = (smin + smax) / 2
+    const k0 = Math.ceil((smin - mid) / ribs.pitch - 1e-6)
+    const k1 = Math.floor((smax - mid) / ribs.pitch + 1e-6)
+    for (let k = k0; k <= k1; k++) {
+      const ends = clipLine(poly, nx, ny, mid + k * ribs.pitch)
+      if (ends) hairline(sheet, ends[0].x, ends[0].y, ends[1].x, ends[1].y, "")
+    }
+  }
+}
+
+/** The two farthest crossings of `n · p = s` with a polygon. */
+function clipLine(poly: Pt[], nx: number, ny: number, s: number): [Pt, Pt] | null {
+  const hits: Pt[] = []
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i]
+    const b = poly[(i + 1) % poly.length]
+    const sa = a.x * nx + a.y * ny
+    const sb = b.x * nx + b.y * ny
+    const d = sb - sa
+    if (Math.abs(d) < 1e-9) continue
+    const t = (s - sa) / d
+    if (t < -1e-6 || t > 1 + 1e-6) continue
+    hits.push({ x: a.x + t * (b.x - a.x), y: a.y + t * (b.y - a.y) })
+  }
+  let best = 0
+  let ia = 0
+  let ib = 1
+  for (let i = 0; i < hits.length; i++) {
+    for (let j = i + 1; j < hits.length; j++) {
+      const dist = Math.hypot(hits[i].x - hits[j].x, hits[i].y - hits[j].y)
+      if (dist > best) {
+        best = dist
+        ia = i
+        ib = j
+      }
+    }
+  }
+  return best > 1e-4 ? [hits[ia], hits[ib]] : null
+}
+
+/** Span arrows. One-way follows the primary span; two-way draws both. */
+function drawSpanArrows(
+  sheet: Sheet,
+  box: { minX: number; minY: number; maxX: number; maxY: number },
+  floor: string,
+  primary: number | null,
+) {
+  const w = box.maxX - box.minX
+  const h = box.maxY - box.minY
+  const cx = (box.minX + box.maxX) / 2
+  const cy = (box.minY + box.maxY) / 2
+  const alongY = !(primary !== null && primary > 0) || Math.abs(h - primary) <= Math.abs(w - primary)
+  const inset = 0.18
+  const reach = Math.max(w, h)
+  if (floor === "two_way" || alongY) {
+    spanArrow(sheet, cx, box.minY + h * inset, cx, box.maxY - h * inset, reach)
+  }
+  if (floor === "two_way" || !alongY) {
+    spanArrow(sheet, box.minX + w * inset, cy, box.maxX - w * inset, cy, reach)
+  }
+}
+
+function spanArrow(sheet: Sheet, x0: number, y0: number, x1: number, y1: number, span: number) {
+  hairline(sheet, x0, y0, x1, y1, "")
+  const ang = Math.atan2(y1 - y0, x1 - x0)
+  const head = Math.max(span * 0.035, 0.04)
+  arrowHead(sheet, x0, y0, ang + Math.PI, head)
+  arrowHead(sheet, x1, y1, ang, head)
+}
+
+function arrowHead(sheet: Sheet, x: number, y: number, ang: number, head: number) {
+  const wing = 2.6
+  const tip = (th: number) => `${x + Math.cos(th) * head},${y + Math.sin(th) * head}`
+  sheet.svg.append(node("polygon", {
+    points: `${x},${y} ${tip(ang + wing)} ${tip(ang - wing)}`,
+    fill: INK,
+  }))
+}
+
+/** Stations of one repeating flute, including the two ends of the bay. */
+function deckStations(across: number, mid: number, pitch: number, top: number, bottom: number): number[] {
+  const xs = new Set<number>([0, across])
+  const k0 = Math.floor((0 - mid) / pitch) - 1
+  const k1 = Math.ceil((across - mid) / pitch) + 1
+  for (let k = k0; k <= k1; k++) {
+    const center = mid + k * pitch
+    for (const at of [0, -bottom / 2, bottom / 2, -top / 2, top / 2, -pitch / 2, pitch / 2]) {
+      const x = center + at
+      if (x > 1e-6 && x < across - 1e-6) xs.add(x)
+    }
+  }
+  return [...xs].sort((a, b) => a - b)
+}
+
+/** Sheet elevation at `x`. Zero is the bottom of a flute and `-hr` is the pan. */
+function deckSoffit(x: number, mid: number, pitch: number, hr: number, top: number, bottom: number): number {
+  let local = (x - mid) % pitch
+  if (local < 0) local += pitch
+  if (local > pitch / 2) local -= pitch
+  const a = Math.abs(local)
+  const halfBottom = bottom / 2
+  const halfTop = top / 2
+  if (a <= halfBottom + 1e-9) return 0
+  if (!(halfTop > halfBottom + 1e-9) || a >= halfTop - 1e-9) return -hr
+  return -hr * (a - halfBottom) / (halfTop - halfBottom)
 }
 
 /** One group of identical placed bars from `drawing.detail.groups`. Paths are `[x, z]` in the member's elevation plane. */
@@ -204,6 +602,8 @@ export interface BarGroupRecord {
   length_m: number
   shape: string
   path_m: number[][]
+  /** One polyline per bar, `[x, y, z]` meters in the member frame. Empty when the bar was not located. */
+  centerlines_m?: number[][][]
   x_positions_m: number[]
   z_positions_m?: number[]
   laps: number
@@ -782,6 +1182,39 @@ function transverseCallout(transverse: Transverse | null): string {
   const spacing = Number(transverse.spacing_m)
   const at = spacing > 0 ? `at ${dimText(spacing)}` : ""
   return [size, word, at].filter(Boolean).join(" ")
+}
+
+/** Stud shanks on the beam elevation, rising from the top of steel. */
+export function studElevation(span: number, studs: Record<string, unknown>): SVGSVGElement | null {
+  const stations = Array.isArray(studs.s_m) ? studs.s_m as number[] : []
+  const length = Number(studs.length_m)
+  const diameter = Number(studs.diameter_m)
+  if (stations.length === 0 || !(length > 0)) return null
+  const beam = span > 0 ? span : Math.max(...stations)
+  const pad = Math.max(length * 0.35, 0.02)
+  const top = 0
+  const steel = length
+  const svg = node("svg", {
+    viewBox: `${-pad} ${-pad} ${beam + 2 * pad} ${steel + 2 * pad}`,
+  }) as SVGSVGElement
+  svg.dataset.caption = `${stations.length} studs, from the top of steel`
+  svg.append(node("line", {
+    x1: "0", y1: String(steel), x2: String(beam), y2: String(steel),
+    stroke: INK, "stroke-width": "1.6", "vector-effect": "non-scaling-stroke",
+  }))
+  const shank = diameter > 0 ? Math.max(diameter, beam * 0.004) : beam * 0.004
+  for (const station of stations) {
+    svg.append(node("line", {
+      x1: String(station), y1: String(steel),
+      x2: String(station), y2: String(top),
+      stroke: INK, "stroke-width": "1.25", "vector-effect": "non-scaling-stroke",
+    }))
+    svg.append(node("circle", {
+      cx: String(station), cy: String(top), r: String(shank),
+      fill: INK,
+    }))
+  }
+  return svg
 }
 
 function dimText(meters: number): string {

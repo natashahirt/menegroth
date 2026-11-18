@@ -224,6 +224,7 @@ end
 
 Convert RC T-beam section to Asap.Section for FEA stiffness.
 Uses T-shaped gross section properties with ACI 318-11 §10.10.4.1 reduction.
+Self-weight and mass are the stem's only ([`self_weight_area`](@ref)).
 """
 function to_asap_section(sec::RCTBeamSection, mat::Concrete; I_factor::Real=0.35)
     bw = ustrip(u"m", sec.bw)
@@ -258,7 +259,9 @@ function to_asap_section(sec::RCTBeamSection, mat::Concrete; I_factor::Real=0.35
     E = mat.E
     ν = mat.ν
     G = E / (2 * (1 + ν))
-    ρ = mat.ρ
+    # Asap weighs a frame as ρ·A·g. The flange is the slab and is already in the
+    # slab's self-weight, so only the stem is weighed (and given mass).
+    ρ = mat.ρ * (Aw / A)
 
     Asap.Section(A*u"m^2", E, G, Ix*u"m^4", Iy*u"m^4", J*u"m^4", ρ)
 end

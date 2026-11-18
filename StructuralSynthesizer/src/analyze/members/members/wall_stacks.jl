@@ -242,14 +242,17 @@ function _push_wall!(struc::BuildingStructure{T}, skel::BuildingSkeleton{T},
     x1, y1 = vc[va, 1], vc[va, 2]
     x2, y2 = vc[vb, 1], vc[vb, 2]
     # Same numerical-degeneracy floor as `_WALLS_BRIDGE_DEGEN_TOL` (1e-9 m).
-    hypot(x2 - x1, y2 - y1) > _WALLS_BRIDGE_DEGEN_TOL || throw(ArgumentError(
+    L = hypot(x2 - x1, y2 - y1)
+    L > _WALLS_BRIDGE_DEGEN_TOL || throw(ArgumentError(
         "initialize_members!: wall plan line has zero length " *
         "($(x1), $(y1))–($(x2), $(y2)) m"))
+    openings = wall_openings_for_edge(skel, va, vb, story, L, ustrip(u"m", height))
     wall = Wall(seg_indices, height;
                 thickness=thickness,
                 x1=x1, y1=y1, x2=x2, y2=y2,
                 story=story,
-                concrete=nothing)
+                concrete=nothing,
+                openings=openings)
     push!(struc.walls, wall)
     return wall
 end

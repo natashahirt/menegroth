@@ -53,6 +53,10 @@ function _design_pierced_segments!(checks, struc, basic, second;
         seismic_effect_displacements(elf, effects)
     qe_reports = _first_order_case_reports(struc, layout, qe_loads; displacements=qe_u)
     prepared = _pierced_second_order(walls, layout, basic, second, wind, elf, effects)
+    # First-order floors scale each ELF term by its own 1/(1−θ). The story
+    # stiffness already carries P-delta, so those cuts are left as solved.
+    qe_case_reports = prepared === nothing ?
+        _strength_elf_segment_reports(struc, layout, elf) : nothing
     vertical = [seg for seg in layout.segments if seg.kind === :vertical]
     for (j, seg) in enumerate(vertical)
         owner_i = _segment_owner_index(walls, seg)
@@ -60,9 +64,12 @@ function _design_pierced_segments!(checks, struc, basic, second;
         material = material_of(wall, owner_i)
         lw = joined_clear_length(wall, walls, owner_i) * u"m"
         Moop = _slab_moment_into_wall(struc, wall, lw)
+        basis = _governing_slab_basis(struc, wall)
         batches = _segment_strength_batches(
             j, roof, gravity_reports, wind_reports, qe_reports, prepared, wind, effects;
-            rho, SDS)
+            rho, SDS,
+            qe_override=_first_order_qe_override(
+                struc, elf, effects, qe_case_reports, wall, j, :vertical))
         direction = _pier_axis_direction(wall, plan_axis)
         special = opening_edges !== nothing && effects !== nothing &&
             _pier_on_special_row(direction, row_x, row_y)
@@ -70,20 +77,30 @@ function _design_pierced_segments!(checks, struc, basic, second;
             line = wall_line_members(wall, walls)
             hw_line = ustrip(u"m", _line_height(line))
             lw_line = joined_clear_length(wall, walls, owner_i)
-            flanged = _boundary_flange(
+            gross = _boundary_flange(
                 wall, walls, owner_i, _assembly_of(struc.wall_mesh, owner_i),
-                hw_line * u"m") !== nothing
+                hw_line * u"m")
+            # Stations run from the negative end along the centerline. Only
+            # the return bars inside this segment enter its rectangle.
+            lw_center = hypot(wall.x2 - wall.x1, wall.y2 - wall.y1)
+            steel = _segment_return_steel(gross, seg.s0, seg.s1, lw_center, wall.thickness)
             shear_actions = CombinedWallAction[]
+            critical = CombinedWallAction[]
             for batch in batches
                 append!(shear_actions, batch.second_bottom)
                 append!(shear_actions, batch.second_top)
+                append!(critical, batch.second_bottom)
+                append!(critical, batch.second_bottom)
             end
             # The full line height is hwcs. The segment is at or above the
             # base, so this is at least the height above its bottom section.
+            # Each case reads Ωv at the segment's bottom section.
             terms = design_segment_special_shear!(
                 wall, shear_actions, material,
                 seg.s1 - seg.s0, seg.z1 - seg.z0, lw_line, hw_line, hw_line, length(line);
-                flanged)
+                critical,
+                segment_flange = steel === nothing ? nothing : steel.flange,
+                extra_ast = steel === nothing ? 0.0 : steel.extra_ast)
             shaped = [(b.case, nothing, vcat(b.second_bottom, b.second_top), nothing)
                       for b in batches]
             extra = special_shear_records(
@@ -95,7 +112,8 @@ function _design_pierced_segments!(checks, struc, basic, second;
         end
         records = _check_vertical_segment(
             wall, seg, batches, prepared !== nothing;
-            material, wall_index=owner_i, boundary, plan_axis, direction, Moop)
+            material, wall_index=owner_i, boundary, plan_axis, direction, Moop,
+            slab_basis=basis)
         append!(records, segment_shear)
         _copy_segment_reinforcement!(walls, seg, wall)
         _file_on_segment!(checks, walls, seg, records)
@@ -128,7 +146,9 @@ function _design_pierced_segments!(checks, struc, basic, second;
                 _pier_on_special_row(direction, row_x, row_y)
             batches = _segment_strength_batches(
                 j, roof, gravity_reports, wind_reports, qe_reports, prepared,
-                wind, effects; rho, SDS, which=:horizontal)
+                wind, effects; rho, SDS, which=:horizontal,
+                qe_override=_first_order_qe_override(
+                    struc, elf, effects, qe_case_reports, wall, j, :horizontal))
             at_start = CombinedWallAction[]
             at_end = CombinedWallAction[]
             for batch in batches
@@ -143,7 +163,9 @@ function _design_pierced_segments!(checks, struc, basic, second;
         records = if seg.design === :beam || seg.design === :stm
             batches = _segment_strength_batches(
                 j, roof, gravity_reports, wind_reports, qe_reports, prepared,
-                wind, effects; rho, SDS, which=:horizontal)
+                wind, effects; rho, SDS, which=:horizontal,
+                qe_override=_first_order_qe_override(
+                    struc, elf, effects, qe_case_reports, wall, j, :horizontal))
             at_start = CombinedWallAction[]
             at_end = CombinedWallAction[]
             for batch in batches
@@ -403,7 +425,8 @@ end
 
 "First-order and second-order strength actions at both ends, one batch per basic case."
 function _segment_strength_batches(j, roof, gravity_reports, wind_reports, qe_reports,
-                                 prepared, wind, effects; rho, SDS, which::Symbol=:vertical)
+                                 prepared, wind, effects; rho, SDS, which::Symbol=:vertical,
+                                 qe_override=nothing)
     gb, gt = _segment_gravity_ends(gravity_reports, j, roof; which)
     fb = _gravity_strength_actions(gb)
     ft = _gravity_strength_actions(gt)
@@ -435,7 +458,8 @@ function _segment_strength_batches(j, roof, gravity_reports, wind_reports, qe_re
         (rho === nothing || SDS === nothing) && throw(ArgumentError(
             "ordinary wall stage: a seismic segment check needs rho and SDS."))
         for k in eachindex(effects)
-            qb, qt = _report_end_pair(qe_reports[k], j, which)
+            qb, qt = prepared === nothing && qe_override !== nothing ?
+                qe_override[k] : _report_end_pair(qe_reports[k], j, which)
             first_b = _seismic_strength_actions(gb, qb, rho, SDS)
             first_t = _seismic_strength_actions(gt, qt, rho, SDS)
             if prepared === nothing
@@ -513,6 +537,56 @@ function _first_order_case_reports(struc, layout, loads; displacements=nothing)
     return _segment_force_reports(struc.walls, layout, u, loads)
 end
 
+"Per-ELF-case segment cuts for the strength cases. `nothing` without an ELF analysis."
+function _strength_elf_segment_reports(struc, layout, elf)
+    elf === nothing && return nothing
+    length(elf.displacements) == length(elf.cases) || throw(ArgumentError(
+        "ordinary wall stage: P-delta scaling needs one stored displacement per ELF case."))
+    reports = Vector{Any}(nothing, length(elf.cases))
+    for (j, c) in enumerate(elf.cases)
+        c.purpose === :strength || continue
+        loads = _elf_loads(struc, elf.levels, c.Fx_kN, c.Mz_kN_m,
+                           elf_direction_vector(elf, c.direction))
+        reports[j] = only(_first_order_case_reports(
+            struc, layout, [loads]; displacements=[elf.displacements[j]]))
+    end
+    return reports
+end
+
+"One scaled QE pair per effect, or `nothing` when the story stiffness already has P-delta."
+function _first_order_qe_override(struc, elf, effects, case_reports, wall, j, which)
+    case_reports === nothing && return nothing
+    effects === nothing && return nothing
+    return [_scaled_segment_ends(case_reports, e, struc, elf, wall, j, which)
+            for e in effects]
+end
+
+"""
+Segment-end QE with each ELF term multiplied by its story's `1/(1−θ)`.
+
+# Citation
+ASCE 7-22 §12.8.7 (corpus: asce-7-22, PDF page 188).
+"""
+function _scaled_segment_ends(case_reports, effect, struc, elf, wall, j, which)
+    level = _elf_level_index(struc, elf, wall)
+    bottom = WallAction(0.0, 0.0, 0.0)
+    top = WallAction(0.0, 0.0, 0.0)
+    for (idx, f) in effect.terms
+        report = case_reports[idx]
+        report === nothing && throw(ArgumentError(
+            "ordinary wall stage: seismic effect $(effect.label) names ELF case $idx, " *
+            "which has no strength cut."))
+        c = elf.cases[idx]
+        m = f * _drift_multiplier(elf, c.direction, c.torsion, level)
+        b, t = _report_end_pair(report, j, which)
+        bottom = WallAction(bottom.N + m * b.N, bottom.V + m * b.V, bottom.M + m * b.M,
+                            bottom.Vo + m * b.Vo, bottom.Mo + m * b.Mo)
+        top = WallAction(top.N + m * t.N, top.V + m * t.V, top.M + m * t.M,
+                         top.Vo + m * t.Vo, top.Mo + m * t.Mo)
+    end
+    return bottom, top
+end
+
 """
 Check one vertical segment.
 
@@ -522,7 +596,7 @@ segment is the ordinary-wall check on the design actions.
 """
 function _check_vertical_segment(wall, seg, batches, have_second::Bool;
                                material, wall_index::Int, boundary::Symbol,
-                               plan_axis, direction::Symbol, Moop)
+                               plan_axis, direction::Symbol, Moop, slab_basis=nothing)
     if seg.design === :column
         nonsway = have_second && all(batch -> story_end_moments_are_nonsway(
             batch.first_bottom, batch.first_top,
@@ -548,7 +622,8 @@ function _check_vertical_segment(wall, seg, batches, have_second::Bool;
     for batch in batches
         append!(records, check_pier_segment(
             wall, seg, batch.second_bottom, batch.second_top;
-            material, wall_index, case=batch.case, boundary, plan_axis, Moop))
+            material, wall_index, case=batch.case, boundary, plan_axis, Moop,
+            slab_basis=slab_basis))
     end
     return records
 end

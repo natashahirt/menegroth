@@ -83,8 +83,11 @@ const BIAXIAL_24X24 = (
         Pnx = 2250.0,       # kip (approx) - capacity at ex only
         Pny = 2050.0,       # kip (approx) - capacity at ey only
         # Calculated biaxial capacity
-        Pn_calc = 1880.0,   # kip (approx) - from reciprocal formula
-        adequate = true,    # Pn_calc > Pn_req = 1846 kip
+        # 1/(1/2250 + 1/2050 − 1/2584) = 1834 kip. The previously stored
+        # 1880 kip does not follow from these uniaxial capacities, and 1834
+        # is short of Pn_req = 1846 kip.
+        Pn_calc = 1834.0,   # kip, nearest kip
+        adequate = false,
     ),
     
     # ===== BRESLER LOAD CONTOUR METHOD =====
@@ -104,11 +107,13 @@ const BIAXIAL_24X24 = (
     ),
     
     # ===== PCA LOAD CONTOUR METHOD =====
-    # Simplified version using β factor
+    # EB712 Eq. (15), page 224: the smaller relative moment is multiplied
+    # by (1−β)/β, not by β. β = 0.65 → (1−0.65)/0.65 = 0.5385.
+    # ratio_x = 300/(0.65×682.8) = 0.676, ratio_y = 0.282
+    # util = 0.676 + 0.5385×0.282 = 0.828
     pca_contour = (
-        β = 0.65,           # Biaxial factor (from design charts)
-        # Mnx/Mnox + β×Mny/Mnoy ≤ 1.0
-        util = 0.86,        # 0.676 + 0.65×0.282 ≈ 0.86
+        β = 0.65,
+        util = 0.828,
         adequate = true,
     ),
     

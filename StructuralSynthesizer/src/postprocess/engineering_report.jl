@@ -563,19 +563,23 @@ function _report_beams(io::IO, design::BuildingDesign; du::DisplayUnits=design.p
     force_u = _ul(du, :force)
     len_u = _ul(du, :length)
 
-    Printf.@printf(io, "  %-5s %-12s %9s %9s %9s %8s %8s %4s\n",
-        "Beam", "Section", "Mu($mom_u)", "Vu($force_u)", "L($len_u)", "FlxRat", "ShrRat", "OK?")
-    Printf.@printf(io, "  %-5s %-12s %9s %9s %9s %8s %8s %4s\n",
-        "─"^5, "─"^12, "─"^9, "─"^9, "─"^9, "─"^8, "─"^8, "─"^4)
+    println(io, "  Mu is the flexure-check demand. Case is the peak of the solved load case.")
+    println(io)
+    Printf.@printf(io, "  %-5s %-22s %9s %9s %9s %9s %8s %8s %4s\n",
+        "Beam", "Section", "Mu($mom_u)", "Case($mom_u)", "Vu($force_u)", "L($len_u)", "FlxRat", "ShrRat", "OK?")
+    Printf.@printf(io, "  %-5s %-22s %9s %9s %9s %9s %8s %8s %4s\n",
+        "─"^5, "─"^22, "─"^9, "─"^9, "─"^9, "─"^9, "─"^8, "─"^8, "─"^4)
 
     for (beam_idx, br) in sort(collect(design.beams); by=first)
-        Mu_val = _to_report(du, :moment, br.Mu; digits=1)
+        Mu_chk = br.check_Mu === nothing ? br.Mu : br.check_Mu
+        Mu_val = _to_report(du, :moment, Mu_chk; digits=1)
+        Case_val = _to_report(du, :moment, br.Mu; digits=1)
         Vu_val = _to_report(du, :force, br.Vu; digits=1)
         L_val  = _to_report(du, :length, br.member_length; digits=1)
 
-        Printf.@printf(io, "  B-%-2d %-12s %9.1f %9.1f %9.1f %8s %8s %4s\n",
+        Printf.@printf(io, "  B-%-2d %-22s %9.1f %9.1f %9.1f %9.1f %8s %8s %4s\n",
             beam_idx, br.section_size,
-            Mu_val, Vu_val, L_val,
+            Mu_val, Case_val, Vu_val, L_val,
             fv(br.flexure_ratio; d=3), fv(br.shear_ratio; d=3), pass_fail(br.ok))
     end
     println(io)

@@ -308,3 +308,36 @@ end
     r = StructuralSizer.radius_of_gyration(section, :x)
     @test ustrip(u"inch", r) ≈ 5.0 atol=0.1
 end
+
+@testset "Circular section layout limits" begin
+    # 20 #6 in a 12" circle: ρg = 0.078 is within §10.9.1, but the bars are
+    # 0.38" apart, below the §25.2.3 minimum of 1.5".
+    @test_throws ArgumentError RCCircularSection(D = 12u"inch", bar_size = 6, n_bars = 20)
+    # Bars cannot fit inside the cover and spiral.
+    @test_throws ArgumentError RCCircularSection(D = 4u"inch", bar_size = 6, n_bars = 6)
+    for s in standard_rc_circular_columns()
+        @test 0.01 <= s.ρg <= 0.08
+    end
+end
+
+@testset "Circular resize magnifies for slenderness" begin
+    mat = ReinforcedConcreteMaterial(NWC_4000, Rebar_60)
+    orig = RCCircularSection(D = 16u"inch", bar_size = 8, n_bars = 8)
+    g = ConcreteMemberGeometry(12u"ft"; Lu = 12u"ft", kx = 1.0, ky = 1.0, braced = true)
+    Pu, Mu = 400.0, 80.0
+    plain = resize_column_with_reinforcement(orig, 18u"inch", 18u"inch", Pu, Mu, mat)
+    slender = resize_column_with_reinforcement(orig, 18u"inch", 18u"inch", Pu, Mu, mat;
+                                               geometry = g, βdns = 0.6)
+    # Bars sized without the magnifier do not resist the magnified moment.
+    @test !StructuralSizer._reinforcement_adequate(plain, mat, Pu, Mu, 0.0; geometry = g)
+    @test StructuralSizer._reinforcement_adequate(slender, mat, Pu, Mu, 0.0; geometry = g)
+    @test ustrip(u"inch^2", slender.As_total) > ustrip(u"inch^2", plain.As_total)
+    # Muy enters as the resultant moment.
+    biax = resize_column_with_reinforcement(orig, 18u"inch", 18u"inch", Pu, Mu, mat;
+                                            Muy = Mu, geometry = g)
+    @test StructuralSizer._reinforcement_adequate(biax, mat, Pu, Mu, Mu; geometry = g)
+    @test ustrip(u"inch^2", biax.As_total) >= ustrip(u"inch^2", slender.As_total)
+    # A demand no layout can carry is an error, not a silently kept section.
+    @test_throws ErrorException resize_column_with_reinforcement(
+        orig, 18u"inch", 18u"inch", 2000.0, 400.0, mat; geometry = g)
+end

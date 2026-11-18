@@ -568,3 +568,15 @@ const has_drop_panels_fn = SS.has_drop_panels
 end  # top-level testset
 
 println("\n✓ All flat slab tests complete.")
+
+@testset "Table 9.5(c) minimum thickness follows fy" begin
+    # ACI 318-11 Table 9.5(c), page 134; footnote † interpolates in fy.
+    ln = 300u"inch"
+    @test min_thickness(FlatPlate(), ln; discontinuous_edge = true, fy = 75000u"psi") ≈ ln / 28
+    @test min_thickness(FlatPlate(), ln; discontinuous_edge = false, fy = 40000u"psi") ≈ ln / 36
+    @test min_thickness(FlatSlab(), ln; discontinuous_edge = true, fy = 75000u"psi") ≈ ln / 31
+    @test min_thickness(FlatSlab(), ln; discontinuous_edge = false, fy = 40000u"psi") ≈ ln / 40
+    h70 = min_thickness(FlatSlab(), ln; discontinuous_edge = false, fy = 70000u"psi")
+    @test h70 ≈ ln / 36 + (70 - 60) / 15 * (ln / 34 - ln / 36)
+    @test_throws ArgumentError min_thickness(FlatPlate(), ln; fy = 80000u"psi")
+end

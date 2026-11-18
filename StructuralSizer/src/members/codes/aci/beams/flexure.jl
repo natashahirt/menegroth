@@ -617,7 +617,7 @@ function design_beam_flexure(Mu::Moment, b::Length, d::Length, fc::Pressure, fy:
 
     if Mu ≤ φ_Mn_singly
         # --- Singly reinforced ---
-        As_req = required_reinforcement(Mu, b, d, fc, fy)
+        As_req = required_reinforcement(Mu, b, d, fc, fy; require_tension_controlled = false)
         if isinf(As_req)
             error("Beam section inadequate: moment demand exceeds capacity. Increase d or f'c.")
         end

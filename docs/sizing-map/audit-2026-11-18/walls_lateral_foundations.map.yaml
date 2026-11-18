@@ -1,0 +1,621 @@
+# Map fragment: walls, lateral system, foundations (main working tree, 2026-11-18).
+# Phase 0 foundation items that exist only on branch row-f-nlp are NOT mapped
+# here; see walls_lateral_foundations.md "Preface".
+area: walls_lateral_foundations
+nodes:
+  # ---------------------------------------------------------------- stages
+  - id: wall.stage
+    level: L1
+    kind: stage
+    anchor: StructuralSynthesizer/src/workflow/pipeline_spec.jl::_walls_with_member_recheck!
+    summary: Walls stage with member recheck; needs_sync=false
+    reads: [member.column.section, member.beam.section, slab.result]
+    writes: [wall.t, wall.rho_l, wall.rho_t, member.frame_section_floors]
+  - id: fdn.stage
+    level: L1
+    kind: stage
+    anchor: StructuralSynthesizer/src/workflow/capture_results.jl::_size_foundations!
+    summary: initialize_supports! then size_foundations!; gravity reactions only
+    reads: [asap.node.reaction]
+    writes: [fdn.B, fdn.L, fdn.h, fdn.type]
+
+  # ---------------------------------------------------------------- loops
+  - id: wall.loop.member_recheck
+    level: L1
+    kind: loop
+    parent: wall.stage
+    anchor: StructuralSynthesizer/src/workflow/pipeline_spec.jl::_walls_with_member_recheck!
+    summary: Walls then member stage until member sections repeat
+    reads: [wall.t, member.frame_section_floors]
+    writes: [member.column.section, member.beam.section]
+    loop:
+      iterates: wall stage + member stage
+      budget: 4 rounds
+      growth: grow-only
+      converges_when: wall.t, frame floors unchanged and no overstressed column, or member sections identical
+      ratchet: true
+  - id: wall.loop.thickness_jump
+    level: L1
+    kind: loop
+    parent: wall.stage
+    anchor: StructuralSynthesizer/src/analyze/lateral/ordinary_wall_stage.jl::design_ordinary_walls!
+    summary: settle! over analyze -> propose -> apply; last pass does not jump
+    reads: [wall.t]
+    writes: [wall.t, wall.rho_l, wall.rho_t]
+    loop:
+      iterates: wall.t per thickness group (default :pier)
+      budget: _wall_thickness_pass_cap + 1 (3 for :all, else 7)
+      growth: grow-only
+      converges_when: no group target grows by more than 0.1 mm
+      ratchet: true
+    trace_labels: [":wall_thickness_jump"]
+  - id: wall.loop.special_ve_end_bars
+    level: L2
+    kind: loop
+    parent: wall.special
+    anchor: StructuralSynthesizer/src/analyze/lateral/ordinary_wall_stage.jl::_analyze_lateral_walls!
+    summary: Fixed point between Ve shear and boundary end bars on special rows
+    reads: [wall.t, wall.rho_l, wall.rho_t]
+    writes: [wall.rho_l, wall.rho_t, wall.end_bars]
+    loop:
+      iterates: special wall rho and end bars
+      budget: 12 passes, then throws
+      growth: free+guard
+      converges_when: _same_end_bars
+      ratchet: false
+  - id: wall.loop.rowf_shear
+    level: L2
+    kind: loop
+    parent: wall.interactive
+    anchor: StructuralSynthesizer/src/analyze/lateral/interactive_checks.jl::_enforce_interactive_wall_shear!
+    summary: Raise rho_t on weakest wall until walls carry 0.75 V
+    reads: [wall.rho_t, wall.t]
+    writes: [wall.rho_t, wall.rho_l]
+    loop:
+      iterates: wall.rho_t on 0.0005 grid
+      budget: until stall
+      growth: grow-only
+      converges_when: sum phiVn >= 0.75 story shear
+      ratchet: false
+  - id: wall.loop.rowf_frame_floors
+    level: L2
+    kind: loop
+    parent: wall.interactive
+    anchor: StructuralSynthesizer/src/analyze/lateral/interactive_checks.jl::_raise_frame_floors!
+    summary: Frame-only 25% V check raises catalog floors; never lowered on main
+    reads: [member.column.section, member.beam.section]
+    writes: [member.frame_section_floors]
+    loop:
+      iterates: catalog floor per member group
+      budget: catalog length
+      growth: grow-only
+      converges_when: every group member passes
+      ratchet: true
+  - id: wall.loop.rho_walk
+    level: L3
+    kind: loop
+    parent: wall.ordinary
+    anchor: StructuralSynthesizer/src/analyze/lateral/wall_ordinary_check.jl::select_ordinary_wall_reinforcement!
+    summary: rho_t then rho_l from code floor on 0.0005 grid
+    reads: [wall.t, demand.wall_actions]
+    writes: [wall.rho_t, wall.rho_l]
+    loop:
+      iterates: wall.rho_t, wall.rho_l
+      budget: up to 0.02
+      growth: free
+      converges_when: first passing grid point
+      ratchet: false
+  - id: wall.loop.proxy_search
+    level: L3
+    kind: loop
+    parent: wall.thickness_jump.propose
+    anchor: StructuralSynthesizer/src/analyze/lateral/wall_thickness_jump.jl::_first_passing_thickness
+    summary: Thinnest whole inch that passes the frozen-action proxy
+    reads: [wall.t, demand.wall_actions]
+    writes: []
+    loop:
+      iterates: candidate wall.t
+      budget: catalog limit (soft +12 in, to 72 in)
+      growth: grow-only
+      converges_when: wall_thickness_passes
+      ratchet: false
+  - id: fdn.loop.reaction_grouping
+    level: L2
+    kind: loop
+    parent: fdn.spread
+    anchor: StructuralSynthesizer/src/analyze/foundations/grouping.jl::group_foundations_by_reaction!
+    summary: Greedy +/-15% clustering; representative takes component-wise max
+    reads: [demand.fdn.Pu, demand.fdn.Ps]
+    writes: [fdn.group_id]
+    loop:
+      iterates: group membership
+      budget: one pass
+      growth: grow-only
+      converges_when: all supports assigned
+      ratchet: true
+  - id: fdn.loop.mat_winkler_h
+    level: L3
+    kind: loop
+    parent: fdn.mat
+    anchor: StructuralSizer/src/foundations/codes/aci/mat_winkler/design.jl::_design_mat_winkler_fea
+    summary: Linear h sweep, active-set Winkler FE solve per step
+    reads: [fdn.B, fdn.L, soil.ks]
+    writes: [fdn.h]
+    loop:
+      iterates: fdn.h
+      budget: 60 steps
+      growth: grow-only
+      converges_when: punching, flexure, bearing pass
+      ratchet: false
+
+  # ---------------------------------------------------------------- policies
+  - id: wall.thickness_jump.propose
+    level: L2
+    kind: policy
+    parent: wall.loop.thickness_jump
+    anchor: StructuralSynthesizer/src/analyze/lateral/wall_thickness_jump.jl::propose_wall_thicknesses
+    summary: Per group t0 * max(drift scale, interactive, shear cap, gates); drift fail marks every group
+    reads: [wall.t, lateral.drift.ratio, demand.wall_actions]
+    writes: [wall.t_target]
+  - id: wall.thickness_jump.drift_scale
+    level: L3
+    kind: policy
+    parent: wall.thickness_jump.propose
+    anchor: StructuralSynthesizer/src/analyze/lateral/wall_thickness_jump.jl::_drift_scale
+    summary: One max ratio over all stories, directions and torsion signs, applied to every group
+    reads: [lateral.drift.ratio]
+    writes: []
+  - id: wall.thickness_jump.apply
+    level: L2
+    kind: sync
+    parent: wall.loop.thickness_jump
+    anchor: StructuralSynthesizer/src/analyze/lateral/wall_thickness_jump.jl::apply_wall_thickness!
+    summary: Grow-only apply, reset rho to 0.0025, update_analysis!(:geometry) full rebuild
+    reads: [wall.t_target]
+    writes: [wall.t, wall.rho_l, wall.rho_t]
+  - id: wall.boundary_thickness
+    level: L3
+    kind: policy
+    parent: wall.special
+    anchor: StructuralSynthesizer/src/analyze/lateral/wall_thickness_jump.jl::_raise_boundary_thickness!
+    summary: Per-pier raise to clear the boundary web limit
+    clause: ACI 318-19 §18.10.6.4
+    reads: [wall.t]
+    writes: [wall.t_target]
+  - id: wall.gravity_share_gate
+    level: L3
+    kind: check
+    parent: wall.lateral_analysis
+    anchor: StructuralSynthesizer/src/analyze/lateral/interactive_checks.jl::_refuse_building_frame_gravity!
+    summary: Throws when walls carry more than 20% of gravity on building-frame rows
+    clause: ASCE 7-22 Table 12.2-1 rows B.4/B.6 (project limit)
+    reads: [demand.wall_dead_share]
+    writes: []
+  - id: fdn.strategy
+    level: L2
+    kind: policy
+    parent: fdn.stage
+    anchor: StructuralSynthesizer/src/analyze/foundations/strategy.jl::_resolve_strategy
+    summary: Coverage sum(Ps/qa)/bbox; >0.50 mat, >0.30 strip, else spread
+    reads: [demand.fdn.Ps, soil.qa]
+    writes: [fdn.type]
+
+  # ---------------------------------------------------------------- analysis
+  - id: wall.lateral_analysis
+    level: L2
+    kind: analysis
+    parent: wall.stage
+    anchor: StructuralSynthesizer/src/analyze/lateral/ordinary_wall_stage.jl::_analyze_lateral_walls!
+    summary: Builds and solves every lateral case itself (embedded in designer)
+    reads: [wall.t, member.column.section, member.beam.section, slab.result]
+    writes: [demand.wall_actions, lateral.drift.ratio]
+    fidelity: shell_story
+  - id: wall.gravity_analysis
+    level: L2
+    kind: analysis
+    parent: wall.stage
+    anchor: StructuralSynthesizer/src/analyze/lateral/ordinary_wall_stage.jl::_analyze_gravity_walls!
+    summary: Gravity-only wall path when params.lateral === nothing
+    reads: [wall.t]
+    writes: [demand.wall_actions]
+    fidelity: shell_story
+  - id: lateral.gravity_basic
+    level: L2
+    kind: analysis
+    parent: wall.lateral_analysis
+    anchor: StructuralSynthesizer/src/analyze/lateral/gravity_basic_cases.jl::solve_gravity_basic_cases
+    summary: D, L, roof basic cases on the shell model with cut-equilibrium checks
+    reads: [wall.t]
+    writes: [demand.gravity_basic]
+    fidelity: shell_story
+  - id: lateral.elf
+    level: L2
+    kind: analysis
+    parent: wall.lateral_analysis
+    anchor: StructuralSynthesizer/src/analyze/lateral/elf_story_cases.jl::elf_story_analysis
+    summary: ELF story forces (closed form) on diaphragm masters, 2 purposes x 2 dirs x 3 torsion
+    clause: ASCE 7-22 §12.8
+    reads: [lateral.W, wall.t]
+    writes: [demand.QE]
+    fidelity: shell_story
+  - id: lateral.seismic_weight
+    level: L3
+    kind: analysis
+    parent: lateral.elf
+    anchor: StructuralSynthesizer/src/analyze/lateral/elf_story_cases.jl::_elf_weight_items
+    summary: W from cells, wall shells and frame self-weight; no cladding (wall_SDL) on main
+    clause: ASCE 7-22 §12.7.2
+    reads: [wall.t, member.beam.section, member.column.section]
+    writes: [lateral.W]
+    fidelity: closed_form
+  - id: lateral.wind
+    level: L2
+    kind: analysis
+    parent: wall.lateral_analysis
+    anchor: StructuralSynthesizer/src/analyze/lateral/wind_story_cases.jl::wind_story_analysis
+    summary: SS loads/wind pressures and Fig. 27.3-8 cases placed on masters
+    clause: ASCE 7-22 Eq. 27.3-1, Fig. 27.3-8, §27.1.5
+    reads: [lateral.qz, lateral.qh]
+    writes: [demand.W_cases]
+    fidelity: shell_story
+  - id: lateral.second_order
+    level: L2
+    kind: analysis
+    parent: wall.lateral_analysis
+    anchor: StructuralSynthesizer/src/analyze/lateral/ordinary_wall_stage.jl::_build_second_order
+    summary: One K - K_G factorization per factored-gravity key (about 4-6); dominant cost
+    clause: ACI 318-19 §6.7 (elastic second-order)
+    reads: [demand.gravity_basic, demand.QE, demand.W_cases]
+    writes: [demand.wall_actions]
+    fidelity: shell_story
+  - id: lateral.drift
+    level: L2
+    kind: check
+    parent: wall.lateral_analysis
+    anchor: StructuralSynthesizer/src/analyze/lateral/ordinary_wall_stage.jl::_story_drift_with_pdelta
+    summary: Story drift with Cd/Ie and 1/(1-theta); max ratio drives every wall group
+    clause: ASCE 7-22 §12.8.6, §12.8.7, §12.12.1
+    reads: [demand.QE]
+    writes: [lateral.drift.ratio]
+  - id: lateral.diaphragm
+    level: L2
+    kind: analysis
+    parent: wall.lateral_analysis
+    anchor: StructuralSynthesizer/src/analyze/diaphragm.jl::classify_diaphragm_idealization
+    summary: Rigid / semirigid / flexible from user-declared construction; flexible floors stay first order
+    clause: ASCE 7-22 §12.3.1
+    reads: [slab.type]
+    writes: [lateral.diaphragm_layout]
+    fidelity: other
+  - id: lateral.reduced_evaluator
+    level: L2
+    kind: analysis
+    parent: wall.stage
+    anchor: StructuralSizer/src/walls/lateral/sensitivity.jl::story_drift_sensitivity
+    summary: Reduced 3-DOF rigid diaphragm model with analytic drift gradient; no SY caller (unused)
+    reads: [wall.t]
+    writes: []
+    fidelity: closed_form
+  - id: fdn.support_demands
+    level: L2
+    kind: analysis
+    parent: fdn.stage
+    anchor: StructuralSynthesizer/src/analyze/foundations/demands.jl::support_demands
+    summary: Pu/M/V from last gravity solve reactions; Ps from one unfactored D+L solve; no lateral
+    reads: [asap.node.reaction]
+    writes: [demand.fdn.Pu, demand.fdn.Ps, demand.fdn.M]
+    fidelity: frame
+
+  # ---------------------------------------------------------------- wall elements and checks
+  - id: wall.ordinary
+    level: L2
+    kind: element
+    parent: wall.stage
+    anchor: StructuralSynthesizer/src/analyze/lateral/wall_ordinary_check.jl::check_ordinary_wall
+    summary: Ordinary RC wall pier checks per combination
+    reads: [wall.t, wall.rho_l, wall.rho_t, demand.wall_actions, slab.Moop]
+    writes: []
+  - id: wall.ordinary.inplane_shear
+    level: L3
+    kind: check
+    parent: wall.ordinary
+    anchor: StructuralSizer/src/walls/checker.jl::check_wall_inplane_shear
+    clause: ACI 318-19 §11.5.4
+    reads: [wall.t, wall.rho_t, demand.Vu]
+    writes: []
+  - id: wall.ordinary.min_reinforcement
+    level: L3
+    kind: check
+    parent: wall.ordinary
+    anchor: StructuralSizer/src/walls/checker.jl::check_wall_min_reinforcement
+    clause: ACI 318-19 §11.6.2
+    reads: [wall.rho_l, wall.rho_t]
+    writes: []
+  - id: wall.ordinary.axial_flexure
+    level: L3
+    kind: check
+    parent: wall.ordinary
+    anchor: StructuralSizer/src/walls/flexure.jl
+    clause: ACI 318-19 §22.2, §22.4.2.1
+    reads: [wall.t, wall.rho_l, demand.Pu, demand.Mu]
+    writes: []
+  - id: wall.ordinary.out_of_plane
+    level: L3
+    kind: check
+    parent: wall.ordinary
+    anchor: StructuralSizer/src/walls/out_of_plane.jl
+    summary: Out-of-plane slenderness with Moop from the slab; flat plate only
+    clause: ACI 318-19 §11.8
+    reads: [wall.t, slab.Moop, demand.Pu]
+    writes: []
+  - id: wall.ordinary.bearing
+    level: L3
+    kind: check
+    parent: wall.ordinary
+    anchor: StructuralSizer/src/walls/bearing.jl::check_wall_bearing_empirical
+    clause: ACI 318-19 §11.5.3
+    reads: [wall.t, demand.Pu]
+    writes: []
+  - id: wall.ordinary.secant_limit
+    level: L3
+    kind: check
+    parent: wall.ordinary
+    anchor: StructuralSynthesizer/src/analyze/lateral/ordinary_wall_stage.jl::_each_second_order
+    summary: Second-order moment at most 1.4 x first-order
+    clause: ACI 318-19 §6.2.5.3
+    reads: [demand.wall_actions]
+    writes: []
+  - id: wall.special
+    level: L2
+    kind: element
+    parent: wall.stage
+    anchor: StructuralSynthesizer/src/analyze/lateral/ordinary_wall_stage.jl::_analyze_lateral_walls!
+    summary: Special structural walls on Table 12.2-1 rows A1/B4
+    reads: [wall.t, wall.rho_l, wall.rho_t, demand.wall_actions]
+    writes: [wall.rho_l, wall.rho_t, wall.end_bars]
+  - id: wall.special.shear_ve
+    level: L3
+    kind: check
+    parent: wall.special
+    anchor: StructuralSizer/src/walls/special_boundary.jl::design_special_wall_shear!
+    clause: ACI 318-19 §18.10.3, §18.10.4
+    reads: [wall.t, wall.rho_t, demand.Vu]
+    writes: [wall.rho_t]
+  - id: wall.special.boundary_elements
+    level: L3
+    kind: check
+    parent: wall.special
+    anchor: StructuralSizer/src/walls/special_boundary.jl::design_boundary_end_bars
+    clause: ACI 318-19 §18.10.2.4, §18.10.6.2, §18.10.6.4
+    reads: [wall.t, demand.Pu, demand.Mu, demand.delta_u]
+    writes: [wall.end_bars]
+  - id: wall.coupling_beam
+    level: L2
+    kind: element
+    parent: wall.stage
+    anchor: StructuralSynthesizer/src/analyze/lateral/wall_opening_checks.jl::check_coupling_beam
+    summary: Checked, not sized; bw = wall.t, h = segment height; bars/hoops designed
+    clause: ACI 318-19 §18.10.7, §18.6
+    reads: [wall.t, demand.segment_actions]
+    writes: [coupling_beam.bars]
+  - id: wall.coupling_beam.diagonal
+    level: L3
+    kind: check
+    parent: wall.coupling_beam
+    anchor: StructuralSizer/src/walls/coupling_beams.jl
+    clause: ACI 318-19 §18.10.7.4
+    reads: [wall.t, demand.Vu]
+    writes: []
+  - id: wall.pierced_segments
+    level: L2
+    kind: element
+    parent: wall.stage
+    anchor: StructuralSynthesizer/src/analyze/lateral/wall_opening_checks.jl::_design_pierced_segments!
+    summary: Vertical segments and spandrels; failures charge owner wall group with no proxy trial
+    reads: [wall.t, demand.segment_actions]
+    writes: [wall.rho_l, wall.rho_t]
+  - id: wall.interactive
+    level: L2
+    kind: element
+    parent: wall.stage
+    anchor: StructuralSynthesizer/src/analyze/lateral/interactive_checks.jl::_check_interactive_frames!
+    summary: Row F dual system; frames alone for 25% V
+    clause: ASCE 7-22 §12.2.5.8
+    reads: [member.column.section, member.beam.section, demand.QE]
+    writes: [member.frame_section_floors]
+  - id: wall.gravity_frames
+    level: L3
+    kind: check
+    parent: wall.stage
+    anchor: StructuralSynthesizer/src/analyze/lateral/gravity_induced.jl::gravity_induced_checks
+    summary: SDC D-F gravity frame detailing records; no sizing lever
+    clause: ACI 318-19 §18.14.3.2, §18.14.3.3
+    reads: [member.column.section, lateral.drift.ratio]
+    writes: []
+
+  # ---------------------------------------------------------------- foundations
+  - id: fdn.grade_walls
+    level: L2
+    kind: owner
+    parent: fdn.stage
+    anchor: StructuralSynthesizer/src/analyze/foundations/wall_groups.jl::design_grade_wall_foundations
+    summary: Closed cells -> mat (walls=legs), open runs -> wall strip; vertical reactions only
+    reads: [asap.node.reaction, demand.fdn.Ps]
+    writes: [fdn.type, fdn.B, fdn.h]
+  - id: fdn.spread
+    level: L2
+    kind: element
+    parent: fdn.stage
+    anchor: StructuralSizer/src/foundations/codes/aci/spread_footing.jl::design_footing
+    summary: Square plan, one FoundationDemand (gravity), kern gate, depth bisection
+    reads: [demand.fdn.Pu, demand.fdn.Ps, demand.fdn.M, soil.qa]
+    writes: [fdn.B, fdn.h]
+  - id: fdn.spread.kern
+    level: L3
+    kind: check
+    parent: fdn.spread
+    anchor: StructuralSizer/src/foundations/codes/aci/spread_footing.jl::design_footing
+    summary: Grow B until q_min >= 0 and service q_max <= qa
+    clause: ACI 336.2R Eq. 3-1
+    reads: [fdn.B, demand.fdn.Ps, demand.fdn.M]
+    writes: [fdn.B]
+  - id: fdn.spread.punching
+    level: L3
+    kind: check
+    parent: fdn.spread
+    anchor: StructuralSizer/src/foundations/codes/aci/spread_footing.jl::design_footing
+    clause: ACI 318-11 §11.11.2.1
+    reads: [fdn.h, demand.fdn.Pu]
+    writes: []
+  - id: fdn.spread.development
+    level: L3
+    kind: check
+    parent: fdn.spread
+    anchor: StructuralSizer/src/foundations/codes/aci/spread_footing.jl::design_footing
+    clause: ACI 318-11 Eq. 12-1, §12.5.2
+    reads: [fdn.B, fdn.bars]
+    writes: [fdn.B]
+  - id: fdn.strip
+    level: L2
+    kind: element
+    parent: fdn.stage
+    anchor: StructuralSizer/src/foundations/codes/aci/strip_footing.jl::design_footing
+    summary: Column-line strip, B outer / h inner, h <= 0.5B, worse of two axes when tied
+    reads: [demand.fdn.Pu, demand.fdn.Ps, soil.qa]
+    writes: [fdn.B, fdn.h]
+  - id: fdn.mat
+    level: L2
+    kind: element
+    parent: fdn.stage
+    anchor: StructuralSizer/src/foundations/codes/aci/mat_footing.jl::design_footing
+    summary: Rigid strips first, gate, then Winkler FEA or throw
+    reads: [demand.fdn.Pu, demand.fdn.Ps, soil.qa, soil.ks]
+    writes: [fdn.B, fdn.L, fdn.h]
+    trace_labels: ["design_footing_mat_aci"]
+  - id: fdn.mat.rigid_strips
+    level: L3
+    kind: check
+    parent: fdn.mat
+    anchor: StructuralSizer/src/foundations/codes/aci/mat_footing.jl::_rigid_mat_strip_moments
+    summary: Coefficient moments wL^2/10, /11, /12 (wL^2/2 single span); not Bowles statics on main
+    clause: none cited in code (approximate coefficient moments)
+    reads: [fdn.B, fdn.L, demand.fdn.Pu]
+    writes: []
+  - id: fdn.mat.rigid_gate
+    level: L3
+    kind: check
+    parent: fdn.mat
+    anchor: StructuralSizer/src/foundations/codes/aci/mat_footing.jl::_rigid_mat_inapplicable
+    summary: Kr >= 0.5 on both widths, spans < 1.75/lambda, loads/spans within 20%; ks missing => reason
+    clause: ACI 336.2R Eq. 5-1, §5.2, §6.1.2 Step 3
+    reads: [fdn.h, fdn.B, fdn.L, soil.Es, soil.ks]
+    writes: []
+  - id: fdn.kr
+    level: L3
+    kind: check
+    parent: fdn.wall_strip
+    anchor: StructuralSizer/src/foundations/codes/aci/wall_plan.jl::wall_footing_kr
+    summary: Footing h^3/12 + sum walls t_w h_w^3/12 / B; no framed-member term on main
+    clause: ACI 336.2R Eq. 5-1, 5-2
+    reads: [fdn.h, fdn.B, wall.t, soil.Es]
+    writes: []
+  - id: fdn.mat.winkler
+    level: L3
+    kind: analysis
+    parent: fdn.mat
+    anchor: StructuralSizer/src/foundations/codes/aci/mat_winkler/design.jl::_design_mat_winkler_fea
+    summary: Plate on Winkler springs with active-set uplift
+    clause: ACI 336.2R §6.1.2 Step 4
+    reads: [fdn.h, soil.ks]
+    writes: [fdn.h]
+    fidelity: fea_coarse
+  - id: fdn.wall_strip
+    level: L2
+    kind: element
+    parent: fdn.grade_walls
+    anchor: StructuralSizer/src/foundations/codes/aci/wall_strip_footing.jl::design_footing
+    summary: Plan from service load with full contact; Kr at opts.min_depth; rigid or straight-wall Winkler
+    reads: [demand.wall_line.Pu, demand.wall_line.Ps, soil.qa, soil.Es]
+    writes: [fdn.B, fdn.h]
+    trace_labels: ["design_footing_wall_aci"]
+  - id: fdn.wall_strip.plan
+    level: L3
+    kind: check
+    parent: fdn.wall_strip
+    anchor: StructuralSizer/src/foundations/codes/aci/wall_plan.jl::_size_wall_plan
+    clause: ACI 318-11 §15.2.2; ACI 336.2R §3.2, §4.2
+    reads: [demand.wall_line.Ps, soil.qa]
+    writes: [fdn.B]
+  - id: fdn.wall_strip.winkler
+    level: L3
+    kind: analysis
+    parent: fdn.wall_strip
+    anchor: StructuralSizer/src/foundations/codes/aci/wall_strip_footing.jl::_design_wall_winkler
+    summary: Beam on elastic foundation, end springs doubled; straight walls only
+    clause: ACI 336.2R §5.4, §3.3.1
+    reads: [fdn.B, fdn.h, soil.ks]
+    writes: [fdn.h]
+    fidelity: closed_form
+  - id: fdn.group_envelope
+    level: L2
+    kind: policy
+    parent: fdn.spread
+    anchor: StructuralSynthesizer/src/analyze/foundations/grouping.jl::size_foundations_grouped!
+    summary: Component-wise max of Pu, Ps, M, V, c1, c2 (c >= 18 in) per group
+    reads: [demand.fdn.Pu, demand.fdn.Ps, demand.fdn.M]
+    writes: [fdn.B, fdn.h]
+
+edges:
+  # cross-area inputs
+  - {from: pipeline.members, to: wall.stage, kind: control}
+  - {from: member.column.section, to: wall.lateral_analysis, kind: data, var: member.column.section}
+  - {from: member.beam.section, to: wall.lateral_analysis, kind: data, var: member.beam.section}
+  - {from: slab.flat_plate.result, to: wall.ordinary.out_of_plane, kind: data, var: slab.Moop}
+  - {from: slab.type, to: lateral.diaphragm, kind: data, var: slab.type}
+  - {from: slab.result, to: lateral.seismic_weight, kind: data, var: slab.self_weight}
+  # walls internal
+  - {from: lateral.diaphragm, to: lateral.elf, kind: data, var: lateral.diaphragm_layout}
+  - {from: lateral.seismic_weight, to: lateral.elf, kind: data, var: lateral.W}
+  - {from: lateral.gravity_basic, to: lateral.second_order, kind: data, var: demand.gravity_basic}
+  - {from: lateral.elf, to: lateral.second_order, kind: data, var: demand.QE}
+  - {from: lateral.wind, to: lateral.second_order, kind: data, var: demand.W_cases}
+  - {from: lateral.elf, to: lateral.drift, kind: data, var: demand.QE}
+  - {from: lateral.second_order, to: wall.ordinary, kind: data, var: demand.wall_actions}
+  - {from: lateral.second_order, to: wall.special, kind: data, var: demand.wall_actions}
+  - {from: lateral.second_order, to: wall.pierced_segments, kind: data, var: demand.segment_actions}
+  - {from: lateral.second_order, to: wall.coupling_beam, kind: data, var: demand.segment_actions}
+  - {from: wall.lateral_analysis, to: wall.gravity_share_gate, kind: data, var: demand.wall_dead_share}
+  - {from: wall.lateral_analysis, to: wall.interactive, kind: call}
+  - {from: lateral.drift, to: wall.thickness_jump.drift_scale, kind: data, var: lateral.drift.ratio}
+  - {from: wall.thickness_jump.drift_scale, to: wall.thickness_jump.propose, kind: data, var: wall.t_target}
+  - {from: wall.ordinary, to: wall.thickness_jump.propose, kind: data, var: wall.check_failures}
+  - {from: wall.pierced_segments, to: wall.thickness_jump.propose, kind: data, var: wall.check_failures}
+  - {from: wall.boundary_thickness, to: wall.thickness_jump.propose, kind: data, var: wall.t_target}
+  - {from: wall.thickness_jump.propose, to: wall.thickness_jump.apply, kind: data, var: wall.t_target}
+  - {from: wall.thickness_jump.apply, to: wall.lateral_analysis, kind: feedback, var: wall.t}
+  - {from: wall.thickness_jump.apply, to: lateral.seismic_weight, kind: feedback, var: wall.t}
+  - {from: lateral.reduced_evaluator, to: wall.thickness_jump.propose, kind: data, var: lateral.drift.gradient}  # does not exist on main: unused
+  # wall <-> member feedback
+  - {from: wall.interactive, to: member.frame_section_floors, kind: data, var: member.frame_section_floors}
+  - {from: wall.loop.member_recheck, to: pipeline.members, kind: feedback, var: wall.t}
+  - {from: member.frame_section_floors, to: member.column.size, kind: data, var: member.frame_section_floors}
+  - {from: wall.thickness_jump.apply, to: slab.flat_plate.punching, kind: data, var: wall.t}  # missing: slab not restaled on wall jump
+  # foundations
+  - {from: pipeline.walls, to: fdn.stage, kind: control}
+  - {from: wall.lateral_analysis, to: fdn.support_demands, kind: data, var: none}  # missing: lateral reactions never stored on main
+  - {from: fdn.support_demands, to: fdn.grade_walls, kind: data, var: demand.wall_line.Pu}
+  - {from: fdn.grade_walls, to: fdn.wall_strip, kind: call}
+  - {from: fdn.grade_walls, to: fdn.mat, kind: call}
+  - {from: fdn.support_demands, to: fdn.strategy, kind: data, var: demand.fdn.Ps}
+  - {from: fdn.strategy, to: fdn.spread, kind: control}
+  - {from: fdn.strategy, to: fdn.strip, kind: control}
+  - {from: fdn.strategy, to: fdn.mat, kind: control}
+  - {from: fdn.support_demands, to: fdn.loop.reaction_grouping, kind: data, var: demand.fdn.Pu}
+  - {from: fdn.loop.reaction_grouping, to: fdn.group_envelope, kind: data, var: fdn.group_id}
+  - {from: fdn.group_envelope, to: fdn.spread, kind: data, var: demand.fdn.Pu}
+  - {from: fdn.mat.rigid_strips, to: fdn.mat.rigid_gate, kind: data, var: fdn.h}
+  - {from: fdn.mat.rigid_gate, to: fdn.mat.winkler, kind: control}
+  - {from: fdn.kr, to: fdn.mat.rigid_gate, kind: data, var: fdn.Kr}
+  - {from: fdn.kr, to: fdn.wall_strip, kind: data, var: fdn.Kr}
+  - {from: wall.thickness_jump.apply, to: fdn.kr, kind: data, var: wall.t}
+  - {from: member.column.section, to: fdn.spread, kind: data, var: column.c1}

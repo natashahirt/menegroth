@@ -122,7 +122,113 @@ function detail_spread_footing(; B::Length, L::Length, D::Length, bar_size::Int,
     z_top = maximum((p[2] for g in md.groups for p in g.path); init = Dm)
     push!(md.outline, (Lm / 2 - cl / 2, Lm / 2 + cl / 2, Dm, max(z_top + cov, 1.5Dm)))
     _report_footing_areas!(md, bar_size, n_bars, column_bars, column_Ag)
+    _locate_footing!(md, Bm, Lm, Dm, cov, db, cl, cs)
     return md
+end
+
+"""
+Centerlines in the footing frame: `x` along the long side from one edge, `y`
+along the short side, `z` up from the bottom. Long bars are uniform across the
+short side. On a rectangle the short bars pack into the central band of width
+`B` and the rest sit outside it, the split already chosen above.
+"""
+function _locate_footing!(md::MemberDetail, B, L, D, cov, db, cl, cs)
+    inset = cov + db / 2
+    long = findfirst(g -> g.direction === :long && g.role === :bottom, md.groups)
+    if long !== nothing
+        g = md.groups[long]
+        ys = _spread(g.count, inset, B - inset)
+        md.groups[long] = _with_centerlines(g, _wires_at_y(g.path, ys))
+    end
+    shorts = findall(g -> g.direction === :short && g.role === :bottom, md.groups)
+    if length(shorts) == 1
+        g = md.groups[shorts[1]]
+        banded = occursin("central band", g.note)
+        x0 = banded ? max((L - B) / 2, inset) : inset
+        x1 = banded ? min((L + B) / 2, L - inset) : L - inset
+        md.groups[shorts[1]] = _with_centerlines(g, _wires_swap(g.path, _spread(g.count, x0, x1)))
+    elseif length(shorts) == 2
+        band = findfirst(i -> occursin("central band", md.groups[i].note), shorts)
+        outside = findfirst(i -> occursin("outside", md.groups[i].note), shorts)
+        (band === nothing || outside === nothing) && throw(ArgumentError(
+            "a rectangular footing needs a central band and the bars outside it"))
+        x0, x1 = (L - B) / 2, (L + B) / 2
+        gb, go = md.groups[shorts[band]], md.groups[shorts[outside]]
+        band_x = _spread(gb.count, max(x0, inset), min(x1, L - inset))
+        half = cld(go.count, 2)
+        left = _spread(half, inset, x0)
+        right = _spread(go.count - half, x1, L - inset)
+        md.groups[shorts[band]] = _with_centerlines(gb, _wires_swap(gb.path, band_x))
+        md.groups[shorts[outside]] = _with_centerlines(go, _wires_swap(go.path, [left; right]))
+    end
+    dowel = findfirst(g -> g.role === :dowel, md.groups)
+    if dowel !== nothing
+        g = md.groups[dowel]
+        y0, y1 = (B - cs) / 2 + cov, (B + cs) / 2 - cov
+        md.groups[dowel] = _with_centerlines(g, _wires_at_y(g.path, _spread(g.count, y0, y1)))
+    end
+    md.solid = (0.0, L, 0.0, B, 0.0, D)
+    return nothing
+end
+
+"""
+    detail_mat(; B, L, D, cover, bar_size_x, bar_size_y, As_x_bot, As_x_top, As_y_bot, As_y_top)
+        -> MemberDetail
+
+Four flexural layers of a mat, in the counts [`mat_flexure_bar_counts`](@ref)
+uses for the steel volume. `x` runs along `L`, `y` along `B`, and `z` up
+from the soffit. x-bars run along `B` and y-bars along `L`. The x layer is
+the outer bottom layer and the inner top layer, so the outer bar is the one
+`d` is measured to: the distance from the extreme compression fiber to the
+centroid of the longitudinal tension reinforcement (ACI 318-11 §2.2,
+corpus: aci-318-11, page 37). Wall dowels are not drawn.
+"""
+function detail_mat(; B::Length, L::Length, D::Length, cover::Length,
+                    bar_size_x::Int, bar_size_y::Int,
+                    As_x_bot, As_x_top, As_y_bot, As_y_top)
+    md = MemberDetail(:footing)
+    Bm, Lm, Dm = ustrip(u"m", B), ustrip(u"m", L), ustrip(u"m", D)
+    cov = ustrip(u"m", cover)
+    (Bm > 0 && Lm > 0 && Dm > 0) || return md
+    opts = (bar_size_x = bar_size_x, bar_size_y = bar_size_y, cover = cover)
+    bars = mat_flexure_bar_counts(B, L, D, As_x_bot, As_x_top, As_y_bot, As_y_top, opts)
+    dbx = ustrip(u"m", bar_diameter(bar_size_x))
+    dby = ustrip(u"m", bar_diameter(bar_size_y))
+    zxb = cov + dbx / 2
+    zyb = zxb + dbx / 2 + dby / 2
+    zyt = Dm - cov - dby / 2
+    zxt = zyt - dby / 2 - dbx / 2
+    function layer!(mark, bar_role, across, n, along, stations, z, size, note)
+        n > 0 || return
+        along > 2cov || return
+        0 < z < Dm || return
+        path = [(cov, z), (along - cov, z)]
+        wires = across === :x ? _wires_swap(path, stations) : _wires_at_y(path, stations)
+        length(wires) == n || return
+        push!(md.groups, BarGroup(; mark = mark, role = bar_role,
+                                  direction = across === :x ? :short : :long,
+                                  bar_size = size, count = n, length = (along - 2cov) * u"m",
+                                  path = path, note = note, centerlines = wires))
+    end
+    # x-bars run along B and are stationed across L. y-bars run along L.
+    layer!("MXB", :bottom, :x, bars.n_xb, Bm, _spread(bars.n_xb, cov, Lm - cov), zxb,
+           bar_size_x, "bottom bars along the width")
+    layer!("MYB", :bottom, :y, bars.n_yb, Lm, _spread(bars.n_yb, cov, Bm - cov), zyb,
+           bar_size_y, "bottom bars along the length")
+    layer!("MYT", :top, :y, bars.n_yt, Lm, _spread(bars.n_yt, cov, Bm - cov), zyt,
+           bar_size_y, "top bars along the length")
+    layer!("MXT", :top, :x, bars.n_xt, Bm, _spread(bars.n_xt, cov, Lm - cov), zxt,
+           bar_size_x, "top bars along the width")
+    md.outline = [(0.0, Lm, 0.0, Dm)]
+    md.solid = (0.0, Lm, 0.0, Bm, 0.0, Dm)
+    push!(md.notes, "Mat bars use the same count as the steel volume. " *
+                    "Wall dowels are not drawn.")
+    return md
+end
+
+"""A bar whose elevation runs along `y`, stationed at each `x`."""
+function _wires_swap(path, xs::Vector{Float64})
+    return [[(x, p[1], p[2]) for p in path] for x in xs]
 end
 
 """

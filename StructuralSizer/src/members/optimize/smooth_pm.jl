@@ -120,8 +120,9 @@ end
 Compute nominal (Pn, Mn, φ, εt) for a rectangular RC column at neutral
 axis depth `c` using the Whitney stress block with smooth approximations.
 
-All inputs in ACI units: fc, fy in ksi; b, h, c, cover in inches.
-Steel modeled as `n_layers` distributed uniformly from cover to d.
+All inputs in ACI units: fc, fy in ksi; b, h, c, cover in inches; `As_bar`
+(one longitudinal bar) in in². Steel modeled as `n_layers` distributed
+uniformly from cover to d.
 
 Returns (Pn, Mn, φ, εt) — all C¹-smooth in (b, h, ρg, c).
 """
@@ -129,7 +130,7 @@ function _smooth_PnMn(b::Float64, h::Float64, ρg::Float64, c::Float64,
                             fc::Float64, fy::Float64, Es::Float64,
                             εcu::Float64, β1::Float64;
                             cover::Float64=2.5, n_layers::Int=10,
-                            tie_type::Symbol=:tied)
+                            tie_type::Symbol=:tied, As_bar::Float64=0.79)
     k = 40.0  # Sharpness for dimensional smooth ops
 
     # Whitney stress block depth
@@ -169,7 +170,7 @@ function _smooth_PnMn(b::Float64, h::Float64, ρg::Float64, c::Float64,
     #      finite layer count, and the square-section bar-split assumption).
 
     d = h - cover
-    As_bar_est = 0.79                       # #8 bar (in²)
+    As_bar_est = As_bar
 
     n_est_raw = ρg * b * h / As_bar_est
 
@@ -237,10 +238,10 @@ function _smooth_find_c(b::Float64, h::Float64, ρg::Float64,
                               fc::Float64, fy::Float64, Es::Float64,
                               εcu::Float64, β1::Float64;
                               cover::Float64=2.5, n_layers::Int=10,
-                              tie_type::Symbol=:tied)
+                              tie_type::Symbol=:tied, As_bar::Float64=0.79)
     function residual(c)
         r = _smooth_PnMn(b, h, ρg, c, fc, fy, Es, εcu, β1;
-                               cover, n_layers, tie_type)
+                               cover, n_layers, tie_type, As_bar)
         return r.φ * r.Pn - Pu_kip
     end
 
@@ -282,15 +283,15 @@ function _smooth_rc_pm_util(b::Float64, h::Float64, ρg::Float64,
                                   Pu_kip::Float64, Mu_kipft::Float64,
                                   mat::NamedTuple;
                                   cover::Float64=2.5, n_layers::Int=10,
-                                  tie_type::Symbol=:tied)
+                                  tie_type::Symbol=:tied, As_bar::Float64=0.79)
     fc, fy, Es, εcu = mat.fc, mat.fy, mat.Es, mat.εcu
     β1 = clamp(0.85 - 0.05 * (fc * 1000.0 - 4000.0) / 1000.0, 0.65, 0.85)
 
     c_star = _smooth_find_c(b, h, ρg, Pu_kip, fc, fy, Es, εcu, β1;
-                                  cover, n_layers, tie_type)
+                                  cover, n_layers, tie_type, As_bar)
 
     r = _smooth_PnMn(b, h, ρg, c_star, fc, fy, Es, εcu, β1;
-                           cover, n_layers, tie_type)
+                           cover, n_layers, tie_type, As_bar)
 
     # 10% conservatism: accounts for smooth-vs-discrete approximation errors
     # (φ sigmoid, steel stress clamp, finite layer count, bar distribution,
@@ -313,15 +314,15 @@ Used by constraint_fns for biaxial interaction.
 function _smooth_rc_pm_capacity(b::Float64, h::Float64, ρg::Float64,
                                       Pu_kip::Float64, mat::NamedTuple;
                                       cover::Float64=2.5, n_layers::Int=10,
-                                      tie_type::Symbol=:tied)
+                                      tie_type::Symbol=:tied, As_bar::Float64=0.79)
     fc, fy, Es, εcu = mat.fc, mat.fy, mat.Es, mat.εcu
     β1 = clamp(0.85 - 0.05 * (fc * 1000.0 - 4000.0) / 1000.0, 0.65, 0.85)
 
     c_star = _smooth_find_c(b, h, ρg, Pu_kip, fc, fy, Es, εcu, β1;
-                                  cover, n_layers, tie_type)
+                                  cover, n_layers, tie_type, As_bar)
 
     r = _smooth_PnMn(b, h, ρg, c_star, fc, fy, Es, εcu, β1;
-                           cover, n_layers, tie_type)
+                           cover, n_layers, tie_type, As_bar)
 
     # 10% conservatism (consistent with _smooth_rc_pm_util)
     return (φMn_kipft = r.φ * r.Mn / 12.0 * 0.90, εt = r.εt)

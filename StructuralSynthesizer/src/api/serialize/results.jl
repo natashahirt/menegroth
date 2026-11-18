@@ -102,6 +102,7 @@ function design_to_json(design::BuildingDesign; geometry_hash::String="")
         foundations = foundations,
         walls = walls,
         seismic_story_drift = seismic_story_drift,
+        scope_notes = copy(design.scope_notes),
         geometry_hash = geometry_hash,
         visualization = visualization,
     )
@@ -144,6 +145,7 @@ function _serialize_story_drift(design::BuildingDesign)
             drift_m = drift.drift_m,
             allowable_m = drift.allowable_m,
             passes = drift.passes,
+            effect = string(drift.effect),
         ))
     end
     return out
@@ -157,10 +159,11 @@ function _serialize_slabs(design::BuildingDesign, du::DisplayUnits)
     for idx in _sorted_indices(design.slabs)
         sr = design.slabs[idx]
         t_display = _to_display(du, :thickness, sr.thickness)
-        slab_ok = sr.converged && sr.deflection_ok && sr.punching_ok
+        slab_ok = _slab_design_ok(sr)
         raw_reason = sr.failure_reason
         normalized_reason = _normalize_failure_reason(raw_reason)
         normalized_checks = _normalize_failing_checks(sr.failing_check)
+        sr.integrity_ok || push!(normalized_checks, "structural_integrity")
         detail = (normalized_reason in ("solver_error", "unknown") && !isempty(raw_reason)) ?
                  raw_reason : nothing
         push!(results, APISlabResult(

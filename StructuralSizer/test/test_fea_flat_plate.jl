@@ -966,7 +966,12 @@ _rpt.section("Test 12: Circular Columns — Octagonal Mesh Patch")
     # Moments should be in the same ballpark (within 30%)
     M0_circ = ustrip(kip * u"ft", fea_circ.M0)
     M0_rect = ustrip(kip * u"ft", fea_rect.M0)
-    @test M0_circ ≈ M0_rect rtol=0.01  # M0 is geometry-based, same for both
+    # ACI 318-11 §13.6.2.5: a circular support is the equivalent-area square
+    # for the clear span, so ℓn (and M0 ∝ ℓn²) is larger than for a D × D square.
+    l1 = slab.spans.primary
+    c_eq = StructuralSizer.equivalent_square_column(D)
+    M0_ratio = uconvert(NoUnits, ((l1 - c_eq) / (l1 - D))^2)
+    @test M0_circ / M0_rect ≈ M0_ratio rtol=0.005
 
     Mp_circ = ustrip(kip * u"ft", fea_circ.M_pos)
     Mp_rect = ustrip(kip * u"ft", fea_rect.M_pos)

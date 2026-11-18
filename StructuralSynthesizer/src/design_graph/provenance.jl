@@ -170,7 +170,11 @@ const PIPELINE_PROVENANCE = Dict{NodeKey, @NamedTuple{
                               :scoped_floor_overrides],
         reads        = Symbol[:slabs, :cells, :columns, :asap_model],
         writes       = Symbol[:slabs, :columns, :cells, :asap_model],
-        code_version = :slab_sizing_v1,
+        # v2: depth and punching loops run for the remaining growth steps,
+        # not only `max_iterations`, and a failed floor records `stop`.
+        # v3: column results keep the perpendicular unbalanced moment, and
+        # the installed design records the column sizes it was checked at.
+        code_version = :slab_sizing_v3,
     ),
     NODE_MEMBERS => (
         # `:optimize_for` and `:collinear_grouping` future-proof the documented
@@ -190,10 +194,26 @@ const PIPELINE_PROVENANCE = Dict{NodeKey, @NamedTuple{
         param_slice  = Symbol[:columns, :beams, :materials, :max_iterations,
                               :fire_rating, :fire_protection, :geometry_is_centerline,
                               :load_combinations, :optimize_for, :collinear_grouping,
-                              :member_group_overrides, :beam_I_factor],
-        reads        = Symbol[:columns, :beams, :slabs, :asap_model],
-        writes       = Symbol[:columns, :beams, :asap_model],
-        code_version = :members_v1,
+                              :member_group_overrides, :beam_I_factor,
+                              :floor, :column_I_factor, :scoped_floor_overrides,
+                              :uniform_column_sizing],
+        reads        = Symbol[:columns, :beams, :slabs, :cells, :asap_model,
+                              :frame_section_floors],
+        # v2: flat-plate columns are checked under the full building load and
+        # grown, and slabs checked against a column that grew are redesigned.
+        # v3: uniform column sizing runs here; member self-weight carries the
+        # dead factor; flat-plate frame columns get their concrete section and
+        # self-weight; re-solves keep rigid-diaphragm links.
+        # v4: the beam/column loop ends when a pass changes no section and runs
+        # uniform sizing and fire coating (dead-factored) inside each pass; no
+        # gravity-only P-Δ step; non-convergence goes to `stage_diagnostics`.
+        # v5: concrete column NLP is constrained on every load case, not the
+        # axial-moment envelope.
+        writes       = Symbol[:columns, :beams, :slabs, :cells, :asap_model,
+                              :stage_diagnostics],
+        # v6: a soft concrete column or beam catalog grows one named tier when
+        # nothing in the current catalog passes. `:hard` keeps the throw.
+        code_version = :members_v6,
     ),
     NODE_FOUNDATIONS => (
         param_slice  = Symbol[:foundation_options],
@@ -201,11 +221,42 @@ const PIPELINE_PROVENANCE = Dict{NodeKey, @NamedTuple{
         writes       = Symbol[:supports, :foundations],
         code_version = :foundations_v1,
     ),
+    # The jump reads `jump_wall_thickness` and `wall_thickness_grouping`.
+    # `wall_thickness` is baked at prepare (`PREPARE_AFFECTING_FIELDS`), so a
+    # change builds a new engine. `:walls` is written so a jump changes the
+    # output hash; the fingerprint is the thickness list, not `repr` of the
+    # wall objects. A clean foundation snapshot would otherwise put the old
+    # thickness back.
+    # v4: a jump's rebuild keeps the sized frame sections, member self-weight,
+    # and fire coating, and re-solves through `sync_asap!` (so the load and
+    # fire fields below are read); a thickness still growing at the pass cap
+    # goes to `stage_diagnostics`.
+    # v5: after a jump the member stage runs again on the new model, so this
+    # node reads and writes everything `:members` does, and takes its params.
+    # v6: a failing row F frame group gets a section floor, and the members
+    # are sized again on it.
+    # v7: each frame member carries its governing ratio; a beam floor uses
+    # that framing level's beam options; uniform column sizing floors the
+    # whole uniformity group.
+    # v8: a frame member's station diagram accumulates only the loads on
+    # that element. Shell area loads stay in the solved end forces.
     NODE_ORDINARY_WALLS => (
-        param_slice  = Symbol[:lateral, :wall_inputs, :materials, :diaphragm_mode],
-        reads        = Symbol[:walls, :wall_mesh, :asap_model, :asap_rigid_links],
-        writes       = Symbol[:ordinary_wall_result, :diaphragm_layout],
-        code_version = :ordinary_walls_v2,
+        param_slice  = Symbol[:lateral, :wall_inputs, :materials, :diaphragm_mode,
+                              :jump_wall_thickness, :wall_thickness_grouping,
+                              :wall_catalog_constraint, :wall_thickness_limit,
+                              :load_combinations, :fire_rating, :fire_protection,
+                              :columns, :beams, :max_iterations, :geometry_is_centerline,
+                              :optimize_for, :collinear_grouping, :member_group_overrides,
+                              :beam_I_factor, :floor, :column_I_factor,
+                              :scoped_floor_overrides, :uniform_column_sizing],
+        reads        = Symbol[:walls, :wall_mesh, :asap_model, :asap_rigid_links,
+                              :columns, :beams, :slabs, :cells, :frame_section_floors],
+        writes       = Symbol[:ordinary_wall_result, :diaphragm_layout, :walls,
+                              :stage_diagnostics, :columns, :beams, :slabs, :cells,
+                              :asap_model, :frame_section_floors],
+        # v13: Seismic Design Categories D, E, and F calculate the gravity-frame
+        # forces from δDE and detail to §18.14.3.2 or §18.14.3.3 from that.
+        code_version = :ordinary_walls_v13,
     ),
 )
 

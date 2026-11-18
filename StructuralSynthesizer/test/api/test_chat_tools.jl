@@ -24,11 +24,12 @@ const SS = StructuralSynthesizer
 """
     _build_test_design()
 
-Build a small 2×2-bay, 1-story flat-plate structure and run `design_building`.
-Returns `(struc, design)`.
+Build a 3×3-bay, 1-story flat plate and run `design_building`.
+Three continuous spans each way is the direct design method minimum
+(ACI 318-11 §13.6.1.1). Returns `(struc, design)`.
 """
 function _build_test_design()
-    skel = gen_medium_office(30.0u"ft", 24.0u"ft", 12.0u"ft", 2, 2, 1)
+    skel = gen_medium_office(30.0u"ft", 24.0u"ft", 12.0u"ft", 3, 3, 1)
     struc = BuildingStructure(skel)
 
     params = DesignParameters(

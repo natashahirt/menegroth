@@ -61,19 +61,21 @@ end
 
 """
     _update_efm_sections_and_loads!(cache, spans, qu, Ecs, Ecc, ν_concrete, ρ_concrete, columns;
-                                    col_I_factor)
+                                    col_I_factor, kec_factors, drop_loads)
 
 Update section properties and loads on a cached EFM ASAP model.
 
-Slab-beam sections are rebuilt from the current `h` and `l2`.  Column stub
-sections are updated via `column_asap_section` — the same single source of
-truth used by the FEA path.  No Kec → Ic_eff back-solve; the ASAP solver
-computes column stiffness from actual geometry.
+Slab-beam sections and line loads are rebuilt from the current spans with
+the same sub-element layout the model was built with
+([`_efm_span_segments`](@ref)). Column stub sections are updated via
+`column_asap_section` — the same single source of truth used by the FEA
+path. No Kec → Ic_eff back-solve; the ASAP solver computes column
+stiffness from actual geometry.
 """
 function _update_efm_sections_and_loads!(
     cache::EFMModelCache,
     spans::Vector{<:EFMSpanProperties},
-    qu::Pressure,
+    qu::Union{Pressure, AbstractVector{<:Pressure}},
     Ecs::Pressure,
     Ecc::Pressure,
     ν_concrete::Float64,
@@ -81,70 +83,26 @@ function _update_efm_sections_and_loads!(
     columns;
     col_I_factor::Float64 = 0.70,
     kec_factors::Union{Nothing, Vector{Float64}} = nothing,
+    drop_loads = nothing,
 )
     model = cache.model
     span_elements = cache.span_elements
     n_spans  = cache.n_spans
 
-    h  = spans[1].h
     l2 = spans[1].l2
     ustrip(l2) > 0 || throw(ArgumentError("Transverse span l2 must be positive (got $l2)"))
 
-    G_slab  = Ecs / (2 * (1 + ν_concrete))
-    Is_gross = l2 * h^3 / 12
-    A_slab   = l2 * h
-    J_slab   = _torsional_constant_rect(l2, h)
-
-    Ecs_Pa = uconvert(u"Pa", Ecs)
-    G_slab_Pa = uconvert(u"Pa", G_slab)
-
-    # ── Slab sections (3 per span) ──
-    clear_sec = Section(
-        uconvert(u"m^2", A_slab), Ecs_Pa, G_slab_Pa,
-        uconvert(u"m^4", Is_gross),
-        uconvert(u"m^4", Is_gross / 10),
-        uconvert(u"m^4", J_slab),
-        ρ_concrete
-    )
-
-    n_elems_per_span = length(span_elements) ÷ n_spans
-
+    # ── Slab sections, in build order ──
+    k = 0
     for i in 1:n_spans
         sp = spans[i]
-
-        # ACI 318-11 §13.7.3.3 rigid-zone I
-        ratio_left  = ustrip(sp.c2_left)  / ustrip(uconvert(unit(sp.c2_left), l2))
-        ratio_right = ustrip(sp.c2_right) / ustrip(uconvert(unit(sp.c2_right), l2))
-        # Cap ratio below 1.0 to avoid singularity; column wider than span is non-physical
-        ratio_left  = min(ratio_left, 0.99)
-        ratio_right = min(ratio_right, 0.99)
-        Is_rigid_left  = Is_gross / (1 - ratio_left)^2
-        Is_rigid_right = Is_gross / (1 - ratio_right)^2
-
-        rigid_sec_left = Section(
-            uconvert(u"m^2", A_slab), Ecs_Pa, G_slab_Pa,
-            uconvert(u"m^4", Is_rigid_left),
-            uconvert(u"m^4", Is_rigid_left / 10),
-            uconvert(u"m^4", J_slab),
-            ρ_concrete
-        )
-        rigid_sec_right = Section(
-            uconvert(u"m^2", A_slab), Ecs_Pa, G_slab_Pa,
-            uconvert(u"m^4", Is_rigid_right),
-            uconvert(u"m^4", Is_rigid_right / 10),
-            uconvert(u"m^4", J_slab),
-            ρ_concrete
-        )
-
-        if n_elems_per_span == 3
-            idx_base = 3 * (i - 1)
-            span_elements[idx_base + 1].section = rigid_sec_left
-            span_elements[idx_base + 2].section = clear_sec
-            span_elements[idx_base + 3].section = rigid_sec_right
-        else
-            span_elements[i].section = clear_sec
+        for seg in _efm_span_segments(sp, _span_drop(drop_loads, i))
+            k += 1
+            span_elements[k].section = _efm_segment_section(seg, sp, Ecs, ν_concrete, ρ_concrete)
         end
     end
+    k == length(span_elements) || error(
+        "EFM cache layout changed ($(length(span_elements)) elements, $k expected); rebuild the model")
 
     # ── Column stub sections (same as FEA: column_asap_section) ──
     n_joints = n_spans + 1
@@ -162,17 +120,16 @@ function _update_efm_sections_and_loads!(
         # Above stub (if column above exists)
         col_above = col.column_above
         if !isnothing(stubs.above) && !isnothing(col_above)
+            sec_a = _sized_column_section(col_above)
+            c1_a, c2_a = sec_a === nothing ? (col.c1, col.c2) : sec_a
             stubs.above.element.section = column_asap_section(
-                col_above.c1, col_above.c2, col_shape(col_above), Ecc, ν_concrete;
+                c1_a, c2_a, col_shape(col_above), Ecc, ν_concrete;
                 I_factor=I_j)
         end
     end
 
     # ── Loads ──
-    w_N_m = uconvert(u"N/m", qu * l2)
-    for load in model.loads
-        load.value = [0.0u"N/m", 0.0u"N/m", -w_N_m]
-    end
+    _set_efm_slab_loads!(model, spans, qu, drop_loads)
 
     # Invalidate cached state so next solve! re-processes
     model._factorization = nothing

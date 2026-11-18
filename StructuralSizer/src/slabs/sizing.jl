@@ -165,6 +165,8 @@ function size_slab!(
     fire_rating::Real = 0.0,
     defer_asap_process::Bool = false,
     tc::Union{Nothing, TraceCollector} = nothing,
+    wall_supported::Bool = false,
+    missing_edge_beam::Bool = false,
 )
     slab = struc.slabs[slab_idx]
     ft = floor_type(slab.floor_type)
@@ -172,11 +174,14 @@ function size_slab!(
           floor_type=string(slab.floor_type),
           dispatch_type=string(typeof(ft)),
           options_type=string(typeof(options)))
+    support_kwargs = ft isa TwoWay ?
+        (; wall_supported, missing_edge_beam) : NamedTuple()
     raw_result = _size_slab!(ft, struc, slab, slab_idx;
                              options=options, column_opts=column_opts,
                              max_iterations=max_iterations, verbose=verbose,
                              _col_cache=_col_cache, fire_rating=fire_rating,
-                             defer_asap_process=defer_asap_process, tc=tc)
+                             defer_asap_process=defer_asap_process, tc=tc,
+                             support_kwargs...)
     outcome = _floor_design_outcome(raw_result, slab)
     emit!(tc, :slab, "size_slab!", string(slab_idx), :exit;
           result_type=string(typeof(outcome)),
@@ -198,6 +203,8 @@ function size_slab!(
     _col_cache = nothing,
     defer_asap_process::Bool = true,
     tc::Union{Nothing, TraceCollector} = nothing,
+    wall_supported::Bool = false,
+    missing_edge_beam::Bool = false,
 )
     slab_idx = request.source.index
     slab_idx <= length(struc.slabs) ||
@@ -219,6 +226,8 @@ function size_slab!(
         fire_rating = request.fire_rating,
         defer_asap_process = defer_asap_process,
         tc = tc,
+        wall_supported = wall_supported,
+        missing_edge_beam = missing_edge_beam,
     )
 end
 
@@ -237,8 +246,34 @@ function _size_slab!(
     throw(UnsupportedFloorSystemError(typeof(system)))
 end
 
+"""
+Failed checks recorded on a floor result, as text. Empty when every recorded
+check passes. Results without recorded checks return none.
+"""
+_failed_floor_checks(::AbstractFloorResult) = String[]
+
+function _failed_floor_checks(r::VaultResult)
+    failed = String[]
+    r.stress_check.ok || push!(failed, "stress ratio $(round(r.stress_check.ratio; digits = 3))")
+    r.kern_check.ok || push!(failed, "thrust-line kern ratio $(round(r.kern_check.ratio; digits = 3))")
+    r.convergence_check.converged || push!(failed, "elastic shortening did not converge")
+    r.convergence_check.converged && !r.deflection_check.ok &&
+        push!(failed, "rise loss ratio $(round(r.deflection_check.ratio; digits = 3))")
+    return failed
+end
+
 function _floor_design_outcome(raw_result, slab)
     iterations = raw_result isa NamedTuple ? get(raw_result, :iterations, 0) : 0
+
+    if raw_result isa AbstractFloorResult && !isempty(_failed_floor_checks(raw_result))
+        return FloorDesignOutcome{Nothing, typeof(raw_result)}(
+            FLOOR_DESIGN_INFEASIBLE,
+            nothing,
+            raw_result,
+            [FloorDesignDiagnostic(:failed_check, join(_failed_floor_checks(raw_result), "; "))],
+            iterations,
+        )
+    end
 
     if raw_result isa AbstractFloorResult
         proposal = FloorDesignProposal(
@@ -274,21 +309,12 @@ function _floor_design_outcome(raw_result, slab)
         )
     end
 
-    reason = raw_result isa NamedTuple ?
-        String(get(raw_result, :failure_reason, "design_failed")) :
-        "design_failed"
-    failing_check = raw_result isa NamedTuple ?
-        String(get(raw_result, :failing_check, "")) :
-        ""
-    status = reason == "non_convergence" ?
-        FLOOR_DESIGN_NOT_CONVERGED :
-        FLOOR_DESIGN_INFEASIBLE
-    message = isempty(failing_check) ? reason : "$reason ($failing_check)"
+    status, code, message = floor_design_failure(raw_result)
     return FloorDesignOutcome{Nothing, typeof(raw_result)}(
         status,
         nothing,
         raw_result,
-        [FloorDesignDiagnostic(Symbol(reason), message)],
+        [FloorDesignDiagnostic(code, message)],
         iterations,
     )
 end
@@ -464,6 +490,299 @@ function auto_size_drop_depth(h_slab::Length)
 end
 
 # =============================================================================
+# Steel: composite deck (one-way span between the beams that support it)
+# =============================================================================
+
+"""Concrete fill for a composite deck. An explicit `fill_material` wins.
+Otherwise the concrete already recorded on the slab is reused, so a second
+design pass matches the first. `NWC_4000_145` is only the last resort.
+"""
+function _composite_deck_concrete(slab, opts::CompositeDeckOptions)
+    opts.fill_material !== nothing && return opts.fill_material
+    if hasproperty(slab, :volumes)
+        for mat in keys(slab.volumes)
+            mat isa Concrete && return mat
+        end
+    end
+    return NWC_4000_145
+end
+
+"""
+    _size_slab!(::CompositeDeck, struc, slab, slab_idx; options, verbose) -> CompositeDeckResult
+
+Size the deck on the distance between the beams that support it.
+Superimposed dead and live are the greatest service pressures on the
+slab's cells. That distance is the beam bay (`spans.primary`), unless
+`design_details.topping_span` names a shorter span between joists. The
+gage and depth come from [`_size_span_floor`](@ref) for `CompositeDeck`.
+"""
+function _size_slab!(::CompositeDeck, struc, slab, slab_idx;
+                     options::AbstractFloorOptions = CompositeDeckOptions(),
+                     verbose::Bool = false,
+                     kwargs...)
+    isempty(slab.cell_indices) && throw(ArgumentError(
+        "Composite deck slab $slab_idx has no cells."))
+    opts = _require_options(CompositeDeckOptions, options, CompositeDeck())
+    span = _slab_topping_span(slab)
+    span === nothing && (span = slab.spans.primary)
+    sdl = maximum(struc.cells[i].sdl for i in slab.cell_indices)
+    live = maximum(struc.cells[i].live_load for i in slab.cell_indices)
+    concrete = _composite_deck_concrete(slab, opts)
+    verbose && @info "Sizing composite deck slab $slab_idx" span = span
+    Lc = _opening_cantilever_span(struc, slab)
+    Lc === nothing || @warn "composite deck slab $slab_idx has an unframed opening $(Lc) from a support; that strip is a cantilever"
+    result = _size_span_floor(CompositeDeck(), span, sdl, live;
+                               material = concrete, options = opts, cantilever = Lc)
+    sw = self_weight(result)
+    for i in slab.cell_indices
+        struc.cells[i].self_weight = sw
+    end
+    slab.result = result
+    return result
+end
+
+"""Rib spacing stored on the slab, when the topping spans rib to rib."""
+function _slab_topping_span(slab)
+    details = hasproperty(slab, :design_details) ? slab.design_details : nothing
+    details === nothing && return nothing
+    hasproperty(details, :topping_span) || return nothing
+    return details.topping_span
+end
+
+"""Service dead and live on a slab: the greatest pressure among its cells."""
+function _slab_service_pressures(struc, slab, slab_idx)
+    isempty(slab.cell_indices) && throw(ArgumentError("Slab $slab_idx has no cells."))
+    sdl = maximum(struc.cells[i].sdl for i in slab.cell_indices)
+    live = maximum(struc.cells[i].live_load for i in slab.cell_indices)
+    return sdl, live
+end
+
+function _install_span_result!(struc, slab, result)
+    sw = self_weight(result)
+    for i in slab.cell_indices
+        struc.cells[i].self_weight = sw
+    end
+    slab.result = result
+    return result
+end
+
+"""Concrete from floor options, when the options name one."""
+function _options_concrete(opts)
+    if opts isa FlatSlabOptions
+        return opts.base.material.concrete
+    elseif hasproperty(opts, :material) && opts.material isa ReinforcedConcreteMaterial
+        return opts.material.concrete
+    elseif hasproperty(opts, :material) && opts.material isa Concrete
+        return opts.material
+    end
+    return NWC_4000
+end
+
+"""
+Merge `options.support` with the condition the beams and the adjacent bays
+actually give. The thicker one is used, so an explicit cantilever stays a
+cantilever and a single bay is not credited with continuity it does not have.
+"""
+function _with_one_way_support(struc, slab, slab_idx, options)
+    options isa OneWayOptions || return options
+    derived = _slab_span_support(struc, slab)
+    use = thicker_support(options.support, derived)
+    use == options.support && return options
+    @warn "one-way slab $slab_idx spans as $use, so its thickness does not use $(options.support)"
+    return OneWayOptions(options.material, options.cover, options.bar_size, use)
+end
+
+"""
+Table 7.3.1.1 condition of a slab (ACI 318-19, corpus: aci-318-19, page 92;
+ACI 318-11 Table 9.5(a) is the same divisors): the thickest condition
+among its cells. A single bay with a support at each end is simply supported.
+"""
+function _slab_span_support(struc, slab)
+    cond = nothing
+    for cell_idx in slab.cell_indices
+        ends = _cell_span_ends(struc, slab, cell_idx)
+        this = one_way_support_condition(ends[1], ends[2])
+        cond = cond === nothing ? this : thicker_support(cond, this)
+    end
+    return something(cond, SIMPLE)
+end
+
+"""
+Length of an unframed opening's cantilever on this slab, or `nothing`.
+
+The building supplies this. A slab with no openings, and any caller that is
+not a building, gets `nothing`, so the bay is sized as it stands.
+"""
+_opening_cantilever_span(::Any, ::Any) = nothing
+
+"""The two ends of a cell's span: `:free`, `:supported`, or `:continuous`."""
+function _cell_span_ends(struc, slab, cell_idx)
+    cell = struc.cells[cell_idx]
+    skel = struc.skeleton
+    face = cell.face_idx
+    verts = skel.face_vertex_indices[face]
+    edges = skel.face_edge_indices[face]
+    length(verts) == length(edges) || throw(ArgumentError(
+        "face $face has $(length(verts)) vertices and $(length(edges)) edges"))
+    axis = (Float64(cell.spans.axis[1]), Float64(cell.spans.axis[2]))
+    xy = [_plan_xy(skel.vertices[v]) for v in verts]
+    c = (sum(p[1] for p in xy) / length(xy), sum(p[2] for p in xy) / length(xy))
+    pos, neg = :free, :free
+    n = length(edges)
+    for i in 1:n
+        a, b = xy[i], xy[mod1(i + 1, n)]
+        dx, dy = b[1] - a[1], b[2] - a[2]
+        L = hypot(dx, dy)
+        L < 1e-9 && continue
+        # A span end faces the span. An edge running with the span is a side.
+        abs((dx / L) * axis[1] + (dy / L) * axis[2]) > 0.5 && continue
+        mid = ((a[1] + b[1]) / 2, (a[2] + b[2]) / 2)
+        side = (mid[1] - c[1]) * axis[1] + (mid[2] - c[2]) * axis[2]
+        abs(side) < 1e-9 && continue
+        kind = _span_end_kind(struc, slab, edges[i], face)
+        if side > 0
+            pos = _stronger_end(pos, kind)
+        else
+            neg = _stronger_end(neg, kind)
+        end
+    end
+    # An edge more than 60° off the normal of the span is skipped above.
+    # On a skewed bay every beam can be that oblique, so both ends stay
+    # :free even though the beams are there. Credit the beams by which
+    # side of the cell they sit on. Continuity still requires an edge the
+    # span actually ends on, so this fallback is support only.
+    # ACI 318-11 Table 9.5(a) (corpus: aci-318-11, page 131): two supports
+    # and no continuity is a simple span; one support is a cantilever.
+    (pos == :free && neg == :free) || return (pos, neg)
+    left = false
+    right = false
+    for i in 1:n
+        _span_end_kind(struc, slab, edges[i], face) == :free && continue
+        a, b = xy[i], xy[mod1(i + 1, n)]
+        mid = ((a[1] + b[1]) / 2, (a[2] + b[2]) / 2)
+        side = (mid[1] - c[1]) * axis[1] + (mid[2] - c[2]) * axis[2]
+        if side > 1e-6
+            right = true
+        elseif side < -1e-6
+            left = true
+        end
+    end
+    left && right && return (:supported, :supported)
+    left && return (:supported, :free)
+    right && return (:free, :supported)
+    return (pos, neg)
+end
+
+_coord_m(x::Unitful.Length) = Float64(ustrip(u"m", x))
+_coord_m(x::Real) = Float64(x)
+_plan_xy(v) = (p = Meshes.coords(v); (_coord_m(p.x), _coord_m(p.y)))
+
+function _span_end_kind(struc, slab, edge, face)
+    skel = struc.skeleton
+    supported = false
+    for g in (:beams, :walls, :joists, :secondary)
+        edge in get(skel.groups_edges, g, Int[]) && (supported = true)
+    end
+    supported || return :free
+    other = nothing
+    for (f, es) in enumerate(skel.face_edge_indices)
+        f == face && continue
+        edge in es && (other = f)
+    end
+    other === nothing && return :supported
+    ci = findfirst(c -> c.face_idx == other, struc.cells)
+    ci === nothing && return :supported
+    # The slab running past the beam is continuous whether or not the next
+    # bay was grouped into this slab.
+    struc.cells[ci].floor_type in (:unknown, :grade) ? :supported : :continuous
+end
+
+_stronger_end(a, b) = (_end_rank(a) >= _end_rank(b) ? a : b)
+_end_rank(s) = s == :continuous ? 2 : s == :supported ? 1 : 0
+
+"""
+    _size_slab!(::OneWay, struc, slab, slab_idx; options, verbose) -> CIPSlabResult
+
+Minimum one-way thickness on the panel's primary span. The analysis method
+is recorded on `slab.design_details`: the §8.3.3 coefficients when this
+panel is a regular multi-span rectangle, and the existing area shell
+otherwise. Bars are not sized here.
+"""
+function _size_slab!(::OneWay, struc, slab, slab_idx;
+                     options::AbstractFloorOptions = OneWayOptions(),
+                     verbose::Bool = false,
+                     kwargs...)
+    sdl, live = _slab_service_pressures(struc, slab, slab_idx)
+    span = _slab_topping_span(slab)
+    span === nothing && (span = slab.spans.primary)
+    options = _with_one_way_support(struc, slab, slab_idx, options)
+    support = hasproperty(options, :support) ? options.support : nothing
+    verbose && @info "Sizing one-way slab $slab_idx" span = span support = support
+    result = _size_span_floor(OneWay(), span, sdl, live;
+                               material = _options_concrete(options), options = options)
+    # A strip from a support to an unframed opening is a cantilever of its own
+    # length (ACI 318-11 Table 9.5(a)). The bay's condition still applies; the
+    # thicker one is kept. No opening returns nothing.
+    Lc = _opening_cantilever_span(struc, slab)
+    if Lc !== nothing
+        cant_opts = OneWayOptions(options.material, options.cover, options.bar_size, CANTILEVER)
+        cant = _size_span_floor(OneWay(), Lc, sdl, live;
+                                 material = _options_concrete(options), options = cant_opts)
+        if total_depth(cant) > total_depth(result)
+            @warn "one-way slab $slab_idx has an unframed opening $(Lc) from a support; its thickness is the cantilever"
+            result = cant
+        end
+    end
+    installed = _install_span_result!(struc, slab, result)
+    dead = installed.self_weight + sdl
+    method, reasons = assign_panel_analysis!(OneWay(), struc, slab, dead, live)
+    verbose && @info "One-way analysis" method=typeof(method) reasons=reasons
+    return installed
+end
+
+"""
+    _size_slab!(::TwoWay, struc, slab, slab_idx; options, verbose) -> CIPSlabResult
+
+Minimum two-way thickness. `ln` is the longer of the two reinforcement-axis
+chords, `spans.primary` and `spans.secondary`, and β is longer over shorter
+(ACI 318-11 §9.5.3.3, corpus: aci-318-11, page 135). The polygon diameter
+is not along either axis, so it is not used. The planned analysis is
+recorded on `slab.design_details`; no moments or bars are computed here.
+"""
+function _size_slab!(::TwoWay, struc, slab, slab_idx;
+                     options::AbstractFloorOptions = FlatPlateOptions(),
+                     verbose::Bool = false,
+                     wall_supported::Bool = false,
+                     missing_edge_beam::Bool = false,
+                     kwargs...)
+    sdl, live = _slab_service_pressures(struc, slab, slab_idx)
+    topping = _slab_topping_span(slab)
+    # A rib bay is not square in general, so the topping's cross bay is stored too.
+    span = topping === nothing ? max(slab.spans.primary, slab.spans.secondary) : topping
+    l2 = topping === nothing ? min(slab.spans.primary, slab.spans.secondary) :
+         something(get(slab.design_details, :topping_l2, nothing), topping)
+    verbose && @info "Sizing two-way slab $slab_idx" span = span l2 = l2
+    # Beams are sized after the slab, so αfm is not known here and the
+    # thickness is the bound in `min_thickness(::TwoWay, ...)`.
+    position = hasproperty(slab, :position) ? slab.position : :edge
+    result = _size_span_floor(TwoWay(), span, sdl, live;
+                               material = _options_concrete(options), options = options,
+                               l2 = l2, position = position,
+                               wall_supported = wall_supported,
+                               missing_edge_beam = missing_edge_beam)
+    installed = _install_span_result!(struc, slab, result)
+    dead = installed.self_weight + sdl
+    method, reasons = assign_panel_analysis!(TwoWay(), struc, slab, dead, live)
+    if hasproperty(slab, :design_details) && slab.design_details !== nothing &&
+       !hasproperty(slab.design_details, :column_results)
+        slab.design_details = merge(slab.design_details, (;
+            wall_supported, missing_edge_beam))
+    end
+    verbose && @info "Two-way analysis" method=typeof(method) reasons=reasons
+    return installed
+end
+
+# =============================================================================
 # Concrete: Vault (slab-based; 1 cell per slab enforced)
 # =============================================================================
 
@@ -495,7 +814,7 @@ function _size_slab!(::Vault, struc, slab, slab_idx;
     
     cell_idx = only(slab.cell_indices)
     cell = struc.cells[cell_idx]
-    vopt = options isa VaultOptions ? options : VaultOptions()
+    vopt = _require_vault_method(_require_options(VaultOptions, options, Vault()))
 
     # Extract geometry and loading
     span = slab.spans.primary
@@ -550,7 +869,6 @@ function _size_slab!(::Vault, struc, slab, slab_idx;
             finishing_load = vopt.finishing_load,
             allowable_stress = vopt.allowable_stress,
             deflection_limit = vopt.deflection_limit,
-            check_asymmetric = vopt.check_asymmetric,
             # Optimization params
             objective = vopt.objective,
             solver = vopt.solver,

@@ -24,8 +24,9 @@ abstract type DemandAssignment end
 Walls are the seismic force-resisting system. `row` is Table 12.2-1 `:A1` or
 `:A3` (bearing wall, special or ordinary) or `:B4` or `:B6` (building frame,
 special or ordinary). There is no default: the rows do not carry the same `R`
-and `Cd`. Categories D, E, and F are accepted. Induced moments are not
-calculated, so the gravity frame is detailed to ACI 318-19 §18.14.3.3.
+and `Cd`. Categories D, E, and F are accepted. The ordinary-wall stage
+calculates the moments from δDE and details the gravity frame to ACI 318-19
+§18.14.3.2 or §18.14.3.3 from that result.
 
 A row that includes a moment frame is not this type. `:F` is
 [`InteractiveShearWallFrameSystem`](@ref). `:C7` and `:E8` are not ordinary-wall

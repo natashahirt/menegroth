@@ -58,7 +58,7 @@ function _build_slab_specs(struc, floor_type, cell_groupings, slab_group_ids;
             sdl_gov = maximum(c.sdl for c in cells)
             live_gov = maximum(c.live_load for c in cells)
 
-            # For grouped slabs, default to :pt_banded unless specified
+            # A grouped slab spans several cells, so no per-cell inference applies.
             ft_overrides = if isnothing(cell_floor_types)
                 Symbol[]
             else
@@ -66,9 +66,12 @@ function _build_slab_specs(struc, floor_type, cell_groupings, slab_group_ids;
             end
             length(ft_overrides) <= 1 ||
                 throw(ArgumentError("Scoped overrides assign mixed floor types within one slab group: $ft_overrides"))
-            ft_sym = isempty(ft_overrides) ?
-                (floor_type == :auto ? :pt_banded : floor_type) :
-                only(ft_overrides)
+            if isempty(ft_overrides) && floor_type == :auto
+                throw(ArgumentError(
+                    "cells $filtered_indices are grouped into one slab, but floor_type is :auto. " *
+                    "A grouped slab needs an explicit floor_type (e.g. :flat_plate)."))
+            end
+            ft_sym = isempty(ft_overrides) ? floor_type : only(ft_overrides)
 
             opts_overrides = if isnothing(cell_floor_opts)
                 Any[]

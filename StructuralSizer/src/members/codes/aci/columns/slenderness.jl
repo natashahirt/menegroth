@@ -60,6 +60,12 @@ function slenderness_ratio(section::RCColumnSection, geometry,
 end
 
 """
+kℓu/r for a rectangle. `r` is 0.3 times `dim`, the same ratio
+[`slenderness_ratio`](@ref) uses. `dim` and `Lu` share a length unit.
+"""
+rectangular_kLu_over_r(dim::Real, Lu::Real, k::Real) = k * Lu / (0.3 * dim)
+
+"""
     slenderness_effects_required(λ, braced; M1=0.0, M2=1.0) -> Bool
 
 `true` when ACI 318-19 §6.2.5.1 (corpus: aci-318-19, printed page 68) does
@@ -331,7 +337,9 @@ that §6.2.5.1 lets skip slenderness is permitted with `δns = 1`.
 function _nonsway_magnifier_result(slender::Bool, M2, δns, Cm, Pc, M_min)
     slender || return (Mc=abs(M2), δns=1.0, Cm=1.0, Pc=Inf, slender=false, permitted=true)
     return (
-        Mc = max(δns * abs(M2), M_min),
+        # ACI 318-11 §10.10.6.5 (corpus: aci-318-11, page 156): M2 in
+        # Eq. (10-11) is floored at M2,min before δns multiplies it.
+        Mc = δns * max(abs(M2), M_min),
         δns = δns,
         Cm = Cm,
         Pc = Pc,
@@ -526,6 +534,90 @@ A story is sway if Q > 0.05.
 function is_sway_frame(story::SwayStoryProperties)
     Q = stability_index(story)
     return Q > 0.05
+end
+
+"""
+    alignment_chart_k(ψA, ψB; sway) -> Float64
+
+Effective length factor from the Jackson and Moreland alignment chart,
+Fig. R10.10.1.1 (corpus: aci-318-11, page 150). The chart is the plot of the
+slope-deflection equations; ACI prints the figure, not the equation. The
+residuals below are those equations.
+
+Nonsway (sidesway inhibited), k in (0.5, 1):
+
+    (ψA ψB / 4) (π/k)² + ((ψA + ψB) / 2) (1 − (π/k) / tan(π/k))
+        + 2 tan(π/(2k)) / (π/k) − 1 = 0
+
+Sway (sidesway uninhibited), k > 1:
+
+    (ψA ψB (π/k)² − 36) / (6 (ψA + ψB)) = (π/k) / tan(π/k)
+
+Fixed ends are ψ = 0. A pinned end is ψ → ∞. A footing that is not rigid is
+ψ = 10, the practical value in McCormac & Brown, 9th ed., slender-column
+chapter (corpus: textbook-mccormac-reinforced-concrete-9e). A sway column
+with both ends pinned has no finite k and throws.
+
+Checked against the chart anchors: nonsway (0, 0) → 0.5, (0, ∞) → 0.7,
+(∞, ∞) → 1; sway (0, 0) → 1, (0, ∞) → 2; and the StructurePoint sway example
+ψA = 2.027, ψB = 0 → k = 1.282.
+"""
+function alignment_chart_k(ψA::Real, ψB::Real; sway::Bool)
+    a = _chart_ψ(ψA)
+    b = _chart_ψ(ψB)
+    loψ, hiψ = min(a, b), max(a, b)
+    if sway
+        loψ < 1e-4 && hiψ < 1e-4 && return 1.0
+        loψ < 1e-4 && hiψ >= 100.0 && return 2.0
+        loψ >= 100.0 && throw(ArgumentError(
+            "a sway column with both ends pinned (ψ = $ψA and $ψB) has no " *
+            "finite k on Fig. R10.10.1.1 (ACI 318-11, page 150)"))
+        root = _chart_root(k -> _sway_chart_residual(k, a, b), (1.001, 1.999), (2.001, 40.0))
+    else
+        hiψ < 1e-4 && return 0.5
+        loψ >= 1e5 && return 1.0
+        root = _chart_root(k -> _nonsway_chart_residual(k, a, b), (0.501, 0.666), (0.667, 0.999))
+    end
+    root === nothing && throw(ArgumentError(
+        "alignment chart has no root for ψ = ($ψA, $ψB), sway=$sway"))
+    return root
+end
+
+"Cap a stiffness ratio so the chart residual stays finite. ψ → ∞ is the pin."
+_chart_ψ(ψ::Real) = ψ < 0 ? throw(ArgumentError("stiffness ratio ψ must be ≥ 0; got $ψ")) :
+                    min(Float64(ψ), 1.0e6)
+
+function _sway_chart_residual(k, ψA, ψB)
+    pk = π / k
+    return (ψA * ψB * pk^2 - 36) / (6 * (ψA + ψB)) - pk / tan(pk)
+end
+
+function _nonsway_chart_residual(k, ψA, ψB)
+    pk = π / k
+    return (ψA * ψB / 4) * pk^2 +
+           ((ψA + ψB) / 2) * (1 - pk / tan(pk)) +
+           2 * tan(pk / 2) / pk - 1
+end
+
+"""First bracket in `ranges` whose ends change sign, solved by bisection."""
+function _chart_root(residual, ranges::Tuple{Float64, Float64}...)
+    for (lo, hi) in ranges
+        flo = residual(lo)
+        fhi = residual(hi)
+        isfinite(flo) && isfinite(fhi) || continue
+        flo * fhi <= 0 || continue
+        for _ in 1:60
+            mid = 0.5 * (lo + hi)
+            fm = residual(mid)
+            if flo * fm <= 0
+                hi, fhi = mid, fm
+            else
+                lo, flo = mid, fm
+            end
+        end
+        return 0.5 * (lo + hi)
+    end
+    return nothing
 end
 
 """
@@ -795,7 +887,7 @@ function magnify_moment_sway_complete(
 
         # Final design moment (ACI §10.10.7)
         M_min = minimum_moment(Pu, h)
-        Mc = max(δns * max(abs(M1), abs(M2)), M_min)
+        Mc = δns * max(abs(M1), abs(M2), M_min)   # M2,min floors M2 before δns (§10.10.6.5)
 
         length_magnified = δns > 1.0
     end
@@ -941,7 +1033,7 @@ function magnify_moment_sway_complete(
         δns = magnification_factor_nonsway(Pu, Pc; Cm=Cm)
 
         M_min = minimum_moment(Pu, D)
-        Mc = max(δns * max(abs(M1), abs(M2)), M_min)
+        Mc = δns * max(abs(M1), abs(M2), M_min)   # M2,min floors M2 before δns (§10.10.6.5)
         length_magnified = δns > 1.0
     end
     

@@ -156,9 +156,11 @@ function planar_bays(nodes::AbstractVector, edges::AbstractVector)
         twice = [(a, b) for (a, b) in steps if a < b && (b, a) in steps]
         where = isempty(twice) ? _fmt_m(xy[cycle[1]]) :
             join(("$(_fmt_m(xy[a])) to $(_fmt_m(xy[b]))" for (a, b) in twice), "; ")
+        gap = _spur_gap(xy, E, twice)
         throw(ArgumentError(
             "a rib bay's boundary walks $where twice. A rib ends inside the bay " *
-            "or is the only link between two networks, so no bay loads it."))
+            "or is the only link between two networks, so no bay loads it. " *
+            "The nearer end is $(round(gap; digits=4)) m from the nearest other edge."))
     end
 
     loops = [xy[f] for f in faces]
@@ -558,4 +560,236 @@ function bay_edge_profiles(arr::RibArrangement)
         out[e] = length(profs) == 1 ? profs[1] : Asap._sum_profiles(profs)
     end
     return out
+end
+
+"""True when the bay lies to the left of arrangement edge `e`."""
+function _bay_is_left_of_edge(arr::RibArrangement, bay::RibBay, e::Int)
+    a, b = arr.edges[e]
+    loop = bay.loop
+    n = length(loop)
+    for k in 1:n
+        u, v = loop[k], loop[mod1(k + 1, n)]
+        u == a && v == b && return true
+        u == b && v == a && return false
+    end
+    throw(ArgumentError("arrangement edge $e is not a side of its bay"))
+end
+
+"""
+Polygon of a width profile on segment `p1`→`p2`.
+
+`positions` run from 0 at `p1` to 1 at `p2`. `widths` are perpendicular
+depths, in the same length unit. `left` puts that depth on the left of
+`p1`→`p2`. The outline runs out along the segment and back along the
+offset, dropping consecutive points that land on each other.
+"""
+function _profile_polygon(p1, p2, positions, widths, left::Bool)
+    dx, dy = p2[1] - p1[1], p2[2] - p1[2]
+    L = hypot(dx, dy)
+    L > 1e-9 || return NTuple{2, Float64}[]
+    nx, ny = -dy / L, dx / L
+    left || ((nx, ny) = (-nx, -ny))
+    pts = NTuple{2, Float64}[]
+    function push_pt(p)
+        isempty(pts) || hypot(p[1] - pts[end][1], p[2] - pts[end][2]) < 1e-6 ||
+            push!(pts, p)
+        isempty(pts) && push!(pts, p)
+        return nothing
+    end
+    for i in eachindex(positions)
+        s = Float64(positions[i])
+        push_pt((p1[1] + s * dx, p1[2] + s * dy))
+    end
+    for i in reverse(eachindex(positions))
+        s = Float64(positions[i])
+        w = max(Float64(widths[i]), 0.0)
+        push_pt((p1[1] + s * dx + w * nx, p1[2] + s * dy + w * ny))
+    end
+    length(pts) >= 2 && hypot(pts[1][1] - pts[end][1], pts[1][2] - pts[end][2]) < 1e-6 &&
+        pop!(pts)
+    return length(pts) >= 3 ? pts : NTuple{2, Float64}[]
+end
+
+"""
+    bay_tributary_polygons(arr) -> Vector of (edge, polygon)
+
+One plan polygon per bay side of [`bay_edge_profiles`](@ref). `edge` is an
+index into `arr.edges`. The polygon is that side's skeleton, offset into
+its bay, so two bays that share an edge draw on opposite sides of it.
+"""
+function bay_tributary_polygons(arr::RibArrangement)
+    out = Tuple{Int, Vector{NTuple{2, Float64}}}[]
+    for bay in arr.bays
+        for (e, (pos, w)) in _bay_side_profiles(arr, bay)
+            a, b = arr.edges[e]
+            poly = _profile_polygon(arr.nodes[a], arr.nodes[b], pos, w,
+                                    _bay_is_left_of_edge(arr, bay, e))
+            isempty(poly) && continue
+            push!(out, (e, poly))
+        end
+    end
+    return out
+end
+
+"""Distance from a spur end to the nearest edge that does not touch it."""
+function _spur_gap(xy, E, twice)
+    isempty(twice) && return Inf
+    best = Inf
+    for (a, b) in twice
+        for p in (xy[a], xy[b])
+            for (u, v) in E
+                (u == a && v == b) && continue
+                (u == b && v == a) && continue
+                best = min(best, _distance_to_loop(p, (xy[u], xy[v])))
+            end
+        end
+    end
+    return best
+end
+
+"""
+    stitch_nodes_onto_edges(nodes, edges; tol=1e-3)
+        -> (nodes, edges, source)
+
+Make a plan graph meet only at nodes.
+
+A node within `tol` metres of another node becomes that node. A node within
+`tol` of another edge is moved onto the edge and the edge is split there.
+`source[k]` is the index of the input edge that output edge `k` came from, so
+a caller that owns the input edges can follow a split.
+
+[`planar_bays`](@ref) walks each face once. A rib end that was meant to land
+on another rib, and missed it by a fraction of a millimetre, is a spur: the
+walk goes out along that rib and back the same edge.
+"""
+function stitch_nodes_onto_edges(nodes::AbstractVector, edges::AbstractVector;
+                                 tol::Float64 = 1e-3)
+    xy = NTuple{2, Float64}[_xy2(p) for p in nodes]
+    E = NTuple{2, Int}[(Int(e[1]), Int(e[2])) for e in edges]
+    src = collect(1:length(E))
+    guard = length(xy) + length(E) + 2
+    for _ in 1:guard
+        changed = _dedupe_graph_edges!(E, src)
+        changed |= _collapse_close_nodes!(xy, E, src, tol)
+        changed |= _split_node_onto_edge!(xy, E, src, tol)
+        changed || return xy, E, src
+    end
+    return xy, E, src
+end
+
+"""Drop zero-length edges and a second edge between the same two nodes."""
+function _dedupe_graph_edges!(E, src)
+    newE = NTuple{2, Int}[]
+    newS = Int[]
+    seen = Set{NTuple{2, Int}}()
+    dropped = false
+    for (k, (a, b)) in enumerate(E)
+        a == b && (dropped = true; continue)
+        key = a < b ? (a, b) : (b, a)
+        if key in seen
+            dropped = true
+            continue
+        end
+        push!(seen, key)
+        push!(newE, (a, b))
+        push!(newS, src[k])
+    end
+    dropped || return false
+    empty!(E)
+    append!(E, newE)
+    empty!(src)
+    append!(src, newS)
+    return true
+end
+
+"""Merge nodes that are within `tol` and rebuild the edges through the roots."""
+function _collapse_close_nodes!(xy, E, src, tol::Float64)
+    parent = collect(eachindex(xy))
+    function find(i)
+        while parent[i] != i
+            parent[i] = parent[parent[i]]
+            i = parent[i]
+        end
+        return i
+    end
+    used = Set{Int}()
+    for (a, b) in E
+        push!(used, a)
+        push!(used, b)
+    end
+    ids = collect(used)
+    merged = false
+    for i in 1:length(ids), j in (i + 1):length(ids)
+        u, v = ids[i], ids[j]
+        hypot(xy[u][1] - xy[v][1], xy[u][2] - xy[v][2]) <= tol || continue
+        a, b = find(u), find(v)
+        a == b && continue
+        a > b && ((a, b) = (b, a))
+        parent[b] = a
+        merged = true
+    end
+    merged || return false
+    newE = NTuple{2, Int}[]
+    newS = Int[]
+    seen = Set{NTuple{2, Int}}()
+    for (k, (a, b)) in enumerate(E)
+        a, b = find(a), find(b)
+        a == b && continue
+        key = a < b ? (a, b) : (b, a)
+        key in seen && continue
+        push!(seen, key)
+        push!(newE, (a, b))
+        push!(newS, src[k])
+    end
+    empty!(E)
+    append!(E, newE)
+    empty!(src)
+    append!(src, newS)
+    return true
+end
+
+"""Parameter and distance of `p` on segment `a`→`b`."""
+function _segment_parameter(p, a, b)
+    ab = (b[1] - a[1], b[2] - a[2])
+    L2 = ab[1]^2 + ab[2]^2
+    if L2 <= 0
+        return (0.0, hypot(p[1] - a[1], p[2] - a[2]))
+    end
+    t = clamp(((p[1] - a[1]) * ab[1] + (p[2] - a[2]) * ab[2]) / L2, 0.0, 1.0)
+    foot = (a[1] + t * ab[1], a[2] + t * ab[2])
+    return (t, hypot(foot[1] - p[1], foot[2] - p[2]))
+end
+
+"""Split one edge that another node almost lies on. One split per call."""
+function _split_node_onto_edge!(xy, E, src, tol::Float64)
+    used = Set{Int}()
+    for (a, b) in E
+        push!(used, a)
+        push!(used, b)
+    end
+    for i in used
+        for (k, edge) in enumerate(E)
+        a, b = edge
+        (i == a || i == b) && continue
+        t, dist = _segment_parameter(xy[i], xy[a], xy[b])
+        dist <= tol || continue
+        L = hypot(xy[b][1] - xy[a][1], xy[b][2] - xy[a][2])
+        # A hit at an end is a node merge, done on the next pass.
+        if t * L <= tol
+            xy[i] = xy[a]
+            return true
+        elseif (1 - t) * L <= tol
+            xy[i] = xy[b]
+            return true
+        end
+        xy[i] = (xy[a][1] + t * (xy[b][1] - xy[a][1]),
+                 xy[a][2] + t * (xy[b][2] - xy[a][2]))
+        owner = src[k]
+        E[k] = (a, i)
+        push!(E, (i, b))
+        push!(src, owner)
+        return true
+        end
+    end
+    return false
 end

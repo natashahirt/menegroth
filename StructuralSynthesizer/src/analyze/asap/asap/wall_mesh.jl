@@ -498,6 +498,37 @@ function _story_elevation_keys(skel::BuildingSkeleton)
 end
 
 """
+    _fix_grade_wall_bases!(skel, wall_shells) -> Int
+
+Fix all six degrees of freedom on every wall-shell node at the support elevation.
+
+A grade wall stands on a rigid mat or strip. Its base cannot translate or
+rotate, including the nodes the mesh creates between support vertices.
+Upper-story walls are not held. A skeleton with no support vertices is left
+unchanged. Returns the number of nodes fixed.
+"""
+function _fix_grade_wall_bases!(skel::BuildingSkeleton, wall_shells)
+    supports = get(skel.groups_vertices, :support, Int[])
+    isempty(supports) && return 0
+    geom = skel.geometry
+    geom === nothing && return 0
+    grade_z = minimum(geom.vertex_coords[v, 3] for v in supports)
+    seen = Set{UInt64}()
+    n = 0
+    for sh in wall_shells
+        for nd in sh.nodes
+            id = objectid(nd)
+            id in seen && continue
+            abs(ustrip(u"m", nd.position[3]) - grade_z) <= WALL_CUT_ZTOL_M || continue
+            push!(seen, id)
+            nd.dof .= false
+            n += 1
+        end
+    end
+    return n
+end
+
+"""
 Add wall nodes that sit on a story elevation to an existing rigid-link set.
 
 Does nothing when `links` is empty (no diaphragm was built) or `wall_nodes`

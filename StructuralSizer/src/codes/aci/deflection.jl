@@ -70,7 +70,7 @@ Effective moment of inertia per ACI 24.2.3.5 (Branson's equation).
 - `Icr`: Cracked moment of inertia
 
 # Reference
-- ACI 318-11 Eq. (9-10)
+- ACI 318-11 §9.5.2.3, Eq. (9-8) (corpus: aci-318-11, PDF p. 132)
 """
 function effective_moment_of_inertia(Mcr, Ma, Ig, Icr)
     if ustrip(u"N*m", Ma) <= ustrip(u"N*m", Mcr)
@@ -84,6 +84,39 @@ function effective_moment_of_inertia(Mcr, Ma, Ig, Icr)
 
     # Ie cannot exceed Ig
     return min(Ie, Ig)
+end
+
+"""
+    effective_moment_of_inertia_aci318_19(Mcr, Ma, Ig, Icr)
+
+Effective moment of inertia, ACI 318-19 Table 24.2.3.5 (corpus: aci-318-19,
+printed p. 457):
+
+    Ie = Ig                                          Ma ≤ (2/3)Mcr
+    Ie = Icr / (1 − ((2/3)Mcr/Ma)² (1 − Icr/Ig))     Ma > (2/3)Mcr
+
+This is Bischoff's form with Mcr reduced by two-thirds for restraint and
+construction cracking (R24.2.3.5).
+"""
+function effective_moment_of_inertia_aci318_19(Mcr, Ma, Ig, Icr)
+    Mcr_r = (2 / 3) * ustrip(u"N*m", Mcr)
+    Ma_v = ustrip(u"N*m", Ma)
+    Ma_v <= Mcr_r && return Ig
+    Ie = Icr / (1 - (Mcr_r / Ma_v)^2 * (1 - Icr / Ig))
+    return min(Ie, Ig)
+end
+
+"""
+    effective_moment_of_inertia_function(method::Symbol) -> Function
+
+Ie function for a method name: `:aci318_19` (Table 24.2.3.5), `:branson`
+(ACI 318-11 Eq. 9-8), or `:bischoff` (Bischoff 2005, no 2/3 factor).
+"""
+function effective_moment_of_inertia_function(method::Symbol)
+    method === :aci318_19 && return effective_moment_of_inertia_aci318_19
+    method === :branson && return effective_moment_of_inertia
+    method === :bischoff && return effective_moment_of_inertia_bischoff
+    throw(ArgumentError("Ie method must be :aci318_19, :branson, or :bischoff; got :$method"))
 end
 
 """
@@ -186,9 +219,21 @@ function long_term_deflection_factor(ξ::Float64=2.0, ρ_prime::Float64=0.0)
 end
 
 """
+    _as_sustained_live_fraction(ψ) -> Float64
+
+Share of service live load counted with dead load as the sustained load of
+ACI 318-11 R9.5.2.5 (corpus: aci-318-11, PDF p. 132). `0` is dead load alone.
+"""
+function _as_sustained_live_fraction(ψ::Real)
+    0 <= ψ <= 1 || throw(ArgumentError(
+        "sustained live fraction must be between 0 and 1; got $ψ"))
+    return Float64(ψ)
+end
+
+"""
     deflection_limit(l, limit_type::Symbol) -> Length
 
-Allowable deflection per ACI Table 24.2.2.
+Allowable deflection per ACI 318-11 Table 9.5(b) (corpus: aci-318-11, page 133).
 
 # Arguments
 - `l`: Span length
@@ -196,16 +241,19 @@ Allowable deflection per ACI Table 24.2.2.
   - `:immediate_ll` — l/360 (immediate, live load only)
   - `:total`        — l/240 (total after attachment)
   - `:sensitive`    — l/480 (supporting sensitive elements)
+
+Any other `limit_type` throws `ArgumentError`.
 """
 function deflection_limit(l::Length, limit_type::Symbol)
-    divisor = if limit_type == :immediate_ll
+    divisor = if limit_type === :immediate_ll
         360
-    elseif limit_type == :total
+    elseif limit_type === :total
         240
-    elseif limit_type == :sensitive
+    elseif limit_type === :sensitive
         480
     else
-        240  # Default
+        throw(ArgumentError(
+            "deflection limit type must be :immediate_ll, :total, or :sensitive; got :$limit_type"))
     end
     return l / divisor
 end

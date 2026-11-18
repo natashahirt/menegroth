@@ -85,7 +85,7 @@ end
         @test length(rec["groups"]) == length(md.groups)
         g = first(rec["groups"])
         @test all(k -> haskey(g, k), ("mark", "role", "bar_size", "diameter_m", "count",
-                                      "length_m", "shape", "path_m", "x_positions_m"))
+                                      "length_m", "shape", "path_m", "centerlines_m", "x_positions_m"))
         @test _detail_record(nothing) === nothing
         @test _detail_record("boom")["error"] == "boom"
 

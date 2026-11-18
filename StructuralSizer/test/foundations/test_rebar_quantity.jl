@@ -222,6 +222,7 @@ opts_strip = StripParams(
     min_depth        = 12.0u"inch",
     depth_increment  = 1.0u"inch",
     width_increment  = 1.0u"inch",
+    check_development = false,  # takeoff below counts the named #8 and #5
 )
 
 result_strip = design_footing(StripFooting(),

@@ -78,6 +78,16 @@ using StructuralSizer
         @test spanning_behavior(floor_type(:clt)) isa OneWaySpanning
     end
     
+    @testset "Long-to-short greater than 2 is one-way" begin
+        # ACI 318-19 R8.3.1.2 (corpus: aci-318-19, PDF p. 103). At 2, two-way.
+        @test infer_floor_type(10.0, 10.0) == :two_way
+        @test infer_floor_type(10.0, 20.0) == :two_way
+        @test infer_floor_type(10.0, 20.1) == :one_way
+        @test infer_floor_type(30.0, 10.0) == :one_way
+        @test infer_floor_type(10.0, 10.0; axis=(1.0, 0.0)) == :one_way
+        @test_throws ArgumentError infer_floor_type(0.0, 10.0)
+    end
+
     @testset "ShapedSlab defaults to two-way" begin
         shaped = ShapedSlab((x,y,l,m) -> nothing)
         @test spanning_behavior(shaped) isa TwoWaySpanning

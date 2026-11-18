@@ -33,12 +33,22 @@ function _frameline_support_classes(struc, frame_line; tc = nothing,
 end
 
 """
+True when `col` is a wall that supports the whole edge it meets.
+
+ACI 318-11 R13.1 (aci-318-11, page 243) treats that wall as a beam of
+infinite stiffness, so §13.6.3.3 Column (5) applies (page 254). A shorter
+wall is stored with `wall_fixed` false and stays a column joint.
+"""
+_support_is_wall_fixed(col) = hasproperty(col, :wall_fixed) && col.wall_fixed === true
+
+"""
 Per-span DDM moments of a FrameLine with the given exterior supports.
 
 Each span: M0 by ACI 318-11 §13.6.2.2 Eq. (13-4) (corpus: aci-318-11,
-page 253) and the §13.6.3 coefficients (page 254): end-span coefficients
-when either support is exterior (edge beam via `βt`), interior-span
-coefficients otherwise; `:simplified` uses 0.65 / 0.35 throughout.
+page 253) and the §13.6.3 coefficients (page 254): Column (5) when either
+support is a fully restrained wall, otherwise end-span coefficients when
+either support is exterior (edge beam via `βt`), interior-span coefficients
+otherwise; `:simplified` uses 0.65 / 0.35 throughout.
 """
 function _frameline_span_moments(method::DDM, frame_line, qu, column_is_exterior, βt)
     l2 = frame_line.tributary_width
@@ -57,7 +67,15 @@ function _frameline_span_moments(method::DDM, frame_line, qu, column_is_exterior
         M0 = total_static_moment(qu, l2, ln_m0)
         left_is_ext = column_is_exterior[span_idx]
         right_is_ext = column_is_exterior[span_idx + 1]
-        if method.variant == :simplified
+        left_fixed = _support_is_wall_fixed(frame_line.columns[span_idx])
+        right_fixed = _support_is_wall_fixed(frame_line.columns[span_idx + 1])
+        if left_fixed || right_fixed
+            # §13.6.3.3 Column (5) for the span that ends on the wall.
+            fixed = ACI_DDM_LONGITUDINAL.end_span_fully_restrained
+            M_neg_left = (left_fixed ? fixed.ext_neg : fixed.int_neg) * M0
+            M_neg_right = (right_fixed ? fixed.ext_neg : fixed.int_neg) * M0
+            M_pos = fixed.pos * M0
+        elseif method.variant == :simplified
             M_neg_left = 0.65 * M0
             M_neg_right = 0.65 * M0
             M_pos = 0.35 * M0
@@ -311,14 +329,16 @@ function run_moment_analysis(
         γ = γ_concrete, design_drop = design_drop, tc = tc,
     )
     
-    # Use first span values for aggregate/representative fields
+    # Representative panel geometry stays the first span. The moments are
+    # the envelope of every span, with a wall kept out of the column labels.
     ln = span_moments[1].ln
     l1 = hasproperty(frame_line, :center_spans) ? frame_line.center_spans[1] :
         ln + sum(c.c1 for c in sorted_columns) / n_cols
     M0 = span_moments[1].M0
-    M_neg_ext = span_moments[1].M_neg_left
-    M_neg_int = span_moments[1].M_neg_right
-    M_pos = span_moments[1].M_pos
+    env = _envelope_support_moments(span_moments, sorted_columns)
+    M_neg_ext = env.M_neg_ext
+    M_neg_int = env.M_neg_int
+    M_pos = env.M_pos
     
     c1_avg = sum(c.c1 for c in sorted_columns) / n_cols
     
@@ -341,7 +361,9 @@ function run_moment_analysis(
         column_moments,
         column_shears,
         unbalanced_moments,
-        Vu_max
+        Vu_max;
+        M_wall_ext = uconvert(kip*u"ft", env.M_wall_ext),
+        M_wall_int = uconvert(kip*u"ft", env.M_wall_int),
     )
 end
 

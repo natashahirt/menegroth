@@ -105,6 +105,88 @@ function _slab_edge_distance(struc::BuildingStructure, slab::Slab, c::_BeamChord
     return isfinite(best) ? best : nothing
 end
 
+"""True when the whole chord lies on `poly`."""
+function _chord_on_polygon(c::_BeamChord, poly::Vector{NTuple{2, Float64}}; tol::Float64 = 1e-3)
+    for s in (0.0, 0.5, 1.0)
+        x = c.p[1] + s * c.L * c.u[1]
+        y = c.p[2] + s * c.L * c.u[2]
+        _point_on_polygon_boundary(x, y, poly; tol = tol) || return false
+    end
+    return true
+end
+
+"""
+Flange thickness of a slab whose boundary contains one of `idxs`, or `nothing`.
+
+Used when a perimeter girder is not stored as a face edge, so
+[`_edge_slab_thickness`](@ref) has no entry for it.
+"""
+function _boundary_group_hf(struc, idxs, chords)
+    for mi in idxs
+        c = chords[mi]
+        c === nothing && continue
+        for slab in struc.slabs
+            poly = _slab_interior_polygon_m(struc, slab)
+            poly === nothing && continue
+            _chord_on_polygon(c, poly) || continue
+            hf = _slab_flange_hf(slab)
+            hf === nothing && continue
+            return hf
+        end
+    end
+    return nothing
+end
+
+"""
+One-sided T-beam flange for a member whose centerline is the slab boundary.
+
+ACI 318-11 §8.12.3 (corpus: aci-318-11, page 119): the slab is on one side
+only, so the outward side is dropped. The inward extent is the clear distance
+to the next parallel web, or the distance across the slab when there is no
+web. A centerline that is not on a slab boundary returns `nothing`
+(ACI 318-11 §8.12.1: the flange and the web are built integrally). The width
+limits themselves stay in `flange_width_at_station`.
+"""
+function _boundary_member_flange(struc, mi::Int, chords; field::Bool, level_gids)
+    c = chords[mi]
+    c === nothing && return nothing
+    lw, rw = _nearest_parallel_webs(chords, mi)
+    for slab in struc.slabs
+        poly = _slab_interior_polygon_m(struc, slab)
+        poly === nothing && continue
+        _chord_on_polygon(c, poly) || continue
+        nx, ny = -c.u[2], c.u[1]
+        mid = (c.p[1] + 0.5 * c.L * c.u[1], c.p[2] + 0.5 * c.L * c.u[2])
+        inward = nothing
+        for sign in (1, -1)
+            tx = mid[1] + sign * 0.02 * nx
+            ty = mid[2] + sign * 0.02 * ny
+            _point_on_polygon_boundary(tx, ty, poly; tol = 1e-4) && continue
+            _point_in_polygon_xy(tx, ty, poly) || continue
+            inward = sign
+            break
+        end
+        inward === nothing && continue
+        web = inward > 0 ? lw : rw
+        dist = web !== nothing ? web.dist_m :
+            _slab_edge_distance(struc, slab, c, inward > 0 ? 1 : -1)
+        dist === nothing && continue
+        side = StructuralSizer.SideExtentProfile(dist)
+        left = inward > 0 ? side : nothing
+        right = inward > 0 ? nothing : side
+        le = inward > 0 && web === nothing ? dist : nothing
+        re = inward < 0 && web === nothing ? dist : nothing
+        m = struc.beams[mi]
+        return _MemberFlange(mi, _member_span(struc, m), left, right,
+                             inward > 0 ? lw : nothing,
+                             inward < 0 ? rw : nothing,
+                             le, re, true,
+                             field ? beam_signed_moment_field(struc, m) : nothing,
+                             level_gids)
+    end
+    return nothing
+end
+
 """
 Flange geometry of one member.
 
@@ -180,29 +262,72 @@ function _framing_home(struc::BuildingStructure)
     return home
 end
 
-"""Center-to-center rib spacing (m) of a `:joist` level, or `nothing` when it has none."""
+"""
+Center-to-center rib spacing (m) of a `:joist` level, or `nothing` when it has none.
+
+ACI 318-11 §8.13.1 (corpus: aci-318-11, page 120) defines joist construction as
+regularly spaced ribs spanning one way or two orthogonal ways. A module grid
+qualifies, cut edge bays included, and its larger module side is the stricter
+§8.13.3 center spacing. Radial and custom ribs are not regularly spaced, so
+they return `nothing`: §8.13.4 designs them as slabs and beams, without the
+joist increase.
+"""
 function _rib_spacing_m(struc::BuildingStructure, fl::FramingLevel)
     fl.role === :joist || return nothing
     pat = fl.pattern
-    pat isa LinearAxisPattern || return nothing
-    if pat.spacing !== nothing
-        return pat.spacing isa Unitful.Quantity ? ustrip(u"m", pat.spacing) : Float64(pat.spacing)
+    if pat isa LinearAxisPattern
+        if pat.spacing !== nothing
+            return pat.spacing isa Unitful.Quantity ? ustrip(u"m", pat.spacing) : Float64(pat.spacing)
+        end
+        return _infer_joist_spacing_m(struc, fl, pat.axis)
     end
-    return _infer_joist_spacing_m(struc, fl, pat.axis)
+    pat isa ModularRibPattern && return maximum(pat.spacing)
+    pat isa IsoparametricPattern || return nothing
+    return _isoparametric_spacing_m(struc, fl)
 end
 
-"""Edge → thicknesses (m) of the slabs on that edge, including host sub-edges split by joist landings."""
+"""
+Larger center-to-center bay of an isoparametric rib grid, in metres.
+
+ACI 318-11 §8.13.3 (corpus: aci-318-11, page 120) limits the clear spacing.
+The larger of the two bay directions is the stricter center spacing. A panel
+that is not a quadrilateral returns `nothing`, and the joist increase stays off.
+"""
+function _isoparametric_spacing_m(struc::BuildingStructure, fl::FramingLevel)
+    fl.slab_idx < 1 && return nothing
+    fl.slab_idx > length(struc.slabs) && return nothing
+    poly = _slab_interior_polygon_m(struc, struc.slabs[fl.slab_idx])
+    poly === nothing && return nothing
+    corners = _panel_corners(poly)
+    length(corners) == 4 || return nothing
+    Lξ = hypot(corners[2][1] - corners[1][1], corners[2][2] - corners[1][2])
+    Lη = hypot(corners[4][1] - corners[1][1], corners[4][2] - corners[1][2])
+    (Lξ > 1e-9 && Lη > 1e-9) || return nothing
+    return max(Lξ / fl.pattern.n_xi, Lη / fl.pattern.n_eta)
+end
+
+"""Flange thickness `hf` (m) a beam may take from `slab`, or `nothing` (vault, shaped, precast, timber)."""
+function _slab_flange_hf(slab)
+    hf = StructuralSizer.flange_thickness(slab.result)
+    return hf === nothing ? nothing : uconvert(u"m", hf)
+end
+
+"""
+Edge → flange thicknesses (m) of the slabs on that edge, including host sub-edges
+split by joist landings. An entry is `nothing` when that slab offers no flange.
+"""
 function _edge_slab_thickness(struc::BuildingStructure)
     skel = struc.skeleton
-    out = Dict{Int, Vector{typeof(1.0u"m")}}()
+    HF = Union{Nothing, typeof(1.0u"m")}
+    out = Dict{Int, Vector{HF}}()
     for slab in struc.slabs
-        hf = uconvert(u"m", StructuralSizer.total_depth(slab.result))
+        hf = _slab_flange_hf(slab)
         for cell_idx in slab.cell_indices
             face_idx = struc.cells[cell_idx].face_idx
             for e in skel.face_edge_indices[face_idx]
-                push!(get!(Vector{typeof(1.0u"m")}, out, e), hf)
+                push!(get!(Vector{HF}, out, e), hf)
                 for sub in get(skel.edge_chains, hash((:framing_host_chain, e)), Int[])
-                    push!(get!(Vector{typeof(1.0u"m")}, out, sub), hf)
+                    push!(get!(Vector{HF}, out, sub), hf)
                 end
             end
         end
@@ -257,12 +382,20 @@ signed moment field that picks the governing station. `nothing` without slab.
 function _girder_member_flange(struc, mi::Int, chords; field::Bool = true)
     m = struc.beams[mi]
     left, right = beam_side_profiles(struc, m)
-    (left === nothing && right === nothing) && return nothing
+    if left === nothing && right === nothing
+        # No tributary profile. A centerline on the slab boundary is still an
+        # edge T-beam (ACI 318-11 §8.12.3, corpus: aci-318-11, page 119).
+        return _boundary_member_flange(struc, mi, chords; field = field,
+                                       level_gids = UInt64[])
+    end
     lw, rw = chords[mi] === nothing ? (nothing, nothing) : _nearest_parallel_webs(chords, mi)
+    # One profile means slab on one side. The width check already treats a
+    # missing side as §8.12.3; the flag is what collinear bar sharing reads.
+    one = (left === nothing) != (right === nothing) ? true : nothing
     return _MemberFlange(mi, _member_span(struc, m), left, right,
                          left === nothing ? nothing : lw,
                          right === nothing ? nothing : rw,
-                         nothing, nothing, nothing,
+                         nothing, nothing, one,
                          field ? beam_signed_moment_field(struc, m) : nothing, UInt64[])
 end
 
@@ -283,20 +416,38 @@ function _framed_member_flange(struc, mi::Int, slab::Slab, fl::FramingLevel, cho
     side(w, e) = w !== nothing ? StructuralSizer.SideExtentProfile(w.dist_m) :
                  e !== nothing ? StructuralSizer.SideExtentProfile(e) : nothing
     left, right = side(lw, le), side(rw, re)
-    (left === nothing && right === nothing) && return nothing
-    free = (left !== nothing && lw === nothing) || (right !== nothing && rw === nothing)
+    if left === nothing && right === nothing
+        return _boundary_member_flange(struc, mi, chords; field = false,
+                                       level_gids = level_group_ids(fl))
+    end
+    # A missing side is slab on one side only (ACI 318-11 §8.12.3). A side
+    # that reaches a free edge with no web is the same. An inset rib with a
+    # web on both sides stays two-sided (§8.12.2).
+    missing_side = (left === nothing) != (right === nothing)
+    free = missing_side || (left !== nothing && lw === nothing) ||
+           (right !== nothing && rw === nothing)
     return _MemberFlange(mi, _member_span(struc, struc.beams[mi]), left, right,
                          lw, rw, le, re, free ? true : nothing, nothing,
                          level_group_ids(fl))
 end
 
-"""Girder group: `hf` from the slabs on its edges, sides from the tributary profiles."""
+"""
+Girder group: `hf` from the slabs on its edges, sides from the tributary profiles.
+A girder bearing any slab without a solid flange (e.g. a vault) is sized rectangular.
+"""
 function _girder_group_flange(struc, idxs, chords, edge_hf)
-    hfs = typeof(1.0u"m")[]
+    hfs = Union{Nothing, typeof(1.0u"m")}[]
     for mi in idxs, si in segment_indices(struc.beams[mi])
-        append!(hfs, get(edge_hf, struc.segments[si].edge_idx, typeof(1.0u"m")[]))
+        append!(hfs, get(edge_hf, struc.segments[si].edge_idx, ()))
     end
-    isempty(hfs) && return nothing
+    if isempty(hfs)
+        # The perimeter member is not recorded as a face edge. If its
+        # centerline is the slab boundary it still bears that slab.
+        hf = _boundary_group_hf(struc, idxs, chords)
+        hf === nothing && return nothing
+        hfs = [hf]
+    end
+    any(isnothing, hfs) && return nothing
     members = _MemberFlange[mf for mf in (_girder_member_flange(struc, mi, chords) for mi in idxs)
                             if mf !== nothing]
     isempty(members) && return nothing
@@ -311,7 +462,9 @@ function _framed_group_flange(struc, idxs, chords, home)
     members = _MemberFlange[]
     for mi in idxs
         slab, fl = home[mi]
-        push!(hfs, uconvert(u"m", StructuralSizer.total_depth(slab.result)))
+        hf = _slab_flange_hf(slab)
+        hf === nothing && return nothing
+        push!(hfs, hf)
         s = _rib_spacing_m(struc, fl)
         s === nothing ? (all_ribs = false) : push!(spacings, s)
         mf = _framed_member_flange(struc, mi, slab, fl, chords)
@@ -407,6 +560,8 @@ has slab.
 """
 function _service_flange_sides(struc::BuildingStructure, mi::Int, bw, ctx)
     entry = get(ctx.home, mi, nothing)
+    hf = entry === nothing ? nothing : _slab_flange_hf(entry[1])
+    entry !== nothing && hf === nothing && return nothing
     mf = entry === nothing ? _girder_member_flange(struc, mi, ctx.chords; field = false) :
                              _framed_member_flange(struc, mi, entry[1], entry[2], ctx.chords)
     mf === nothing && return nothing
@@ -414,7 +569,6 @@ function _service_flange_sides(struc::BuildingStructure, mi::Int, bw, ctx)
     batch = gid === nothing ? Set{UInt64}() : Set([gid])
     cap(web, edge) = _side_clear_cap(struc, mf, web, edge, bw, batch,
                                      StructuralSizer.MAX_CATALOG_TBEAM_WEB; final = true)
-    hf = entry === nothing ? nothing : uconvert(u"m", StructuralSizer.total_depth(entry[1].result))
     return (left = mf.left, right = mf.right,
             left_clear = cap(mf.left_web, mf.left_edge_m),
             right_clear = cap(mf.right_web, mf.right_edge_m),

@@ -200,14 +200,16 @@ function is_exterior_support(col::Column, span_direction::Symbol)::Bool
 end
 
 # =============================================================================
-# Structural Column Offset — Architectural → Centerline
+# Column centerlines and the slab edge
 # =============================================================================
 #
-# When columns are placed at architectural reference points (column face flush
-# with slab edge), the structural centerline is inboard by half the column
-# dimension normal to each boundary edge.  These functions compute that offset
-# using the adjacent face's CCW winding to determine the inward direction —
-# robust to concave floor plates and arbitrary edge orientations.
+# Skeleton vertices are column and beam centerlines. A column resize does not
+# move them. `boundary_inward_normals` still records which way the slab lies,
+# and `structural_offset` stays (0, 0). The slab edge is the centerline shifted
+# out to the largest column face on each straight run (`slab_vertex_overhang`).
+#
+# Input drawn as a slab edge is shifted onto those centerlines once, by
+# `apply_facade_setback!`, and is not shifted again.
 # =============================================================================
 
 """
@@ -222,11 +224,14 @@ and returns the distance to the bounding-box face along that direction.
 Equivalent to StructuralSizer's `_column_face_offset_m` but self-contained so
 StructuralSynthesizer doesn't depend on a private function.
 """
+_length_m(x::Unitful.Quantity) = Float64(ustrip(u"m", x))
+_length_m(x::Real) = Float64(x)
+
 function _column_half_dim_m(col::Column, d::NTuple{2,Float64})
     (col.c1 === nothing || col.c2 === nothing) && return 0.0
 
-    c1_m = Float64(ustrip(u"m", col.c1))
-    c2_m = Float64(ustrip(u"m", col.c2))
+    c1_m = _length_m(col.c1)
+    c2_m = _length_m(col.c2)
 
     if col.shape == :circular
         return c1_m / 2  # D/2 in any direction
@@ -337,18 +342,15 @@ end
 """
     update_structural_offsets!(struc; input_is_centerline=false)
 
-Compute `structural_offset` and `boundary_inward_normals` for every column.
+Record each column's inward boundary normals and keep its center on the
+skeleton vertex.
 
-When `input_is_centerline=true`, all offsets are set to `(0,0)` — the input
-vertex coordinates are already structural centerlines and no adjustment is needed.
-
-When `input_is_centerline=false` (architectural input), edge and corner columns
-are offset inward by half the column dimension normal to each boundary edge.
-Interior columns always have zero offset.
-
-Call this:
-1. After `classify_column_position` (initial setup)
-2. After any column resize (design iteration) to update offsets for new dimensions
+`structural_offset` is always `(0, 0)`. The grid is the centerline, and the
+slab edge moves instead (`slab_vertex_overhang`). `input_is_centerline` remains
+so existing callers keep working; the centerline is no longer shifted either way.
+Interior columns have no boundary normals. The slab edge follows the column
+sizes, so the edge-strip tributary areas are refreshed
+([`refresh_edge_strip_tributaries!`](@ref)).
 
 The function is idempotent — safe to call repeatedly.
 """
@@ -359,68 +361,43 @@ function update_structural_offsets!(struc::BuildingStructure;
     efc = skel.geometry.edge_face_counts
 
     for col in struc.columns
+        col.structural_offset = (0.0, 0.0)
         if input_is_centerline || col.position == :interior
-            col.structural_offset = (0.0, 0.0)
             empty!(col.boundary_inward_normals)
             continue
         end
-
-        # Recompute inward normals + offset from current column dimensions.
-        # Multiple boundary edges may share the same inward normal (e.g., a
-        # mid-edge column has two boundary edges both pointing the same way).
-        # We deduplicate normals so the offset is applied once per unique
-        # inward direction.
-        all_normals = NTuple{2, Float64}[]
-        v_idx = col.vertex_idx
-        v_z = vc[v_idx, 3]
-
-        neighbors = Graphs.neighbors(skel.graph, v_idx)
-        for n_idx in neighbors
-            abs(vc[n_idx, 3] - v_z) > 0.01 && continue  # horizontal only
-            edge_idx = find_edge(skel, v_idx, n_idx)
-            isnothing(edge_idx) && continue
-            get(efc, edge_idx, 0) == 1 || continue  # boundary edges only
-
-            n_inward = _compute_inward_normal(skel, v_idx, n_idx, edge_idx)
-            push!(all_normals, n_inward)
-        end
-
-        # Deduplicate: keep only unique inward normal directions (cosine > 0.95)
-        unique_normals = NTuple{2, Float64}[]
-        for n in all_normals
-            is_dup = false
-            for u in unique_normals
-                dot_val = n[1]*u[1] + n[2]*u[2]
-                if dot_val > 0.95
-                    is_dup = true
-                    break
-                end
-            end
-            is_dup || push!(unique_normals, n)
-        end
-
-        ox, oy = 0.0, 0.0
-        for n_inward in unique_normals
-            half_dim = _column_half_dim_m(col, n_inward)
-            ox += n_inward[1] * half_dim
-            oy += n_inward[2] * half_dim
-        end
-
-        col.boundary_inward_normals = unique_normals
-        col.structural_offset = (ox, oy)
+        col.boundary_inward_normals = _unique_inward_normals(skel, vc, efc, col.vertex_idx)
     end
 
+    # Column sizes set the slab edge, and the slab edge is support area.
+    refresh_edge_strip_tributaries!(struc)
     return struc
+end
+
+"""Unique inward unit normals of the horizontal boundary edges at `vertex_idx`."""
+function _unique_inward_normals(skel, vc, efc, vertex_idx::Int)
+    all_normals = NTuple{2, Float64}[]
+    v_z = vc[vertex_idx, 3]
+    for n_idx in Graphs.neighbors(skel.graph, vertex_idx)
+        abs(vc[n_idx, 3] - v_z) > 0.01 && continue
+        edge_idx = find_edge(skel, vertex_idx, n_idx)
+        isnothing(edge_idx) && continue
+        get(efc, edge_idx, 0) == 1 || continue
+        push!(all_normals, _compute_inward_normal(skel, vertex_idx, n_idx, edge_idx))
+    end
+    unique_normals = NTuple{2, Float64}[]
+    for n in all_normals
+        any(u -> n[1] * u[1] + n[2] * u[2] > 0.95, unique_normals) && continue
+        push!(unique_normals, n)
+    end
+    return unique_normals
 end
 
 """
     structural_center_xy_m(skel, col::Column) -> NTuple{2,Float64}
 
-XY position (meters) of a column's **structural centerline**, accounting for
-the inward offset from the architectural vertex.
-
-For interior columns or when `input_is_centerline=true`, this returns the
-same value as `_vertex_xy_m(skel, col.vertex_idx)`.
+XY position (meters) of a column's centerline. The centerline is the
+skeleton vertex. `structural_offset` is `(0, 0)`.
 """
 function structural_center_xy_m(skel, col::Column)
     vc = skel.geometry.vertex_coords
@@ -433,11 +410,13 @@ end
     group_collinear_members!(struc::BuildingStructure; 
                              member_type::Symbol=:beams, tol::Real=1e-3)
 
-Detect collinear beams (sharing a node with the same direction vector) and assign
-them the same `group_id` so the optimizer sizes them with the same section.
+Detect separate collinear beams (sharing a node with the same direction
+vector) and assign them the same `group_id` so the optimizer can give that
+line one section.
 
-This enforces the constructability constraint that you don't splice a different
-section mid-span along a continuous line.
+This is optional. A moment connection does not require the two members to be
+the same shape. Edges that already belong to one beam are one member in
+`initialize_members!` and are sized once without this grouping.
 
 Two edges are collinear if they share a vertex and `|sin(θ)| < tol` where θ is
 the angle between their direction vectors (cross product test).

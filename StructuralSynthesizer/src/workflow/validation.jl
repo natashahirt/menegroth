@@ -93,16 +93,19 @@ function run_pre_sizing_validation(
     floor_opts = resolve_floor_options(params)
     fp_opts = floor_opts isa StructuralSizer.FlatSlabOptions ? floor_opts.base : floor_opts
 
-    # Only FlatPlateOptions / FlatSlabOptions have method applicability checks
-    if !(fp_opts isa StructuralSizer.FlatPlateOptions)
+    # Only FlatPlateOptions / FlatSlabOptions have method applicability checks.
+    # A :two_way request can redesign beamless panels as flat plates; those
+    # panels are checked against the options the slab node will actually use.
+    any_plate = any(s -> s.floor_type in (:flat_plate, :flat_slab), struc.slabs)
+    if !(fp_opts isa StructuralSizer.FlatPlateOptions) && !any_plate
         StructuralSizer.emit!(tc, :workflow, "run_pre_sizing_validation", "", :decision;
                               outcome="skipped", reason="non_flat_plate_floor_options",
                               floor_opts_type=string(typeof(floor_opts)))
         return (true, String[])
     end
 
-    method = fp_opts.method
-    ρ_concrete = fp_opts.material.concrete.ρ
+    method = fp_opts isa StructuralSizer.FlatPlateOptions ? fp_opts.method : nothing
+    ρ_concrete = fp_opts isa StructuralSizer.FlatPlateOptions ? fp_opts.material.concrete.ρ : nothing
 
     StructuralSizer.emit!(tc, :workflow, "run_pre_sizing_validation", "", :enter;
                           n_slabs=length(struc.slabs),
@@ -113,11 +116,17 @@ function run_pre_sizing_validation(
 
     for (slab_idx, slab) in enumerate(struc.slabs)
         slab.floor_type in (:flat_plate, :flat_slab) || continue
+        slab_opts = _floor_options_for_slab(struc, slab_idx, params, floor_opts)
+        slab_fp = slab_opts isa StructuralSizer.FlatSlabOptions ? slab_opts.base : slab_opts
+        slab_fp isa StructuralSizer.FlatPlateOptions || continue
+        method = slab_fp.method
+        ρ_concrete = slab_fp.material.concrete.ρ
         n_checked += 1
 
         slab_cell_indices = Set(slab.cell_indices)
         columns = StructuralSizer.find_supporting_columns(struc, slab_cell_indices)
         n_cols = length(columns)
+        n_walls = length(StructuralSizer.supporting_wall_segments(struc, slab))
 
         prefix = "Slab $slab_idx: "
 
@@ -140,8 +149,11 @@ function run_pre_sizing_validation(
                 n_violations += length(result.violations)
             end
         elseif method isa StructuralSizer.FEA
-            if n_cols < 2
-                push!(errors, prefix * "FEA requires at least 2 supporting columns; found $n_cols")
+            # A wall line is a support. Two columns, a column and a wall, or
+            # two walls are enough; one support is a mechanism.
+            n_supports = n_cols + n_walls
+            if n_supports < 2
+                push!(errors, prefix * "FEA requires at least 2 supports; found $n_cols columns and $n_walls wall lines")
                 n_violations += 1
             end
         end

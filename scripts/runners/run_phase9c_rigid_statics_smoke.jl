@@ -123,7 +123,7 @@ end
 
 @testset "Phase 9c — rigid-diaphragm shear distribution & equilibrium" begin
     params = DesignParameters(materials =
-        MaterialOptions(steel = A992_Steel, beam = A992_Steel))
+        MaterialOptions(steel = A992_Steel))
     N_per_kN = 1000.0
     tol_kN = 0.5                                   # 0.25% of a 200 kN load
 

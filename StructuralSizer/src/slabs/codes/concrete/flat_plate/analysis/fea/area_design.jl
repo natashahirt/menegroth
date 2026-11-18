@@ -48,25 +48,87 @@ struct AreaDesignMoment
 end
 
 """
+    _envelope_design_faces(method, span_axis, ex, ey, combos; torsion_discount, Qxz, Qyz)
+        -> (Mx_bot, My_bot, Mx_top, My_top)
+
+Envelope one element's factored moment tensors onto the reinforcement axes.
+
+`method.moment_transform` chooses the transform: `:wood_armer`,
+`:no_torsion`, or a projection. Each tensor is in the element frame and
+uses Asap's hogging-positive sign. The result uses sagging-positive bottom
+moments and hogging-negative top moments, in N·m/m.
+
+The flat-plate cache and the story shell both call this, so a panel does
+not grow a second copy of the transform.
+"""
+function _envelope_design_faces(
+    method::FEA,
+    span_axis::NTuple{2, Float64},
+    ex::NTuple{2, Float64},
+    ey::NTuple{2, Float64},
+    combos;
+    torsion_discount::Union{Nothing, NamedTuple} = nothing,
+    Qxz::Float64 = 0.0,
+    Qyz::Float64 = 0.0,
+)
+    rebar_ax, rebar_ay = _resolve_rebar_axes(method, span_axis)
+    ex1, ex2 = ex
+    ey1, ey2 = ey
+    Mx_bot = 0.0
+    My_bot = 0.0
+    Mx_top = 0.0
+    My_top = 0.0
+
+    for (Mxx, Myy, Mxy) in combos
+        Mxx_g = Mxx * ex1^2 + Myy * ey1^2 + 2 * Mxy * ex1 * ey1
+        Myy_g = Mxx * ex2^2 + Myy * ey2^2 + 2 * Mxy * ex2 * ey2
+        Mxy_g = Mxx * ex1 * ex2 + Myy * ey1 * ey2 + Mxy * (ex1 * ey2 + ex2 * ey1)
+        Mxx_s = -Mxx_g
+        Myy_s = -Myy_g
+        Mxy_s = -Mxy_g
+
+        if method.moment_transform == :wood_armer
+            Mxx_r, Myy_r, Mxy_r = _rotate_moments_to_rebar(
+                Mxx_s, Myy_s, Mxy_s, rebar_ax, rebar_ay)
+            if !isnothing(torsion_discount)
+                Mxy_c = _aci_concrete_torsion_capacity(
+                    Qxz, Qyz,
+                    torsion_discount.h_m, torsion_discount.d_m,
+                    torsion_discount.fc_Pa, torsion_discount.λ)
+                Mxy_r = _apply_torsion_discount(Mxy_r, Mxy_c)
+            end
+            wa = wood_armer(Mxx_r, Myy_r, Mxy_r)
+            Mx_bot = max(Mx_bot, wa.Mx_bot)
+            My_bot = max(My_bot, wa.My_bot)
+            Mx_top = min(Mx_top, wa.Mx_top)
+            My_top = min(My_top, wa.My_top)
+        elseif method.moment_transform == :no_torsion
+            Mx_proj = _project_moment_no_torsion(Mxx_s, Myy_s, rebar_ax)
+            My_proj = _project_moment_no_torsion(Mxx_s, Myy_s, rebar_ay)
+            Mx_bot = max(Mx_bot, max(0.0, Mx_proj))
+            My_bot = max(My_bot, max(0.0, My_proj))
+            Mx_top = min(Mx_top, min(0.0, Mx_proj))
+            My_top = min(My_top, min(0.0, My_proj))
+        else
+            Mx_proj = _project_moment_onto_axis(Mxx_s, Myy_s, Mxy_s, rebar_ax)
+            My_proj = _project_moment_onto_axis(Mxx_s, Myy_s, Mxy_s, rebar_ay)
+            Mx_bot = max(Mx_bot, max(0.0, Mx_proj))
+            My_bot = max(My_bot, max(0.0, My_proj))
+            Mx_top = min(Mx_top, min(0.0, Mx_proj))
+            My_top = min(My_top, min(0.0, My_proj))
+        end
+    end
+    return (Mx_bot, My_bot, Mx_top, My_top)
+end
+
+"""
     _extract_area_design_moments(cache, method, span_axis; verbose=false)
         -> Vector{AreaDesignMoment}
 
 Extract per-element design moments for area-based reinforcement design.
 
-# Algorithm
-For each element in `cache.element_data`:
-1. Rotate element-local moments (Mxx, Myy, Mxy) to global frame.
-2. Negate to convert Asap convention (positive = hogging) to standard
-   (positive = sagging).
-3. If `method.moment_transform == :wood_armer`:
-   - Apply Wood–Armer transformation in the rebar coordinate system.
-4. If `method.moment_transform == :no_torsion`:
-   - Project onto rebar axes ignoring Mxy: Mn = Mxx·ax² + Myy·ay².
-   - ⚠ Intentionally unconservative baseline — use only for comparison.
-5. If `method.moment_transform == :projection`:
-   - Project the moment tensor onto the rebar axes to get Mx', My'.
-   - Use Mx' and My' directly (no twisting moment envelope).
-   - ⚠ This can be unconservative if Mxy is significant.
+Each element is sent through [`_envelope_design_faces`](@ref), which follows
+`method.moment_transform`.
 
 # Returns
 Vector of `AreaDesignMoment` for each element.
@@ -78,62 +140,17 @@ function _extract_area_design_moments(
     torsion_discount::Union{Nothing, NamedTuple} = nothing,
     verbose::Bool = false,
 )
-    # Resolve reinforcement axes
-    rebar_ax, rebar_ay = _resolve_rebar_axes(method, span_axis)
-
     n_elem = length(cache.element_data)
     results = Vector{AreaDesignMoment}(undef, n_elem)
 
     for k in 1:n_elem
         ed = cache.element_data[k]
-        ex1, ex2 = ed.ex
-        ey1, ey2 = ed.ey
-
-        Mx_bot = 0.0; My_bot = 0.0
-        Mx_top = 0.0; My_top = 0.0
-
         # Envelope transform outputs over every factored combo (per-face,
         # both directions).  One combo → identical to the historical
         # single-tensor path.
-        for (Mxx, Myy, Mxy) in _factored_moment_combos(cache, k)
-            Mxx_g = Mxx * ex1^2 + Myy * ey1^2 + 2 * Mxy * ex1 * ey1
-            Myy_g = Mxx * ex2^2 + Myy * ey2^2 + 2 * Mxy * ex2 * ey2
-            Mxy_g = Mxx * ex1 * ex2 + Myy * ey1 * ey2 + Mxy * (ex1 * ey2 + ex2 * ey1)
-            Mxx_s = -Mxx_g
-            Myy_s = -Myy_g
-            Mxy_s = -Mxy_g
-
-            if method.moment_transform == :wood_armer
-                Mxx_r, Myy_r, Mxy_r = _rotate_moments_to_rebar(
-                    Mxx_s, Myy_s, Mxy_s, rebar_ax, rebar_ay)
-                if !isnothing(torsion_discount)
-                    Mxy_c = _aci_concrete_torsion_capacity(
-                        ed.Qxz, ed.Qyz,
-                        torsion_discount.h_m, torsion_discount.d_m,
-                        torsion_discount.fc_Pa, torsion_discount.λ)
-                    Mxy_r = _apply_torsion_discount(Mxy_r, Mxy_c)
-                end
-                wa = wood_armer(Mxx_r, Myy_r, Mxy_r)
-                Mx_bot = max(Mx_bot, wa.Mx_bot)
-                My_bot = max(My_bot, wa.My_bot)
-                Mx_top = min(Mx_top, wa.Mx_top)
-                My_top = min(My_top, wa.My_top)
-            elseif method.moment_transform == :no_torsion
-                Mx_proj = _project_moment_no_torsion(Mxx_s, Myy_s, rebar_ax)
-                My_proj = _project_moment_no_torsion(Mxx_s, Myy_s, rebar_ay)
-                Mx_bot = max(Mx_bot, max(0.0, Mx_proj))
-                My_bot = max(My_bot, max(0.0, My_proj))
-                Mx_top = min(Mx_top, min(0.0, Mx_proj))
-                My_top = min(My_top, min(0.0, My_proj))
-            else
-                Mx_proj = _project_moment_onto_axis(Mxx_s, Myy_s, Mxy_s, rebar_ax)
-                My_proj = _project_moment_onto_axis(Mxx_s, Myy_s, Mxy_s, rebar_ay)
-                Mx_bot = max(Mx_bot, max(0.0, Mx_proj))
-                My_bot = max(My_bot, max(0.0, My_proj))
-                Mx_top = min(Mx_top, min(0.0, Mx_proj))
-                My_top = min(My_top, min(0.0, My_proj))
-            end
-        end
+        Mx_bot, My_bot, Mx_top, My_top = _envelope_design_faces(
+            method, span_axis, ed.ex, ed.ey, _factored_moment_combos(cache, k);
+            torsion_discount, Qxz = ed.Qxz, Qyz = ed.Qyz)
 
         results[k] = AreaDesignMoment(
             k, ed.cx, ed.cy, ed.area,

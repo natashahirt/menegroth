@@ -1,16 +1,17 @@
 include("members/initialize.jl")
 include("members/wall_stacks.jl")
-include("members/beam_tributaries.jl")
-include("members/support_regions.jl")
-include("members/column_tributaries.jl")
 include("members/geometry_classification.jl")
 include("members/slab_edge.jl")
 include("members/releases.jl")
+include("members/framing_level.jl")
 include("members/demands.jl")
+include("members/pinned_joists.jl")
 include("members/grouping.jl")
-# Flange geometry for `size_beams!` (`_verify_tbeam_flanges`,
-# `_compute_flange_params`) and the story-shell service widths.
-include("members/tbeam_flange.jl")
 include("members/size_beams.jl")
+# `_verify_tbeam_flanges` is called from `size_beams!`. The story-shell
+# service widths use the same flange geometry.
+include("members/tbeam_flange.jl")
+include("members/collinear_ribs.jl")
+include("members/rib_variation.jl")
 include("members/size_beams_story_shell.jl")
 include("members/size_columns.jl")

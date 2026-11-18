@@ -1388,8 +1388,12 @@ begin
     defl_wd = 1.2u"kip/ft"; defl_wl = 0.8u"kip/ft"
     defl_opts = NLPBeamOptions(min_depth=16.0u"inch", max_depth=30.0u"inch")
 
-    r_str_only = size_rc_tbeam_nlp(defl_Mu, defl_Vu, defl_bf, defl_hf, defl_opts)
+    # Simply supported: no hogging. The default Mu_neg = Mu is a top-steel
+    # check these spans do not have.
+    r_str_only = size_rc_tbeam_nlp(defl_Mu, defl_Vu, defl_bf, defl_hf, defl_opts;
+        Mu_neg=0.0kip*u"ft")
     r_with_defl = size_rc_tbeam_nlp(defl_Mu, defl_Vu, defl_bf, defl_hf, defl_opts;
+        Mu_neg=0.0kip*u"ft",
         w_dead=defl_wd, w_live=defl_wl, L_span=defl_L)
 
     println("    NLP T-beam sizing: Mu=250 kip·ft, Vu=50 kip, bf=48\", hf=6\", L=25'")
@@ -1829,9 +1833,11 @@ begin
     tbeam_nlp_hf = 5.0u"inch"
 
     tbeam_nlp_tor = size_rc_tbeam_nlp(tbeam_nlp_tor_Mu, tbeam_nlp_tor_Vu,
-                                       tbeam_nlp_bf, tbeam_nlp_hf, tbeam_nlp_tor_opts; Tu=tbeam_nlp_tor_Tu)
+                                       tbeam_nlp_bf, tbeam_nlp_hf, tbeam_nlp_tor_opts;
+                                       Tu=tbeam_nlp_tor_Tu, Mu_neg=0.0kip*u"ft")
     tbeam_nlp_notor = size_rc_tbeam_nlp(tbeam_nlp_tor_Mu, tbeam_nlp_tor_Vu,
-                                         tbeam_nlp_bf, tbeam_nlp_hf, tbeam_nlp_tor_opts)
+                                         tbeam_nlp_bf, tbeam_nlp_hf, tbeam_nlp_tor_opts;
+                                         Mu_neg=0.0kip*u"ft")
 
     println("\n  15.3.4  RC T-Beam NLP — Strength + Torsion")
     println("    Demand: Mu = 200 kip·ft, Vu = 40 kip, Tu = 100 kip·in")

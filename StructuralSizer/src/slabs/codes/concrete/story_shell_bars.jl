@@ -104,6 +104,8 @@ function story_load_cases(
     groups = [Asap.ShellElement[] for _ in 1:npan]
     @inbounds for (k, el) in enumerate(shells)
         i = panel_index[k]
+        # 0 is a wall the slab is joined to, not a slab panel.
+        i == 0 && continue
         1 <= i <= npan || throw(ArgumentError("panel_index $i is outside 1:$npan"))
         push!(groups[i], el)
     end
@@ -199,6 +201,7 @@ function story_panel_reinforcement(
 
     faces = Vector{NTuple{4, Float64}}(undef, n)
     @inbounds for k in 1:n
+        panel_index[k] == 0 && continue
         combos = [_combined_moment(cases, c, k) for c in cases.combinations]
         faces[k] = _envelope_design_faces(
             method, panels[panel_index[k]].span_axis, ex[k], ey[k], combos)

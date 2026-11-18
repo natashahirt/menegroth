@@ -10,7 +10,8 @@
 Ωv, ωv, and φ from the analysis, held while the thickness changes.
 
 φ stays at the analyzed value. A wall that was at 0.60 is not given 0.75
-at a greater thickness.
+at a greater thickness. `Ωv_cases` is as on [`SpecialShearTerms`](@ref),
+indexed by the trial's actions.
 """
 struct WallThicknessShear
     Ωv::Float64
@@ -20,7 +21,11 @@ struct WallThicknessShear
     hw_m::Float64
     "Stack height for §18.10.4.3 [m]."
     hwcs_m::Float64
+    Ωv_cases::Vector{Float64}
 end
+
+WallThicknessShear(Ωv, ωv, φ, hw_m, hwcs_m) =
+    WallThicknessShear(Ωv, ωv, φ, hw_m, hwcs_m, Float64[])
 
 """One pier's frozen demand, ready to re-check at another thickness."""
 struct WallThicknessTrial
@@ -36,6 +41,14 @@ struct WallThicknessTrial
     boundary::Symbol
     "Special-wall shear factors, or `nothing` for an ordinary pier."
     shear::Union{Nothing, WallThicknessShear}
+    "Dead and live pressures that pair `Moop` with each combination, or `nothing`."
+    slab_basis
+end
+
+function WallThicknessTrial(wall, actions, N_self0, lw, Moop, material, hw,
+                            assembly, boundary, shear)
+    return WallThicknessTrial(wall, actions, N_self0, lw, Moop, material, hw,
+                              assembly, boundary, shear, nothing)
 end
 
 """Inch grid the jump walks. CIP walls are specified in whole inches."""
@@ -48,8 +61,77 @@ function _inch_ceiling(t)
 end
 """Practical ceiling when shear and drift do not ask for more."""
 const WALL_THICKNESS_DEFAULT_MAX = 24.0u"inch"
-"""Hard ceiling. A thicker wall is a layout change, not this jump."""
+"""Starting thickness catalog. A hard constraint errors past this."""
 const WALL_THICKNESS_HARD_MAX = 36.0u"inch"
+"How far a soft thickness catalog steps when the current limit fails."
+const WALL_THICKNESS_CATALOG_STEP = 12.0u"inch"
+"Top of the soft thickness catalog. Past this, the jump errors."
+const WALL_THICKNESS_CATALOG_TOP = 72.0u"inch"
+
+"`:hard` and `:soft` are the thickness-catalog constraints."
+function _require_catalog_constraint(constraint::Symbol)
+    constraint in (:hard, :soft) || throw(ArgumentError(
+        "wall_catalog_constraint :$constraint is not :hard or :soft"))
+    return constraint
+end
+
+"Whole inches, for a catalog warning."
+_thickness_inches(t) = round(Int, ustrip(u"inch", t))
+
+"""
+Raise `limit` until it covers `need`.
+
+`:hard` errors when `need` is past `limit`. `:soft` steps by
+[`WALL_THICKNESS_CATALOG_STEP`](@ref) up to [`WALL_THICKNESS_CATALOG_TOP`](@ref)
+and warns once. A need past the top errors on either constraint.
+"""
+function _raise_catalog_limit(need, limit; constraint::Symbol)
+    _require_catalog_constraint(constraint)
+    need_m = ustrip(u"m", need)
+    limit_m = ustrip(u"m", limit)
+    need_m <= limit_m + 1e-4 && return limit
+    top = WALL_THICKNESS_CATALOG_TOP
+    if constraint === :hard
+        throw(ArgumentError(
+            "wall thickness catalog is hard at $(_thickness_inches(limit)) in; " *
+            "the demand needs $(_thickness_inches(need)) in."))
+    end
+    step = ustrip(u"m", WALL_THICKNESS_CATALOG_STEP)
+    top_m = ustrip(u"m", top)
+    bumped = limit_m
+    while bumped + 1e-6 < need_m && bumped + 1e-6 < top_m
+        bumped = min(top_m, bumped + step)
+    end
+    bumped_q = bumped * u"m"
+    if need_m > bumped + 1e-4
+        throw(ArgumentError(
+            "wall thickness catalog stops at $(_thickness_inches(top)) in; " *
+            "the demand needs $(_thickness_inches(need)) in."))
+    end
+    @warn "Wall thickness catalog: nothing through $(_thickness_inches(limit)) in " *
+          "covers the demand; raising the limit to $(_thickness_inches(bumped_q)) in."
+    return bumped_q
+end
+
+"""
+One step past `limit` when no thickness in the catalog passes.
+
+`:hard`, and a soft catalog already at the top, error.
+"""
+function _bump_wall_catalog(limit; constraint::Symbol)
+    _require_catalog_constraint(constraint)
+    top = WALL_THICKNESS_CATALOG_TOP
+    if constraint === :hard || ustrip(u"m", limit) >= ustrip(u"m", top) - 1e-6
+        stop = ustrip(u"m", limit) < ustrip(u"m", top) ? limit : top
+        throw(ArgumentError(
+            "wall thickness catalog is :$constraint and stops at " *
+            "$(_thickness_inches(stop)) in, and no thickness in it passes."))
+    end
+    bumped = min(top, limit + WALL_THICKNESS_CATALOG_STEP)
+    @warn "Wall thickness catalog: no thickness through $(_thickness_inches(limit)) in " *
+          "passes; raising the limit to $(_thickness_inches(bumped)) in."
+    return bumped
+end
 
 """
     shared_wall_thickness(walls) -> thickness or nothing
@@ -418,14 +500,16 @@ function wall_thickness_passes(t, t0, trials, drift;
         try
             ρt_strength = select_ordinary_wall_reinforcement!(
                 wall, actions, trial.material;
-                hw=trial.hw, lw=trial.lw, Moop=trial.Moop)
+                hw=trial.hw, lw=trial.lw, Moop=trial.Moop,
+                slab_basis=trial.slab_basis)
             shear_ok = true
             if trial.shear !== nothing
                 terms = _trial_shear_terms(trial)
                 _raise_for_special_shear!(wall, terms, actions, trial.material)
                 Vn = _special_vn(terms, wall, wall.ρt, trial.material)
                 φVn = trial.shear.φ * Vn
-                shear_ok = all(a -> special_shear_demand(terms, a) <= φVn * (1 + 1e-9), actions)
+                shear_ok = all(k -> special_shear_demand(terms, actions[k], k) <= φVn * (1 + 1e-9),
+                               eachindex(actions))
                 ρt_strength === nothing || (ρt_strength = max(Float64(ρt_strength), wall.ρt))
             end
             records = check_ordinary_wall(
@@ -433,7 +517,7 @@ function wall_thickness_passes(t, t0, trials, drift;
                 material=trial.material, wall_index=1, case=:jump,
                 boundary=trial.boundary, assembly=trial.assembly,
                 hw=trial.hw, ρt_strength=ρt_strength, lw=trial.lw,
-                Moop=trial.Moop)
+                Moop=trial.Moop, slab_basis=trial.slab_basis)
             passed = shear_ok && all(r -> r.passed || _thickness_unresponsive(r.check), records)
         finally
             wall.thickness = t_save
@@ -446,11 +530,16 @@ function wall_thickness_passes(t, t0, trials, drift;
 end
 
 """
-    propose_wall_thickness(t0, trials, drift; SDS=0, result=nothing) -> thickness
+    propose_wall_thickness(t0, trials, drift; SDS=0, result=nothing,
+                           constraint=:soft, t_limit=WALL_THICKNESS_HARD_MAX) -> thickness
 
 Thinnest inch above `t0` the proxy accepts, and not below what the failing
-Table 11.3.1.1 and slenderness gates ask for. When nothing on the grid
-passes, the return is the last candidate and the confirm records the failure.
+Table 11.3.1.1 and slenderness gates ask for.
+
+`t_limit` is the thickness catalog. `:hard` errors when no thickness in it
+passes, or when the geometric need is past it. `:soft` raises the limit by
+[`WALL_THICKNESS_CATALOG_STEP`](@ref), warns, and tries again, up to
+[`WALL_THICKNESS_CATALOG_TOP`](@ref).
 
 When the self-weight scale does not apply, the frozen demand cannot be
 moved. Only the geometric gates are then used: the return is the first
@@ -458,7 +547,9 @@ inch that meets them, or `t0` (no jump) when they already pass.
 """
 function propose_wall_thickness(t0, trials, drift;
                                 SDS::Real=0.0,
-                                result::Union{Nothing, OrdinaryWallResult}=nothing)
+                                result::Union{Nothing, OrdinaryWallResult}=nothing,
+                                constraint::Symbol=:soft,
+                                t_limit=WALL_THICKNESS_HARD_MAX)
     t_geom = result === nothing ? t0 : _geometric_thickness_need(result, t0)
     t_need = t_geom
     if result !== nothing
@@ -483,21 +574,44 @@ function propose_wall_thickness(t0, trials, drift;
     # The grid is whole inches. A need that falls between inches has to
     # include the next inch, or the search stops on a thickness that is
     # still short of φVn.
-    t_max = max(WALL_THICKNESS_DEFAULT_MAX, _inch_ceiling(t_need))
-    candidates = wall_thickness_candidates(t0; t_max=t_max)
-    isempty(candidates) && return t0
-    t_geom_m = ustrip(u"m", t_geom) - 1e-9
-    filter!(t -> ustrip(u"m", t) >= t_geom_m, candidates)
-    isempty(candidates) && return t0
-    if !wall_thickness_scale_applies(t0, trials)
-        return ustrip(u"m", t_geom) > ustrip(u"m", t0) + 1e-9 ? first(candidates) : t0
+    _require_catalog_constraint(constraint)
+    limit = t_limit
+    ask = max(t_need, t_geom)
+    if ustrip(u"m", ask) > ustrip(u"m", limit) + 1e-4
+        limit = _raise_catalog_limit(ask, limit; constraint)
     end
     interactive_ratio = result === nothing ? 0.0 :
         _linear_capacity_ratio(result, _INTERACTIVE_WALL_SHEAR)
+    while true
+        found = _first_passing_thickness(
+            t0, trials, drift, t_geom, limit; SDS, interactive_ratio)
+        found !== nothing && return found
+        limit = _bump_wall_catalog(limit; constraint)
+    end
+end
+
+"""
+Thinnest inch on the grid up to `limit` that the proxy accepts.
+
+`nothing` when the grid has a candidate and none of them pass. `t0` when
+there is nothing thicker to try and the geometric gate does not ask for
+more, or when the self-weight scale does not apply and the gate already
+passes.
+"""
+function _first_passing_thickness(t0, trials, drift, t_geom, limit; SDS, interactive_ratio)
+    candidates = wall_thickness_candidates(t0; t_max=limit, t_hard=limit)
+    t_geom_m = ustrip(u"m", t_geom) - 1e-9
+    filter!(t -> ustrip(u"m", t) >= t_geom_m, candidates)
+    if isempty(candidates)
+        return ustrip(u"m", t_geom) > ustrip(u"m", t0) + 1e-4 ? nothing : t0
+    end
+    if !wall_thickness_scale_applies(t0, trials)
+        return ustrip(u"m", t_geom) > ustrip(u"m", t0) + 1e-9 ? first(candidates) : t0
+    end
     for t in candidates
         wall_thickness_passes(t, t0, trials, drift; SDS, interactive_ratio) && return t
     end
-    return last(candidates)
+    return nothing
 end
 
 "True when `proposed` is more than 0.1 mm thicker than `current`."
@@ -567,7 +681,8 @@ function _result_for_group(result::OrdinaryWallResult, indices)
         result.gravity_shares, result.interactive_shear, result.frame_members,
         result.type5_horizontal_irregularity, result.nonparallel_elements,
         result.orthogonal_combination, boundary, opening_edges,
-        Dict(i => b for (i, b) in result.end_bars if i in keep))
+        Dict(i => b for (i, b) in result.end_bars if i in keep),
+        result.induced)
 end
 
 "Trials whose wall is one of `indices`, in the order `trials` already has."
@@ -599,7 +714,9 @@ other group that is already mixed throws: that grouping asked for one
 thickness there.
 """
 function propose_wall_thicknesses(walls, trials, result::OrdinaryWallResult;
-                                  grouping::Symbol=:all, SDS::Real=0.0)
+                                  grouping::Symbol=:all, SDS::Real=0.0,
+                                  constraint::Symbol=:soft,
+                                  t_limit=WALL_THICKNESS_HARD_MAX)
     targets = [w.thickness for w in walls]
     n = length(walls)
     for indices in _thickness_group_members(walls; grouping)
@@ -614,7 +731,8 @@ function propose_wall_thicknesses(walls, trials, result::OrdinaryWallResult;
         whole = length(indices) == n
         sub_trials = whole ? trials : _trials_for_group(walls, trials, indices)
         sub = whole ? result : _result_for_group(result, indices)
-        t1 = propose_wall_thickness(t0, sub_trials, sub.drift; SDS, result=sub)
+        t1 = propose_wall_thickness(t0, sub_trials, sub.drift; SDS, result=sub,
+                                   constraint, t_limit)
         for i in indices
             targets[i] = convert(typeof(targets[i]), t1)
         end
@@ -625,7 +743,7 @@ function propose_wall_thicknesses(walls, trials, result::OrdinaryWallResult;
     # when a single critical section was stated. The shortfall is the web's.
     # This pier grows to the next inch that covers it. Another pier, and a
     # row with no decision, stays at the thickness the group proposed.
-    _raise_boundary_thickness!(targets, walls, result)
+    _raise_boundary_thickness!(targets, walls, result; constraint, t_limit)
     return targets
 end
 
@@ -633,12 +751,15 @@ end
 Raise a pier to the next inch that covers its §18.10.6.4 web shortfall.
 
 A missing decision, a shortfall of `nothing`, or a shortfall the present
-thickness already covers leaves that pier. The inch is the jump's grid,
-and the hard ceiling still applies.
+thickness already covers leaves that pier. The inch is the jump's grid.
+`:hard` errors when that inch is past `t_limit`. `:soft` raises the limit
+until the inch is inside it, and errors past the catalog top.
 """
-function _raise_boundary_thickness!(targets, walls, result::OrdinaryWallResult)
+function _raise_boundary_thickness!(targets, walls, result::OrdinaryWallResult;
+                                   constraint::Symbol=:soft,
+                                   t_limit=WALL_THICKNESS_HARD_MAX)
     inc = ustrip(u"m", WALL_THICKNESS_INCREMENT)
-    hard = ustrip(u"m", WALL_THICKNESS_HARD_MAX)
+    limit = t_limit
     gaps = Dict{Int, Float64}()
     for (i, decision) in result.boundary
         _note_boundary_gap!(gaps, i, decision)
@@ -651,7 +772,10 @@ function _raise_boundary_thickness!(targets, walls, result::OrdinaryWallResult)
     for (i, gap) in gaps
         gap > 1e-4 || continue
         need = ustrip(u"m", walls[i].thickness) + gap
-        snapped = min(hard, ceil((need - 1e-9) / inc) * inc)
+        if need > ustrip(u"m", limit) + 1e-4
+            limit = _raise_catalog_limit(need * u"m", limit; constraint)
+        end
+        snapped = min(ustrip(u"m", limit), ceil((need - 1e-9) / inc) * inc)
         snapped > ustrip(u"m", targets[i]) + 1e-4 || continue
         targets[i] = convert(typeof(targets[i]), snapped * u"m")
     end
@@ -717,12 +841,12 @@ function apply_wall_thickness!(struc::BuildingStructure, params::DesignParameter
 end
 
 function _trial_for_pier(struc, wall_index, grown, lw, Moop, material, boundary, assembly,
-                        terms=nothing)
+                        terms=nothing; slab_basis=nothing)
     wall = struc.walls[wall_index]
     N_self = pier_self_weight_N(wall, wall.thickness, lw, material.concrete.ρ)
     return WallThicknessTrial(wall, grown, N_self, lw, Moop, material,
                               _stacked_wall_height(wall), assembly, boundary,
-                              _thickness_shear(terms, wall, material))
+                              _thickness_shear(terms, wall, material), slab_basis)
 end
 
 "The analyzed special-shear factors, or `nothing` for an ordinary pier."
@@ -732,25 +856,25 @@ function _thickness_shear(terms, wall, material)
     if φ === nothing
         φ = special_shear_phi(terms, _special_vn(terms, wall, wall.ρt, material))
     end
-    return WallThicknessShear(terms.Ωv, terms.ωv, φ, terms.hw_m, terms.hwcs_m)
+    return WallThicknessShear(terms.Ωv, terms.ωv, φ, terms.hw_m, terms.hwcs_m,
+                              terms.Ωv_cases)
 end
 
-"Largest shear the jump sizes for: Ve on an earthquake combination, |V| otherwise."
+"""
+Largest shear the jump sizes for: Ve on an earthquake combination, |V|
+otherwise. Each action takes its own case's Ωv.
+"""
 function _trial_shear_demand(trial)
-    demand = 0.0
-    for a in trial.actions
-        v = abs(a.V)
-        if trial.shear !== nothing && a.combination in _BOUNDARY_EARTHQUAKE && v > 0
-            v = min(trial.shear.Ωv * trial.shear.ωv * v, 3 * v)
-        end
-        demand = max(demand, v)
-    end
-    return demand
+    trial.shear === nothing && return maximum(a -> abs(a.V), trial.actions; init = 0.0)
+    terms = _trial_shear_terms(trial)
+    _require_case_count(terms, trial.actions)
+    return maximum(k -> special_shear_demand(terms, trial.actions[k], k),
+                   eachindex(trial.actions); init = 0.0)
 end
 
 "Frozen Ωv, ωv, and φ, with this pier's length, for one thickness trial."
 function _trial_shear_terms(trial)
     sh = trial.shear
     return SpecialShearTerms(sh.Ωv, sh.ωv, false, sh.φ, Inf,
-                            sh.hw_m, sh.hwcs_m, ustrip(u"m", trial.lw))
+                            sh.hw_m, sh.hwcs_m, ustrip(u"m", trial.lw), sh.Ωv_cases)
 end

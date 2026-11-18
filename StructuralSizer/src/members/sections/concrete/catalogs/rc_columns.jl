@@ -103,24 +103,23 @@ function standard_rc_columns(;
                     continue  # Skip invalid ratios
                 end
                 
-                # Cover to bar center
-                cover_to_center = cover + (db/2) * u"inch"
-                
-                try
-                    section = RCColumnSection(
+                # `cover` is clear cover; the constructor adds the tie and half
+                # the bar diameter, and rejects §25.2.3 spacing violations.
+                section = try
+                    RCColumnSection(
                         b = b,
                         h = h,
-                        cover = cover_to_center,
+                        cover = cover,
                         bar_size = bar_size,
                         n_bars = n_bars,
                         tie_type = :tied,
                         arrangement = :perimeter
                     )
-                    push!(catalog, section)
                 catch e
-                    # Skip invalid combinations (e.g., bar spacing too tight)
+                    e isa ArgumentError || rethrow()
                     continue
                 end
+                push!(catalog, section)
             end
         end
     end
@@ -318,58 +317,20 @@ function standard_rc_circular_columns(;
     cover::Length = 1.5u"inch"
 )
     catalog = RCCircularSection[]
-    cover_val = ustrip(u"inch", cover)
-    
-    for D_val in diameters
-        D = Float64(D_val) * u"inch"
-        
-        for bar_size in bar_sizes
-            # Check minimum size for this bar
-            bar = StructuralSizer.rebar(bar_size)
-            db = ustrip(u"inch", bar.diameter)
-            
-            # Minimum diameter should fit bars with adequate spacing
-            # For circular, need clearance around perimeter
-            min_cover_to_center = cover_val + 0.5 + db/2  # 0.5" for spiral
-            R_bars = D_val/2 - min_cover_to_center
-            
-            if R_bars < db
-                continue  # Skip if bars would be too close to center
-            end
-            
-            for n_bars in n_bars_range
-                # Check bar spacing around circumference
-                circumference = 2 * π * R_bars
-                spacing = circumference / n_bars
-                min_spacing = max(1.5 * db, 1.5)  # ACI minimum
-                
-                if spacing < min_spacing
-                    continue  # Skip if bars too close together
-                end
-                
-                # Ensure reasonable reinforcement ratio (1-8% per ACI)
-                As_total = n_bars * ustrip(u"inch^2", bar.A)
-                Ag = π * (D_val/2)^2
-                ρ = As_total / Ag
-                
-                if ρ < 0.01 || ρ > 0.08
-                    continue  # Skip invalid ratios
-                end
-                
-                try
-                    section = RCCircularSection(
-                        D = D,
-                        bar_size = bar_size,
-                        n_bars = n_bars,
-                        cover = cover,
-                        tie_type = :spiral  # Circular columns typically use spiral
-                    )
-                    push!(catalog, section)
-                catch e
-                    # Skip invalid combinations
-                    continue
-                end
-            end
+
+    # The constructor rejects layouts outside the §10.9.1 ρg limits, bars that
+    # do not fit inside the cover, and §25.2.3 clear-spacing violations.
+    for D_val in diameters, bar_size in bar_sizes, n_bars in n_bars_range
+        try
+            push!(catalog, RCCircularSection(
+                D = Float64(D_val) * u"inch",
+                bar_size = bar_size,
+                n_bars = n_bars,
+                cover = cover,
+                tie_type = :spiral,
+            ))
+        catch e
+            e isa ArgumentError || rethrow()
         end
     end
     

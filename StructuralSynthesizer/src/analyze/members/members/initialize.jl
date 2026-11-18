@@ -36,6 +36,12 @@ A `:walls` edge never becomes a `Beam`. An edge index that is in `:walls`
 and also in `:beams`, `:columns`, or `:braces` throws `ArgumentError`
 naming that edge index. The beam, column, or brace is not dropped. Each
 wall edge, or each shattered chain of `:walls` edges, becomes one `Wall`.
+An `:absent` edge keeps its segment and becomes no member. `to_asap!`
+still holds that edge's frame slot. An edge index that is in `:absent`
+and also in `:beams`, `:columns`, `:braces`, or `:walls` throws
+`ArgumentError`. A shattered chain that mixes `:absent` with another
+group throws the same way. A chain whose edges are all `:absent` builds
+no member.
 `segment_indices` point at `struc.segments`, same as beams. `Wall.story`
 is the 0-based story whose elevation is nearest the plan-line Z. Both
 ends of a `:walls` edge already share that Z. The nearest distance must
@@ -60,8 +66,8 @@ An empty `:walls` group leaves `struc.walls` empty and does not read
 `WallLine.story` is 1-based. This function stores the 0-based index and
 does not apply that shift.
 
-Other segments stay 1:1 with a member, with shattered chains merged the
-same way as beams.
+Other segments, aside from `:absent`, stay 1:1 with a member, with
+shattered chains merged the same way as beams.
 """
 function initialize_members!(struc::BuildingStructure{T};
                              default_Kx=1.0, default_Ky=1.0,
@@ -88,6 +94,7 @@ function initialize_members!(struc::BuildingStructure{T};
     column_edges = Set(get(skel.groups_edges, :columns, Int[]))
     brace_edges = Set(get(skel.groups_edges, :braces, Int[]))
     wall_edges = Set(get(skel.groups_edges, :walls, Int[]))
+    absent_edges = Set(get(skel.groups_edges, :absent, Int[]))
     # One edge index in two groups would become only a Wall and the beam,
     # column, or brace would disappear. Name the edge and refuse.
     for eidx in sort!(collect(wall_edges))
@@ -98,6 +105,20 @@ function initialize_members!(struc::BuildingStructure{T};
         isempty(others) && continue
         throw(ArgumentError(
             "initialize_members!: edge index $eidx is in :walls and also in " *
+            join(others, ", ") * "."))
+    end
+    # :absent is parked geometry. It is not a beam that the fall-through
+    # below would otherwise build, and it is not a second member on an
+    # edge that already has one.
+    for eidx in sort!(collect(absent_edges))
+        others = String[]
+        eidx in beam_edges && push!(others, ":beams")
+        eidx in column_edges && push!(others, ":columns")
+        eidx in brace_edges && push!(others, ":braces")
+        eidx in wall_edges && push!(others, ":walls")
+        isempty(others) && continue
+        throw(ArgumentError(
+            "initialize_members!: edge index $eidx is in :absent and also in " *
             join(others, ", ") * "."))
     end
     # Nothing when :walls is empty. Throws if the group is non-empty and
@@ -135,7 +156,10 @@ function initialize_members!(struc::BuildingStructure{T};
         edge_idx in processed_edges && continue
         
         if haskey(edge_to_chain, edge_idx)
-            # This edge is part of a shattered chain — process the whole chain
+            # One beam. The solve graph may cut it into several edges, and
+            # those edges are this one member, so they take one section.
+            # Separate beams that only happen to be collinear are not joined
+            # here. That grouping is optional (`collinear_grouping`).
             chain_id = edge_to_chain[edge_idx]
             chain_edge_indices = skel.edge_chains[chain_id]
             
@@ -154,6 +178,13 @@ function initialize_members!(struc::BuildingStructure{T};
             if _chain_is_all_walls(chain_edge_indices, wall_edges)
                 _push_wall!(struc, skel, chain_seg_indices, chain_edge_indices,
                             thickness, vc)
+            elseif all(e -> e in absent_edges, chain_edge_indices)
+                # Parked chain: the segments stay, and no member is built.
+            elseif any(e -> e in absent_edges, chain_edge_indices)
+                bad = chain_edge_indices[findfirst(e -> e in absent_edges, chain_edge_indices)]
+                throw(ArgumentError(
+                    "initialize_members!: edge index $bad is in :absent inside " *
+                    "a chain that also has another group."))
             else
                 chain_segs = [struc.segments[si] for si in chain_seg_indices]
 
@@ -212,7 +243,10 @@ function initialize_members!(struc::BuildingStructure{T};
                              Lb=seg.Lb, Kx=default_Kx, Ky=default_Ky, Cb=seg.Cb,
                              brace_type=:both)
                 push!(struc.struts, strut)
-                
+
+            elseif edge_idx in absent_edges
+                # Parked edge: the segment stays, and no member is built.
+
             else
                 beam = Beam(seg_idx, seg.L;
                            Lb=seg.Lb, Kx=default_Kx, Ky=default_Ky, Cb=seg.Cb)
@@ -228,7 +262,8 @@ function initialize_members!(struc::BuildingStructure{T};
     # Classify beam roles now that all columns exist. `:girder` when both chain
     # endpoints land on a column vertex; `:joist` when the beam supports a slab
     # (any sub-edge lies on a slab-cell boundary) and is not a girder; `:beam`
-    # otherwise. Skeleton-input members keep the default `level = 0`.
+    # otherwise. Skeleton members stay at `level = 0` until
+    # `assign_framing_levels!` (`populate_levels!`) writes the support rank.
     column_vertices = Set(col.vertex_idx for col in struc.columns)
     slab_support_edges = Set{Int}()
     for slab in struc.slabs
@@ -263,3 +298,67 @@ end
 # horizontal edge does not. The same tolerance is the maximum distance from a
 # wall's plan-line Z to the nearest story elevation. `edge_story` uses a 0.1 m
 # window and the first hit in the story dict; walls do not.
+
+"""
+Create a Column from a chain of shattered edge segments.
+
+Uses the top vertex (highest Z) of the last edge in the chain for position
+classification and story assignment.
+"""
+function _create_chain_column!(struc, skel, chain_seg_indices, chain_edge_indices,
+                                L_total, Lb_gov, Cb_gov, default_Kx, default_Ky, vc, efc,
+                                column_θ::Float64=0.0)
+    # Use the top vertex of the chain (highest Z) for classification
+    last_edge = chain_edge_indices[end]
+    v1, v2 = skel.edge_indices[last_edge]
+    z1 = vc[v1, 3]
+    z2 = vc[v2, 3]
+    vertex_idx = z1 > z2 ? v1 : v2
+    
+    story = edge_story(skel, last_edge)
+    position, boundary_edge_dirs = classify_column_position(skel, vertex_idx, vc, efc)
+    corner_angle = position == :corner ? slab_material_angle(skel, vertex_idx, vc) : 0.0
+    corner_kind = classify_corner_kind(corner_angle, position)
+    
+    col = Column(chain_seg_indices, L_total;
+                Lb=Lb_gov, Kx=default_Kx, Ky=default_Ky, Cb=Cb_gov,
+                vertex_idx=vertex_idx, story=story, position=position,
+                corner_kind=corner_kind, corner_angle=corner_angle,
+                boundary_edge_dirs=boundary_edge_dirs, θ=column_θ)
+    push!(struc.columns, col)
+end
+
+"""
+    link_column_stack!(struc::BuildingStructure)
+
+Populate `col.column_above` for every column by matching `(x, y)` position
+across stories.  A column on story `s` is linked to the column at the same
+`(x, y)` on story `s + 1`, if one exists.  Roof-level columns (no column
+above) keep `column_above = nothing`.
+
+Called automatically by `initialize_members!`.
+"""
+function link_column_stack!(struc::BuildingStructure)
+    vc = struc.skeleton.geometry.vertex_coords
+
+    # Build (x, y, story) → Column reference lookup
+    ColT = eltype(struc.columns)
+    lookup = Dict{Tuple{Float64, Float64, Int}, ColT}()
+    for col in struc.columns
+        key = (round(vc[col.vertex_idx, 1]; digits=COORD_DIGITS),
+               round(vc[col.vertex_idx, 2]; digits=COORD_DIGITS),
+               col.story)
+        lookup[key] = col
+    end
+
+    n_linked = 0
+    for col in struc.columns
+        above_key = (round(vc[col.vertex_idx, 1]; digits=COORD_DIGITS),
+                     round(vc[col.vertex_idx, 2]; digits=COORD_DIGITS),
+                     col.story + 1)
+        col.column_above = get(lookup, above_key, nothing)
+        !isnothing(col.column_above) && (n_linked += 1)
+    end
+
+    @debug "Linked column stack" total=length(struc.columns) linked=n_linked roof=(length(struc.columns) - n_linked)
+end

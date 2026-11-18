@@ -78,11 +78,38 @@ const SS = StructuralSizer
         @test length(shared) >= 2
         @test !isempty(built.frames)
         @test all(el -> el.id === :girder, built.frames)
+        # This girder runs +Y, so local y is up and the physical offset is unchanged.
         @test all(el -> abs(el.eccentricity[3] - ecc[3]) < 1e-12, built.frames)
         for el in built.frames
             @test ustrip(u"m", el.nodeStart.position[1]) ≈ 4.0 atol = 1e-6
             @test any(n -> n === el.nodeStart, shared)
         end
+    end
+
+    @testset "A web below the slab stays below when the beam runs west" begin
+        E = 30e9
+        ν = 0.2
+        panel = SS.StoryShellPanel(
+            [(0.0, 0.0), (4.0, 0.0), (4.0, 1.0), (0.0, 1.0)],
+            Asap.ShellSection(0.20u"m", E * u"Pa", ν; ρ = 2400u"kg/m^3"))
+        web = Asap.Section(0.15u"m^2", E * u"Pa", 0.4E * u"Pa",
+                           3.0e-3u"m^4", 1.0e-3u"m^4", 1.0e-3u"m^4", 2400u"kg/m^3")
+        ecc = SS.web_below_slab_eccentricity(0.20u"m", 0.40u"m")
+        @test ecc[3] < 0
+        east = SS.ShellFrameBeam([(0.0, 0.5), (4.0, 0.5)], web; eccentricity = ecc, id = :east)
+        west = SS.ShellFrameBeam([(4.0, 0.25), (0.0, 0.25)], web; eccentricity = ecc, id = :west)
+        built = SS.story_shell([panel], [east, west]; target_edge = 1.0u"m")
+        east_frames = [el for el in built.frames if el.id === :east]
+        west_frames = [el for el in built.frames if el.id === :west]
+        @test !isempty(east_frames) && !isempty(west_frames)
+        # +X: local y is up, so the downward offset stays negative.
+        @test all(el -> ustrip(u"m", el.nodeEnd.position[1]) >
+                        ustrip(u"m", el.nodeStart.position[1]), east_frames)
+        @test all(el -> el.eccentricity[3] ≈ ecc[3], east_frames)
+        # −X: local y points down, so the same downward offset is positive local y.
+        @test all(el -> ustrip(u"m", el.nodeStart.position[1]) >
+                        ustrip(u"m", el.nodeEnd.position[1]), west_frames)
+        @test all(el -> el.eccentricity[3] ≈ -ecc[3], west_frames)
     end
 
     @testset "A section can change from one piece of a beam to the next" begin

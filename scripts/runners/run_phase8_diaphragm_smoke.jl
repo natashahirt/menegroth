@@ -278,7 +278,7 @@ build_nodes(struc) = SS._create_offset_nodes(struc.skeleton,
     @testset "(4) to_asap!(diaphragms=:shell) + AreaLoad interior_beams" begin
         struc, _ = build_two_way_bay_with_joists()
         params = DesignParameters(materials =
-            MaterialOptions(steel = A992_Steel, beam = A992_Steel))
+            MaterialOptions(steel = A992_Steel))
 
         tolerate_joist_stiffness_gap(() ->
             to_asap!(struc; params = params,
@@ -306,7 +306,7 @@ build_nodes(struc) = SS._create_offset_nodes(struc.skeleton,
             end
         end
         elem_edge = IdDict{Any, Int}()
-        for (i, el) in enumerate(model.elements)
+        for (i, el) in enumerate(model.frame_elements)
             elem_edge[el] = i
         end
         @test !isempty(al.interior_beams)
@@ -322,7 +322,7 @@ build_nodes(struc) = SS._create_offset_nodes(struc.skeleton,
         struc, slab = build_two_way_bay_with_joists()
         nodes = build_nodes(struc)
         params = DesignParameters(materials =
-            MaterialOptions(steel = A992_Steel, beam = A992_Steel))
+            MaterialOptions(steel = A992_Steel))
         effective_props = SS._build_shell_props(params, :shell, nothing)
         shells = SS._create_shell_diaphragms(struc, nodes;
                                              mode = :shell, props = effective_props)

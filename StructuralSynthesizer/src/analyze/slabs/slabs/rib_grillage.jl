@@ -209,10 +209,11 @@ end
 # -----------------------------------------------------------------------------
 #
 # A framing level with `analysis = :grillage` owns its panel. The ribs are the
-# frame members already in the building, and each one carries the isotropic
-# skeleton of the rectangular bays ([`rectangle_rib_tributaries`](@ref)). The
-# story shell does not also take those ribs, and the uniform joist strip is
-# not posted on top of the skeleton.
+# frame members already in the building, noded at every crossing. Each bay
+# they enclose with the slab boundary ([`grillage_bays`](@ref)) puts its own
+# isotropic skeleton on the members around it, so the slab can be any polygon
+# with holes and the ribs any layout. The story shell does not also take those
+# ribs, and the uniform joist strip is not posted on top of the skeleton.
 #
 # ACI 318-19 §8.2.1 (corpus: aci-318-19, page 101).
 
@@ -265,84 +266,6 @@ function exclusive_grillage_stories(struc)
     return sort!(collect(stories))
 end
 
-"""Local frame of a rectangular quad. Corners run around the panel."""
-function _rectangular_frame(corners)
-    length(corners) == 4 || throw(ArgumentError(
-        "a grillage panel is a quadrilateral, and this one has $(length(corners)) corners"))
-    StructuralSizer.is_rectangular_panel(corners) || throw(ArgumentError(
-        "a grillage tributary is the rectangular skeleton. This panel is not a rectangle."))
-    o = corners[1]
-    ex = (corners[2][1] - o[1], corners[2][2] - o[2])
-    ey = (corners[4][1] - o[1], corners[4][2] - o[2])
-    Lx = hypot(ex[1], ex[2])
-    Ly = hypot(ey[1], ey[2])
-    (Lx > 1e-9 && Ly > 1e-9) || throw(ArgumentError("a rib panel has a zero side"))
-    return (origin = o, ex = (ex[1] / Lx, ex[2] / Lx), ey = (ey[1] / Ly, ey[2] / Ly),
-            Lx = Lx, Ly = Ly)
-end
-
-_to_global(frame, x, y) = (
-    frame.origin[1] + x * frame.ex[1] + y * frame.ey[1],
-    frame.origin[2] + x * frame.ex[2] + y * frame.ey[2],
-)
-
-"""
-    grillage_piece_profiles(corners, nξ, nη)
-
-One skeleton profile per rib piece, in the same order as [`rib_network`](@ref).
-
-`corners` is the quad in order. `a` and `b` are the piece ends in that same
-coordinate system. `positions` and `widths` are the piece's own profile.
-"""
-function grillage_piece_profiles(corners, nξ::Int, nη::Int)
-    if StructuralSizer.is_rectangular_panel(corners)
-        return _rectangle_piece_profiles(corners, nξ, nη)
-    end
-    length(corners) == 4 || throw(ArgumentError(
-        "a grillage panel is a quadrilateral, and this one has $(length(corners)) corners"))
-    c = ntuple(i -> (Float64(corners[i][1]), Float64(corners[i][2])), 4)
-    panel = StructuralSizer.IsoParametricPanel(c)
-    grid = StructuralSizer.WaffleRibGrid(panel, nξ, nη)
-    net = StructuralSizer.rib_network(grid)
-    profiles = StructuralSizer._isotropic_rib_tributaries(c, nξ, nη)
-    length(profiles) == length(net.pieces) || throw(ArgumentError(
-        "the rib grid and its tributary profiles do not match"))
-    out = NamedTuple[]
-    for (piece, profile) in zip(net.pieces, profiles)
-        push!(out, (
-            a = net.nodes[piece.a],
-            b = net.nodes[piece.b],
-            positions = profile.positions,
-            widths = profile.widths,
-        ))
-    end
-    return out
-end
-
-"""Closed-form skeleton of a rectangle, mapped back onto the given corners."""
-function _rectangle_piece_profiles(corners, nξ::Int, nη::Int)
-    frame = _rectangular_frame(corners)
-    panel = StructuralSizer.IsoParametricPanel((
-        (0.0, 0.0), (frame.Lx, 0.0), (frame.Lx, frame.Ly), (0.0, frame.Ly)))
-    grid = StructuralSizer.WaffleRibGrid(panel, nξ, nη)
-    net = StructuralSizer.rib_network(grid)
-    profiles = StructuralSizer.rectangle_rib_tributaries(frame.Lx, frame.Ly, nξ, nη)
-    length(profiles) == length(net.pieces) || throw(ArgumentError(
-        "the rib grid and its tributary profiles do not match"))
-    out = NamedTuple[]
-    for (piece, profile) in zip(net.pieces, profiles)
-        pa = net.nodes[piece.a]
-        pb = net.nodes[piece.b]
-        push!(out, (
-            a = _to_global(frame, pa[1], pa[2]),
-            b = _to_global(frame, pb[1], pb[2]),
-            positions = profile.positions,
-            widths = profile.widths,
-        ))
-    end
-    return out
-end
-
 """Parameter of `p` on segment `a`→`b`, or `nothing` when `p` is off the segment."""
 function _param_on_segment(p, a, b; tol::Float64 = 1e-3)
     ab = (b[1] - a[1], b[2] - a[2])
@@ -354,63 +277,6 @@ function _param_on_segment(p, a, b; tol::Float64 = 1e-3)
     foot = (a[1] + t * ab[1], a[2] + t * ab[2])
     hypot(foot[1] - p[1], foot[2] - p[2]) > tol && return nothing
     return clamp(t, 0.0, 1.0)
-end
-
-"""
-Shortest skeleton edge at elevation `z` (metres) that contains both ends of the
-piece. Returns `(edge, t_a, t_b)` with parameters in the edge's canonical
-direction. Edges on other levels are skipped, so stacked identical floors do
-not share ribs.
-"""
-function _edge_covering_piece(skel, a, b, z::Float64; tol::Float64 = 1e-3)
-    best = nothing
-    bestL = Inf
-    for (e, vs) in enumerate(skel.edge_indices)
-        abs(_vertex_z_m(skel, vs[1]) - z) <= tol || continue
-        abs(_vertex_z_m(skel, vs[2]) - z) <= tol || continue
-        p1 = _vertex_xy_m(skel, vs[1])
-        p2 = _vertex_xy_m(skel, vs[2])
-        ta = _param_on_segment(a, p1, p2; tol = tol)
-        tb = _param_on_segment(b, p1, p2; tol = tol)
-        (ta === nothing || tb === nothing) && continue
-        L = hypot(p2[1] - p1[1], p2[2] - p1[2])
-        if L < bestL
-            best = (e, ta, tb)
-            bestL = L
-        end
-    end
-    return best
-end
-
-"""Piece profile placed on the canonical edge, zero outside the piece."""
-function _profile_on_edge(ta, tb, positions, widths)
-    s0, s1 = ta, tb
-    pos, w = positions, widths
-    if tb < ta
-        s0, s1 = tb, ta
-        pos = reverse(1.0 .- positions)
-        w = reverse(widths)
-    end
-    out_p = Float64[]
-    out_w = Float64[]
-    if s0 > 1e-9
-        push!(out_p, 0.0)
-        push!(out_w, 0.0)
-    end
-    for (p, wi) in zip(pos, w)
-        push!(out_p, s0 + p * (s1 - s0))
-        push!(out_w, wi)
-    end
-    if s1 < 1.0 - 1e-9
-        push!(out_p, 1.0)
-        push!(out_w, 0.0)
-    end
-    out_p[1] = 0.0
-    out_p[end] = 1.0
-    for i in 2:length(out_p)
-        out_p[i] < out_p[i - 1] && (out_p[i] = out_p[i - 1])
-    end
-    return (out_p, out_w)
 end
 
 """Elevation (metres) of the slab's cells; throws when they are not level."""
@@ -426,48 +292,235 @@ function _slab_face_z_m(struc, slab; tol::Float64 = 1e-3)
 end
 
 """
+    grillage_bays(struc, slab, level) -> (arrangement, edges)
+
+Bays of a grillage level: the faces enclosed by its members, the slab
+boundary, the girders between the slab's own cells, and the beam rings around
+its holes. `edges[k]` is the skeleton edge behind arrangement edge `k`, in the
+same direction. The face inside a ring is the void and is not a bay.
+
+Two skeleton vertices within `tol` metres are one node. Throws when two
+members join the same two points, or when a member ends inside a bay.
+"""
+function grillage_bays(struc, slab, fl::FramingLevel; tol::Float64 = 1e-6)
+    skel = struc.skeleton
+    z = _slab_face_z_m(struc, slab)
+    cand = vcat(_slab_boundary_sub_edges(struc, slab), _slab_interior_sub_edges(struc, slab),
+                _slab_hole_edges(struc, slab))
+    for mi in level_member_indices(struc, fl), si in segment_indices(struc.beams[mi])
+        push!(cand, struc.segments[si].edge_idx)
+    end
+    unique!(sort!(cand))
+    nodes = NTuple{2, Float64}[]
+    function node_at(p)
+        for (k, q) in enumerate(nodes)
+            hypot(q[1] - p[1], q[2] - p[2]) <= tol && return k
+        end
+        push!(nodes, p)
+        return length(nodes)
+    end
+    E = NTuple{2, Int}[]
+    owners = Int[]
+    seen = Dict{NTuple{2, Int}, Int}()
+    for e in cand
+        v1, v2 = skel.edge_indices[e]
+        (abs(_vertex_z_m(skel, v1) - z) <= 1e-3 && abs(_vertex_z_m(skel, v2) - z) <= 1e-3) || continue
+        a = node_at(_vertex_xy_m(skel, v1))
+        b = node_at(_vertex_xy_m(skel, v2))
+        a == b && continue
+        key = (min(a, b), max(a, b))
+        if haskey(seen, key)
+            throw(ArgumentError(
+                "skeleton edges $(seen[key]) and $e both join $(nodes[a]) and $(nodes[b]) m. " *
+                "A grillage bay sends its load to one member per side."))
+        end
+        seen[key] = e
+        push!(E, (a, b))
+        push!(owners, e)
+    end
+    # A rib end that misses the rib it was drawn to meet, by a millimetre,
+    # is a spur. The bay walk would go out and back on that one edge.
+    nodes, E, src = StructuralSizer.stitch_nodes_onto_edges(nodes, E; tol = 1e-3)
+    owners = [owners[k] for k in src]
+    arr = StructuralSizer.planar_bays(nodes, E)
+    return (StructuralSizer.without_hole_bays(arr, _slab_hole_loops_m(struc, slab)), owners)
+end
+
+"""
+    slab_column_heads(struc, slab, level) -> Vector{ColumnSolidHead}
+
+The solid head each column of this slab seeds on the grillage, before any
+growth. A column on a rib node takes every bay at that node, so a corner is
+one bay, a mid-edge column is the bays along that edge, and an interior
+column is the bays around the crossing. A column on another story, or off
+this slab, is not seeded.
+
+Growth is [`resolve_arrangement_heads`](@ref): the bays are cast solid,
+the frame is solved, and a failing check grows one bay. This function does
+not run that check. A second call returns the same heads.
+"""
+function slab_column_heads(struc::BuildingStructure, slab::Slab, level::FramingLevel)
+    arr, _ = grillage_bays(struc, slab, level)
+    z = _slab_face_z_m(struc, slab)
+    poly = _slab_interior_polygon_m(struc, slab)
+    seen = Set{NTuple{2, Int}}()
+    heads = StructuralSizer.ColumnSolidHead[]
+    for col in struc.columns
+        xy = _column_on_slab(struc, col, z)
+        xy === nothing && continue
+        _on_this_slab_plan(xy, poly) || continue
+        key = (round(Int, xy[1] * 1e6), round(Int, xy[2] * 1e6))
+        key in seen && continue
+        push!(seen, key)
+        push!(heads, StructuralSizer.seed_column_head(arr, xy))
+    end
+    sort!(heads; by = h -> (h.column[1], h.column[2]))
+    return heads
+end
+
+"""Plan point where `column` meets this slab, or `nothing`."""
+function _column_on_slab(struc::BuildingStructure, column, z::Float64)
+    skel = struc.skeleton
+    for si in segment_indices(column)
+        si <= length(struc.segments) || continue
+        for v in skel.edge_indices[struc.segments[si].edge_idx]
+            abs(_vertex_z_m(skel, v) - z) <= 0.01 || continue
+            return _vertex_xy_m(skel, v)
+        end
+    end
+    return nothing
+end
+
+function _on_this_slab_plan(xy::NTuple{2, Float64}, poly)
+    poly === nothing && return true
+    _point_on_polygon_boundary(xy[1], xy[2], poly; tol = 1e-4) && return true
+    return _point_in_polygon(xy, poly)
+end
+
+"""
+    undersized_rib_bays(struc, slab, level) -> Vector{StructuralSizer.RibBay}
+
+Bays of a [`ModularRibPattern`](@ref) grillage smaller than half a module.
+Empty for any other pattern, which has no module.
+"""
+function undersized_rib_bays(struc, slab, fl::FramingLevel)
+    fl.pattern isa ModularRibPattern || return StructuralSizer.RibBay[]
+    arr, _ = grillage_bays(struc, slab, fl)
+    return arr.bays[StructuralSizer.undersized_bays(arr, module_area(fl.pattern))]
+end
+
+"""
     grillage_edge_profiles(struc, slab, level) -> Dict{Int, (positions, widths)}
 
-Skeleton width on each skeleton edge the ribs occupy, in the edge's canonical
-direction. Widths are metres. The areas sum to the panel.
+Skeleton width on each skeleton edge that bounds a grillage bay
+([`grillage_bays`](@ref)), in the edge's canonical direction. Widths are
+metres. Each bay uses its own isotropic skeleton, in closed form when it is a
+rectangle, so the pattern can be any rib layout. The areas sum to the slab
+less its holes.
 """
 function grillage_edge_profiles(struc, slab, fl::FramingLevel)
-    fl.pattern isa IsoparametricPattern || throw(ArgumentError(
-        "rib analysis :grillage needs an IsoparametricPattern, " *
-        "and this level has a $(typeof(fl.pattern))"))
+    arr, owners = grillage_bays(struc, slab, fl)
+    isempty(arr.bays) && throw(ArgumentError("a grillage slab encloses no rib bay"))
+    profiles = StructuralSizer.bay_edge_profiles(arr)
+    skel = struc.skeleton
+    groups = Dict{Int, Vector{Int}}()
+    for k in keys(profiles)
+        push!(get!(Vector{Int}, groups, owners[k]), k)
+    end
+    ProfT = Tuple{Vector{Float64}, Vector{Float64}}
+    merged = Dict{Int, ProfT}()
+    area = 0.0
+    for (e, ks) in groups
+        # A stitched rib splits one skeleton edge into two graph edges. Each
+        # profile belongs to its own graph edge; the member load is those
+        # pieces laid back along the skeleton edge.
+        merged[e] = _profile_on_skeleton_edge(arr, profiles, ks, skel, e)
+        for k in ks
+            a, b = arr.edges[k]
+            p1, p2 = arr.nodes[a], arr.nodes[b]
+            pos, w = profiles[k]
+            area += _profile_integral(pos, w) * hypot(p2[1] - p1[1], p2[2] - p1[2])
+        end
+    end
     poly = _slab_interior_polygon_m(struc, slab)
     poly === nothing && throw(ArgumentError(
         "a grillage needs the slab boundary, and this slab has none"))
-    corners = _panel_corners(poly)
-    pieces = grillage_piece_profiles(corners, fl.pattern.n_xi, fl.pattern.n_eta)
-    skel = struc.skeleton
-    z = _slab_face_z_m(struc, slab)
-    ProfT = Tuple{Vector{Float64}, Vector{Float64}}
-    by_edge = Dict{Int, Vector{ProfT}}()
-    for piece in pieces
-        hit = _edge_covering_piece(skel, piece.a, piece.b, z)
-        hit === nothing && throw(ArgumentError(
-            "grillage rib from $(piece.a) to $(piece.b) does not lie on a frame " *
-            "member at the slab's elevation z = $(z) m"))
-        e, ta, tb = hit
-        push!(get!(Vector{ProfT}, by_edge, e),
-              _profile_on_edge(ta, tb, piece.positions, piece.widths))
-    end
-    merged = Dict{Int, ProfT}()
-    area = 0.0
-    for (e, profs) in by_edge
-        pos, w = _merge_edge_profiles(profs)
-        merged[e] = (pos, w)
-        vs = skel.edge_indices[e]
-        p1 = _vertex_xy_m(skel, vs[1])
-        p2 = _vertex_xy_m(skel, vs[2])
-        L = hypot(p2[1] - p1[1], p2[2] - p1[2])
-        area += _profile_integral(pos, w) * L
-    end
-    panel = StructuralSizer.polygon_area_m(corners)
+    panel = StructuralSizer.polygon_area_m(poly) -
+        sum(StructuralSizer.polygon_area_m, _slab_hole_loops_m(struc, slab); init = 0.0)
     abs(area - panel) <= 1e-6 * max(panel, 1.0) || throw(ArgumentError(
-        "grillage ribs carry $(area) m² and the panel is $(panel) m²"))
+        "grillage ribs carry $(area) m² and the slab is $(panel) m²"))
     return merged
+end
+
+"""
+    grillage_tributary_loops(struc, slab, level)
+        -> Vector of (skeleton edge, polygon)
+
+The pan skeletons [`grillage_edge_profiles`](@ref) already uses, one polygon
+per bay side. `skeleton edge` is the building edge that side loads. The
+polygons are the picture of that load; they are not a second load path.
+"""
+function grillage_tributary_loops(struc, slab, fl::FramingLevel)
+    arr, owners = grillage_bays(struc, slab, fl)
+    out = Tuple{Int, Vector{NTuple{2, Float64}}}[]
+    for (e, poly) in StructuralSizer.bay_tributary_polygons(arr)
+        1 <= e <= length(owners) || throw(ArgumentError(
+            "a grillage bay side has no skeleton edge"))
+        push!(out, (owners[e], poly))
+    end
+    return out
+end
+
+"""
+Width profile of skeleton edge `e`, in that edge's direction.
+
+One graph edge keeps its profile. A stitch that split the edge into several
+graph edges lays each piece's profile onto its station along the member.
+"""
+function _profile_on_skeleton_edge(arr, profiles, ks, skel, e)
+    length(ks) == 1 && return profiles[ks[1]]
+    v1, v2 = skel.edge_indices[e]
+    p1 = _vertex_xy_m(skel, v1)
+    p2 = _vertex_xy_m(skel, v2)
+    stations = Tuple{Float64, Float64}[]
+    for k in ks
+        a, b = arr.edges[k]
+        ta = _station_on_segment(arr.nodes[a], p1, p2)
+        tb = _station_on_segment(arr.nodes[b], p1, p2)
+        pos, w = profiles[k]
+        if ta > tb
+            ta, tb = tb, ta
+            pos, w = StructuralSizer._reversed_profile(pos, w)
+        end
+        span = tb - ta
+        for i in eachindex(pos)
+            push!(stations, (ta + Float64(pos[i]) * span, Float64(w[i])))
+        end
+    end
+    sort!(stations; by = first)
+    gpos = Float64[]
+    gw = Float64[]
+    for (t, w) in stations
+        if !isempty(gpos) && t <= gpos[end] + 1e-9
+            gw[end] = max(gw[end], w)
+            continue
+        end
+        push!(gpos, t)
+        push!(gw, w)
+    end
+    length(gpos) >= 2 || return profiles[ks[1]]
+    gpos[1] > 1e-9 && (pushfirst!(gpos, 0.0); pushfirst!(gw, gw[1]))
+    gpos[end] < 1 - 1e-9 && (push!(gpos, 1.0); push!(gw, gw[end]))
+    return (gpos, gw)
+end
+
+"""Parameter of `p` along segment `a`→`b`, clamped to the segment."""
+function _station_on_segment(p, a, b)
+    ab = (b[1] - a[1], b[2] - a[2])
+    L2 = ab[1]^2 + ab[2]^2
+    L2 <= 0 && return 0.0
+    t = ((p[1] - a[1]) * ab[1] + (p[2] - a[2]) * ab[2]) / L2
+    return clamp(t, 0.0, 1.0)
 end
 
 """Post the skeleton on the frame elements and return the cell indices owned."""

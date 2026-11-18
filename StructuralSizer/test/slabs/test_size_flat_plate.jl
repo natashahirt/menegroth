@@ -166,18 +166,11 @@ MutableColumn(v, pos, s, c1, c2, base) = MutableColumn(v, pos, s, c1, c2, base, 
         b = 84u"inch"
         h = 7u"inch"
         
-        # Grade 60 (60 ksi)
-        As_min_60 = StructuralSizer.minimum_reinforcement(b, h, 60000u"psi")
-        @test ustrip(u"inch^2", As_min_60) ≈ 0.0018 * 84 * 7 rtol=0.01
-        
-        # Grade 40 (< 60 ksi) → ρ_min = 0.0020
-        As_min_40 = StructuralSizer.minimum_reinforcement(b, h, 40000u"psi")
-        @test ustrip(u"inch^2", As_min_40) ≈ 0.0020 * 84 * 7 rtol=0.01
-        
-        # Grade 80 (≥ 77 ksi) → ρ_min = max(0.0014, 0.0018×60000/fy)
-        As_min_80 = StructuralSizer.minimum_reinforcement(b, h, 80000u"psi")
-        expected_80 = max(0.0014, 0.0018 * 60000 / 80000) * 84 * 7
-        @test ustrip(u"inch^2", As_min_80) ≈ expected_80 rtol=0.01
+        # ACI 318-19 §8.6.1.1: 0.0018 Ag for every grade.
+        for fy_psi in (40000, 60000, 80000)
+            As_min = StructuralSizer.minimum_reinforcement(b, h, fy_psi * u"psi")
+            @test ustrip(u"inch^2", As_min) ≈ 0.0018 * 84 * 7 rtol=0.01
+        end
     end
 end
 

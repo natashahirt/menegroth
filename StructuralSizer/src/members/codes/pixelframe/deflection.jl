@@ -163,7 +163,7 @@ function pf_element_properties(s::PixelFrameSection, L_mm::Real, Ls_mm::Real, Ld
     θ = atan(em / max(Ls, 1e-6))
 
     # Self-weight [N/mm]
-    w = Atr * 2400.0 * 9.81 / 1e9
+    w = Atr * 2400.0 * ustrip(u"m/s^2", GRAVITY) / 1e9
 
     # Moments
     moment_selfweight = w * L^2 / 8.0

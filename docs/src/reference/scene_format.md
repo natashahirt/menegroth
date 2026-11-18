@@ -110,6 +110,7 @@ Global displacement is `dx lx + dy ly + dz lz`. Between stations the particular 
 | `element_axial` | f32 | elements | Signed axial force, N. Tension positive |
 | `shell_surface_stress` | f32 | triangles | Signed dominant principal surface stress, Pa, one per `shell_faces` triangle. Tension positive. Written only for a solved model |
 | `shell_axial` | f32 | triangles | Vertical membrane force, N/m, one per `shell_faces` triangle. Tension positive. Written only for a solved model |
+| `shell_wall` | u32 | triangles | 1-based `struc.walls` index of each `shell_faces` triangle (the wall record's `design_index`), 0 for a triangle that is not a wall. Written by `build_scene(design)` |
 | `tributary_position` | f32 | vertices × 3 | Polygon vertices relative to `origin`, on the slab plane |
 | `tributary_count` | u32 | polygons | Vertices in each loop |
 | `tributary_element` | u32 | polygons | 0-based frame element, or `0xffffffff` when the edge is not in the analysis model |
@@ -119,6 +120,8 @@ Global displacement is `dx lx + dy ly + dz lz`. Between stations the particular 
 `shell_surface_stress` is the scalar the JSON view calls `face_surface_stress`: the principal stress of larger magnitude at the top or bottom surface, from `ShellInternalForces`. `max_surface_stress_pa` is the largest absolute value. An unsolved model omits the buffer.
 
 `shell_axial` is the vertical component of that same membrane force, `v · N · v` with `v` the global Z axis projected onto the shell. On a wall it is the axial force per unit length. On a floor the in-plane axes are horizontal, so the value is zero. An unsolved model omits it.
+
+`shell_wall` comes from the wall mesher, not from geometry. A pier that ends on columns is meshed on the offset column centerlines, up to a column half-width off the architectural line in the wall record's `drawing`. A viewer picks the wall record and its triangles by this index. A scene without it falls back to the distance from the drawn line.
 
 The loops are copied from `slab.tributary_polygons`: each column share and each wall share of that slab's cells, with a parabolic edge already sampled into the loop. A beam-supported cell with no such share keeps the straight-skeleton polygon of each edge. Kind is column, beam, or wall. `tributary_cell` names the cell, and a slab's `bind.cell_indices` lists the cells it owns, so the picture is that slab. A design with an empty cache omits the buffers. The loops lie on the slab; a viewer lifts them slightly so they read above the surface.
 

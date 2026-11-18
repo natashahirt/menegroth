@@ -73,16 +73,33 @@ end
 """
 Maximum design shear capacity for T-beam section geometry.
 Shear is resisted by the web only (bw × d), per ACI 318-11 §11.2.1.1.
+`vc_factor` scales `Vc` only (1.10 for qualifying joists, §8.13.8).
 """
-function _compute_φVn_max(section::RCTBeamSection, fc_psi::Float64, λ::Float64)
+function _compute_φVn_max(section::RCTBeamSection, fc_psi::Float64, λ::Float64;
+                          vc_factor::Float64 = 1.0, vs_factor::Float64 = 1.0)
     bw_in = ustrip(u"inch", section.bw)
     d_in  = ustrip(u"inch", section.d)
 
     sqrt_fc = sqrt(fc_psi)
-    Vc_lb     = 2 * λ * sqrt_fc * bw_in * d_in
-    Vs_max_lb = 8 * sqrt_fc * bw_in * d_in
+    Vc_lb     = vc_factor * 2 * λ * sqrt_fc * bw_in * d_in
+    # vs_factor is 0 when stirrups are not credited. §11.4.7.9 still defines Vs,max.
+    Vs_max_lb = vs_factor * 8 * sqrt_fc * bw_in * d_in
 
     return 0.75 * (Vc_lb + Vs_max_lb) / 1000.0  # kip
+end
+
+"""
+`Vc` factor for `section` under `checker`: 1.10 when the checker sizes joist
+ribs and the section meets ACI 318-11 §8.13.2 and §8.13.3 at the checker's
+spacing (§8.13.8, corpus: aci-318-11, PDF page 121), 1.0 otherwise.
+"""
+_checker_vc_factor(::ACIBeamChecker, ::AbstractSection) = 1.0
+function _checker_vc_factor(checker::ACIBeamChecker, section::RCTBeamSection)
+    checker.joist_spacing_in > 0 || return 1.0
+    checker.joist_spacing_in > ustrip(u"inch", section.bw) || return 1.0
+    joist = JoistConstruction(section, checker.joist_spacing_in * u"inch",
+                              checker.joist_direction)
+    return _joist_vc_factor(joist)
 end
 
 # ==============================================================================
@@ -160,7 +177,9 @@ function is_feasible(
         h_in_s   = ustrip(u"inch", section.h)
         Ag_comp  = ustrip(u"inch^2", section_area(section))
         Ag_tens  = bw_in_s * h_in_s
-        φVn_kip = _φVn_with_axial(bw_in_s, d_in_s, Ag_comp, Ag_tens, fc_psi_s, checker.λ, Nu_kip)
+        φVn_kip = _φVn_with_axial(bw_in_s, d_in_s, Ag_comp, Ag_tens, fc_psi_s, checker.λ, Nu_kip;
+                                  vc_factor = _checker_vc_factor(checker, section),
+                                  vs_factor = _checker_vs_factor(checker))
         φVn_kip ≥ Vu || return false
     else
         cache.φVn_max[j] ≥ Vu || return false
@@ -189,6 +208,7 @@ function is_feasible(
             checker.w_dead_kplf * kip / u"ft",
             checker.w_live_kplf * kip / u"ft";
             support = checker.defl_support,
+            λ = checker.λ,
             ξ = checker.defl_ξ,
             sustained_live_fraction = checker.defl_sustained_live,
         )
@@ -301,7 +321,9 @@ function diagnose_infeasibility(
         d_in = ustrip(u"inch", sec.d)
         Ag_comp = ustrip(u"inch^2", section_area(sec))
         Ag_tens = bw_in * ustrip(u"inch", sec.h)
-        φVn_kip = _φVn_with_axial(bw_in, d_in, Ag_comp, Ag_tens, fc_psi, checker.λ, Nu_kip)
+        φVn_kip = _φVn_with_axial(bw_in, d_in, Ag_comp, Ag_tens, fc_psi, checker.λ, Nu_kip;
+                                  vc_factor = _checker_vc_factor(checker, sec),
+                                  vs_factor = _checker_vs_factor(checker))
         if φVn_kip < Vu
             tag = Nu_kip < 0 ? "Nu<0" : "Nu>0"
             return "Shear ($tag): φVn=$(round(φVn_kip, digits=1)) < Vu=$(round(Vu, digits=1)) kip"
@@ -349,7 +371,9 @@ function explain_feasibility(
         d_in = ustrip(u"inch", section.d)
         Ag_comp = ustrip(u"inch^2", section_area(section))
         Ag_tens = bw_in * ustrip(u"inch", section.h)
-        φVn_kip = _φVn_with_axial(bw_in, d_in, Ag_comp, Ag_tens, fc_psi_s, checker.λ, Nu_kip)
+        φVn_kip = _φVn_with_axial(bw_in, d_in, Ag_comp, Ag_tens, fc_psi_s, checker.λ, Nu_kip;
+                                  vc_factor = _checker_vc_factor(checker, section),
+                                  vs_factor = _checker_vs_factor(checker))
     else
         φVn_kip = cache.φVn_max[j]
     end

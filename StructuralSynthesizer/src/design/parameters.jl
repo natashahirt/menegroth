@@ -148,11 +148,10 @@ Base.@kwdef mutable struct DesignParameters
     scoped_floor_overrides::Vector{ScopedFloorOverride} = ScopedFloorOverride[]
     
     # ─── Member Grouping ───
-    # When true, detect collinear beams (sharing a node with aligned direction)
-    # and assign them the same group_id before sizing. Forces the optimizer to
-    # assign the same section to all members along a continuous line.
-    # NOTE: This is orthogonal to `uniform_column_sizing` — collinear_grouping
-    # operates on beam-line continuity in plan, not column uniformity per story.
+    # When true, separate collinear beams share one group_id and one section.
+    # Edges that are already one beam are one member and are sized once without
+    # this flag. A moment connection does not by itself require the same section.
+    # Orthogonal to `uniform_column_sizing`, which is per story rather than along a line.
     collinear_grouping::Bool = false
 
     # ─── Per-Member-Group Sizing Overrides (Run 4 / Phase B) ───
@@ -269,7 +268,14 @@ Base.@kwdef mutable struct DesignParameters
     # record the failure at the given t sets this false.
     jump_wall_thickness::Bool = true
     # Which walls share a thickness. See `WALL_THICKNESS_GROUPINGS`.
-    wall_thickness_grouping::Symbol = :all
+    # `:pier` sizes each wall on its own demand. `:all` moves every wall
+    # together, so one analysis can predict the next inch.
+    wall_thickness_grouping::Symbol = :pier
+    # Thickness catalog. `:hard` errors when no thickness through
+    # `wall_thickness_limit` passes. `:soft` steps that limit up by 12 in,
+    # warns, and errors at 72 in.
+    wall_catalog_constraint::Symbol = :soft
+    wall_thickness_limit::typeof(1.0u"m") = 36.0u"inch"
     
     # Default frame element properties (before member sizing).
     # Use precomputed SI constants to avoid runtime Unitful conversion of ksi → Pa,
@@ -284,6 +290,21 @@ Base.@kwdef mutable struct DesignParameters
     
     # ─── Iteration Control ───
     max_iterations::Int = 20
+    # ENGINEERING JUDGMENT. A rib piece that frames into a solid head is sized
+    # for Vu ≤ φVc. ACI 318-11 §11.1.1 permits stirrups to carry the rest;
+    # `true` credits them and lets the head grow instead.
+    rib_head_stirrups::Bool = false
+    # ENGINEERING JUDGMENT. Largest soffit step, in length, between rib pieces
+    # that share a node. ACI 318-11 §12.10.6 requires anchorage where a bar is
+    # not parallel to the compression face and gives no length for a step, so
+    # each piece stays prismatic.
+    rib_depth_step::typeof(1.0u"inch") = 6.0u"inch"
+    # ENGINEERING JUDGMENT. A rib bay whose least centerline width, minus the
+    # ribs, is below this joins the nearest solid head.
+    min_rib_void::typeof(1.0u"inch") = 12.0u"inch"
+    # ENGINEERING JUDGMENT. Solid heads stop growing once they cover more than
+    # this fraction of the rib-bay area. The design is then reported short.
+    solid_fraction_max::Float64 = 0.35
     
     # ─── Geometry Interpretation ───
     # When true (default), vertices are column and beam centerlines. The slab

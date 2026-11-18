@@ -549,6 +549,74 @@ end
 # This ensures a "cable" mechanism if the slab loses support at a column.
 
 """
+    integrity_bottom_bars(cs_pos_primary, cs_pos_secondary) -> NamedTuple
+
+ACI 318-11 §13.3.8.5 (corpus: aci-318-11, page 247): column-strip bottom
+bars in each direction are continuous or spliced (Class B, Fig. 13.3.8), and
+at least two of them in each direction pass within the column core and are
+anchored at exterior supports. The requirement is prescriptive; there is no
+force check.
+
+This checks the count: each direction's column-strip positive steel
+(`StripReinforcement`) has at least two bars. Routing two of them through
+the core, continuity, and hooks at exterior supports are placed by the slab
+detailing (`:integrity` bar group in `detailing/slab.jl`).
+
+`cs_pos_secondary = nothing` means the secondary direction was not designed.
+The clause asks for bars in each direction, so that is a failure, reported
+with `secondary_verified = false`.
+
+Returns `(ok, n_primary, n_secondary, secondary_verified, utilization)`,
+with `utilization` = 2 / (fewest bars in a checked direction).
+"""
+function integrity_bottom_bars(cs_pos_primary, cs_pos_secondary)
+    n_p = cs_pos_primary.n_bars
+    n_s = cs_pos_secondary === nothing ? nothing : cs_pos_secondary.n_bars
+    n_min = n_s === nothing ? n_p : min(n_p, n_s)
+    return (ok = n_s !== nothing && n_min >= 2, n_primary = n_p, n_secondary = n_s,
+            secondary_verified = n_s !== nothing,
+            utilization = 2 / max(n_min, 1e-9))
+end
+
+"""
+    integrity_bottom_bars!(rebar_design, h) -> Bool
+
+Raise `rebar_design`'s column-strip positive steel to two bars when it has
+fewer (§13.3.8.5). Returns `true` when it changed the design.
+"""
+function integrity_bottom_bars!(rebar_design, h)
+    k = _cs_pos_index(rebar_design)
+    k === nothing && return false
+    cs = rebar_design.column_strip_reinf[k]
+    cs.n_bars >= 2 && return false
+    # ACI 318-11 §13.3.2 + §7.6.5 — slab-thickness-dependent s_max.
+    # `select_bars` places at least two bars.
+    b = select_bars(cs.As_provided, rebar_design.column_strip_width;
+                    max_spacing = max_bar_spacing(h))
+    rebar_design.column_strip_reinf[k] = StripReinforcement(
+        :pos, cs.Mu, cs.As_reqd, cs.As_min,
+        uconvert(u"m^2", b.As_provided), b.bar_size,
+        uconvert(u"m", b.spacing), b.n_bars, cs.section_adequate)
+    return true
+end
+
+"""Index of the column-strip positive (bottom) steel in `rebar_design`, or `nothing`."""
+_cs_pos_index(rebar_design) =
+    findfirst(r -> r.location === :pos, rebar_design.column_strip_reinf)
+
+"""
+    design_integrity_check(rebar_design, secondary_rebar_design) -> NamedTuple
+
+[`integrity_bottom_bars`](@ref) on the column-strip positive steel of each
+direction's design (`secondary_rebar_design` may be `nothing`).
+"""
+function design_integrity_check(rebar_design, secondary_rebar_design)
+    cs_pos(rd) = (k = _cs_pos_index(rd); k === nothing ? (n_bars = 0,) : rd.column_strip_reinf[k])
+    sec = secondary_rebar_design === nothing ? nothing : cs_pos(secondary_rebar_design)
+    return integrity_bottom_bars(cs_pos(rebar_design), sec)
+end
+
+"""
     integrity_reinforcement(
         tributary_area::Area,
         qD::LinearLoad,
@@ -557,10 +625,10 @@ end
         load_factor::Float64 = 2.0
     ) -> NamedTuple
 
-Calculate required structural integrity reinforcement per ACI 318-11 §13.3.8.5.
-
-The required steel area provides tensile capacity to carry the reaction force
-from the tributary area under a progressive collapse scenario.
+Not an ACI 318-11 requirement and not used by the slab pipeline: §13.3.8.5
+is prescriptive (see [`integrity_bottom_bars`](@ref)). This force estimate,
+2(D + L) over the tributary area carried in tension at 0.9 fy, is kept for
+the report generators that print it.
 
 # Arguments
 - `tributary_area`: Area supported by the column connection
@@ -579,9 +647,6 @@ Named tuple with:
 - Applies to all column types (interior, edge, corner)
 - This is in addition to flexural reinforcement requirements
 
-# Reference
-- ACI 318-11 §13.3.8.5: Two-way slab structural integrity
-- ACI 318-11 R13.3.8: Commentary on progressive collapse resistance
 """
 function integrity_reinforcement(
     tributary_area::Area,

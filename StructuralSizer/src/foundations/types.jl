@@ -173,6 +173,23 @@ const hard_clay = Soil(
 abstract type AbstractFoundationResult end
 
 """
+    FoundationUtilizations(; bearing=NaN, punching=NaN, one_way_shear=NaN)
+
+The per-check utilizations behind a footing's governing `utilization`.
+`NaN` means the routine did not compute that check.
+
+- `bearing`: service soil pressure / allowable `qa`.
+- `punching`: two-way shear Vu/φVc, worst column. A mat with walls also
+  includes the wall-cantilever shear here.
+- `one_way_shear`: Vu/φVc on the critical section (wall footings).
+"""
+Base.@kwdef struct FoundationUtilizations
+    bearing::Float64 = NaN
+    punching::Float64 = NaN
+    one_way_shear::Float64 = NaN
+end
+
+"""
     SpreadFootingResult{L, V, F}
 
 Design result for a spread (isolated) footing.
@@ -200,6 +217,7 @@ struct SpreadFootingResult{L, V, F} <: AbstractFoundationResult
     concrete_volume::V  # Total concrete (m³)
     steel_volume::V     # Total rebar (m³)
     utilization::Float64
+    checks::FoundationUtilizations
 end
 
 """
@@ -217,6 +235,7 @@ struct CombinedFootingResult{L, V, F} <: AbstractFoundationResult
     concrete_volume::V  # (m³)
     steel_volume::V     # (m³)
     utilization::Float64
+    checks::FoundationUtilizations
 end
 
 """
@@ -267,6 +286,7 @@ struct StripFootingResult{L, A, V, F} <: AbstractFoundationResult
     Bn::F            # φBn_footing at governing (min sqA) column
     sqA::Float64     # √(A2/A1) ≤ 2 at that column
     analysis::Symbol
+    checks::FoundationUtilizations
 end
 
 """
@@ -303,6 +323,7 @@ struct MatFootingResult{L, A, V, F} <: AbstractFoundationResult
     steel_volume::V
     utilization::Float64
     analysis::Symbol
+    checks::FoundationUtilizations
 end
 
 """
@@ -321,7 +342,23 @@ struct PileCapResult{L, V} <: AbstractFoundationResult
     concrete_volume::V  # Cap + piles (if cast-in-place)
     steel_volume::V     # Reinforcement volume
     utilization::Float64
+    checks::FoundationUtilizations
 end
+
+# Callers that predate `checks` get an empty breakdown.
+SpreadFootingResult{L, V, F}(args::Vararg{Any, 10}) where {L, V, F} =
+    SpreadFootingResult{L, V, F}(args..., FoundationUtilizations())
+CombinedFootingResult{L, V, F}(args::Vararg{Any, 9}) where {L, V, F} =
+    CombinedFootingResult{L, V, F}(args..., FoundationUtilizations())
+StripFootingResult{L, A, V, F}(args::Vararg{Any, 15}) where {L, A, V, F} =
+    StripFootingResult{L, A, V, F}(args..., FoundationUtilizations())
+MatFootingResult{L, A, V, F}(args::Vararg{Any, 13}) where {L, A, V, F} =
+    MatFootingResult{L, A, V, F}(args..., FoundationUtilizations())
+PileCapResult{L, V}(args::Vararg{Any, 10}) where {L, V} =
+    PileCapResult{L, V}(args..., FoundationUtilizations())
+
+"""Per-check utilizations of a foundation result (see [`FoundationUtilizations`](@ref))."""
+utilization_checks(r::AbstractFoundationResult) = r.checks
 
 # =============================================================================
 # Common Interface
@@ -480,6 +517,8 @@ A grade wall (or one leg of an L or T) as a line load on a footing.
 - `hw`: Wall height, for the shear-wall term of ACI 336.2R Eq. (5-2).
 - `samples`: Base reactions along the wall. A node shared with another leg
   belongs to exactly one leg.
+- `solid`: Length of wall that is concrete at the base. An opening whose
+  sill is at the base is not part of it. Defaults to the centerline length.
 """
 struct WallLineDemand{L, F}
     idx::Int
@@ -488,6 +527,7 @@ struct WallLineDemand{L, F}
     tw::L
     hw::L
     samples::Vector{WallLineSample{L, F}}
+    solid::L
 end
 
 """
@@ -497,7 +537,7 @@ end
 and forces in newtons, so a wall in feet and a thickness in inches are
 the same demand.
 """
-function WallLineDemand(idx::Int, p1, p2, tw, hw, samples)
+function WallLineDemand(idx::Int, p1, p2, tw, hw, samples; solid_length=nothing)
     isempty(samples) && throw(ArgumentError(
         "Wall line $idx has no base reactions"))
     xy(p) = (uconvert(u"m", p[1]), uconvert(u"m", p[2]))
@@ -505,8 +545,14 @@ function WallLineDemand(idx::Int, p1, p2, tw, hw, samples)
                              uconvert(u"N", s.Pu),
                              uconvert(u"N", s.Ps)) for s in samples]
     p1m, p2m = xy(p1), xy(p2)
+    centerline = hypot(ustrip(u"m", p2m[1] - p1m[1]), ustrip(u"m", p2m[2] - p1m[2]))
+    solid = solid_length === nothing ? centerline * u"m" : uconvert(u"m", solid_length)
+    ustrip(u"m", solid) <= centerline + 1e-6 || throw(ArgumentError(
+        "Wall line $idx concrete length exceeds its centerline"))
+    ustrip(u"m", solid) >= 0 || throw(ArgumentError(
+        "Wall line $idx has a negative concrete length"))
     WallLineDemand{typeof(p1m[1]), typeof(normed[1].Pu)}(
-        idx, p1m, p2m, uconvert(u"m", tw), uconvert(u"m", hw), normed)
+        idx, p1m, p2m, uconvert(u"m", tw), uconvert(u"m", hw), normed, solid)
 end
 
 """

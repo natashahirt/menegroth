@@ -149,12 +149,13 @@ converted internally to kip/kip-ft for ACI calculations.
 - `M1/M2 < 0`: **single** curvature (worst case).
 - Used by `Cm = 0.6 − 0.4·(M1/M2)` (Eq. 6.6.4.5.3a) and slenderness limit
   `34 + 12·(M1/M2)` capped at 40 (Eq. 6.2.5.1b/c).
-- If not provided, defaults to `M1 = 0` (Cm = 0.6, conservative
-  single-curvature stand-in).
+- If not provided, defaults to `M1 = 0` (Cm = 0.6, slenderness limit 34).
+  This is NOT conservative: single curvature (`M1 = −M2`) gives Cm = 1.0
+  and a limit of 22. Pass `M1 = −M2` when the curvature is unknown.
 
 # Examples
 ```julia
-# Simple: envelope moment only (uses conservative M1=0)
+# Simple: envelope moment only (M1 = 0; see the note above)
 demand = RCColumnDemand(1; Pu=500.0, Mux=100.0, Muy=50.0)
 
 # Full: with end moments for proper slenderness (double curvature)
@@ -230,6 +231,28 @@ function RCColumnDemand(idx::Int;
     RCColumnDemand{T}(idx, T(Pu), T(Mux), T(Muy),
                       T(M1x), T(M2x), T(M1y), T(M2y),
                       Float64(βdns), transverse_load)
+end
+
+"""
+    RCColumnDemandSet(member_idx, cases) <: AbstractDemand
+
+Every load case one RC column group must resist. Each case carries the axial
+force and the end moments of one analysis case, so they act together. A
+section is feasible when it passes every case.
+
+An envelope that pairs the largest axial force of any case with the largest
+moment of any case is not a bound for a reinforced concrete section. Below
+the balanced point more axial compression raises the moment capacity
+(ACI 318-19 §22.4, P–M interaction), so a case with less axial force and the
+same moment can fail while the envelope passes.
+"""
+struct RCColumnDemandSet{D <: RCColumnDemand} <: AbstractDemand
+    member_idx::Int
+    cases::Vector{D}
+    function RCColumnDemandSet(member_idx::Int, cases::Vector{D}) where {D <: RCColumnDemand}
+        isempty(cases) && throw(ArgumentError("RCColumnDemandSet needs at least one case"))
+        return new{D}(member_idx, cases)
+    end
 end
 
 # ==============================================================================

@@ -11,3 +11,9 @@ include("biaxial.jl")
 
 # Checker depends on pm, slenderness, biaxial
 include("checker.jl")
+
+# One-way shear. Ties are sized here; detailing places the spacing it returns.
+include("shear.jl")
+
+# ACI 318-11 §10.12: column strength where it passes through a weaker floor.
+include("floor_transmission.jl")

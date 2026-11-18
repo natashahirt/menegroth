@@ -32,6 +32,10 @@ const CORE_STAIR_X = 12.8
 function core_office_skeleton()
     skel = gen_medium_office(3 * CORE_BAY * u"m", 3 * CORE_BAY * u"m", CORE_STORY_H * u"m",
                              3, 3, CORE_STORIES)
+    # Story 0 is support nodes only. The ground-story walls need the four core
+    # edges, and every bay keeps a grade face. The beams between the other
+    # column bases are not added. find_faces! already ran.
+    _grade_core_grid!(skel)
     x0, x1 = CORE_BAY, 2 * CORE_BAY
     corners = ((x0, x0), (x1, x0), (x1, x1), (x0, x1))
     edges = ((corners[1], corners[2]), (corners[2], corners[3]),
@@ -43,8 +47,6 @@ function core_office_skeleton()
     end
     claimed == 4 * CORE_STORIES ||
         error("core: claimed $claimed wall edges, expected $(4 * CORE_STORIES)")
-    # The grid column at each core corner stays. The walls carry the bay
-    # edges; the column stack is still designed.
     # Lobby slab along the south of the core, three shafts north of it, and
     # the walls between them. The roof stays one face.
     _shape_core!(skel)
@@ -52,6 +54,74 @@ function core_office_skeleton()
     # one entrance sits on the south wall into the lobby. Sizes are the demo
     # geometry, not a code minimum.
     _core_doors!(skel)
+    # The grid puts a column on every intersection, including the four corners
+    # where the core walls meet. Those stacks move to :absent: the edges stay,
+    # so a later pass can put them back in :columns, and this design's walls
+    # are the supports there. Another design may still size a column on a wall.
+    _park_core_corner_columns!(skel)
+    return skel
+end
+
+"""
+Grade faces on story 0, and the four edges the ground-story core walls claim.
+
+`gen_medium_office` does not put beams between the column bases. The core
+walls need the four edges of the center bay, and the lobby is that bay's
+grade face. The other bays stay grade faces with no beams between the
+foundations. `find_faces!` has already run, so the faces are added here and
+it is not called again.
+"""
+function _grade_core_grid!(skel)
+    n = 3
+    function at(i, j)
+        return _vertex_at(skel, i * CORE_BAY, j * CORE_BAY, 0.0)
+    end
+    # Center bay only. The claim below moves these four edges into `:walls`.
+    add_element!(skel, at(1, 1), at(2, 1); group=:beams, level_idx=0)
+    add_element!(skel, at(2, 1), at(2, 2); group=:beams, level_idx=0)
+    add_element!(skel, at(2, 2), at(1, 2); group=:beams, level_idx=0)
+    add_element!(skel, at(1, 2), at(1, 1); group=:beams, level_idx=0)
+    for j in 0:(n - 1), i in 0:(n - 1)
+        cycle = [at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)]
+        StructuralSynthesizer.add_face!(skel, Meshes.Ngon(skel.vertices[cycle]...);
+                                        group=:grade, level_idx=0, v_indices=cycle)
+    end
+    return skel
+end
+
+"""
+Move the four core-corner column stacks from `:columns` into `:absent`.
+
+The edges and their indices stay. `to_asap!` gives an `:absent` edge a zero
+frame section, and member initialization does not build a column from it.
+Moving the same indices back to `:columns` restores them.
+"""
+function _park_core_corner_columns!(skel)
+    corners = ((CORE_BAY, CORE_BAY), (2 * CORE_BAY, CORE_BAY),
+               (2 * CORE_BAY, 2 * CORE_BAY), (CORE_BAY, 2 * CORE_BAY))
+    park = Int[]
+    keep = Int[]
+    for eidx in get(skel.groups_edges, :columns, Int[])
+        v1, v2 = skel.edge_indices[eidx]
+        c1 = Meshes.coords(skel.vertices[v1])
+        c2 = Meshes.coords(skel.vertices[v2])
+        x1, y1 = ustrip(u"m", c1.x), ustrip(u"m", c1.y)
+        x2, y2 = ustrip(u"m", c2.x), ustrip(u"m", c2.y)
+        on_corner = hypot(x1 - x2, y1 - y2) <= 1e-6 &&
+            any(p -> hypot(x1 - p[1], y1 - p[2]) <= 1e-3, corners)
+        if on_corner
+            push!(park, eidx)
+        else
+            push!(keep, eidx)
+        end
+    end
+    length(park) == 4 * CORE_STORIES ||
+        error("core: parking $(length(park)) corner columns, expected $(4 * CORE_STORIES)")
+    skel.groups_edges[:columns] = keep
+    absent = get!(skel.groups_edges, :absent, Int[])
+    for eidx in park
+        eidx in absent || push!(absent, eidx)
+    end
     return skel
 end
 

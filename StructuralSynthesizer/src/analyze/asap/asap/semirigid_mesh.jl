@@ -245,31 +245,61 @@ function _mesh_semirigid_face(skel, face, nodes, pool, edge_cache, h, t, E, ν)
         push!(fixed, nd)
     end
 
+    holes = face_opening_loops(skel, face)
     interior = NTuple{2, Float64}[]
     xs = [p[1] for p in poly]
     ys = [p[2] for p in poly]
     for x in range(minimum(xs) + h, maximum(xs) - h / 2; step=h),
         y in range(minimum(ys) + h, maximum(ys) - h / 2; step=h)
         _point_in_polygon_xy(x, y, poly) || continue
+        any(loop -> _point_in_polygon_xy(x, y, loop), holes) && continue
         _distance_to_polygon(x, y, poly) >= h / 2 || continue
         any(nd -> hypot(_xy(nd)[1] - x, _xy(nd)[2] - y) < h / 2, fixed) && continue
         push!(interior, (x, y))
     end
 
     all_nodes = vcat(boundary, fixed, [_membrane_node(p[1], p[2], z) for p in interior])
+    outer = vcat(collect(1:length(boundary)), 1)
+    hole_area = 0.0
+    sections = Vector{Int}[]
+    for raw in holes
+        loop = Asap._as_hole_loop(raw)
+        isempty(loop) && continue
+        ids = Int[]
+        for p in loop
+            push!(all_nodes, _membrane_node(p[1], p[2], z))
+            push!(ids, length(all_nodes))
+        end
+        push!(ids, ids[1])
+        push!(sections, ids)
+        hole_area += abs(_polygon_area_m2(NTuple{2, Float64}[(p[1], p[2]) for p in loop]))
+    end
     points = [_xy(nd) for nd in all_nodes]
-    loop = vcat(collect(1:length(boundary)), 1)
-    tri = Asap.DT.triangulate(points; boundary_nodes=[loop], rng=Asap._mesh_rng())
+    # Hole edges are constrained segments, the same pair set the shell mesher
+    # passes. Triangles inside a hole are dropped below. A face with no hole
+    # is the single outer curve, as before.
+    segments = Set{Tuple{Int, Int}}()
+    for ids in sections
+        for k in 1:(length(ids) - 1)
+            push!(segments, (ids[k], ids[k + 1]))
+        end
+    end
+    tri = isempty(segments) ?
+        Asap.DT.triangulate(points; boundary_nodes=[outer], rng=Asap._mesh_rng()) :
+        Asap.DT.triangulate(points; boundary_nodes=[outer], segments=segments, rng=Asap._mesh_rng())
     shells = Asap.ShellTri3[]
     for T in Asap.DT.each_solid_triangle(tri)
         i, j, k = Asap.DT.triangle_vertices(T)
+        a, b, c = points[i], points[j], points[k]
+        mid = ((a[1] + b[1] + c[1]) / 3, (a[2] + b[2] + c[2]) / 3)
+        any(loop -> _point_in_polygon_xy(mid[1], mid[2], loop), holes) && continue
         sh = Asap.ShellTri3((all_nodes[i], all_nodes[j], all_nodes[k]), t, E, ν;
                             id=:semirigid_diaphragm, membrane_only=true)
         Asap.populate_globalID!(sh)
         push!(shells, sh)
     end
     covered = sum(sh.area for sh in shells)
-    face_area = abs(area2) / 2
+    face_area = abs(area2) / 2 - hole_area
     abs(covered - face_area) <= 1e-6 * max(1.0, face_area) || throw(ArgumentError(
         "semirigid diaphragm: the mesh of face $face covers $covered m² of $face_area m²."))
     return shells

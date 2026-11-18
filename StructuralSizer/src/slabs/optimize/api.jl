@@ -231,7 +231,6 @@ optimize_vault(span, sdl, live; rise=1.0u"m", thickness_bounds=(50u"mm", 150u"mm
 - `finishing_load`: Topping load (default: 0)
 - `allowable_stress`: Max stress MPa (default: 0.45 fc')
 - `deflection_limit`: Max rise reduction (default: span/240)
-- `check_asymmetric`: Check half-span live (default: true)
 - `rib_depth`, `rib_apex_rise`: Rib geometry (default: 0)
 - `objective`: MinVolume(), MinWeight(), MinCarbon(), MinCost()
 - `solver`: :grid or :ipopt (default: :grid)
@@ -259,7 +258,6 @@ function optimize_vault(
     finishing_load::F = zero(sdl),
     allowable_stress::Union{Real, Nothing} = nothing,
     deflection_limit::Union{L, Nothing} = nothing,
-    check_asymmetric::Bool = true,
     rib_depth::L = zero(span),
     rib_apex_rise::L = zero(span),
     # Solver options
@@ -303,7 +301,6 @@ function optimize_vault(
         deflection_limit = deflection_limit,
         rise_bounds = (_rise_bounds(mode)[1] * u"m", _rise_bounds(mode)[2] * u"m"),
         thickness_bounds = (_thickness_bounds(mode)[1] * u"m", _thickness_bounds(mode)[2] * u"m"),
-        check_asymmetric = check_asymmetric,
         rib_depth = rib_depth,
         rib_apex_rise = rib_apex_rise,
         mode = _mode_symbol(mode),

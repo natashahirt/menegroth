@@ -141,84 +141,81 @@ end
 # =============================================================================
 # §13.2.6 — Shear Caps
 # =============================================================================
-@testset "Shear Caps — ACI §13.2.6" begin
+const _SS = StructuralSizer
+const _col_int = (position = :interior, c1 = _c1, c2 = _c2, shape = :rectangular)
+const _col_edge = (position = :edge, c1 = _c1, c2 = _c2, shape = :rectangular)
+const _Vu_moderate = uconvert(u"kip", _vu_moderate * _b0 * _d)   # 208.8 kip on the bare section
+const _M0 = 0.0u"kip*ft"
 
-    @testset "Basic design — moderate demand" begin
-        cap = design_shear_cap(
-            _vu_moderate, _fc, _d, _h, :interior, _c1, _c2;
-            λ=_λ, φ=_φ)
+@testset "Shear Caps — ACI §13.2.6 / §11.11.1.2" begin
 
-        @test cap.required == true
-        # Cap should resolve punching for moderate demand
-        @test cap.ok == true
-        @test cap.ratio <= 1.0
-
-        # h_cap should be positive
-        @test ustrip(u"inch", cap.h_cap) > 0.0
-
-        # extent ≥ h_cap (§13.2.6)
-        @test cap.extent >= cap.h_cap
-
-        # d_eff = d + h_cap
-        @test ustrip(u"inch", cap.d_eff) ≈ ustrip(u"inch", _d + cap.h_cap) atol=0.01
-
-        # b0_cap > original b0 (cap enlarges critical section)
-        @test cap.b0_cap > _b0
-    end
-
-    @testset "High demand — may reach max projection" begin
-        cap = design_shear_cap(
-            _vu_high, _fc, _d, _h, :interior, _c1, _c2;
-            λ=_λ, φ=_φ, max_projection=_h)
-
-        @test cap.required == true
-        # May or may not resolve depending on projection limit
-        if !cap.ok
-            @test cap.h_cap == _h  # Reached max projection
+    @testset "Both critical sections are checked; the worse governs" begin
+        cap = design_shear_cap(_col_int, _Vu_moderate, _M0, _fc, _d, _h; λ=_λ, φ=_φ)
+        @test cap.required && cap.ok
+        @test cap.extent == cap.h_cap                     # §13.2.6 minimum extent
+        @test cap.d_eff ≈ _d + cap.h_cap
+        @test cap.c1_cap ≈ _c1 + 2cap.h_cap
+        # (a) column face through the cap, (b) cap edge in slab depth d.
+        a = _SS.check_punching_for_column(_col_int, _Vu_moderate, _M0, _d + cap.h_cap,
+                                          _h + cap.h_cap, _fc; λ=_λ, φ_shear=_φ)
+        proxy = (position = :interior, c1 = cap.c1_cap, c2 = cap.c2_cap, shape = :rectangular)
+        b = _SS.check_punching_for_column(proxy, _Vu_moderate, _M0, _d, _h, _fc; λ=_λ, φ_shear=_φ)
+        @test cap.ratio ≈ max(a.ratio, b.ratio)
+        @test cap.b0_cap ≈ 4 * (_c1 + 2cap.h_cap + _d)   # d/2 outside the cap, slab d
+        # One increment less fails one of the two sections.
+        if cap.h_cap > 0.25u"inch"
+            hc = cap.h_cap - 0.25u"inch"
+            a0 = _SS.check_punching_for_column(_col_int, _Vu_moderate, _M0, _d + hc, _h + hc, _fc;
+                                               λ=_λ, φ_shear=_φ)
+            p0 = (position = :interior, c1 = _c1 + 2hc, c2 = _c2 + 2hc, shape = :rectangular)
+            b0 = _SS.check_punching_for_column(p0, _Vu_moderate, _M0, _d, _h, _fc; λ=_λ, φ_shear=_φ)
+            @test max(a0.ratio, b0.ratio) > 1.0
         end
     end
 
-    @testset "Zero demand — no cap needed" begin
-        # If concrete alone is adequate, shear cap still designed but with tiny projection
-        vu_low = 50.0u"psi"  # Well below φ × 4√f'c ≈ 190 psi
-        cap = design_shear_cap(
-            vu_low, _fc, _d, _h, :interior, _c1, _c2;
-            λ=_λ, φ=_φ)
-
-        @test cap.required == true
-        @test cap.ok == true
-        # Smallest possible cap should suffice
-        @test ustrip(u"inch", cap.h_cap) <= 0.5
+    @testset "The cap edge section is in the slab depth, not d + h_cap" begin
+        # A demand the column-face section clears easily with a deep cap
+        # still needs the cap edge section at slab depth d to pass.
+        Vu = 1.6 * _Vu_moderate
+        cap = design_shear_cap(_col_int, Vu, _M0, _fc, _d, _h; λ=_λ, φ=_φ)
+        proxy = (position = :interior, c1 = cap.c1_cap, c2 = cap.c2_cap, shape = :rectangular)
+        b = _SS.check_punching_for_column(proxy, Vu, _M0, _d, _h, _fc; λ=_λ, φ_shear=_φ)
+        @test cap.ratio >= b.ratio - 1e-12
+        cap.ok || @test cap.h_cap ≈ _h
     end
 
-    @testset "Edge column" begin
-        cap = design_shear_cap(
-            _vu_moderate, _fc, _d, _h, :edge, _c1, _c2;
-            λ=_λ, φ=_φ)
-
-        @test cap.required == true
-        # Edge column has smaller b0, so may need larger cap
+    @testset "Edge cap stops at the free edge" begin
+        Vu = 0.5 * _Vu_moderate
+        Mub = 40.0u"kip*ft"
+        cap = design_shear_cap(_col_edge, Vu, Mub, _fc, _d, _h; λ=_λ, φ=_φ,
+                               punch_kwargs = (free_edge_parallel = :c2,))
+        @test cap.required
+        @test cap.c1_cap ≈ _c1 + cap.h_cap          # perpendicular to the edge: one side
+        @test cap.c2_cap ≈ _c2 + 2cap.h_cap         # along the edge: both sides
     end
 
-    @testset "Small column — larger cap needed" begin
-        c_small = 12.0u"inch"
-        cap = design_shear_cap(
-            _vu_moderate, _fc, _d, _h, :interior, c_small, c_small;
-            λ=_λ, φ=_φ)
+    @testset "Skew or re-entrant corners are not modelled" begin
+        col = (position = :corner, c1 = _c1, c2 = _c2, shape = :rectangular,
+               corner_kind = :reentrant)
+        cap = design_shear_cap(col, _Vu_moderate, _M0, _fc, _d, _h)
+        @test cap.required && !cap.ok && cap.governing === :unsupported
+    end
 
-        # Smaller column → smaller b0 → higher stress → larger cap needed
-        cap_large_col = design_shear_cap(
-            _vu_moderate, _fc, _d, _h, :interior, _c1, _c2;
-            λ=_λ, φ=_φ)
+    @testset "Smaller column needs at least as deep a cap" begin
+        small = (position = :interior, c1 = 12.0u"inch", c2 = 12.0u"inch", shape = :rectangular)
+        Vu = 0.6 * _Vu_moderate
+        @test design_shear_cap(small, Vu, _M0, _fc, _d, _h).h_cap >=
+              design_shear_cap(_col_int, Vu, _M0, _fc, _d, _h).h_cap
+    end
 
-        @test cap.h_cap >= cap_large_col.h_cap
+    @testset "Volume is the footprint less the column" begin
+        cap = ShearCapDesign(required = true, h_cap = 3.0u"inch", extent = 3.0u"inch",
+                             c1_cap = 26.0u"inch", c2_cap = 26.0u"inch")
+        @test shear_cap_concrete_volume(cap, _c1, _c2) ≈ (26^2 - 20^2) * 3.0u"inch^3"
     end
 
     @testset "check_punching_with_shear_cap" begin
-        cap = design_shear_cap(
-            _vu_moderate, _fc, _d, _h, :interior, _c1, _c2;
-            λ=_λ, φ=_φ)
-
+        cap = design_shear_cap(_col_int, _Vu_moderate, _M0, _fc, _d, _h; λ=_λ, φ=_φ)
         chk = check_punching_with_shear_cap(cap)
         @test chk.ok == cap.ok
         @test chk.ratio == cap.ratio
@@ -231,84 +228,49 @@ end
 @testset "Column Capitals — ACI §13.1.2" begin
 
     @testset "Basic design — moderate demand" begin
-        capital = design_column_capital(
-            _vu_moderate, _fc, _d, _h, :interior, _c1, _c2;
-            λ=_λ, φ=_φ)
-
-        @test capital.required == true
-        @test capital.ok == true
-        @test capital.ratio <= 1.0
-
-        # h_cap should be positive
-        @test ustrip(u"inch", capital.h_cap) > 0.0
-
-        # 45° rule: c_eff = c + 2·h_cap
-        @test ustrip(u"inch", capital.c1_eff) ≈ ustrip(u"inch", _c1 + 2 * capital.h_cap) atol=0.01
-        @test ustrip(u"inch", capital.c2_eff) ≈ ustrip(u"inch", _c2 + 2 * capital.h_cap) atol=0.01
-
-        # Effective perimeter should be larger than original
-        @test capital.b0_eff > _b0
-    end
-
-    @testset "High demand — may reach max projection" begin
-        capital = design_column_capital(
-            _vu_high, _fc, _d, _h, :interior, _c1, _c2;
-            λ=_λ, φ=_φ)
-
-        @test capital.required == true
-        # Capital only enlarges b0 (doesn't increase d like shear cap)
-        # So it may be less effective for high demands
+        capital = design_column_capital(_col_int, _Vu_moderate, _M0, _fc, _d, _h; λ=_λ, φ=_φ)
+        @test capital.required && capital.ok
+        @test capital.h_cap > 0.0u"inch"
+        # 45° rule at an interior column: c_eff = c + 2·h_cap
+        @test capital.c1_eff ≈ _c1 + 2capital.h_cap
+        @test capital.c2_eff ≈ _c2 + 2capital.h_cap
+        # Section at d/2 from the effective support, slab depth d.
+        @test capital.b0_eff ≈ 4 * (_c1 + 2capital.h_cap + _d)
     end
 
     @testset "Rectangular column — 45° rule" begin
-        c1_rect = 24.0u"inch"
-        c2_rect = 12.0u"inch"
-        capital = design_column_capital(
-            _vu_moderate, _fc, _d, _h, :interior, c1_rect, c2_rect;
-            λ=_λ, φ=_φ)
-
-        if capital.ok
-            # 45° rule applies to both directions
-            @test ustrip(u"inch", capital.c1_eff) ≈ ustrip(u"inch", c1_rect + 2 * capital.h_cap) atol=0.01
-            @test ustrip(u"inch", capital.c2_eff) ≈ ustrip(u"inch", c2_rect + 2 * capital.h_cap) atol=0.01
-        end
+        col = (position = :interior, c1 = 24.0u"inch", c2 = 12.0u"inch", shape = :rectangular)
+        capital = design_column_capital(col, 0.8 * _Vu_moderate, _M0, _fc, _d, _h)
+        @test capital.c1_eff ≈ 24.0u"inch" + 2capital.h_cap
+        @test capital.c2_eff ≈ 12.0u"inch" + 2capital.h_cap
     end
 
-    @testset "Capital vs shear cap — different mechanisms" begin
-        # For same demand, compare capital vs shear cap
-        capital = design_column_capital(
-            _vu_moderate, _fc, _d, _h, :interior, _c1, _c2;
-            λ=_λ, φ=_φ)
+    @testset "Edge capital flares only into the slab" begin
+        capital = design_column_capital(_col_edge, 0.5 * _Vu_moderate, 40.0u"kip*ft",
+                                        _fc, _d, _h; punch_kwargs = (free_edge_parallel = :c2,))
+        @test capital.required
+        @test capital.c1_eff ≈ _c1 + capital.h_cap
+        @test capital.c2_eff ≈ _c2 + 2capital.h_cap
+    end
 
-        cap = design_shear_cap(
-            _vu_moderate, _fc, _d, _h, :interior, _c1, _c2;
-            λ=_λ, φ=_φ)
-
-        # Both should resolve moderate demand
-        @test capital.ok == true
-        @test cap.ok == true
-
-        # Shear cap increases d, so it may need less projection
-        # Capital only enlarges b0, so it may need more projection
-        # (This is a design insight, not a strict test)
+    @testset "Volume is the 45° frustum less the column" begin
+        # 20×20 column, 4 in flare → 28×28 at the soffit.
+        # Prismoid: 4/6 (400 + 48·48 + 784) = 2325.33; less 20·20·4 = 1600.
+        capital = ColumnCapitalDesign(required = true, h_cap = 4.0u"inch",
+                                      c1_eff = 28.0u"inch", c2_eff = 28.0u"inch")
+        @test capital_concrete_volume(capital, _c1, _c2) ≈ (3488 * 4 / 6 - 1600) * u"inch^3"
+        round_cap = ColumnCapitalDesign(required = true, h_cap = 4.0u"inch",
+                                        c1_eff = 28.0u"inch", c2_eff = 28.0u"inch",
+                                        shape = :circular)
+        @test capital_concrete_volume(round_cap, 20.0u"inch", 20.0u"inch") ≈
+              (π * 4 / 12 * (400 + 560 + 784) - π * 400 / 4 * 4) * u"inch^3"
     end
 
     @testset "check_punching_with_capital" begin
-        capital = design_column_capital(
-            _vu_moderate, _fc, _d, _h, :interior, _c1, _c2;
-            λ=_λ, φ=_φ)
-
+        capital = design_column_capital(_col_int, _Vu_moderate, _M0, _fc, _d, _h; λ=_λ, φ=_φ)
         chk = check_punching_with_capital(capital)
         @test chk.ok == capital.ok
         @test chk.ratio == capital.ratio
-    end
-
-    @testset "Edge column" begin
-        capital = design_column_capital(
-            _vu_moderate, _fc, _d, _h, :edge, _c1, _c2;
-            λ=_λ, φ=_φ)
-
-        @test capital.required == true
     end
 end
 
@@ -330,14 +292,10 @@ end
             λ=_λ, φ=_φ, c1=_c1, c2=_c2)
 
         # Shear cap
-        cap = design_shear_cap(
-            _vu_moderate, _fc, _d, _h, :interior, _c1, _c2;
-            λ=_λ, φ=_φ)
+        cap = design_shear_cap(_col_int, _Vu_moderate, _M0, _fc, _d, _h; λ=_λ, φ=_φ)
 
         # Column capital
-        capital = design_column_capital(
-            _vu_moderate, _fc, _d, _h, :interior, _c1, _c2;
-            λ=_λ, φ=_φ)
+        capital = design_column_capital(_col_int, _Vu_moderate, _M0, _fc, _d, _h; λ=_λ, φ=_φ)
 
         # All design functions should produce valid results for moderate demand
         @test studs.required == true
@@ -428,4 +386,130 @@ end
     @test is_adequate(ClosedStirrupDesign(required=true, n_legs=0, outer_ok=false)) == false
     @test is_adequate(ShearCapDesign(required=true, ok=false)) == false
     @test is_adequate(ColumnCapitalDesign(required=true, ok=false)) == false
+end
+
+# =============================================================================
+# Wall reactions at any plan angle (§11.11.1.2)
+# =============================================================================
+@testset "Wall reaction punching — plan rotation" begin
+    SS = StructuralSizer
+    d, fc, qu = 7.0u"inch", 4000.0u"psi", 250.0u"psf"
+    t = 10.0u"inch"
+    trib = Dict(1 => 30.0)
+    wall(p, q) = (x1 = p[1], y1 = p[2], x2 = q[1], y2 = q[2], thickness = t,
+                  tributary_cell_areas = trib)
+    rot(p, θ) = (cos(θ) * p[1] - sin(θ) * p[2], sin(θ) * p[1] + cos(θ) * p[2])
+    checks(walls, inside) = SS._push_cluster_checks!(NamedTuple[], walls, d, fc, qu, inside;
+                                                    λ = 1.0, ϕ = 0.75)
+    θ = deg2rad(30)
+
+    # A free-standing wall with slab on both faces: same check when turned.
+    everywhere = pt -> true
+    a = only(checks([wall((0.0, 0.0), (3.0, 0.0))], everywhere))
+    b = only(checks([wall(rot((0.0, 0.0), θ), rot((3.0, 0.0), θ))], everywhere))
+    @test a.kind === b.kind === :wall_interior
+    @test a.utilization ≈ b.utilization rtol = 1e-9
+    @test a.b0 ≈ b.b0 rtol = 1e-9
+
+    # An L corner with slab in the first quadrant only, turned by 30°.
+    quad = pt -> pt[1] > 0 && pt[2] > 0
+    quad_r = pt -> quad(rot(pt, -θ))
+    L = [wall((0.0, 0.0), (4.0, 0.0)), wall((0.0, 0.0), (0.0, 3.0))]
+    Lr = [wall(rot((0.0, 0.0), θ), rot((4.0, 0.0), θ)),
+          wall(rot((0.0, 0.0), θ), rot((0.0, 3.0), θ))]
+    ca, cb = checks(L, quad), checks(Lr, quad_r)
+    @test [c.kind for c in ca] == [c.kind for c in cb] == [:reentrant_corner]
+    @test ca[1].utilization ≈ cb[1].utilization rtol = 1e-9
+
+    # Walls meeting at 60°: only the slab-side face lines count.
+    V = [wall((0.0, 0.0), (4.0, 0.0)), wall((0.0, 0.0), rot((3.0, 0.0), deg2rad(60)))]
+    j = only(checks(V, everywhere))
+    @test j.kind === :wall_junction
+    @test j.b0 ≈ 2 * (4.0 + 3.0) * u"m"
+    Vu = qu * 60.0u"m^2"
+    @test j.vu ≈ uconvert(u"psi", Vu / (j.b0 * d)) rtol = 1e-9
+end
+
+# =============================================================================
+# Outer section demand: both moments, mapped like the column-face check
+# =============================================================================
+@testset "Outer section demand mapping" begin
+    SS = StructuralSizer
+    c = 20.0u"inch"
+    dem = (Vu = 100.0u"kip", Mub = 60.0u"kip*ft", Muy = 25.0u"kip*ft")
+
+    # Free edge along y, span along x: Mub is about the edge-parallel axis.
+    edge = (position = :edge, c1 = c, c2 = c, shape = :rectangular,
+            boundary_edge_dirs = [(0.0, 1.0)], θ = 0.0)
+    o = SS._outer_section_demand(edge, dem; span_axis = (1.0, 0.0))
+    @test o.M_about_y == dem.Mub && o.M_about_x == dem.Muy
+    # Span along the edge: the secondary moment is the edge-parallel one.
+    o = SS._outer_section_demand(edge, dem; span_axis = (0.0, 1.0))
+    @test o.M_about_y == dem.Muy && o.M_about_x == dem.Mub
+    # No edge direction: both axes carry the larger moment.
+    bare = (position = :edge, c1 = c, c2 = c, shape = :rectangular)
+    o = SS._outer_section_demand(bare, dem)
+    @test o.M_about_y == dem.Mub && o.M_about_x == dem.Mub
+
+    # Interior: the span moment follows the span axis onto c1 or c2.
+    int = (position = :interior, c1 = c, c2 = c, shape = :rectangular)
+    o = SS._outer_section_demand(int, dem; span_axis = (1.0, 0.0))
+    @test o.M_about_y == dem.Mub && o.M_about_x == dem.Muy
+    o = SS._outer_section_demand(int, dem; span_axis = (0.0, 1.0))
+    @test o.M_about_y == dem.Muy && o.M_about_x == dem.Mub
+end
+
+# =============================================================================
+# Flat slab: reinforcement for the section that governs (§11.11.1.2)
+# =============================================================================
+@testset "Drop-panel punching remedies" begin
+    SS = StructuralSizer
+    col = (position = :interior, c1 = 20.0u"inch", c2 = 20.0u"inch", shape = :rectangular)
+    h, d = 10.0u"inch", 8.5u"inch"
+    panel = DropPanelGeometry(4.25u"inch", 5.0u"ft", 5.0u"ft")
+    drop = SS._drop_depths(panel, h, 0.75u"inch", 0.5u"inch")
+    @test drop.h_total ≈ 14.25u"inch"
+    @test drop.d_total ≈ SS.effective_depth(drop.h_total; cover = 0.75u"inch",
+                                            bar_diameter = 0.5u"inch")
+    @test SS._drop_depths(nothing, h, 0.75u"inch", 0.5u"inch") === nothing
+
+    qu = 300.0u"psf"
+    mr = (qu = qu,)
+    Mub = 0.0u"kip*ft"
+    punch(Vu) = SS.check_punching(col, Vu, Mub, h, d, drop.h_total, drop.d_total,
+                                  _fc, panel; qu = qu)
+    studs = FlatPlateOptions(punching_reinforcement = :headed_studs_generic)
+    demand(Vu) = (Vu = Vu, Mub = Mub, Muy = nothing)
+
+    # Column face fails inside the drop; the drop edge passes.
+    Vu = 380.0u"kip"
+    r = punch(Vu)
+    @test !r.ok && r.governing_section === :column && r.drop_section.ok
+    reach = 5.0u"ft" - 10.0u"inch" - drop.d_total / 2
+    out = SS._try_drop_reinforcement(:headed_studs_generic, r, _fc, col, studs, mr,
+                                     demand(Vu), drop)
+    s = out.studs
+    @test s !== nothing
+    @test s.s0 + (s.n_studs_per_rail - 1) * s.s <= reach + 1e-9u"inch"
+    # Designed at the drop depth: the first line sits at d_total/2.
+    @test s.s0 ≈ drop.d_total / 2
+
+    # Caps and capitals assume slab depth around the column.
+    for kind in (:shear_caps, :column_capitals)
+        @test !SS._try_drop_reinforcement(kind, r, _fc, col, studs, mr, demand(Vu), drop).ok
+    end
+
+    # Drop edge fails: no column-side remedy, the slab thickens.
+    Vu_big = 1200.0u"kip"
+    rb = punch(Vu_big)
+    @test !rb.drop_section.ok
+    @test !SS._try_drop_reinforcement(:headed_studs_generic, rb, _fc, col, studs, mr,
+                                      demand(Vu_big), drop).ok
+    cols = [(position = :interior, c1 = 20.0u"inch", c2 = 20.0u"inch", shape = :rectangular)]
+    mres = (column_shears = [Vu_big], unbalanced_moments = [Mub], column_moments = [Mub],
+            qu = qu)
+    grew, h_new = SS._resolve_punching_failures!(
+        Any[rb], cols, [1], studs, ConcreteColumnOptions(), mres, nothing,
+        h, d, _fc, 0.5u"inch"; drop = drop)
+    @test grew && h_new == 10.5u"inch"
 end

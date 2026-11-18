@@ -9,9 +9,35 @@ steel gives a smaller `Icr`, so the fallback over-predicts deflection.
 """
 _deflection_As(As_reqd, As_min) = isfinite(As_reqd) ? max(As_reqd, As_min) : As_min
 
+"""Slab deflection limit types accepted by `check_two_way_deflection` and `FlatPlateOptions`."""
+const TWO_WAY_DEFLECTION_LIMITS = (:L_240, :L_360, :L_480)
+
+"""Throw `ArgumentError` unless `limit_type` is one of `TWO_WAY_DEFLECTION_LIMITS`."""
+function validate_two_way_deflection_limit(limit_type::Symbol)
+    limit_type in TWO_WAY_DEFLECTION_LIMITS || throw(ArgumentError(
+        "deflection_limit must be one of $(TWO_WAY_DEFLECTION_LIMITS); got :$limit_type"))
+    return limit_type
+end
+
+"""
+    _two_way_deflection_limit(limit_type, l1, Δi_live, Δ_after_const) -> (Δ_check, Δ_limit)
+
+Checked deflection and its allowable value per ACI 318-11 Table 9.5(b)
+(corpus: aci-318-11, page 133):
+- `:L_360` — immediate live-load deflection ≤ ℓ/360
+- `:L_480` — deflection after attachment of nonstructural elements ≤ ℓ/480
+- `:L_240` — deflection after attachment of nonstructural elements ≤ ℓ/240
+"""
+function _two_way_deflection_limit(limit_type::Symbol, l1, Δi_live, Δ_after_const)
+    validate_two_way_deflection_limit(limit_type)
+    limit_type === :L_360 && return (Δi_live, deflection_limit(l1, :immediate_ll))
+    limit_type === :L_480 && return (Δ_after_const, deflection_limit(l1, :sensitive))
+    return (Δ_after_const, deflection_limit(l1, :total))
+end
+
 """
     check_two_way_deflection(moment_results, h, d, fc, fy, Es, Ecs, spans, γ_concrete,
-                             columns; verbose, limit_type, rotation_factor, As_provided) -> NamedTuple
+                             columns; λ, verbose, limit_type, rotation_factor, As_provided) -> NamedTuple
 
 Two-way deflection check per ACI 318-11 §9.5.2.6.
 
@@ -40,12 +66,16 @@ and the same ACI Table 24.2.2 limit comparisons.
 - `columns`: Supporting columns (for position classification)
 
 # Keyword Arguments
+- `λ`: Lightweight-concrete factor for the modulus of rupture, Eq. (9-10)
+  (required; `1.0` for normal weight)
 - `verbose`: Enable debug logging (default `false`)
-- `limit_type`: `:L_360` (default, LL only), `:L_240` (after construction), or `:L_480`
+- `limit_type`: `:L_360` (default, LL only), `:L_240` (after construction), or `:L_480`.
+  Any other value throws `ArgumentError`.
 - `rotation_factor`: Multiplier on fixed-end deflection for joint rotation
   contribution (default `0.10`). Only used by the crossing-beam path (DDM/EFM).
 - `ξ`: ACI 24.2.4.1 time-dependent factor (default `2.0` for ≥ 5 years)
-- `ρ_prime`: Compression reinforcement ratio at midspan (default `0.0`)
+- `ρ_prime`: Compression reinforcement ratio at midspan, ACI 318-11 §9.5.2.5
+  (default `0.0`: the flat-plate pipeline provides no top steel through midspan)
 - `As_provided`: Actual provided reinforcement area for cracked I calculation.
   If `nothing` (default), estimates from `required_reinforcement(M_pos, l2, d, fc, fy)`
   bounded below by `minimum_reinforcement(l2, h, fy)`.
@@ -57,14 +87,16 @@ Named tuple: `(ok, Δ_check, Δ_total, Δ_limit, Δ_panel_D, Δ_panel_DL,
 """
 function check_two_way_deflection(
     moment_results, h, d, fc, fy, Es, Ecs, spans, γ_concrete, columns;
+    λ::Real,
     verbose::Bool      = false,
     limit_type::Symbol = :L_360,
     rotation_factor    = 0.10,
     ξ::Float64         = 2.0,
     ρ_prime::Float64   = 0.0,
     As_provided        = nothing,
-    deflection_Ie_method::Symbol = :branson,
+    deflection_Ie_method::Symbol = :aci318_19,
 )
+    validate_two_way_deflection_limit(limit_type)
     l1 = spans.primary
     l2 = spans.secondary
 
@@ -80,8 +112,8 @@ function check_two_way_deflection(
     Ig_cs    = slab_moment_of_inertia(cs_width, h)      # column strip
     Ig_ms    = slab_moment_of_inertia(ms_width, h)      # middle strip
 
-    # ── Cracking check ──
-    fr_val = fr(fc)
+    # ── Cracking check: f_r = 7.5λ√f'c, ACI 318-11 Eq. (9-10) (corpus: aci-318-11, page 132) ──
+    fr_val = fr(fc; λ = λ)
     Mcr    = cracking_moment(fr_val, Ig_frame, h)
 
     # ── Service moments (scale factored moments by load ratios) ──
@@ -103,19 +135,18 @@ function check_two_way_deflection(
 
     # Midspan (positive) reinforcement estimate
     As_mid = if isnothing(As_provided)
-        _deflection_As(required_reinforcement(moment_results.M_pos, l2, d, fc, fy), As_min)
+        _deflection_As(required_reinforcement(moment_results.M_pos, l2, d, fc, fy; εt_min = tension_controlled_strain(fy)), As_min)
     else
         max(As_provided, As_min)
     end
     Icr_mid = cracked_moment_of_inertia(As_mid, l2, d, Ecs, Es)
 
     # Support (negative) reinforcement estimate
-    As_neg = _deflection_As(required_reinforcement(M_neg_max, l2, d, fc, fy), As_min)
+    As_neg = _deflection_As(required_reinforcement(M_neg_max, l2, d, fc, fy; εt_min = tension_controlled_strain(fy)), As_min)
     Icr_sup = cracked_moment_of_inertia(As_neg, l2, d, Ecs, Es)
 
     # ── Effective I at each section ──
-    _Ie = deflection_Ie_method === :bischoff ?
-        effective_moment_of_inertia_bischoff : effective_moment_of_inertia
+    _Ie = effective_moment_of_inertia_function(deflection_Ie_method)
     Ie_mid_D  = _Ie(Mcr, Ma_D_mid,  Ig_frame, Icr_mid)
     Ie_mid_DL = _Ie(Mcr, Ma_DL_mid, Ig_frame, Icr_mid)
     Ie_sup_D  = _Ie(Mcr, Ma_D_sup,  Ig_frame, Icr_sup)
@@ -167,10 +198,11 @@ function check_two_way_deflection(
         Δ_frame_D  = frame_deflection_fixed(w_D,  l1, Ecs, Ie_D)
         Δ_frame_DL = frame_deflection_fixed(w_DL, l1, Ecs, Ie_DL)
 
-        Δc_fixed_D  = strip_deflection_fixed(Δ_frame_D,  LDF_c, Ie_D,  Ig_cs)
-        Δm_fixed_D  = strip_deflection_fixed(Δ_frame_D,  LDF_m, Ie_D,  Ig_ms)
-        Δc_fixed_DL = strip_deflection_fixed(Δ_frame_DL, LDF_c, Ie_DL, Ig_cs)
-        Δm_fixed_DL = strip_deflection_fixed(Δ_frame_DL, LDF_m, Ie_DL, Ig_ms)
+        # Gross frame / gross strip ratio (PCA Eq. 11); cracking is in Δ_frame.
+        Δc_fixed_D  = strip_deflection_fixed(Δ_frame_D,  LDF_c, Ig_frame, Ig_cs)
+        Δm_fixed_D  = strip_deflection_fixed(Δ_frame_D,  LDF_m, Ig_frame, Ig_ms)
+        Δc_fixed_DL = strip_deflection_fixed(Δ_frame_DL, LDF_c, Ig_frame, Ig_cs)
+        Δm_fixed_DL = strip_deflection_fixed(Δ_frame_DL, LDF_m, Ig_frame, Ig_ms)
 
         Δcx_D  = uconvert(u"inch", Δc_fixed_D  * (1 + rotation_factor))
         Δmx_D  = uconvert(u"inch", Δm_fixed_D  * (1 + rotation_factor))
@@ -187,17 +219,8 @@ function check_two_way_deflection(
     Δ_after_const = Δi_live + Δ_creep                  # after attachment of partitions
     Δ_total       = Δ_panel_D + Δ_after_const          # total from day 1
 
-    # ── ACI Table 24.2.2 limit comparison ──
-    if limit_type == :L_240
-        Δ_check = Δ_after_const
-        Δ_limit = deflection_limit(l1, :total)
-    elseif limit_type == :L_480
-        Δ_check = Δ_after_const
-        Δ_limit = deflection_limit(l1, :sensitive)
-    else  # :L_360 (default)
-        Δ_check = Δi_live
-        Δ_limit = deflection_limit(l1, :immediate_ll)
-    end
+    # ── ACI 318-11 Table 9.5(b) limit comparison ──
+    Δ_check, Δ_limit = _two_way_deflection_limit(limit_type, l1, Δi_live, Δ_after_const)
     ok = Δ_check <= Δ_limit
 
     if verbose
@@ -308,14 +331,16 @@ Otherwise follows the same crossing-beam or FEA-direct path.
 function check_two_way_deflection(
     moment_results, h_slab, d_slab, fc, fy, Es, Ecs, spans, γ_concrete, columns,
     drop::DropPanelGeometry;
+    λ::Real,
     verbose::Bool      = false,
     limit_type::Symbol = :L_360,
     rotation_factor    = 0.10,
     ξ::Float64         = 2.0,
     ρ_prime::Float64   = 0.0,
     As_provided        = nothing,
-    deflection_Ie_method::Symbol = :branson,
+    deflection_Ie_method::Symbol = :aci318_19,
 )
+    validate_two_way_deflection_limit(limit_type)
     l1 = spans.primary
     l2 = spans.secondary
 
@@ -329,8 +354,8 @@ function check_two_way_deflection(
     gs = gross_section_at_drop(l2, h_slab, drop)
     Ig_support = gs.Ig
 
-    # ── Cracking ──
-    fr_val = fr(fc)
+    # ── Cracking: f_r = 7.5λ√f'c, ACI 318-11 Eq. (9-10) (corpus: aci-318-11, page 132) ──
+    fr_val = fr(fc; λ = λ)
     # At midspan: cracking based on slab Ig
     Mcr_mid = cracking_moment(fr_val, Ig_mid, h_slab)
     # At support: cracking based on composite Ig (use yt from composite centroid)
@@ -353,7 +378,7 @@ function check_two_way_deflection(
     # ── Reinforcement for cracked I ──
     As_min = minimum_reinforcement(l2, h_slab, fy)
     As_est = if isnothing(As_provided)
-        _deflection_As(required_reinforcement(moment_results.M_pos, l2, d_slab, fc, fy), As_min)
+        _deflection_As(required_reinforcement(moment_results.M_pos, l2, d_slab, fc, fy; εt_min = tension_controlled_strain(fy)), As_min)
     else
         max(As_provided, As_min)
     end
@@ -364,12 +389,11 @@ function check_two_way_deflection(
     # Cracked I at support (use total depth for effective depth)
     h_total = total_depth_at_drop(h_slab, drop)
     d_total = h_total - (h_slab - d_slab)  # same cover
-    As_neg = _deflection_As(required_reinforcement(M_neg_max, l2, d_total, fc, fy), As_min)
+    As_neg = _deflection_As(required_reinforcement(M_neg_max, l2, d_total, fc, fy; εt_min = tension_controlled_strain(fy)), As_min)
     Icr_sup = cracked_moment_of_inertia(As_neg, l2, d_total, Ecs, Es)
 
     # ── Effective I at each section ──
-    _Ie = deflection_Ie_method === :bischoff ?
-        effective_moment_of_inertia_bischoff : effective_moment_of_inertia
+    _Ie = effective_moment_of_inertia_function(deflection_Ie_method)
     Ie_mid_D  = _Ie(Mcr_mid, Ma_D_mid,  Ig_mid, Icr_mid)
     Ie_mid_DL = _Ie(Mcr_mid, Ma_DL_mid, Ig_mid, Icr_mid)
     Ie_sup_D  = _Ie(Mcr_supp, Ma_D_sup,  Ig_support, Icr_sup)
@@ -409,10 +433,12 @@ function check_two_way_deflection(
         ms_width = l2 - cs_width
         Ig_cs = slab_moment_of_inertia(cs_width, h_slab)
         Ig_ms = slab_moment_of_inertia(ms_width, h_slab)
-        Δc_fixed_D  = strip_deflection_fixed(Δ_frame_D,  LDF_c, Ie_D,  Ig_cs)
-        Δm_fixed_D  = strip_deflection_fixed(Δ_frame_D,  LDF_m, Ie_D,  Ig_ms)
-        Δc_fixed_DL = strip_deflection_fixed(Δ_frame_DL, LDF_c, Ie_DL, Ig_cs)
-        Δm_fixed_DL = strip_deflection_fixed(Δ_frame_DL, LDF_m, Ie_DL, Ig_ms)
+        # Slab-only gross frame / gross strip ratio (PCA Eq. 11, as in
+        # sp-de-two-way-flat-slab-drop-panels-aci318-14 p. 72).
+        Δc_fixed_D  = strip_deflection_fixed(Δ_frame_D,  LDF_c, Ig_mid, Ig_cs)
+        Δm_fixed_D  = strip_deflection_fixed(Δ_frame_D,  LDF_m, Ig_mid, Ig_ms)
+        Δc_fixed_DL = strip_deflection_fixed(Δ_frame_DL, LDF_c, Ig_mid, Ig_cs)
+        Δm_fixed_DL = strip_deflection_fixed(Δ_frame_DL, LDF_m, Ig_mid, Ig_ms)
         Δcx_D  = uconvert(u"inch", Δc_fixed_D  * (1 + rotation_factor))
         Δmx_D  = uconvert(u"inch", Δm_fixed_D  * (1 + rotation_factor))
         Δcx_DL = uconvert(u"inch", Δc_fixed_DL * (1 + rotation_factor))
@@ -427,16 +453,7 @@ function check_two_way_deflection(
     Δ_after_const = Δi_live + Δ_creep
     Δ_total       = Δ_panel_D + Δ_after_const
 
-    if limit_type == :L_240
-        Δ_check = Δ_after_const
-        Δ_limit = deflection_limit(l1, :total)
-    elseif limit_type == :L_480
-        Δ_check = Δ_after_const
-        Δ_limit = deflection_limit(l1, :sensitive)
-    else
-        Δ_check = Δi_live
-        Δ_limit = deflection_limit(l1, :immediate_ll)
-    end
+    Δ_check, Δ_limit = _two_way_deflection_limit(limit_type, l1, Δi_live, Δ_after_const)
     ok = Δ_check <= Δ_limit
 
     if verbose

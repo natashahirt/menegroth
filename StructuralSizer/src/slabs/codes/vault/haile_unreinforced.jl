@@ -167,6 +167,14 @@ Named tuple with Unitful quantities:
 - `thrust::Force`: Horizontal thrust
 - `self_weight::Pressure`: Self-weight intensity
 - `vertical::Force`: Vertical reaction at support
+
+!!! warning "Springing section is the vertical thickness"
+    `σ` divides the springing resultant by `trib_depth × thickness`, as Haile's
+    MATLAB does. The shell section normal to the arch at the springing is
+    `thickness × cos θ` with `tan θ = 4 rise / span`, so `σ` understates the
+    normal stress by `1/cos θ` (about 41 % at span/rise 4, 7 % at span/rise 10).
+    [`vault_kern_check`](@ref) already uses `t cos θ`. Revisit when Haile's
+    updated code is ported.
 """
 function vault_stress_symmetric(
     span::Length,
@@ -228,18 +236,23 @@ end
 
 """
     vault_stress_asymmetric(span, rise, trib_depth, thickness, rib_depth, rib_apex_rise,
-                           density, applied_load, finishing_load)
+                           density, applied_load, finishing_load; sdl=0)
 
 Calculate working stress and thrust for asymmetric case (live load on half-span).
 
 This represents pattern loading where live load acts only on one half of the span,
 which typically produces higher stresses than symmetric loading.
 
+`applied_load` is the half-span load, which is live load only. Superimposed
+dead load `sdl` is permanent, so it acts on the full span with self-weight and
+finishing load.
+
 # Arguments (all Unitful quantities)
 Same as `vault_stress_symmetric`.
 
 # Returns
-Named tuple with same fields as `vault_stress_symmetric`.
+Named tuple with same fields as `vault_stress_symmetric`. The springing stress
+uses the vertical thickness, with the same caveat as `vault_stress_symmetric`.
 
 Reference: Haile's VaultStress_Asymmetric.m
 """
@@ -252,15 +265,15 @@ function vault_stress_asymmetric(
     rib_apex_rise::Length,
     density::Unitful.Density,
     applied_load::Unitful.Pressure,
-    finishing_load::Unitful.Pressure
+    finishing_load::Unitful.Pressure;
+    sdl::Unitful.Pressure = zero(applied_load),
 )
-    # For asymmetric analysis, only live load is asymmetric
-    # Total UDL on half 1 (left): SW + finish + Live
-    # Total UDL on half 2 (right): SW + finish
-    
-    # 1. Base symmetric self-weight and finishing (no applied load)
+    # Full span (both halves): self-weight + finishing + SDL.
+    # Loaded half only: live.
+
+    # 1. Full-span dead load
     base = vault_stress_symmetric(span, rise, trib_depth, thickness, rib_depth, rib_apex_rise,
-                                  density, zero(applied_load), finishing_load)
+                                  density, sdl, finishing_load)
     
     # Dead load intensity (line load)
     q_d = (base.vertical * 2) / span  # Force / Length = Force/Length
@@ -282,6 +295,96 @@ function vault_stress_asymmetric(
     σ = resultant / resisting_area           # Force / Area = Pressure
     
     return (σ=σ, thrust=thrust, self_weight=base.self_weight, vertical=V1)
+end
+
+"""
+    vault_kern_check(span, rise, thickness, q_dead, q_live) -> NamedTuple
+
+Thrust-line eccentricity of the three-hinge parabolic arch at its quarter
+points, with line loads `q_dead` on the full span and `q_live` on half.
+
+Haile's reference checks only the springing resultant. An unreinforced shell
+also needs its thrust line inside the section; this check requires the middle
+third, so no section is in tension (ENGINEERING JUDGMENT, chosen by the
+project; Haile's MATLAB has no such check).
+
+Statics of the three-hinge arch (hinges at both springings and the crown):
+- Full-span load is uniform per plan length, so the parabola is funicular and
+  carries it without moment. Only the live half bends the arch:
+  `M(x) = q_L x (L − 2x) / 8` on the loaded half and the antisymmetric value
+  on the other, largest at the quarter points, `q_L L² / 64`.
+- At `x = L/4`: slope `tan θ = 2f/L`, thrust `H = L² (2q_D + q_L) / (16 f)`,
+  vertical shear `V = (2q_D + q_L) L / 8`, axial force `N = H cos θ + V sin θ`.
+  The other quarter point has the same `|M|` and `N`.
+- The extrados is the intrados raised by `t`, so the section normal to the
+  axis is `t cos θ` deep and its kern limit is `t cos θ / 6`.
+
+Returns `(e, limit, ratio, ok)` with `e` and `limit` in mm.
+"""
+function vault_kern_check(span::Length, rise::Length, thickness::Length, q_dead, q_live)
+    tanθ = 2 * rise / span
+    cosθ = 1 / sqrt(1 + tanθ^2)
+    sinθ = tanθ * cosθ
+    H = span^2 * (2q_dead + q_live) / (16 * rise)
+    V = (2q_dead + q_live) * span / 8
+    N = H * cosθ + V * sinθ
+    M = q_live * span^2 / 64
+    e = ustrip(u"mm", M / N)
+    limit = ustrip(u"mm", thickness * cosθ / 6)
+    ratio = e / limit
+    return (e = e, limit = limit, ratio = ratio, ok = ratio <= 1.0)
+end
+
+"""
+Throw for a ribbed vault: the kern check covers the plain shell only.
+
+[`vault_kern_check`](@ref) uses the rectangular shell section (limit
+`t cos θ / 6`) and a funicular full-span load. A rib (both `rib_depth` and
+`rib_apex_rise` positive, as in [`get_vault_properties`](@ref)) makes the
+section a T with an uneven kern, and its weight, deepest at the springings,
+is not uniform over the span, so the full-span load bends the arch too.
+"""
+function _require_unribbed_kern(rib_depth::Length, rib_apex_rise::Length)
+    (rib_depth > zero(rib_depth) && rib_apex_rise > zero(rib_apex_rise)) || return nothing
+    throw(ArgumentError(
+        "Ribbed vaults are not supported: the unreinforced no-tension (kern) check " *
+        "is implemented for the plain shell section only. Set rib_depth or " *
+        "rib_apex_rise to zero."))
+end
+
+"""
+    vault_load_cases(span, rise, trib_depth, thickness, rib_depth, rib_apex_rise,
+                     density, sdl, live, finishing_load)
+
+Every vault load case at one geometry, with self-weight counted once.
+
+- Symmetric: one resultant of self-weight, finishing, `sdl` and `live` on the
+  full span. Stresses from separate resultants are not added.
+- Thrust: `thrust_dead` is self-weight + finishing + `sdl`; `thrust_live` is
+  the full-span live increment. H = wL²/(8h) is linear in w, so the two add
+  up to the symmetric thrust.
+- Asymmetric: `sdl` on the full span and `live` on half, for the springing
+  stress and the thrust-line kern check ([`vault_kern_check`](@ref)). The vault
+  is unreinforced, so this no-tension check always runs.
+
+Returns `(σ_max, governing, σ_sym, σ_asym, kern, thrust_dead, thrust_live, self_weight)`.
+"""
+function vault_load_cases(span::Length, rise::Length, trib_depth::Length, thickness::Length,
+                          rib_depth::Length, rib_apex_rise::Length, density::Unitful.Density,
+                          sdl::Unitful.Pressure, live::Unitful.Pressure,
+                          finishing_load::Unitful.Pressure)
+    _require_unribbed_kern(rib_depth, rib_apex_rise)
+    args = (span, rise, trib_depth, thickness, rib_depth, rib_apex_rise, density)
+    dead = vault_stress_symmetric(args..., sdl, finishing_load)
+    total = vault_stress_symmetric(args..., sdl + live, finishing_load)
+    σ_asym = vault_stress_asymmetric(args..., live, finishing_load; sdl = sdl).σ
+    σ_max, governing = σ_asym > total.σ ? (σ_asym, :asymmetric) : (total.σ, :symmetric)
+    q_dead = 2 * dead.vertical / span
+    kern = vault_kern_check(span, rise, thickness, q_dead, live * trib_depth)
+    return (σ_max = σ_max, governing = governing, σ_sym = total.σ, σ_asym = σ_asym,
+            kern = kern,
+            thrust_dead = dead.thrust, thrust_live = total.thrust - dead.thrust,
+            self_weight = dead.self_weight)
 end
 
 # =============================================================================
@@ -376,7 +479,8 @@ function solve_equilibrium_rise(
         
         return (final_rise=final_rise_m*u"m", converged=true, deflection_ok=deflection_ok)
     catch e
-        # Silently fail for expected non-convergence cases
+        # Only a failed root search is non-convergence; any other error is a bug.
+        e isa Union{Roots.ConvergenceFailed, DomainError} || rethrow()
         return (final_rise=NaN*u"m", converged=false, deflection_ok=false)
     end
 end
@@ -384,6 +488,39 @@ end
 # =============================================================================
 # Internal span-based sizing helper: _size_span_floor
 # =============================================================================
+
+"""
+    vault_allowable_stress(material, override_MPa=nothing) -> Pressure
+    vault_rise_loss_limit(span, override=nothing) -> Length
+
+Default vault limits: working stress `0.45 f′c` and rise loss `span / 240`,
+unless an override is given (stress in MPa).
+
+# Engineering judgment (not code limits; corpus searched 2026-11-09)
+- `0.45 f′c`: project choice. Not in Haile's MATLAB, and no corpus code gives
+  it for arches. ACI 318-11 Eq. (22-14) has 0.45 f′c as a nominal plain-wall
+  strength coefficient, a different method (corpus: aci-318-11, page 386); it
+  is not the source of this value.
+- `span / 240`: Haile's reference choice (`reference/BasePlotsWithLim.m`,
+  `reference/generate_test_vectors.m`), not a code limit.
+
+Plain concrete is permitted where arch action keeps it in compression under
+all loading, ACI 318-11 §22.2.1(b) (corpus: aci-318-11, page 382). The kern
+check ([`vault_kern_check`](@ref)) is what enforces that here.
+"""
+vault_allowable_stress(material::Concrete, override::Union{Real, Nothing}=nothing) =
+    isnothing(override) ? 0.45 * material.fc′ : override * u"MPa"
+
+"""Rise-loss limit `span / 240` unless overridden. See [`vault_allowable_stress`](@ref)."""
+vault_rise_loss_limit(span::Length, override::Union{Length, Nothing}=nothing) =
+    isnothing(override) ? span / 240 : override
+
+"""Return `vopt` if its analysis method is implemented; `ShellFEA` is not."""
+function _require_vault_method(vopt::VaultOptions)
+    vopt.method isa HaileAnalytical || throw(ArgumentError(
+        "Vault sizing implements only HaileAnalytical(); got $(typeof(vopt.method))."))
+    return vopt
+end
 
 """
 Size an unreinforced vault using Haile's method.
@@ -401,7 +538,6 @@ Size an unreinforced vault using Haile's method.
 - `finishing_load`: Topping/screed load (default: 0.0)
 - `allowable_stress`: Max allowable compressive stress [MPa] (default: 0.45 fc')
 - `deflection_limit`: Max allowable rise deflection (default: span/240)
-- `check_asymmetric`: Also check half-span live load case (default: true)
 - `verbose`: Enable debug logging (default: false)
 
 # Returns
@@ -429,13 +565,12 @@ function _size_span_floor(::Vault, span::L, sdl::F, live::F;
                     finishing_load::Union{F,Nothing}=nothing,
                     allowable_stress::Union{Real,Nothing}=nothing,
                     deflection_limit::Union{L,Nothing}=nothing,
-                    check_asymmetric::Union{Bool,Nothing}=nothing,
                     verbose::Bool=false) where {L, F}
     
     # =========================================================================
     # PHASE 1: RESOLVE OPTIONS (kwargs override VaultOptions defaults)
     # =========================================================================
-    vopt = options isa VaultOptions ? options : VaultOptions()
+    vopt = _require_vault_method(_require_options(VaultOptions, options, Vault()))
     
     # Geometry: kwargs override VaultOptions (which has sensible defaults)
     rise = isnothing(rise) ? vopt.rise : rise
@@ -445,7 +580,6 @@ function _size_span_floor(::Vault, span::L, sdl::F, live::F;
     rib_depth = isnothing(rib_depth) ? vopt.rib_depth : rib_depth
     rib_apex_rise = isnothing(rib_apex_rise) ? vopt.rib_apex_rise : rib_apex_rise
     finishing_load = isnothing(finishing_load) ? vopt.finishing_load : finishing_load
-    check_asymmetric = isnothing(check_asymmetric) ? vopt.check_asymmetric : check_asymmetric
     
     # Validate rise/lambda (exactly one must be provided)
     if !isnothing(rise) && !isnothing(lambda)
@@ -456,23 +590,10 @@ function _size_span_floor(::Vault, span::L, sdl::F, live::F;
             "VaultOptions(rise=1.0u\"m\") or VaultOptions(lambda=6.0)"))
     end
     
-    # Allowable stress: kwargs → VaultOptions → default 0.45fc'
-    allowable_stress_val = if !isnothing(allowable_stress)
-        allowable_stress * u"MPa"
-    elseif !isnothing(vopt.allowable_stress)
-        vopt.allowable_stress * u"MPa"
-    else
-        0.45 * material.fc′
-    end
-    
-    # Deflection limit: kwargs → VaultOptions → default span/240
-    defl_lim = if !isnothing(deflection_limit)
-        deflection_limit
-    elseif !isnothing(vopt.deflection_limit)
-        vopt.deflection_limit
-    else
-        span / 240
-    end
+    # kwargs → VaultOptions → defaults (see `vault_allowable_stress`).
+    allowable_stress_val = vault_allowable_stress(material,
+        something(allowable_stress, vopt.allowable_stress, Some(nothing)))
+    defl_lim = vault_rise_loss_limit(span, something(deflection_limit, vopt.deflection_limit, Some(nothing)))
     
     # =========================================================================
     # PHASE 2: RESOLVE GEOMETRY (stay Unitful)
@@ -505,67 +626,30 @@ function _size_span_floor(::Vault, span::L, sdl::F, live::F;
         end
         actual_thickness = _find_min_thickness(
             span, actual_rise, trib_depth, rib_depth, rib_apex_rise,
-            material.ρ, material.E, sdl + live, finishing_load,
-            allowable_stress_val, defl_lim, check_asymmetric
+            material.ρ, material.E, sdl, live, finishing_load,
+            allowable_stress_val, defl_lim;
+            t_min = vopt.thickness_bounds[1], t_max = vopt.thickness_bounds[2]
         )
         verbose && @debug "  Selected thickness" t=actual_thickness
     end
     
     # =========================================================================
-    # PHASE 4: SYMMETRIC LOAD ANALYSIS
+    # PHASES 4–5: SYMMETRIC AND HALF-SPAN LIVE LOAD
     # =========================================================================
-    if verbose
-        @debug "───────────────────────────────────────────────────────────────"
-        @debug "PHASE 4: Symmetric Load Analysis"
-    end
-    
-    # Dead component: SW + finishing + SDL (no live)
-    sym_dead = vault_stress_symmetric(
-        span, actual_rise, trib_depth, actual_thickness, rib_depth, rib_apex_rise,
-        material.ρ, sdl, finishing_load
-    )
-    
-    # Live component: Live load only
-    sym_live = vault_stress_symmetric(
-        span, actual_rise, trib_depth, actual_thickness, rib_depth, rib_apex_rise,
-        material.ρ, live, zero(finishing_load)
-    )
-    
-    σ_sym = sym_dead.σ + sym_live.σ           # Pressure (Unitful)
-    σ_max = σ_sym
-    governing_case = :symmetric
-    thrust_dead = sym_dead.thrust             # Force (Unitful)
-    thrust_live = sym_live.thrust             # Force (Unitful)
-    sw = sym_dead.self_weight                 # Pressure (Unitful)
-    
+    cases = vault_load_cases(span, actual_rise, trib_depth, actual_thickness, rib_depth,
+                             rib_apex_rise, material.ρ, sdl, live, finishing_load)
+    σ_max = cases.σ_max
+    governing_case = cases.governing
+    kern_check = cases.kern
+    thrust_dead = cases.thrust_dead
+    thrust_live = cases.thrust_live
+    sw = cases.self_weight
+
     if verbose
         @debug "  Self-weight" sw=sw
         @debug "  Thrust (dead)" H=thrust_dead
         @debug "  Thrust (live)" H=thrust_live
-        @debug "  Stress (symmetric)" σ=σ_sym
-    end
-    
-    # =========================================================================
-    # PHASE 5: ASYMMETRIC LOAD ANALYSIS (if enabled)
-    # =========================================================================
-    if check_asymmetric
-        if verbose
-            @debug "───────────────────────────────────────────────────────────────"
-            @debug "PHASE 5: Asymmetric Load Analysis (half-span live)"
-        end
-        
-        asym_total = vault_stress_asymmetric(
-            span, actual_rise, trib_depth, actual_thickness, rib_depth, rib_apex_rise,
-            material.ρ, sdl + live, finishing_load
-        )
-        σ_asym = asym_total.σ
-        
-        if σ_asym > σ_max
-            σ_max = σ_asym
-            governing_case = :asymmetric
-        end
-        
-        verbose && @debug "  Stress (asymmetric)" σ=σ_asym governs=(governing_case==:asymmetric)
+        @debug "  Stress" σ_sym=cases.σ_sym σ_asym=cases.σ_asym governs=governing_case
     end
     
     # =========================================================================
@@ -620,10 +704,12 @@ function _size_span_floor(::Vault, span::L, sdl::F, live::F;
         @debug "  Stress check" σ=round(σ_max_MPa, digits=3) σ_allow=σ_allow_MPa ratio=round(σ_ratio, digits=2) ok=stress_ok
         @debug "  Deflection check" δ=round(deflection_m*1000, digits=1) limit=round(defl_lim_m*1000, digits=1) unit="mm" ok=deflection_ok
         @debug "  Convergence" converged=eq.converged
-        @debug "  ADEQUATE" adequate=(stress_ok && deflection_ok && eq.converged)
+        @debug "  Kern check" e_mm=round(kern_check.e, digits=1) limit_mm=round(kern_check.limit, digits=1) ok=kern_check.ok
+        @debug "  ADEQUATE" adequate=(stress_ok && kern_check.ok && deflection_ok && eq.converged)
     end
     
     # Warnings for failures (independent of verbose)
+    kern_check.ok || @warn "Thrust line leaves the middle third under half-span live load: e = $(round(kern_check.e, digits=1)) mm > $(round(kern_check.limit, digits=1)) mm"
     !eq.converged && @warn "Elastic shortening solver did not converge"
     eq.converged && !eq.deflection_ok && @warn "Deflection exceeds limit: $(round(deflection_m*1000, digits=1)) mm > $(round(defl_lim_m*1000, digits=1)) mm"
     !stress_ok && @warn "Working stress exceeds allowable: $(round(σ_max_MPa, digits=3)) > $(round(σ_allow_MPa, digits=3)) MPa"
@@ -664,17 +750,24 @@ function _size_span_floor(::Vault, span::L, sdl::F, live::F;
         thrust_dead_out, thrust_live_out,
         vol_out, sw_out,
         σ_max_MPa, governing_case,
-        stress_check, deflection_check, convergence_check
+        stress_check, deflection_check, convergence_check, kern_check
     )
 end
 
 """
     _find_min_thickness(span, rise, trib_depth, rib_depth, rib_apex_rise,
-                        density, E, applied_load, finishing_load,
-                        allowable_stress, deflection_limit, check_asymmetric;
+                        density, E, sdl, live, finishing_load,
+                        allowable_stress, deflection_limit;
                         t_min=0.03u"m", t_max=0.50u"m", t_step=0.005u"m")
 
-Find minimum thickness satisfying stress and deflection constraints.
+Smallest thickness on the grid `t_min:t_step:t_max` (plus `t_max`) that passes
+the stress, kern, and deflection checks, with the same load cases as the final
+check ([`vault_load_cases`](@ref)).
+
+Each check eases as `t` grows (stress `∝ a/t + b`; the kern limit grows with `t`
+and the eccentricity falls; elastic shortening `∝ 1/t`), so the grid is
+bisected. The returned thickness has always passed every check itself. When
+`t_max` fails, it is returned with a warning and the final checks report it.
 
 All arguments are Unitful quantities. Returns minimum thickness as Unitful Length.
 """
@@ -686,57 +779,40 @@ function _find_min_thickness(
     rib_apex_rise::Length,
     density::Unitful.Density,
     E::Unitful.Pressure,
-    applied_load::Unitful.Pressure,
+    sdl::Unitful.Pressure,
+    live::Unitful.Pressure,
     finishing_load::Unitful.Pressure,
     allowable_stress::Union{Unitful.Pressure, Nothing},
-    deflection_limit::Length,
-    check_asymmetric::Bool;
+    deflection_limit::Length;
     t_min::Length = 0.03u"m",
     t_max::Length = 0.50u"m",
     t_step::Length = 0.005u"m"
 )
-    has_stress_check = !isnothing(allowable_stress)
-    
-    # Iterate over thickness range
-    t_min_m = ustrip(u"m", t_min)
-    t_max_m = ustrip(u"m", t_max)
-    t_step_m = ustrip(u"m", t_step)
-    
-    for t_m in t_min_m:t_step_m:t_max_m
+    function passes(t_m)
         t = t_m * u"m"
-        
-        if has_stress_check
-            sym = vault_stress_symmetric(span, rise, trib_depth, t, rib_depth, rib_apex_rise,
-                                         density, applied_load, finishing_load)
-            σ_max = sym.σ
-            sw = sym.self_weight
-            
-            if check_asymmetric
-                asym = vault_stress_asymmetric(span, rise, trib_depth, t, rib_depth, rib_apex_rise,
-                                               density, applied_load, finishing_load)
-                if asym.σ > σ_max
-                    σ_max = asym.σ
-                end
-            end
-            
-            # Stress check (both Unitful)
-            σ_max > allowable_stress && continue
-        else
-            sym = vault_stress_symmetric(span, rise, trib_depth, t, rib_depth, rib_apex_rise,
-                                         density, applied_load, finishing_load)
-            sw = sym.self_weight
-        end
-        
-        # Total load (all Unitful Pressure)
-        total_load = applied_load + sw + finishing_load
+        cases = vault_load_cases(span, rise, trib_depth, t, rib_depth, rib_apex_rise,
+                                 density, sdl, live, finishing_load)
+        !isnothing(allowable_stress) && cases.σ_max > allowable_stress && return false
+        cases.kern.ok || return false
+        total_load = sdl + live + cases.self_weight + finishing_load
         eq = solve_equilibrium_rise(span, rise, total_load, t, trib_depth, E;
                                     deflection_limit=deflection_limit)
-        
-        if eq.converged && eq.deflection_ok
-            return t
-        end
+        return eq.converged && eq.deflection_ok
     end
-    
-    @warn "Could not find valid thickness in range [$(t_min), $(t_max)]"
-    return t_max
+
+    t_max_m = ustrip(u"m", t_max)
+    ts = collect(ustrip(u"m", t_min):ustrip(u"m", t_step):t_max_m)
+    (isempty(ts) || last(ts) < t_max_m) && push!(ts, t_max_m)
+
+    if !passes(last(ts))
+        @warn "Could not find valid thickness in range [$(t_min), $(t_max)]"
+        return t_max
+    end
+    passes(first(ts)) && return first(ts) * u"m"
+    lo, hi = 1, length(ts)              # ts[lo] fails, ts[hi] passes
+    while hi - lo > 1
+        mid = (lo + hi) ÷ 2
+        passes(ts[mid]) ? (hi = mid) : (lo = mid)
+    end
+    return ts[hi] * u"m"
 end

@@ -188,19 +188,52 @@ Smallest added area at each end, not below `As_floor`, at which every
 `(Nu, Mu)` in newtons and newton-metres. Compression is positive.
 
 The axial ceiling is §22.4.2.1 with the web steel plus both ends. The moment
-is [`wall_end_bar_capacity_si`](@ref). The Cardenas closed form is not used:
-it has no end bars.
+is [`wall_end_bar_capacity_si`](@ref) on a rectangle. On one flange,
+`flange_at` names that end and the moment is
+[`wall_flanged_c_at_axial_si`](@ref). When `tf_pos` and `tf_neg` are both
+positive the section has a flange at each end
+([`wall_two_flange_c_at_axial_si`](@ref)). The added bars sit at both ends.
+The Cardenas closed form is not used: it has no end bars.
 """
 function boundary_end_area_si(fc::Real, fy::Real, Es::Real, lw::Real, t::Real,
-                             Ast::Real, inset::Real, actions, As_floor::Real)
+                             Ast::Real, inset::Real, actions, As_floor::Real;
+                             flange_at::Union{Nothing, Symbol}=nothing,
+                             tf::Real=0.0, bf::Real=0.0, As_flange::Real=0.0,
+                             tf_pos::Real=0.0, bf_pos::Real=0.0, As_pos::Real=0.0,
+                             tf_neg::Real=0.0, bf_neg::Real=0.0, As_neg::Real=0.0)
     As_floor >= 0 || throw(ArgumentError("end bar area: the floor is non-negative"))
     isempty(actions) && throw(ArgumentError("end bar area: there is no strength combination"))
+    two = tf_pos > 0 && tf_neg > 0
+    if two
+        (tf_pos + tf_neg < lw && bf_pos + 1e-12 >= t && bf_neg + 1e-12 >= t &&
+            As_pos >= 0 && As_neg >= 0) || throw(ArgumentError(
+            "end bar area: the two flanges are not a section"))
+    elseif flange_at !== nothing
+        flange_at in (:positive, :negative) || throw(ArgumentError(
+            "end bar area: the flange is at :positive or :negative (got :$flange_at)"))
+        (tf > 0 && tf < lw && bf + 1e-12 >= t && As_flange >= 0) || throw(ArgumentError(
+            "end bar area: the flange thickness, width, and steel area are not a section"))
+    end
+    function section_at(As, Nu, Mu)
+        if two
+            return wall_two_flange_c_at_axial_si(
+                fc, fy, Es, lw, t, tf_pos, bf_pos, tf_neg, bf_neg, Ast, Nu;
+                compress_positive = Mu >= 0,
+                As_pos = As_pos, As_neg = As_neg, As_end = As, inset = inset)
+        end
+        flange_at === nothing &&
+            return wall_end_bar_capacity_si(fc, fy, Es, lw, t, Ast, As, inset, Nu)
+        return wall_flanged_c_at_axial_si(
+            fc, fy, Es, lw, t, tf, bf, Ast, Nu;
+            flange_in_compression = flange_end_compressed(flange_at, Mu),
+            As_flange = As_flange, As_end = As, inset = inset)
+    end
     function passes(As)
         ρ = (Ast + 2 * As) / (lw * t)
         ax = wall_pure_axial_capacity_si(fc, fy, lw, t, ρ)
         for (Nu, Mu) in actions
             Nu > 0.65 * ax.Pn_max && return false
-            cap = wall_end_bar_capacity_si(fc, fy, Es, lw, t, Ast, As, inset, Nu)
+            cap = section_at(As, Nu, Mu)
             cap.converged || return false
             abs(Mu) <= cap.φMn + 1.0 || return false
         end

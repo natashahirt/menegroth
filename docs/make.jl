@@ -150,6 +150,8 @@ makedocs(
         ],
 
         "Reference" => [
+            "Architecture & Contracts" => "reference/architecture_contracts.md",
+            "Scene Format" => "reference/scene_format.md",
             "Design Codes" => "reference/design_codes.md",
             "Solver Trace Threading" => "reference/solver_trace_threading.md",
             "Type Hierarchy" => "reference/type_hierarchy.md",

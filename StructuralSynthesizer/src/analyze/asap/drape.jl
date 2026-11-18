@@ -499,7 +499,7 @@ function compute_draped_displacements(design::BuildingDesign)
 
     # ── Identify frame nodes in the coupled model ──
     frame_node_set = Set{Asap.Node}()
-    for el in shell_model.elements
+    for el in shell_model.frame_elements
         push!(frame_node_set, el.nodeStart)
         push!(frame_node_set, el.nodeEnd)
     end

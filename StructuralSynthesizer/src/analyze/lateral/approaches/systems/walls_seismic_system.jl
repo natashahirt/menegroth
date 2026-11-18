@@ -25,8 +25,9 @@ seismic_members(struc, ::WallsSeismicSystem) =
 
 ASCE 7-22 §12.12.4 Deformation Compatibility for Seismic Design Categories D
 through F (corpus: asce-7-22, PDF page 195). For A, B, or C it does not apply.
-For D, E, or F the induced moments are not calculated, so the gravity frame is
-detailed to ACI 318-19 §18.14.3.3. Nothing is returned.
+For D, E, or F the ordinary-wall stage calculates the forces from δDE.
+§18.14.3.2 applies when they do not exceed the design strength, and
+§18.14.3.3 otherwise. Nothing is returned here.
 """
 function system_checks(struc, ::WallsSeismicSystem; seismic_design_category::Symbol)
     _require_sdc(seismic_design_category)

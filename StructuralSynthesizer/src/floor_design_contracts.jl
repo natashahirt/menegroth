@@ -59,6 +59,7 @@ function _flat_plate_design_input(struc::BuildingStructure, slab_idx::Int)
             deepcopy(slab.result),
             deepcopy(slab.drop_panel),
             copy(StructuralSizer.supporting_wall_segments(struc, slab)),
+            StructuralSizer.flat_plate_wall_piers(struc, slab),
         )
         for slab in struc.slabs
     ]
@@ -238,6 +239,21 @@ function design_floor(
     end
 
     working = deepcopy(struc)
+    support_kwargs = NamedTuple()
+    if request.system isa StructuralSizer.TwoWay
+        support = classify_two_way_supports(working, working.slabs[slab_idx].cell_indices)
+        if support.action === :throw
+            throw(ArgumentError(support.message))
+        elseif support.action === :flat_plate
+            throw(ArgumentError(
+                "floor $slab_idx is :two_way and has no beams. initialize! designs " *
+                "that panel as :flat_plate; this request is still :two_way."))
+        end
+        support_kwargs = (
+            wall_supported = support.wall_supported,
+            missing_edge_beam = support.missing_edge_beam,
+        )
+    end
     outcome = StructuralSizer.size_slab!(
         working,
         request;
@@ -245,6 +261,7 @@ function design_floor(
         _col_cache = workspace.column_cache,
         defer_asap_process = true,
         tc = tc,
+        support_kwargs...,
     )
     StructuralSizer.is_installable(outcome) || return outcome
 
@@ -267,15 +284,17 @@ function design_floor(
 end
 
 """
-    design_floors!(struc; options, column_options=nothing, ...) -> Vector{FloorDesignOutcome}
+    design_floors!(struc; options, slab_options=nothing, column_options=nothing, ...) -> Vector{FloorDesignOutcome}
 
 Design all declared floors in stable source order. Each floor is evaluated on
 isolated state and installed before the next request, so successful monotonic
 support growth is visible to later floors while a failed floor installs nothing.
+`slab_options[i]`, when given, replaces `options` for slab `i` (scoped overrides).
 """
 function design_floors!(
     struc::BuildingStructure;
     options::StructuralSizer.AbstractFloorOptions,
+    slab_options::Union{Nothing, AbstractVector} = nothing,
     column_options = nothing,
     max_iterations::Int = 10,
     fire_rating::Real = 0.0,
@@ -298,16 +317,22 @@ function design_floors!(
         max_iterations = max_iterations,
     )
     StructuralSizer.emit!(tc, :slab, "size_slabs!", "", :decision; parallel = false)
+    slab_options === nothing || length(slab_options) == length(slab_indices) ||
+        throw(ArgumentError("slab_options has $(length(slab_options)) entries for $(length(slab_indices)) slabs"))
+    warn_vault_openings!(struc)
     for slab_idx in slab_indices
         request = floor_design_request(
             struc,
             slab_idx;
-            options = options,
+            options = slab_options === nothing ? options : slab_options[slab_idx],
             column_options = column_options,
             max_iterations = max_iterations,
             fire_rating = fire_rating,
         )
-        if isnothing(workspace)
+        # Only a flat plate or flat slab builds the column cache, so a leading
+        # vault or one-way slab must not fix an empty workspace for later slabs.
+        if isnothing(workspace) || (isnothing(workspace.column_cache) &&
+                                    request.system isa Union{StructuralSizer.FlatPlate, StructuralSizer.FlatSlab})
             workspace = StructuralSizer.prepare_floor_design_workspace(request)
         end
         outcome = design_floor!(
@@ -335,7 +360,8 @@ Rejected or stale outcomes therefore leave the building unchanged.
 function install_floor_design!(
     struc::BuildingStructure,
     request::StructuralSizer.FloorDesignRequest,
-    outcome::StructuralSizer.FloorDesignOutcome,
+    outcome::StructuralSizer.FloorDesignOutcome;
+    install_supports::Bool = true,
 )
     StructuralSizer.is_installable(outcome) ||
         throw(ArgumentError("cannot install floor outcome with status $(outcome.status)"))
@@ -371,19 +397,37 @@ function install_floor_design!(
 
     slab.result = deepcopy(proposal.result)
     slab.design_details = deepcopy(proposal.details)
+    # Column sizes this design was checked at, below the slab and directly
+    # above it (the upper column's stiffness enters the slab analysis), so a
+    # later column change can be recognized as making the stored checks stale.
+    # Written even when empty: a design with no record is treated as stale.
+    if slab.design_details isa NamedTuple
+        above_size(i) = (a = struc.columns[i].column_above;
+                         a === nothing ? nothing : (deepcopy(a.c1), deepcopy(a.c2), a.shape))
+        slab.design_details = merge(slab.design_details, (
+            designed_supports = Dict(
+                u.source_index => (deepcopy(u.c1), deepcopy(u.c2), u.shape)
+                for u in proposal.support_updates),
+            designed_above = Dict(
+                u.source_index => above_size(u.source_index)
+                for u in proposal.support_updates),
+        ))
+    end
     slab.drop_panel = deepcopy(proposal.drop_panel)
     for update in proposal.cell_updates
         cell = struc.cells[update.source_index]
         cell.self_weight = deepcopy(update.self_weight)
         cell.live_load = deepcopy(update.live_load)
     end
-    for update in proposal.support_updates
-        column = struc.columns[update.source_index]
-        column.c1 = deepcopy(update.c1)
-        column.c2 = deepcopy(update.c2)
-        column.shape = update.shape
-        column.base.section = deepcopy(update.section)
-        column.base.volumes = deepcopy(update.volumes)
+    if install_supports
+        for update in proposal.support_updates
+            column = struc.columns[update.source_index]
+            column.c1 = deepcopy(update.c1)
+            column.c2 = deepcopy(update.c2)
+            column.shape = update.shape
+            column.base.section = deepcopy(update.section)
+            column.base.volumes = deepcopy(update.volumes)
+        end
     end
     return struc
 end

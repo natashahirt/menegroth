@@ -40,8 +40,7 @@
 
 using Unitful
 
-# psi → Pa (= _KSI_TO_PA/1000, with _KSI_TO_PA defined in flexure.jl).
-const _PSI_TO_PA = _KSI_TO_PA / 1000.0
+const _PSI_TO_PA = Asap.PSI_TO_PA
 
 # ------------------------------------------------------------------------------
 # Bare-SI strength + second-order analysis core
@@ -315,3 +314,56 @@ end
 # Length/force coercion helpers (Unitful quantity or bare SI number → SI Float).
 _oop_len(x)   = x isa Unitful.Quantity ? ustrip(u"m", x) : Float64(x)
 _oop_force(x) = x isa Unitful.Quantity ? ustrip(u"N", x) : Float64(x)
+
+"""
+Ec = 57000 √f'c, ACI 318-19 §19.2.2.1(b). `fc` is Pa. Result is Pa.
+"""
+wall_modulus_si(fc::Real) = 57000.0 * sqrt(fc / _PSI_TO_PA) * _PSI_TO_PA
+
+"""
+Nonsway moment magnification for a wall bent out of plane.
+
+ACI 318-19 §6.6.4.5.1–§6.6.4.5.3 (corpus: aci-318-19, page 82):
+`Mc = δ M2`, `δ = Cm / (1 − Pu / (0.75 Pc)) ≥ 1`.
+`Cm = 0.6 − 0.4 (M1/M2)` when no transverse load acts between the floors.
+`M1/M2` is negative for single curvature and positive for double curvature.
+The other end is not in this action, so the default ratio is 0 and `Cm = 0.6`.
+
+`Pc = π² (EI)eff / (k ℓu)²` (§6.6.4.4.2, page 81). `(EI)eff = 0.4 Ec Ig / (1+βdns)`
+(§6.6.4.4.4a). `βdns = 0.6` is the sustained-load value the commentary permits
+when the split is not known, which makes `(EI)eff = 0.25 Ec Ig` (page 82).
+`k = 1` for a nonsway member (§6.6.4.4.3, page 81).
+
+`Pu` and `Pc` are newtons, `M2` is N·m, `Ec` is Pa, `Ig` is m⁴, `lu` is m.
+A tensile `Pu` is not magnified. `Pu ≥ 0.75 Pc` is unstable.
+"""
+function nonsway_slenderness_moment(Pu::Real, M2::Real, Ec::Real, Ig::Real, lu::Real;
+                                    k::Real=1.0, βdns::Real=0.6, M1_over_M2::Real=0.0)
+    M = abs(M2)
+    Pu <= 0 && return (stable=true, δ=1.0, Mc=M, Pc=Inf, Cm=1.0)
+    EI = 0.4 * Ec * Ig / (1 + βdns)
+    Pc = π^2 * EI / (k * lu)^2
+    Pu >= 0.75 * Pc && return (stable=false, δ=Inf, Mc=Inf, Pc=Pc, Cm=0.6)
+    Cm = 0.6 - 0.4 * M1_over_M2
+    δ = max(Cm / (1 - Pu / (0.75 * Pc)), 1.0)
+    return (stable=true, δ=δ, Mc=δ * M, Pc=Pc, Cm=Cm)
+end
+
+"""
+Out-of-plane axial plus bending, ACI 318-19 §22.2 and §22.4.
+
+The section is the pier bent through its thickness. Vertical steel is smeared
+across the thickness with the same layer model as the in-plane check. Two
+layers near the faces, required by §11.7.2.3 when the wall is thicker than
+10 in, are stronger than that smear, so this capacity is a lower bound.
+`Mu` is the moment the caller has already magnified.
+"""
+function check_wall_out_of_plane_axial_flexure(ws::WallSection, material, Nu, Mu;
+                                               fy=nothing, Es=nothing)
+    through_thickness = WallSection(ws.t, ws.lw; ρl=ws.ρl, ρt=ws.ρt)
+    result = check_wall_inplane_flexure(through_thickness, material, Nu, Mu;
+                                         fy=fy, Es=Es)
+    return CheckResult(
+        replace(result.name, "in-plane" => "out-of-plane"),
+        result.passed, result.ratio, result.demand, result.capacity, result.code_clause)
+end

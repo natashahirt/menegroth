@@ -79,6 +79,26 @@ end
     @test_throws ArgumentError wind_story_analysis(bare;
         directions=((1.0, 0.0), (0.0, 1.0)),
         qz=[1.0], qh=1.0, Kd=1.0, G=0.85, GCpi=0.18, flexible=true)
+    missing = try
+        wind_story_analysis(bare;
+            directions=((1.0, 0.0), (0.0, 1.0)),
+            qz=[1.0], qh=1.0, Kd=1.0, G=0.85, GCpi=0.18, flexible=true)
+        nothing
+    catch e
+        e
+    end
+    @test missing isa ArgumentError && occursin("27.3-4", missing.msg)
+    gust = (eR=0.0, Iz=0.2, gQ=3.4, Q=0.85, gR=3.8, R=0.0)
+    given = try
+        wind_story_analysis(bare;
+            directions=((1.0, 0.0), (0.0, 1.0)),
+            qz=[1.0], qh=1.0, Kd=1.0, G=0.85, GCpi=0.18,
+            flexible=true, gust)
+        nothing
+    catch e
+        e
+    end
+    @test given isa ArgumentError && occursin("not processed", given.msg)
     @test_throws ArgumentError wind_story_analysis(bare;
         directions=((1.0, 0.0),),
         qz=[1.0], qh=1.0, Kd=1.0, G=0.85, GCpi=0.0)
@@ -227,4 +247,94 @@ end
         qz=qz, qh=qh, Kd=Kd, G=G, GCpi=GCpi, perpendicular=false)
     @test length(skewed.cases) == 13
     @test count(c -> c.kind === :case3, skewed.cases) == 1
+end
+
+"""1×1 office, one story, a wall on every side, flexible diaphragm."""
+function _wind_flexible_box()
+    skel = gen_medium_office(10.0u"m", 6.0u"m", 4.0u"m", 1, 1, 1)
+    beams = Set(get(skel.groups_edges, :beams, Int[]))
+    edges = [e for e in skel.stories[0].edges if e in beams && _wind_horizontal(skel, e)]
+    @assert length(edges) >= 4
+    walls = get!(skel.groups_edges, :walls, Int[])
+    for eidx in edges
+        filter!(!=(eidx), skel.groups_edges[:beams])
+        eidx in walls || push!(walls, eidx)
+    end
+    struc = BuildingStructure(skel)
+    initialize!(struc;
+        floor_type=:vault,
+        material=NWC_4000,
+        floor_opts=_WIND_VAULT,
+        wall_thickness=0.3u"m")
+    params = DesignParameters(
+        materials=MaterialOptions(concrete=NWC_5000),
+        diaphragm_mode=:flexible,
+        skip_visualization=true,
+        lateral=LateralDesign(; system=WallsSeismicSystem(:A3), assignment=BuildingUnit()))
+    to_asap!(struc; params=params, diaphragms=:flexible)
+    flexible_diaphragm_layout!(struc, params.lateral)
+    return struc
+end
+
+@testset "flexible diaphragm keeps the wind eccentricity" begin
+    struc = _wind_flexible_box()
+    @test struc.diaphragm_layout isa FlexibleDiaphragmLayout
+    @test isempty(struc.asap_rigid_links)
+    result = wind_story_analysis(struc;
+        directions=((1.0, 0.0), (0.0, 1.0)),
+        qz=[1.0], qh=1.0, Kd=1.0, G=0.85, GCpi=0.18)
+    plus = _wind_pick(result, :case2, (1.0, 0.0); sign_1=1)
+    @test abs(plus.Mz_kN_m[1]) > 1.0
+    loads = StructuralSynthesizer._wind_loads(
+        struc, result.levels, plus.Fx_kN, plus.Fy_kN, plus.Mz_kN_m, result.centroids)
+    got = StructuralSynthesizer._story_load_moment(
+        loads, result.levels[1].elevation_m, result.centroids[1])
+    @test got ≈ plus.Mz_kN_m[1] atol=1e-6
+    torsion = [l for l in loads if l isa Asap.NodeForce && l.id === :wind_torsion]
+    @test !isempty(torsion)
+    fx = sum(ustrip(u"kN", l.value[1]) for l in torsion)
+    fy = sum(ustrip(u"kN", l.value[2]) for l in torsion)
+    @test fx ≈ 0.0 atol=1e-6
+    @test fy ≈ 0.0 atol=1e-6
+end
+
+@testset "§26.11 decides rigid or flexible per direction" begin
+    box(w, d) = [[(0.0, 0.0), (w, 0.0), (w, d), (0.0, d)]]
+    levels_of(n; w=30.0, d=30.0) = [StructuralSynthesizer.WindStoryLevel(
+        i, 4.0 * i, 4.0, nothing, box(w, d)) for i in 1:n]
+    nowalls = (walls=[],)
+    dirs = ((1.0, 0.0), (0.0, 1.0))
+    site = (V_mph=115.0, exposure=:C, β=0.02)
+    gust = StructuralSynthesizer._wind_site_gust
+
+    # 12 m (39.4 ft) and 30 m wide: low-rise, rigid at the caller's G.
+    low = gust(nowalls, levels_of(3), site, dirs, 0.85)
+    @test all(r -> !r.flexible && r.G == 0.85 && r.low_rise, low)
+
+    # 80 m (262.5 ft): na = 75/h = 0.286 Hz, flexible. eR is required.
+    tall = levels_of(20)
+    err = try
+        gust(nowalls, tall, site, dirs, 0.85); nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError && occursin("eR", err.msg)
+    flex = gust(nowalls, tall, (; site..., eR=1.0), dirs, 0.85)
+    h_ft = 80 / 0.3048
+    side_ft = 30 / 0.3048
+    @test all(r -> r.flexible, flex)
+    @test flex[1].n1 ≈ 75 / h_ft
+    ref = gust_effect_factor_flexible(h_ft, side_ft, side_ft; exposure=:C, V_mph=115.0,
+                                      n1=75 / h_ft, β=0.02)
+    @test flex[1].G ≈ ref.Gf
+    @test flex[1].gust.R ≈ ref.R
+    @test flex[1].gust.eR == 1.0
+
+    # A measured n1 at or above 1 Hz is rigid (§26.2).
+    stiff = gust(nowalls, tall, (; site..., n1=1.2), dirs, 0.85)
+    @test all(r -> !r.flexible && r.G == 0.85, stiff)
+
+    # One B and one L: a setback is refused.
+    setback = [levels_of(19); StructuralSynthesizer.WindStoryLevel(20, 80.0, 4.0, nothing, box(20.0, 30.0))]
+    @test_throws ArgumentError gust(nowalls, setback, (; site..., eR=1.0), dirs, 0.85)
 end

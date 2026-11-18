@@ -108,7 +108,10 @@ end
     @testset "stiffness factor scales the slab modulus and nothing else" begin
         struc = semi_office()
         layout = struc.diaphragm_layout
-        base = only(values(layout.base_E_Pa))
+        bases = collect(values(layout.base_E_Pa))
+        @test !isempty(bases)
+        base = first(bases)
+        @test all(≈(base), bases)
         @test all(sh -> sh.E ≈ base, semirigid_shells(layout))
         set_semirigid_stiffness!(layout, 0.35)
         @test layout.stiffness_factor ≈ 0.35
@@ -137,7 +140,8 @@ end
         @test sum(w) ≈ lv.weight_kN rtol=1e-9
         xc = sum(w[k] * StructuralSynthesizer._xy(nd)[1] for (k, nd) in enumerate(floor.nodes)) / sum(w)
         yc = sum(w[k] * StructuralSynthesizer._xy(nd)[2] for (k, nd) in enumerate(floor.nodes)) / sum(w)
-        @test (xc, yc) ≈ lv.center_of_mass rtol=1e-9
+        @test xc ≈ lv.center_of_mass[1] rtol=1e-9
+        @test yc ≈ lv.center_of_mass[2] rtol=1e-9
     end
 
     @testset "HAND CHECK wind force sits on the exterior edge about the centroid" begin
@@ -187,7 +191,8 @@ end
             @test case.elastic_drift_m[2] ≈ case.elastic_m[2] - case.elastic_m[1]
         end
         # A rigid translation of the wall tops is read back unchanged, and a
-        # rigid rotation about the center of mass reads as zero there.
+        # rigid rotation about p reads as zero there.
+        # u_x = −ω (y − p_y), u_y = ω (x − p_x).
         floor = layout.floors[1]
         dn = only(d for d in layout.drift_nodes if d.elevation_m == floor.elevation_m)
         n = length(elf.displacements[1])
@@ -198,10 +203,13 @@ end
         p = (4.0, 2.5)
         @test StructuralSynthesizer._semirigid_disp_at(u, layout, floor.elevation_m, :x, p) ≈ 0.02
         fill!(u, 0.0)
+        ω = 0.01
         for nd in dn.nodes
             x, y = StructuralSynthesizer._xy(nd)
-            u[nd.globalID[2]] = 0.01 * (x - p[1])
+            u[nd.globalID[1]] = -ω * (y - p[2])
+            u[nd.globalID[2]] = ω * (x - p[1])
         end
+        @test abs(StructuralSynthesizer._semirigid_disp_at(u, layout, floor.elevation_m, :x, p)) < 1e-12
         @test abs(StructuralSynthesizer._semirigid_disp_at(u, layout, floor.elevation_m, :y, p)) < 1e-12
     end
 
@@ -330,10 +338,10 @@ end
         params = DesignParameters(diaphragm_mode=:auto,
             diaphragm_construction=:concrete_slab,
             diaphragm_irregularities=irr)
-        @test resolve_auto_diaphragm(one, params) === :semirigid
+        @test StructuralSynthesizer.resolve_auto_diaphragm(one, params) === :semirigid
         @test irr == Int[]
         stated = [2]
-        @test resolve_auto_diaphragm(one, DesignParameters(diaphragm_mode=:auto,
+        @test StructuralSynthesizer.resolve_auto_diaphragm(one, DesignParameters(diaphragm_mode=:auto,
             diaphragm_construction=:concrete_slab,
             diaphragm_irregularities=stated)) === :semirigid
         @test stated == [2]

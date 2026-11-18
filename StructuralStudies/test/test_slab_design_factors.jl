@@ -16,7 +16,7 @@ include(joinpath(@__DIR__, "..", "src", "slab_design_factors", "study.jl"))
             @test length(plan.columns) == 9
             @test isempty(plan.sections)
             skel = plan_skeleton(plan)
-            @test length(skel.groups_edges[:beams]) == 24
+            @test length(skel.groups_edges[:beams]) == 12
             @test length(skel.groups_edges[:columns]) == 9
             @test :floor in keys(skel.groups_faces)
             @test !isempty(skel.groups_faces[:floor])
@@ -46,6 +46,78 @@ include(joinpath(@__DIR__, "..", "src", "slab_design_factors", "study.jl"))
             @test plan_loads("validation/office").sdl == 20.0
             @test plan_loads("grid/x1y1").occupancy == "parametric"
             @test plan_loads("grid/x1y1").ll == 60.0
+        end
+
+        @testset "a rectangle's tributaries cover the floor once" begin
+            for system in (:one_way, :two_way)
+                row = tributary_balance("grid/x0y0", system)
+                @test row.polygon_m2 ≈ row.gross_m2 rtol = 1e-6
+                @test row.beam_m2 ≈ row.polygon_m2 rtol = 1e-6
+                @test row.net_m2 ≈ row.gross_m2 rtol = 1e-6
+                @test row.beam_kN ≈ row.cell_kN rtol = 1e-6
+                # Edges parallel to a one-way span carry no width. Two-way reaches every edge.
+                system == :two_way && @test row.n_bare == 0
+            end
+        end
+
+        @testset "skewed one-way edges keep their whole strip" begin
+            row = tributary_balance("special/star_8x12", :one_way)
+            @test row.beam_m2 ≈ row.net_m2 rtol = 1e-9
+        end
+
+        @testset "faces filled by openings are void" begin
+            # 4 of the warehouse floor faces are openings; two-way sizing used to
+            # throw on their zero span.
+            # Support-level beams are gone. The floor tributary still covers the
+            # floor; the cell count is 49.
+            row = tributary_balance("validation/warehouse", :two_way)
+            @test row.n_cells == 49
+            @test row.polygon_m2 ≈ row.net_m2 rtol = 1e-6
+            @test row.beam_m2 ≈ row.polygon_m2 rtol = 1e-9
+            @test row.beam_kN ≈ row.cell_kN rtol = 1e-6
+        end
+
+        @testset "a star joint is split onto the beam it meets" begin
+            plan = load_plan("star/e10c2")
+            skel = plan_skeleton(plan)
+            # An unsplit plan would have one edge per line. The joint adds more.
+            @test length(skel.groups_edges[:beams]) > length(plan.lines)
+        end
+
+        @testset "a grillage covers each rectangular panel" begin
+            function _xy(skel, v)
+                c = Meshes.coords(skel.vertices[v])
+                return (ustrip(u"m", c.x), ustrip(u"m", c.y))
+            end
+            function _panel_area(skel, face, nξ, nη)
+                poly = [_xy(skel, Int(v)) for v in skel.face_vertex_indices[face]]
+                corners = StructuralSynthesizer._panel_corners(poly)
+                length(corners) == 4 || return nothing
+                pieces = StructuralSynthesizer.grillage_piece_profiles(corners, nξ, nη)
+                area = sum(StructuralSizer.tributary_profile_area(
+                    hypot(p.b[1] - p.a[1], p.b[2] - p.a[2]), p.positions, p.widths)
+                           for p in pieces)
+                return area, StructuralSizer.polygon_area_m(corners)
+            end
+            plan = load_plan("grid/x0y0")
+            skel = plan_skeleton(plan)
+            n_rect = 0
+            for face in skel.groups_faces[:floor]
+                got = _panel_area(skel, face, 2, 2)
+                got === nothing && continue
+                n_rect += 1
+                @test got[1] ≈ got[2] rtol = 1e-6
+            end
+            @test n_rect == 4
+            rhombus = plan_skeleton(load_plan("special/rhombus_8x12"))
+            n_quad = 0
+            for face in rhombus.groups_faces[:floor]
+                got = _panel_area(rhombus, face, 2, 2)
+                got === nothing && continue
+                n_quad += 1
+                @test got[1] ≈ got[2] rtol = 1e-4
+            end
+            @test n_quad >= 1
         end
 
         @testset "the three systems build" begin

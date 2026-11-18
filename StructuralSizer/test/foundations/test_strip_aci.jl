@@ -58,6 +58,9 @@ soil = Soil(4.32ksf, 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa")
 # L/2 = 12 + overhang → L ≈ 25.33 ft
 positions = [0.0u"ft", 20.0u"ft"]
 
+# The published example parks the exterior column at the property line.
+# That face does not develop (§15.6.3). The comparison below is the
+# published section; the following testset lengthens the strip.
 opts = StripParams(
     material = RC_3000_60,
     bar_size_long = 8,
@@ -66,6 +69,7 @@ opts = StripParams(
     min_depth = 12.0u"inch",
     depth_increment = 1.0u"inch",
     width_increment = 1.0u"inch",
+    check_development = false,
 )
 
 println("Designing strip footing...")
@@ -123,3 +127,53 @@ println("  As_bot = $(round(As_bot, digits=2)) in² (ref: ≈13.4 in², ±15%) �
 println("  utilization = $(round(result.utilization, digits=3)) < 1.0 ✓")
 
 println("\n=== All strip footing validation tests passed! ===")
+
+@testset "A flush end is lengthened until the bars develop" begin
+    # ACI 318-11 §15.6.3 (corpus: aci-318-11, page 274): each bar is
+    # developed from its own column face. The property-line face has no
+    # projection, so the plan grows until Eq. (12-1) or a §12.5 hook fits.
+    developed_opts = StripParams(
+        material = RC_3000_60,
+        bar_size_long = 8,
+        bar_size_trans = 5,
+        cover = 3.0u"inch",
+        min_depth = 12.0u"inch",
+        depth_increment = 1.0u"inch",
+        width_increment = 1.0u"inch",
+    )
+    grown = design_footing(StripFooting(), [d_ext, d_int], positions, soil;
+                           opts = developed_opts)
+    @test grown.L_ftg > result.L_ftg
+
+    fc = developed_opts.material.concrete.fc′
+    fy = developed_opts.material.rebar.Fy
+    λ = something(developed_opts.λ, developed_opts.material.concrete.λ)
+    cover = developed_opts.cover
+    x_bar = (d_ext.Ps * positions[1] + d_int.Ps * positions[2]) / (d_ext.Ps + d_int.Ps)
+
+    function nearest_face(footing)
+        L = footing.L_ftg
+        x_left = x_bar - L / 2
+        avail = L
+        for (dem, p) in zip((d_ext, d_int), positions)
+            xc = p - x_left
+            avail = min(avail, min(xc, L - xc) - dem.c1 / 2 - cover)
+        end
+        return avail
+    end
+
+    short_avail = nearest_face(result)
+    grown_avail = nearest_face(grown)
+    @test short_avail <= 1.0u"inch"
+    @test grown_avail > short_avail
+    As_short = max(result.As_long_top, result.As_long_bot)
+    As_grown = max(grown.As_long_top, grown.As_long_bot)
+    refused = StructuralSizer._one_way_anchorage(
+        8, As_short, result.B, result.D, cover, fc, fy, λ, short_avail,
+        min(3 * result.D, 18.0u"inch"))
+    accepted = StructuralSizer._one_way_anchorage(
+        8, As_grown, grown.B, grown.D, cover, fc, fy, λ, grown_avail,
+        min(3 * grown.D, 18.0u"inch"))
+    @test !refused.ok
+    @test accepted.ok
+end

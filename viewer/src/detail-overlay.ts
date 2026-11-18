@@ -4,7 +4,6 @@ import * as THREE from "three"
 import { deflectionColor, signedColor, stressColor } from "./building"
 import { displacementAt } from "./frame"
 import type { ComponentRecord } from "./detail"
-
 export type OverlayMode = "diagram" | "deflection" | "stress" | "axial" | "tributary"
 
 export interface OverlayScene {
@@ -19,6 +18,7 @@ export interface OverlayScene {
   maxStress: number
   shellAxial: Float32Array
   shellAxialPresent: boolean
+  shellWall: Uint32Array
   elementNodes: Uint32Array
   elementAxial: Float32Array
   axialPresent: boolean
@@ -106,12 +106,14 @@ function axialPicture(record: ComponentRecord, scene: OverlayScene): HTMLElement
   return sheet("Along the member", polys, `−${end}`, `+${end}`, "Axial force · tension positive", "ramp")
 }
 
+const UNASSIGNED = 0xffffffff
+
 function tributaryPicture(record: ComponentRecord, scene: OverlayScene): HTMLElement {
   if (record.kind !== "slab") return sentence("Tributary areas are shown on slabs.")
   if (!scene.tributaryPresent) return sentence("Tributary areas are not in this scene.")
   const elevation = record.bind?.elevation_m
   if (typeof elevation !== "number") return sentence("This slab has no elevation, so its tributary area cannot be placed.")
-  const polys: Poly[] = []
+  const groups = new Map<string, { color: string; loops: [number, number][][] }>()
   let cursor = 0
   for (let loop = 0; loop < scene.tributaryCount.length; loop++) {
     const count = scene.tributaryCount[loop] ?? 0
@@ -134,10 +136,21 @@ function tributaryPicture(record: ComponentRecord, scene: OverlayScene): HTMLEle
     } else if (Math.abs(y / pts.length - elevation) > 0.5) {
       continue
     }
-    polys.push({ pts, color: tributaryKindColor(scene.tributaryKind[loop]), stroke: "#ffffff" })
+    const kind = scene.tributaryKind[loop] ?? 0
+    const element = scene.tributaryElement[loop] ?? UNASSIGNED
+    const key = element !== UNASSIGNED ? `${kind}:${element}` : kind === 2 ? "wall" : `open:${loop}`
+    const group = groups.get(key) ?? { color: tributaryKindColor(kind), loops: [] }
+    group.loops.push(pts)
+    groups.set(key, group)
+  }
+  const polys: Poly[] = []
+  for (const group of groups.values()) {
+    for (const ring of group.loops) {
+      polys.push({ pts: ring, color: group.color, stroke: "#ffffff" })
+    }
   }
   if (polys.length === 0) return sentence("No tributary area was recorded on this slab.")
-  return sheet("Plan", polys, "", "", "Column areas are cerulean. Wall areas are iris. Beam areas are gold.", "none")
+  return sheet("Plan", polys, "", "", "Each outline is one assigned area. Column areas are cerulean. Wall areas are iris. Beam areas are gold.", "none")
 }
 
 function footingFill(record: ComponentRecord, scene: OverlayScene, scale: number): HTMLElement {
@@ -171,6 +184,7 @@ function shellSamples(record: ComponentRecord, scene: OverlayScene, valueOf: (tr
   const kinds = record.bind?.shell_kinds ?? (wall ? [1] : [0, 2])
   const frame = wall ? wallFrame(record, scene) : null
   const elevation = record.bind?.elevation_m
+  const owned = wall && scene.shellWall.length > 0 && typeof record.design_index === "number"
   const samples: Sample[] = []
   const triangles = scene.shellFaces.length / 3
   for (let t = 0; t < triangles; t++) {
@@ -180,6 +194,8 @@ function shellSamples(record: ComponentRecord, scene: OverlayScene, valueOf: (tr
     if (!wall) {
       if (typeof elevation !== "number") continue
       if (!ids.every((id) => Math.abs((scene.nodePosition[id * 3 + 1] ?? 0) - elevation) <= 0.5)) continue
+    } else if (owned) {
+      if (scene.shellWall[t] !== record.design_index) continue
     } else if (frame && !frame.keeps(ids)) {
       continue
     }
@@ -334,7 +350,15 @@ function tributaryKindColor(kind: number | undefined): string {
   return "#00aeef"
 }
 
-function sheet(caption: string, polys: Poly[], min: string, max: string, note: string, scaleKind: "ramp" | "stress" | "none"): HTMLElement {
+function sheet(
+  caption: string,
+  polys: Poly[],
+  min: string,
+  max: string,
+  note: string,
+  scaleKind: "ramp" | "stress" | "none",
+  seams: [number, number][][] = [],
+): HTMLElement {
   let minX = Infinity
   let minY = Infinity
   let maxX = -Infinity
@@ -364,6 +388,18 @@ function sheet(caption: string, polys: Poly[], min: string, max: string, note: s
       polygon["vector-effect"] = "non-scaling-stroke"
     }
     svg.append(el("polygon", polygon))
+  }
+  for (const seam of seams) {
+    svg.append(el("polyline", {
+      points: seam.map(([x, y]) => `${x},${y}`).join(" "),
+      fill: "none",
+      stroke: "#ffffff",
+      "stroke-opacity": "0.55",
+      "stroke-width": "1",
+      "stroke-linecap": "round",
+      "stroke-dasharray": "0.22 0.32",
+      "vector-effect": "non-scaling-stroke",
+    }))
   }
   const fig = document.createElement("figure")
   const cap = document.createElement("figcaption")

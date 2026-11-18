@@ -77,6 +77,7 @@ function run_moment_analysis(
     edge_beam_βt::Float64 = 0.0,
     col_I_factor::Float64 = 0.70,  # ACI 318-11 §10.10.4.1
     tc = nothing,  # API parity with DDM (FEA does not emit Eq. 13-7 fallbacks)
+    column_concrete = nothing,  # column stub Ec; slab concrete when nothing
 )
     setup = _moment_analysis_setup(struc, slab, supporting_columns, h, γ_concrete)
     (; l1, l2, ln, span_axis, c1_avg, qD, qL, qu, M0) = setup
@@ -100,11 +101,8 @@ function run_moment_analysis(
         0.0
     end
 
-    # Column concrete modulus (may differ from slab fc)
-    fc_col = _get_column_fc(supporting_columns, fc)
-    wc_pcf = ustrip(pcf, γ_concrete)
-    # ACI 318-11 §8.5.1 (corpus: aci-318-11, page 115): Ec = wc^1.5 · 33 · √f'c.
-    Ecc = Ec(fc_col, wc_pcf)
+    # Column concrete modulus (may differ from the slab's)
+    Ecc = _column_Ec(supporting_columns, column_concrete, fc, γ_concrete)
 
     if verbose
         @debug "═══════════════════════════════════════════════════════════════════"
@@ -131,6 +129,7 @@ function run_moment_analysis(
         edge_beam_βt   = eb_βt,
         edge_beam_l2   = l2,
         edge_beam_c1_avg = c1_avg,
+        q_drop = isnothing(drop_panel) ? 0.0u"Pa" : drop_panel_dead_pressure(drop_panel, γ_concrete),
     )
     model = cache.model
 
@@ -175,8 +174,12 @@ function run_moment_analysis(
 
     fe_equil_err = abs(fe_residual) / max(abs(total_Pz), 1e-6) * 100
 
-    # Diagnostic: compare AreaLoad effective area vs element_data area
-    A_mesh_from_P = abs(total_Pz) / ustrip(u"Pa", qu)
+    # Diagnostic: compare AreaLoad effective area vs element_data area. The
+    # drop patches' extra self-weight is not part of `qu × A`.
+    P_drop = sum(ld.pressure * sum(s.area for s in ld.shells; init = 0.0)
+                 for ld in model.loads
+                 if ld isa Asap.AreaLoad && ld.id === FEA_DROP_LOAD_ID; init = 0.0u"Pa")
+    A_mesh_from_P = (abs(total_Pz) - ustrip(u"Pa", P_drop)) / ustrip(u"Pa", qu)
     A_elem_data   = sum(ed.area for ed in cache.element_data)
     area_mismatch = abs(A_mesh_from_P - A_elem_data) / max(A_elem_data, 1e-6) * 100
 
@@ -280,7 +283,7 @@ function run_moment_analysis(
             # half the pattern demand is not used as a divisor.
             sec_pattern = _efm_pattern_baselines(
                 struc, slab, supporting_columns, h, fc, Ecs, γ_concrete;
-                drop_panel, col_I_factor, ν_concrete,
+                drop_panel, col_I_factor, ν_concrete, column_concrete,
             )
             pon, poff = sec_pattern.primary_on, sec_pattern.primary_off
             M_neg_ext = _fea_pattern_demand(M_neg_ext, pon.M_neg_ext, poff.M_neg_ext)
@@ -291,10 +294,12 @@ function run_moment_analysis(
                     column_moments[i], pon.column_moments[i], poff.column_moments[i])
                 forces.Mub[i] = _fea_pattern_demand(
                     forces.Mub[i], pon.unbalanced_moments[i], poff.unbalanced_moments[i])
-                # Same pattern ratio as the joint moment, so the below-stub
+                # Same pattern ratio as the joint moment, so each stub's
                 # share of the amplified joint stays the shell's share.
-                forces.Mub_below[i] = _fea_pattern_demand(
-                    forces.Mub_below[i], pon.unbalanced_moments[i], poff.unbalanced_moments[i])
+                for stub in (forces.Mub_below, forces.Mub_above)
+                    stub[i] = _fea_pattern_demand(
+                        stub[i], pon.unbalanced_moments[i], poff.unbalanced_moments[i])
+                end
                 forces.Vu[i] = _fea_pattern_demand(
                     forces.Vu[i], pon.column_shears[i], poff.column_shears[i])
             end
@@ -343,10 +348,13 @@ function run_moment_analysis(
     MomentT = typeof(1.0kip * u"ft")
     sec_Mub = Vector{MomentT}(undef, n_cols)
     sec_Mub_below = Vector{MomentT}(undef, n_cols)
+    sec_Mub_above = Vector{MomentT}(undef, n_cols)
     for i in 1:n_cols
         sec_Mub[i] = uconvert(kip * u"ft", abs(sec_ax[1] * forces.My[i] - sec_ax[2] * forces.Mx[i]))
         sec_Mub_below[i] = uconvert(kip * u"ft",
             abs(sec_ax[1] * forces.My_below[i] - sec_ax[2] * forces.Mx_below[i]))
+        sec_Mub_above[i] = uconvert(kip * u"ft",
+            abs(sec_ax[1] * forces.My_above[i] - sec_ax[2] * forces.Mx_above[i]))
     end
     if !isnothing(sec_pattern)
         son, soff = sec_pattern.secondary_on, sec_pattern.secondary_off
@@ -356,8 +364,10 @@ function run_moment_analysis(
         for i in eachindex(sec_Mub)
             sec_Mub[i] = _fea_pattern_demand(
                 sec_Mub[i], son.unbalanced_moments[i], soff.unbalanced_moments[i])
-            sec_Mub_below[i] = _fea_pattern_demand(
-                sec_Mub_below[i], son.unbalanced_moments[i], soff.unbalanced_moments[i])
+            for stub in (sec_Mub_below, sec_Mub_above)
+                stub[i] = _fea_pattern_demand(
+                    stub[i], son.unbalanced_moments[i], soff.unbalanced_moments[i])
+            end
             sec_column_moments[i] = _fea_pattern_demand(
                 sec_column_moments[i], son.column_moments[i], soff.column_moments[i])
         end
@@ -374,7 +384,8 @@ function run_moment_analysis(
         column_moments = sec_column_moments,
         column_shears = forces.Vu,
         unbalanced_moments = sec_Mub,
-        column_design_moments = sec_Mub_below,
+        stub_moments_below = sec_Mub_below,
+        stub_moments_above = sec_Mub_above,
         # Same factored load as the primary strip. Short-wall moments in the
         # transverse direction read it.
         qu = qu,
@@ -400,7 +411,11 @@ function run_moment_analysis(
         pattern_loading = use_pattern,
         M_wall_ext = _max_wall_face_moment(cache, struc, slab, span_axis, M0_u),
         M_wall_int = zero(M0_u),
-        column_design_moments = forces.Mub_below,
+        stub_moments_below = forces.Mub_below,
+        stub_moments_above = forces.Mub_above,
+        # One shell solve serves both directions: walls across either span.
+        wall_transfer = vcat(_fea_wall_transfer(cache, struc, slab, span_axis),
+                             _fea_wall_transfer(cache, struc, slab, sec_span_axis)),
     )
 end
 

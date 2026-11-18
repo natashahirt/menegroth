@@ -270,6 +270,28 @@ function Slab(cell_indices::Vector{Int}, result::AbstractFloorResult, spans::Spa
             drop_panel, design_details, levels, SlabTributaryPolygon[])
 end
 
+"""
+Positional `Slab` from before tributary polygons were stored on the slab.
+
+The column and wall shares stay empty until `compute_column_tributaries!`.
+"""
+function Slab{T}(
+    cell_indices::Vector{Int},
+    result::AbstractFloorResult,
+    floor_type::Symbol,
+    spans::SpanInfo{T},
+    position::Symbol,
+    group_id::Union{UInt64, Nothing},
+    volumes::MaterialVolumes,
+    drop_panel::Union{Nothing, StructuralSizer.DropPanelGeometry},
+    design_details::Union{Nothing, NamedTuple},
+    framing_levels::Vector{FramingLevel{T}},
+) where {T}
+    return Slab{T}(cell_indices, result, floor_type, spans, position, group_id,
+                   volumes, drop_panel, design_details, framing_levels,
+                   SlabTributaryPolygon[])
+end
+
 """Single-cell slab convenience: wraps the cell index in a vector."""
 Slab(cell_idx::Int, result::AbstractFloorResult, spans::SpanInfo; kwargs...) = 
     Slab([cell_idx], result, spans; kwargs...)

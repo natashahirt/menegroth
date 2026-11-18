@@ -89,14 +89,18 @@ function size_beams!(
     # concrete, `SteelShellSpan`s for steel. A separate deflection check on
     # discrete sizing; it never changes the frame-model deflection demand.
     shell_spans = nothing,
-    # Group id → `(section = s, exact = Bool)`. Steel discrete only; see
-    # `_apply_section_floor`. `nothing` leaves every group free.
+    # Group id → `(section = s, exact = Bool)`. Discrete steel, and rectangular
+    # discrete concrete; see `_apply_section_floor`. `nothing` leaves every group free.
     section_floor = nothing,
     # `gid -> Bool`: size only the beam groups it accepts. `nothing` sizes every
     # beam group, one pass per framing level when framing exists
     # (see `_beam_sizing_passes`). Not specialized: each level's predicate is a
     # different closure, and specializing this function on each one recompiles it.
     @nospecialize(group_filter = nothing),
+    # ENGINEERING JUDGMENT. `false` sizes shear as Vu ≤ φVc, with no stirrup
+    # credit. The head-face pass uses it. The ordinary pass leaves it true:
+    # ACI 318-11 §11.1.1 permits Vc + Vs.
+    stirrup_shear::Bool = true,
 )
     dp = (hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters)) ?
          struc.design_parameters : nothing
@@ -174,7 +178,7 @@ function size_beams!(
                             composite_deck_orientation =
                                 own ? nothing : composite_deck_orientation,
                             shell_demands, shell_spans, section_floor,
-                            group_filter = pass.accept)
+                            group_filter = pass.accept, stirrup_shear)
                 # The next pass reads forces from the sections just installed.
                 # The cached unshored split was sampled before those sections.
                 if k < length(passes) || reanalyze
@@ -194,7 +198,8 @@ function size_beams!(
                               composite_concrete, composite_t_slab, composite_anchor,
                               composite_shored, composite_cp_class, composite_slab_type,
                               composite_deck_hr, composite_deck_wr, composite_deck_orientation,
-                              shell_demands, shell_spans, section_floor, group_filter)
+                              shell_demands, shell_spans, section_floor, group_filter,
+                              stirrup_shear)
     _verify_tbeam_flanges(struc, group_filter)
     # A single pass solves inside the sizer, before the solid-head sections
     # exist. The framing path solves through `_reanalyze_after_section_change!`,
@@ -230,18 +235,18 @@ function _size_beams_one!(
     shell_spans = nothing,
     section_floor = nothing,
     @nospecialize(group_filter = nothing),
+    stirrup_shear::Bool = true,
 )
-    section_floor === nothing ||
-        (effective_opts isa StructuralSizer.SteelBeamOptions && strategy == :discrete) ||
-        throw(ArgumentError("section_floor applies to steel beams sized with :discrete only"))
+    section_floor === nothing || _section_floor_supported(effective_opts, strategy) ||
+        throw(ArgumentError(
+            "section_floor applies to discrete steel beams and to rectangular " *
+            "discrete concrete beams only"))
     StructuralSizer.emit!(tc, :sizing, "size_beams!", "", :enter;
                           opts_type=string(typeof(effective_opts)),
                           strategy=string(strategy))
 
-    # NOTE: as of this writing `BuildingStructure` has NO `design_parameters` field
-    # (see building_types/structure.jl), so `hasproperty(...)` is always false and this
-    # collinear-grouping branch is an INERT backstop kept for a future harness-gated
-    # addition of the field.
+    # `BuildingStructure` has no `design_parameters` field, so this branch does not
+    # run. The live call is `_size_beams_columns!`, from `DesignParameters`.
     if hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters) && struc.design_parameters.collinear_grouping
         group_collinear_members!(struc; member_type=:beams)
     end
@@ -307,6 +312,11 @@ function _size_beams_one!(
                           composite_shored, composite_cp_class, composite_slab_type,
                           composite_deck_hr, composite_deck_wr, composite_deck_orientation,
                           shell_demands, shell_spans, section_floor, group_filter)
+    elseif effective_opts isa StructuralSizer.ConcreteBeamOptions && strategy == :discrete
+        _size_beams_impl!(struc, effective_opts, Val(strategy);
+                          resolution, reanalyze, gravity_factor,
+                          member_group_overrides, I_factor, shell_demands,
+                          shell_spans, section_floor, group_filter, stirrup_shear)
     else
         _size_beams_impl!(struc, effective_opts, Val(strategy);
                           resolution, reanalyze, gravity_factor,
@@ -424,6 +434,10 @@ end
 Demands for the beam groups `accept` keeps. `nothing` keeps every beam group.
 `service_deflection = false` skips the service deflection solve; pass it only
 when no deflection limit applies.
+
+On a floor with one-way concrete joists, each group's strength demand is the
+larger of the frame solve and a solve with the joist ends pinned
+([`_pinned_joist_releases`](@ref)). Service deflections are the frame solve's.
 """
 function _beam_group_demands(struc::BuildingStructure, accept; resolution::Int,
                              shell_demands, service_deflection::Bool = true)
@@ -431,6 +445,16 @@ function _beam_group_demands(struc::BuildingStructure, accept; resolution::Int,
         member_group_demands(struc; member_edge_group = BEAM_GROUP_SYMBOLS,
                              resolution = resolution, shell_demands = shell_demands,
                              service_deflection = service_deflection)
+    releases = _pinned_joist_releases(struc)
+    if !isempty(releases)
+        pinned_ids, pinned = _with_pinned_joists(struc, releases) do
+            member_group_demands(struc; member_edge_group = BEAM_GROUP_SYMBOLS,
+                                 resolution = resolution, service_deflection = false)[1:2]
+        end
+        pinned_ids == group_ids || error(
+            "pinned-joist solve returned different beam groups than the frame solve")
+        demands = [_envelope_demand(a, b) for (a, b) in zip(demands, pinned)]
+    end
     accept === nothing &&
         return group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs
     keep = [i for (i, gid) in enumerate(group_ids) if accept(gid)]
@@ -495,7 +519,8 @@ function _size_beams_impl!(
 
     # DEFINITIVE size-time gid gate (Run 4 / Phase B, [P1-2] + [P2-3]). `group_ids`
     # here is the REAL steel-beam group set the sizer actually emits: collinear-MERGED
-    # (`group_collinear_members!` ran in `size_beams!` before this call) AND
+    # (`group_collinear_members!` ran in `_size_beams_columns!` before this call
+    # when `collinear_grouping` is set) AND
     # par_has-FILTERED (`member_group_demands` drops groups with no segment on a
     # :beams edge). Every EFFECTIVE `member_group_overrides` entry MUST target one of
     # these gids — anything else can never be honored on this path and would be
@@ -947,6 +972,18 @@ _section_objective(opts, s) =
     StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
 
 """
+    _section_floor_supported(opts, strategy) -> Bool
+
+`section_floor` is honored for discrete steel beams and for rectangular
+discrete concrete beams. T-beams, NLP, and other materials are not.
+"""
+function _section_floor_supported(opts, strategy)
+    strategy == :discrete || return false
+    opts isa StructuralSizer.SteelBeamOptions && return true
+    return opts isa StructuralSizer.ConcreteBeamOptions && !opts.include_flange
+end
+
+"""
     _apply_section_floor(opts, group_ids, catalog, feasible, floors) -> (catalog, feasible)
 
 Narrow each floored group's candidates. A floor `(section = s, exact = false)`
@@ -957,7 +994,8 @@ objective never replaces a passing `s`. Groups without a floor are unchanged.
 
 The mask only narrows: every candidate still goes through the full checker.
 Groups are sized independently here, so `n_max_sections` and multi-material
-catalogs are refused.
+catalogs are refused. Concrete T-beams are refused: their catalog is a web
+plus a flange, not this rectangular list.
 """
 function _apply_section_floor(opts::StructuralSizer.SteelBeamOptions, group_ids,
                               catalog, feasible, floors)
@@ -970,6 +1008,27 @@ function _apply_section_floor(opts::StructuralSizer.SteelBeamOptions, group_ids,
             StructuralSizer.steel_column_catalog(opts.section_type, opts.catalog) :
             opts.custom_catalog) :
         catalog
+    return _narrow_to_section_floor(opts, group_ids, cat, feasible, floors)
+end
+
+function _apply_section_floor(opts::StructuralSizer.ConcreteBeamOptions, group_ids,
+                              catalog, feasible, floors)
+    opts.n_max_sections == 0 || throw(ArgumentError(
+        "section_floor needs n_max_sections = 0: a shared-section cap couples the groups"))
+    opts.materials === nothing || throw(ArgumentError(
+        "section_floor needs a single-material catalog"))
+    opts.include_flange && throw(ArgumentError(
+        "section_floor does not apply to T-beam sizing"))
+    cat = catalog === nothing ?
+        (opts.custom_catalog === nothing ?
+            StructuralSizer.rc_beam_catalog(opts.catalog) :
+            opts.custom_catalog) :
+        catalog
+    return _narrow_to_section_floor(opts, group_ids, cat, feasible, floors)
+end
+
+"Keep each floor section and, unless the floor is exact, every strictly heavier one."
+function _narrow_to_section_floor(opts, group_ids, cat, feasible, floors)
     obj = [_section_objective(opts, s) for s in cat]
     out = feasible === nothing ? [collect(eachindex(cat)) for _ in group_ids] :
                                  [copy(f) for f in feasible]
@@ -983,6 +1042,58 @@ function _apply_section_floor(opts::StructuralSizer.SteelBeamOptions, group_ids,
         end
     end
     return cat, out
+end
+
+"""
+Size rectangular concrete beams. With `section_floor`, each group keeps its
+floor or a strictly heavier section. A named catalog grows one tier when
+nothing in that set passes; a feasibility mask would otherwise stop that
+growth. Without a floor, a row-F frame floor is applied exactly as before.
+"""
+function _rectangular_rc_beam_result(struc, opts, group_ids, Mu, Vu, Mu_neg, Nu,
+                                    geoms, shell_spans, section_floor)
+    has_frame = any(gid -> haskey(struc.frame_section_floors, gid), group_ids)
+    if has_frame
+        (opts.materials === nothing && opts.n_max_sections == 0) ||
+            _refuse_frame_floors(struc, group_ids, "this concrete beam sizing")
+    end
+    objective_of = s -> StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
+    if section_floor === nothing
+        floor_kw = (;)
+        if has_frame
+            cat = isnothing(opts.custom_catalog) ?
+                StructuralSizer.rc_beam_catalog(opts.catalog) : opts.custom_catalog
+            floor_kw = (; catalog = cat,
+                        feasible = _frame_floor_mask(struc, group_ids, cat, objective_of))
+        end
+        return StructuralSizer.size_beams(Mu, Vu, geoms, opts; Mu_neg = Mu_neg, Nu = Nu,
+                                          shell_spans = shell_spans, floor_kw...)
+    end
+
+    tier = (opts.catalog_constraint === :soft && opts.custom_catalog === nothing) ?
+        opts.catalog : nothing
+    cat = opts.custom_catalog === nothing ?
+        StructuralSizer.rc_beam_catalog(opts.catalog) : opts.custom_catalog
+    while true
+        frame_feasible = has_frame ?
+            _frame_floor_mask(struc, group_ids, cat, objective_of) : nothing
+        catalog_kw, feasible_kw = _apply_section_floor(opts, group_ids, cat,
+                                                       frame_feasible, section_floor)
+        try
+            return StructuralSizer.size_beams(Mu, Vu, geoms, opts; Mu_neg = Mu_neg, Nu = Nu,
+                                              shell_spans = shell_spans,
+                                              catalog = catalog_kw, feasible = feasible_kw)
+        catch e
+            grown = tier isa Symbol ? StructuralSizer.grow_rc_beam_catalog(cat, tier) : nothing
+            (grown !== nothing && e isa ArgumentError &&
+                startswith(e.msg, "No feasible sections for group")) || rethrow()
+            cat, nxt = grown
+            depth_in = round(Int, ustrip(u"inch", maximum(s -> s.h, cat)))
+            @warn "RC beam sizing: no section in the :$tier catalog passes the section floor; " *
+                  "retrying with :$nxt added (depths to $(depth_in) in)." reason = e.msg
+            tier = nxt
+        end
+    end
 end
 
 """
@@ -1384,7 +1495,10 @@ function _size_beams_impl!(
     I_factor::Real = 0.35,
     shell_demands = nothing,
     shell_spans = nothing,
+    # Group id → `(section, exact)`. Rectangular beams only; see `_apply_section_floor`.
+    section_floor = nothing,
     @nospecialize(group_filter = nothing),
+    stirrup_shear::Bool = true,
 )
     # DEFENSE-IN-DEPTH layer-symmetric guard (Phase B). This non-steel overload
     # ACCEPTS `member_group_overrides` for uniform `size_beams!` dispatch but does NOT
@@ -1440,6 +1554,8 @@ function _size_beams_impl!(
 
     # ── T-beam path (include_flange = true) ──
     if opts.include_flange
+        section_floor === nothing || throw(ArgumentError(
+            "section_floor does not apply to T-beam sizing"))
         isempty(struc.slabs) && error(
             "include_flange=true but no slabs found. Size slabs first.")
         _require_known_rib_form(opts)
@@ -1472,6 +1588,8 @@ function _size_beams_impl!(
                       "($(floor_hf)). A bay whose slab is thinner is not " *
                       "thickened by this pass." maxlog = 1
             end
+            # Group id → (demand index, joist spacing the checker was given).
+            checked_as = Dict{UInt64, Tuple{Int, Any}}()
             for idxs in batches
                 ribs = all(specs[i].joist_spacing !== nothing for i in idxs)
                 hf = ribs && floor_hf !== nothing ? floor_hf :
@@ -1497,16 +1615,30 @@ function _size_beams_impl!(
                     Nu               = Nu[idxs],
                     sustained_live_fraction = opts.sustained_live_fraction,
                     shell_spans      = spans,
+                    stirrup_shear    = stirrup_shear,
                 )
                 _apply_beam_results!(struc, result, group_ids[idxs], member_array,
                                      edge_ids_in_group, opts.material; I_factor=I_factor,
                                      rebar=opts.rebar_material)
+                for i in idxs
+                    checked_as[group_ids[i]] = (i, result.joist_spacing)
+                end
+            end
+            recheck = function (mi, sec)
+                i, js = checked_as[group_id(member_array[mi])]
+                return StructuralSizer.check_tbeam_section(
+                    sec, Mu[i], Vu[i], geoms[i], opts;
+                    Mu_neg = Mu_neg[i], Nu = Nu[i], joist_spacing = js,
+                    sustained_live_fraction = opts.sustained_live_fraction,
+                    shell_span = grouped_spans === nothing ? nothing : grouped_spans[i],
+                    stirrup_shear = stirrup_shear)
             end
             _share_collinear_rib_bars!(struc, group_ids, specs, opts;
                                        uniform = opts.uniform_geometry,
                                        I_factor = I_factor,
                                        edge_ids = edge_ids_in_group,
-                                       rebar = opts.rebar_material)
+                                       rebar = opts.rebar_material,
+                                       recheck = recheck)
             missing = findall(isnothing, specs)
             if !isempty(missing)
                 spans = grouped_spans === nothing ? nothing : grouped_spans[missing]
@@ -1531,17 +1663,8 @@ function _size_beams_impl!(
     end
 
     # ── Rectangular beam path (default) ──
-    floor_kw = (;)
-    if any(gid -> haskey(struc.frame_section_floors, gid), group_ids)
-        (opts.materials === nothing && opts.n_max_sections == 0) ||
-            _refuse_frame_floors(struc, group_ids, "this concrete beam sizing")
-        cat = isnothing(opts.custom_catalog) ?
-            StructuralSizer.rc_beam_catalog(opts.catalog) : opts.custom_catalog
-        obj = s -> StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
-        floor_kw = (; catalog = cat, feasible = _frame_floor_mask(struc, group_ids, cat, obj))
-    end
-    result = StructuralSizer.size_beams(Mu, Vu, geoms, opts; Mu_neg=Mu_neg, Nu=Nu,
-                                        shell_spans=grouped_spans, floor_kw...)
+    result = _rectangular_rc_beam_result(struc, opts, group_ids, Mu, Vu, Mu_neg, Nu,
+                                         geoms, grouped_spans, section_floor)
 
     _apply_beam_results!(struc, result, group_ids, member_array,
                          edge_ids_in_group, opts.material; I_factor=I_factor,
@@ -1967,17 +2090,34 @@ Size the batch from `opts.catalog_size_tbeam`. A demand the ordinary catalog
 cannot carry is sized again from the heavy catalog (`large_rc_tbeams`, webs
 to 30 in and depths to 48 in). A heavy catalog that also has no section
 still throws.
+
+The result carries `joist_spacing`: the spacing the checker was given, which
+is `nothing` once §8.13.4 sized the batch as beams.
 """
+_no_feasible_section(err) =
+    err isa ArgumentError && occursin("No feasible sections", err.msg)
+
 function _size_tbeams_escalating(Mu, Vu, geoms, opts; kwargs...)
+    kw = (; kwargs...)
+    used = (; joist_spacing = get(kw, :joist_spacing, nothing))
     cat = opts.catalog_size_tbeam
     try
-        return StructuralSizer.size_tbeams(Mu, Vu, geoms, opts;
-                                           catalog_size = cat, kwargs...)
+        return merge(StructuralSizer.size_tbeams(Mu, Vu, geoms, opts;
+                                                 catalog_size = cat, kw...), used)
     catch err
-        (cat === :large || !(err isa ArgumentError) ||
-            !occursin("No feasible sections", err.msg)) && rethrow()
+        _no_feasible_section(err) || rethrow()
+        # The joist catalog keeps only ribs that meet ACI 318-11 §8.13.2 and
+        # §8.13.3 (corpus: aci-318-11, page 120). None of them can carry this
+        # demand, so §8.13.4 sizes the member as a beam and §8.13.8 does not apply.
+        if get(kw, :joist_spacing, nothing) !== nothing
+            @warn "No joist rib meeting ACI 318-11 §8.13.2 and §8.13.3 can carry " *
+                  "this demand. §8.13.4 sizes it as a beam, and §8.13.8 does not apply." maxlog = 4
+            return _size_tbeams_escalating(Mu, Vu, geoms, opts;
+                                           merge(kw, (joist_spacing = nothing,))...)
+        end
+        cat === :large && rethrow()
         @warn "RC T-beam demand exceeds the $cat catalog; sizing from the heavy catalog" maxlog = 4
-        return StructuralSizer.size_tbeams(Mu, Vu, geoms, opts;
-                                           catalog_size = :large, kwargs...)
+        return merge(StructuralSizer.size_tbeams(Mu, Vu, geoms, opts;
+                                                 catalog_size = :large, kw...), used)
     end
 end

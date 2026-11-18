@@ -7,12 +7,12 @@ title: A moment under 2% of direct shear names no punching face
 node_label: 2% punching face band
 tags: waffle,solid-head,punching,aci-318
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-7cc6f39a
 created_at: '2026-11-14T15:19:19.070249+00:00'
-updated_at: '2026-11-14T15:19:19.070249+00:00'
+updated_at: '2026-11-14T16:37:57.832108+00:00'
 has_child_rationale: Confirmed implementation of the face band under the edge-beam
   and solid-head phase
 ---

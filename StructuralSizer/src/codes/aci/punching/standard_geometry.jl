@@ -131,6 +131,46 @@ function eccentricity_to_critical_centroid(b_section::Length, c_col::Length, cAB
 end
 
 """
+    shifted_moment_stress(γv, M, Vu, e, cAB, cCD, Jc) -> Pressure
+
+Peak eccentric-shear stress of one moment about an edge or corner critical
+section, after the moment is moved to the section centroid.
+
+ACI 318-11 R11.11.7.2 (corpus: aci-318-11, page 210) takes `Mu` at the
+centroidal axis and gives both faces:
+
+    vu(AB) = Vu/Ac + γv Mu cAB / Jc,    vu(CD) = Vu/Ac − γv Mu cCD / Jc
+
+The centroid moment is `Mc = |M| − Vu·e`, which assumes the gravity sense of
+the unbalanced moment at a slab edge (the reaction eccentricity opposes it;
+see `eccentricity_to_critical_centroid`). When `Vu·e > |M|`, `Mc` is negative
+and face CD carries the larger stress, `γv |Mc| cCD / Jc`. This returns the
+moment term of the larger face; the caller adds `Vu/Ac`.
+
+An axis with no unbalanced moment contributes nothing: §11.11.7.1 (page 209)
+applies eccentric shear where moment is transferred between slab and column.
+"""
+function shifted_moment_stress(γv, M, Vu, e, cAB, cCD, Jc)
+    abs(to_kipft(M)) < 1e-10 && return 0.0u"psi"
+    Mc = abs(M) - Vu * e
+    lever = Mc >= zero(Mc) ? Mc * cAB : -Mc * cCD
+    return uconvert(u"psi", γv * lever / Jc)
+end
+
+"""
+    moment_names_a_face(moment_psi, direct_psi) -> Bool
+
+`direct_psi` is `Vu/(b₀ d)`. ENGINEERING JUDGMENT: a moment stress under 2% of
+that direct shear does not name a face. The same 2% as the rib band in
+`_one_way_growth_direction`. Not an ACI factor. ACI 318-11 R11.11.7.2
+(corpus: aci-318-11, page 210) still places the peak, and the reported `vu`
+still adds the moment.
+"""
+function moment_names_a_face(moment_psi::Real, direct_psi::Real)
+    moment_psi >= 0.02 * direct_psi
+end
+
+"""
     punching_perimeter(c1, c2, d; shape=:rectangular)
 
 Critical perimeter b₀ for an interior column.

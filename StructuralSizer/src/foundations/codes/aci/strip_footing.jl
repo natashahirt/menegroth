@@ -12,7 +12,7 @@
 #   4. One-way (beam) shear at critical sections
 #   5. Longitudinal reinforcement (top + bottom)
 #   6. Transverse reinforcement under column bands
-#   7. Development length check (ACI 25.4.2)
+#   7. Development length check (ACI 318-11 §12.2 / §15.6.3)
 #   8. Column-footing bearing & dowels at each column (ACI 22.8)
 #
 # Fully Unitful throughout — uses shared punching_check() with unbalanced moments.
@@ -692,6 +692,8 @@ function design_footing(::StripFooting,
         Bn_gov,
         sqA_gov,
         :rigid,
+        FoundationUtilizations(; bearing = Float64(util_bearing),
+                               punching = Float64(util_punch)),
     )
     StructuralSizer.emit!(tc, :checker, "design_footing_strip_aci", "", :exit;
                           B_m=Float64(ustrip(u"m", result.B)),

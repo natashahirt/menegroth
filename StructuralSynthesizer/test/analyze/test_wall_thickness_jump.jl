@@ -115,7 +115,8 @@ function _jump_result(checks; drift=SeismicStoryDriftCheck[],
         StructuralSynthesizer.InteractiveStoryShearCheck[],
         StructuralSynthesizer.FrameMemberCheck[], false, String[], false,
         boundary, Dict{Int, Vector{StructuralSynthesizer.SpecialBoundaryDecision}}(),
-        Dict{Int, StructuralSynthesizer.BoundaryEndReinforcement}())
+        Dict{Int, StructuralSynthesizer.BoundaryEndReinforcement}(),
+        StructuralSynthesizer.GravityInducedCheck[])
 end
 
 function _jump_record(check, ratio, demand, capacity; passed=false, index=1)
@@ -438,9 +439,10 @@ end
     north = _jump_pier(; thickness=0.20, y1=6.0, y2=6.0, x2=5.0)
     walls = [south, north]
     inch = ustrip(u"m", 1.0u"inch")
-    function propose(boundary; grouping=:all)
+    function propose(boundary; grouping=:all, constraint=:soft)
         result = _jump_result(Dict{Int, Vector{WallCheckRecord}}(); boundary=boundary)
-        return propose_wall_thicknesses(walls, WallThicknessTrial[], result; grouping)
+        return propose_wall_thicknesses(walls, WallThicknessTrial[], result;
+                                        grouping, constraint)
     end
     quiet = propose(Dict(1 => _shortfall_decision(nothing)))
     @test ustrip.(u"m", quiet) ≈ [0.20, 0.20] atol=1e-9
@@ -461,7 +463,15 @@ end
     spread = propose(Dict(2 => _shortfall_decision(0.05)); grouping=:pier)
     @test ustrip(u"m", spread[1]) ≈ 0.20 atol=1e-9
     @test ustrip(u"m", spread[2]) ≈ expect atol=1e-9
-    capped = propose(Dict(1 => _shortfall_decision(2.0)))
-    @test ustrip(u"m", capped[1]) ≈ ustrip(u"m", StructuralSynthesizer.WALL_THICKNESS_HARD_MAX) atol=1e-9
-    @test ustrip(u"m", capped[2]) ≈ 0.20 atol=1e-9
+    # 40 in is past the 36 in catalog. Soft raises the limit; hard errors.
+    gap40 = ustrip(u"m", 40.0u"inch") - 0.20
+    grown = @test_logs (:warn, r"raising the limit to 48 in") match_mode=:any begin
+        propose(Dict(1 => _shortfall_decision(gap40)))
+    end
+    @test ustrip(u"m", grown[1]) ≈ ustrip(u"m", 40.0u"inch") atol=1e-9
+    @test ustrip(u"m", grown[2]) ≈ 0.20 atol=1e-9
+    @test_throws ArgumentError propose(Dict(1 => _shortfall_decision(gap40));
+                                       constraint=:hard)
+    # Past the 72 in top, soft errors too.
+    @test_throws ArgumentError propose(Dict(1 => _shortfall_decision(2.0)))
 end

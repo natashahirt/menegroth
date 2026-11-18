@@ -123,23 +123,24 @@ const SS = StructuralSizer
     # =========================================================================
     # 5. Face-of-Support Moment Reduction (ACI 8.11.6.1)
     # =========================================================================
-    @testset "Face-of-Support Moment Reduction (ACI 8.11.6.1)" begin
-        # StructurePoint reference: M_cl = 83.91 kip-ft, V = 26.39 kip, c = 16"
-        # M_face = 83.91 - 26.39 × (16/12/2) = 83.91 - 17.59 = 66.32 kip-ft
-        M_cl = 83.91kip * u"ft"
-        V = 26.39kip
-        c = 16.0u"inch"
+    @testset "Face-of-Support Moments (ACI 318-11 §13.7.7.1)" begin
         l1 = 18.0u"ft"
+        @test efm_face_offset(16.0u"inch", l1) == 8.0u"inch"
+        # Not farther than 0.175 l1 from the column center
+        @test efm_face_offset(8.0u"ft", l1) ≈ 0.175 * l1
 
-        M_face = face_of_support_moment(M_cl, V, c, l1)
-        @test ustrip(kip * u"ft", M_face) ≈ 66.32 atol=1.5
+        # Symmetric span: V = w l1/2 at each end, face moment from statics
+        w = 2.0kip / u"ft"
+        M = 60.0kip * u"ft"
+        x = 1.0u"ft"
+        left, right = span_face_moments(M, M, w, l1, x, x)
+        expected = 60.0 - 18.0 * 1.0 + 2.0 * 1.0^2 / 2
+        @test ustrip(kip * u"ft", left) ≈ expected
+        @test ustrip(kip * u"ft", right) ≈ expected
 
-        # Large column: should be limited by 0.175×l1
-        c_large = 8.0u"ft"  # huge column
-        M_face_large = face_of_support_moment(M_cl, V, c_large, l1)
-        # 0.175 × 18 = 3.15 ft limit → M_face = 83.91 - 26.39 × 3.15 = 0.78 kip-ft
-        # But d_face = 4.0 ft > 3.15 ft, so limited to 3.15 ft
-        @test ustrip(kip * u"ft", M_face_large) ≈ 83.91 - 26.39 * 3.15 atol=1.0
+        # A face in the sagging region carries no negative moment
+        left0, _ = span_face_moments(1.0kip * u"ft", M, w, l1, 3.0u"ft", x)
+        @test left0 == 0.0kip * u"ft"
     end
 
     # =========================================================================
@@ -192,6 +193,30 @@ const SS = StructuralSizer
 
         check_fail = SS.check_integrity_reinforcement(1.0u"inch^2", integrity.As_integrity)
         @test check_fail.ok == false
+    end
+
+    # ACI 318-11 §13.3.8.5 (corpus: aci-318-11, page 247): at least two
+    # column-strip bottom bars in each direction; prescriptive, no force.
+    @testset "Integrity bottom bars — §13.3.8.5 count, both directions" begin
+        one_bar = SS.StripReinforcement(:pos, 0.0u"kN*m", 0.0u"m^2", 0.0u"m^2",
+                                        uconvert(u"m^2", 0.31u"inch^2"), 5,
+                                        uconvert(u"m", 60.0u"inch"), 1, true)
+        three = SS.StripReinforcement(:pos, 0.0u"kN*m", 0.0u"m^2", 0.0u"m^2",
+                                      uconvert(u"m^2", 0.93u"inch^2"), 5,
+                                      uconvert(u"m", 20.0u"inch"), 3, true)
+        @test SS.integrity_bottom_bars(three, three).ok
+        @test SS.integrity_bottom_bars(three, three).secondary_verified
+        @test !SS.integrity_bottom_bars(three, one_bar).ok
+        r = SS.integrity_bottom_bars(three, nothing)
+        # Bars are required in each direction: an undesigned direction fails.
+        @test !r.ok && !r.secondary_verified
+
+        rd = (column_strip_width = 60.0u"inch",
+              column_strip_reinf = SS.StripReinforcement[one_bar])
+        @test SS.integrity_bottom_bars!(rd, 8.0u"inch")
+        @test rd.column_strip_reinf[1].n_bars >= 2
+        @test !SS.integrity_bottom_bars!(rd, 8.0u"inch")
+        @test SS.design_integrity_check(rd, rd).ok
     end
 
     # =========================================================================
@@ -382,26 +407,56 @@ const SS = StructuralSizer
     # =========================================================================
     # 13. Face-of-support with per-column c1
     # =========================================================================
-    @testset "Face-of-support per-column c1 (conservative)" begin
-        M_cl = 100.0kip * u"ft"
-        V = 30.0kip
+    @testset "Face-of-support uses each support's own shear" begin
+        # End span: the exterior end carries less shear than the interior
+        # end, so the same column size reduces it less.
         l1 = 20.0u"ft"
+        w = 3.0kip / u"ft"
+        M_ext = 40.0kip * u"ft"
+        M_int = 120.0kip * u"ft"
+        x = efm_face_offset(24.0u"inch", l1)
+        ext_face, int_face = span_face_moments(M_ext, M_int, w, l1, x, x)
+        V_ext = 30.0 - 4.0
+        V_int = 30.0 + 4.0
+        @test ustrip(kip * u"ft", ext_face) ≈ 40.0 - V_ext * 1.0 + 3.0 / 2
+        @test ustrip(kip * u"ft", int_face) ≈ 120.0 - V_int * 1.0 + 3.0 / 2
+    end
 
-        # Small column: less reduction
-        c_small = 12.0u"inch"
-        M_face_small = face_of_support_moment(M_cl, V, c_small, l1)
+    # §13.6.4.1 / §13.6.4.2 are per support along the span (page 255).
+    @testset "Strip moment bins follow continuity along the span" begin
+        x = (1.0, 0.0)
+        y = (0.0, 1.0)
+        int = (position = :interior,)
+        cor = (position = :corner, boundary_edge_dirs = [(1.0, 0.0), (0.0, 1.0)])
+        edge_along_x = (position = :edge, boundary_edge_dirs = [(1.0, 0.0)])
+        edge_bare = (position = :edge,)
+        edge_skew = (position = :edge, boundary_edge_dirs = [(1.0, 1.0)])
+        @test SS._negative_moment_bins(int, x) == (false, true)
+        @test SS._negative_moment_bins(cor, x) == (true, false)
+        # Span along the free edge: slab continues past the column.
+        @test SS._negative_moment_bins(edge_along_x, x) == (false, true)
+        # Span perpendicular to the free edge: the slab ends there.
+        @test SS._negative_moment_bins(edge_along_x, y) == (true, false)
+        @test SS._negative_moment_bins(edge_bare, x) == (true, true)
+        @test SS._negative_moment_bins(edge_skew, x) == (true, true)
+        @test SS._negative_moment_bins(edge_bare, nothing) == (true, false)
 
-        # Large column: more reduction
-        c_large = 24.0u"inch"
-        M_face_large = face_of_support_moment(M_cl, V, c_large, l1)
-
-        # Smaller column gives less reduction → higher design moment (conservative)
-        @test ustrip(kip * u"ft", M_face_small) > ustrip(kip * u"ft", M_face_large)
-
-        # Using minimum c1 among columns gives the most conservative result
-        c_min = min(c_small, c_large)
-        M_face_min = face_of_support_moment(M_cl, V, c_min, l1)
-        @test M_face_min ≈ M_face_small  # min c1 = c_small → same result
+        # A large edge-column moment with the span along the edge lands in
+        # the interior strip at the §13.6.4.1 fraction.
+        mr = (l1 = 20.0u"ft", l2 = 20.0u"ft", M0 = 100.0u"kip*ft", M_pos = 30.0u"kip*ft",
+              qu = 200.0u"psf",
+              column_moments = [40.0u"kip*ft", 90.0u"kip*ft"])
+        cols = [(position = :interior, c1 = 16u"inch", c2 = 16u"inch"),
+                (position = :edge, c1 = 16u"inch", c2 = 16u"inch",
+                 boundary_edge_dirs = [(1.0, 0.0)])]
+        along = SS.design_strip_reinforcement(mr, cols, 8u"inch", 6.75u"inch", fc, fy,
+                                              0.75u"inch"; span_axis = x)
+        across = SS.design_strip_reinforcement(mr, cols, 8u"inch", 6.75u"inch", fc, fy,
+                                               0.75u"inch"; span_axis = y)
+        Mu_of(r, loc) = only(s.Mu for s in r.column_strip_reinf if s.location === loc)
+        @test Mu_of(along, :int_neg) ≈ 0.75 * 90.0u"kip*ft"
+        @test Mu_of(across, :int_neg) ≈ 0.75 * 40.0u"kip*ft"
+        @test Mu_of(across, :ext_neg) ≈ SS.aci_col_strip_ext_neg_fraction(0.0) * 90.0u"kip*ft"
     end
 end
 

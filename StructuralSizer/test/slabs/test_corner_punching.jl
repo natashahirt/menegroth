@@ -12,6 +12,8 @@
 #   γv  = 1 − γf                                    Eq. (11-37), page 209
 #   vu  = Vu/(b0 d) + γv Mux,adj c_x / Jc_x
 #                       + γv Muy,adj c_y / Jc_y     (§11.11.7.2, page 210)
+#   M_adj = |M| − Vu·e at the centroid; when negative the moment is
+#   reversed and face CD governs with lever b − c (R11.11.7.2, page 210).
 #
 # This file also checks that `check_punching_for_column` matches
 # `punching_check` at a corner (including biaxial Muy), not Jc_edge/2.
@@ -23,6 +25,34 @@ using Asap
 using StructuralSizer
 
 const SS = StructuralSizer
+
+# Moment term at the larger face: AB (lever cAB) for a positive centroid
+# moment, CD (lever b − cAB) when the shift reverses it.
+function _face_term(γv, M, Vu, e, cAB, b, Jc)
+    Mc = abs(M) - Vu * e
+    return Mc >= zero(Mc) ? γv * Mc * cAB / Jc : γv * (-Mc) * (b - cAB) / Jc
+end
+
+# Edge hand calc (psi): `M_par` about the axis parallel to the free edge,
+# shifted to the 3-sided centroid; `M_oth` about the symmetry axis.
+#   b1 = c1 + d/2 (perp to edge), b2 = c2 + d, cAB = b1²/(2b1 + b2)
+#   vu = Vu/(b0 d) + γv(b1,b2)·(|M_par| − Vu·e)·cAB/Jc
+#                  + γv(b2,b1)·|M_oth|·(b2/2)/Jc⊥
+#   Jc⊥ = d b2³/12 + b2 d³/12 + 2 b1 d (b2/2)²
+function _edge_vu_oracle(Vu, M_par, M_oth, d, c1, c2)
+    b1 = c1 + d / 2
+    b2 = c2 + d
+    b0 = 2b1 + b2
+    cAB = b1^2 / (2b1 + b2)
+    e = SS.eccentricity_to_critical_centroid(b1, c1, cAB)
+    γv   = 1 - 1 / (1 + (2 / 3) * sqrt(b1 / b2))
+    γv_p = 1 - 1 / (1 + (2 / 3) * sqrt(b2 / b1))
+    Jc   = SS.polar_moment_Jc_edge(b1, b2, d, cAB)
+    Jc_p = d * b2^3 / 12 + b2 * d^3 / 12 + 2 * b1 * d * (b2 / 2)^2
+    v_par = abs(ustrip(u"kip*ft", M_par)) < 1e-10 ? 0.0u"psi" :
+            uconvert(u"psi", _face_term(γv, M_par, Vu, e, cAB, b1, Jc))
+    return ustrip(u"psi", Vu / (b0 * d) + v_par + γv_p * abs(M_oth) * (b2 / 2) / Jc_p)
+end
 
 @testset "Corner punching — slab / shared-API parity" begin
     c1 = 16.0u"inch"
@@ -51,11 +81,13 @@ const SS = StructuralSizer
     # e = (b − cAB) − c/2. cAB is from the inner critical-section face,
     # which sits d/2 outside the column face (b = c + d/2).
     # ACI 318-11 R11.11.7.2 (page 210); spSlab exterior column page 42.
-    Mux_adj = max(abs(Mux) - Vu * ((b1 - cAB_x) - c1 / 2), zero(Mux))
-    Muy_adj = max(abs(Muy) - Vu * ((b2 - cAB_y) - c2 / 2), zero(Muy))
+    # Here Vu·e_y = 20.5 kip·ft > Muy = 20: the y moment reverses (face CD).
+    e_x = (b1 - cAB_x) - c1 / 2
+    e_y = (b2 - cAB_y) - c2 / 2
+    @test Vu * e_y > Muy
     vu_oracle = uconvert(u"psi", Vu / (b0 * d)) +
-                uconvert(u"psi", γv_x * Mux_adj * cAB_x / Jc_x) +
-                uconvert(u"psi", γv_y * Muy_adj * cAB_y / Jc_y)
+                uconvert(u"psi", _face_term(γv_x, Mux, Vu, e_x, cAB_x, b1, Jc_x)) +
+                uconvert(u"psi", _face_term(γv_y, Muy, Vu, e_y, cAB_y, b2, Jc_y))
 
     r_api = SS.punching_check(Vu, Mux, Muy, d, fc, c1, c2; position = :corner)
     r_slab = SS.check_punching_for_column(col, Vu, Mux, d, h, fc; Muy = Muy)
@@ -101,9 +133,20 @@ end
     b0 = 2 * b1 + b2
     vu_oracle = uconvert(u"psi", Vu / (b0 * d)) +
                 uconvert(u"psi", γv * M_unb * cAB / Jc)
-    r = SS.punching_check(Vu, M_cl, zero(M_cl), d, fc, c1, c2; position = :edge)
+    # The slab kernel knows the moment is about the edge-parallel axis: free
+    # edge along global y, span along x.
+    h = 7.0u"inch"
+    col = (position = :edge, c1 = c1, c2 = c2, shape = :rectangular,
+           boundary_edge_dirs = [(0.0, 1.0)], θ = 0.0)
+    r = SS.check_punching_for_column(col, Vu, M_cl, d, h, fc)
     @test ustrip(u"psi", r.vu) ≈ ustrip(u"psi", vu_oracle) rtol=1e-9
     @test ustrip(u"psi", r.vu) ≈ 137.20 atol=0.5
+    # The shared API does not take the axis from the labels, so it also
+    # tries the moment about the symmetry axis and is never lower.
+    r_api = SS.punching_check(Vu, M_cl, zero(M_cl), d, fc, c1, c2; position = :edge)
+    @test ustrip(u"psi", r_api.vu) ≈ max(_edge_vu_oracle(Vu, M_cl, zero(M_cl), d, c1, c2),
+                                         _edge_vu_oracle(Vu, zero(M_cl), M_cl, d, c1, c2)) rtol=1e-9
+    @test ustrip(u"psi", r_api.vu) >= ustrip(u"psi", r.vu) - 1e-9
 end
 
 @testset "Corner punching — production Muy (20×30 panel, governing 130 axis)" begin
@@ -194,11 +237,13 @@ end
 # =============================================================================
 #
 # Column on the 20-ft free edge: interior in the primary frame
-# (Mux = Eq. 13-7, O(10) kip-ft), exterior in the secondary
-# (Muy = 0.3 M0_y ≈ 130 kip-ft).  punching_check(; position=:edge)
-# takes max(|Mux|, |Muy|).  The slab kernel must not be weaker.
+# (Mux = Eq. 13-7, O(10) kip-ft, spanning along the edge), exterior in the
+# secondary (Muy = 0.3 M0_y ≈ 130 kip-ft, spanning perpendicular to it).
+# Both moments are superposed (ENGINEERING JUDGMENT; §11.11.7.1 is written
+# for one moment). With no stored edge direction the slab kernel checks
+# both assignments and keeps the worse.
 
-@testset "Edge punching — 20×30 panel applies Muy (max |Mux|, |Muy|)" begin
+@testset "Edge punching — 20×30 panel superposes Mux and Muy" begin
     l1 = 20.0u"ft"          # along free edge (interior in this frame)
     l2 = 30.0u"ft"          # perpendicular to free edge (exterior)
     qu = 0.193u"kip/ft^2"
@@ -228,15 +273,21 @@ end
     r_y   = SS.check_punching_for_column(col, Vu, zero(Mux), d, h, fc; Muy = Muy)
     r_api = SS.punching_check(Vu, Mux, Muy, d, fc, c1, c2; position = :edge)
 
-    @test ustrip(u"psi", r_new.vu) ≈ ustrip(u"psi", r_api.vu) rtol=1e-9
-    # Discarded-Muy path: vu(Mux, Muy) collapses to vu(Mux, 0) and these fail.
-    @test ustrip(u"psi", r_new.vu) > ustrip(u"psi", r_old.vu)
-    @test ustrip(u"psi", r_y.vu) > ustrip(u"psi", r_old.vu)
-    # :edge takes max(|Mux|, |Muy|) = |Muy|, so Muy-only matches both-axes.
-    @test ustrip(u"psi", r_new.vu) ≈ ustrip(u"psi", r_y.vu) rtol=1e-9
-    # Omitted Muy stays uniaxial on Mux (parity with punching_check Mux-only).
-    r_api_x = SS.punching_check(Vu, Mux, zero(Muy), d, fc, c1, c2; position = :edge)
-    @test ustrip(u"psi", r_old.vu) ≈ ustrip(u"psi", r_api_x.vu) rtol=1e-9
+    psi(r) = ustrip(u"psi", r.vu)
+    # Physical labels: Muy is about the axis parallel to the edge.
+    vu_true  = _edge_vu_oracle(Vu, Muy, Mux, d, c1, c2)
+    vu_swap  = _edge_vu_oracle(Vu, Mux, Muy, d, c1, c2)
+    # No edge direction: the worse of both assignments.
+    @test psi(r_new) ≈ max(vu_true, vu_swap) rtol=1e-9
+    @test psi(r_new) >= vu_true - 1e-9
+    # The shared API also takes the worse assignment.
+    @test psi(r_api) ≈ max(vu_true, vu_swap) rtol=1e-9
+    # Both moments add: dropping either lowers vu.
+    @test psi(r_new) > psi(r_old)
+    @test psi(r_new) > psi(r_y)
+    @test psi(r_y) > psi(r_old)
+    @test psi(r_old) ≈ max(_edge_vu_oracle(Vu, Mux, zero(Mux), d, c1, c2),
+                           _edge_vu_oracle(Vu, zero(Mux), Mux, d, c1, c2)) rtol=1e-9
 
     # Drop-panel wrapper must forward Muy on :edge (same as :corner).
     drop = SS.DropPanelGeometry(2.5u"inch", 4.0u"ft", 4.0u"ft")
@@ -251,8 +302,9 @@ end
 end
 
 # Production edge columns fill `boundary_edge_dirs` via classify_column_position.
-# A left-edge dir (-1, 0) infers :c1; the uniaxial check must still use |Muy|.
-@testset "Edge punching — production boundary_edge_dirs infers :c1, keeps |Muy|" begin
+# A free edge along global x (dir (-1, 0)) with the span along x: the span
+# moment Mux acts about the symmetry axis and Muy about the edge-parallel axis.
+@testset "Edge punching — production boundary_edge_dirs orients both moments" begin
     l1 = 20.0u"ft"
     l2 = 30.0u"ft"
     qu = 0.193u"kip/ft^2"
@@ -281,9 +333,23 @@ end
     r_api  = SS.punching_check(Vu, Mux, Muy, d, fc, c1, c2;
                                position = :edge, free_edge_parallel = :c1)
 
-    @test ustrip(u"psi", r_prod.vu) ≈ ustrip(u"psi", r_api.vu) rtol=1e-9
-    @test ustrip(u"psi", r_prod.vu) ≈ ustrip(u"psi", r_gov.vu) rtol=1e-9
+    # ACI c1 is the named c2 after the :c1 swap; the column is square here.
+    @test ustrip(u"psi", r_prod.vu) ≈ _edge_vu_oracle(Vu, Muy, Mux, d, c2, c1) rtol=1e-9
+    @test ustrip(u"psi", r_api.vu) >= ustrip(u"psi", r_prod.vu) - 1e-9
+    @test ustrip(u"psi", r_prod.vu) > ustrip(u"psi", r_gov.vu)
     @test ustrip(u"psi", r_prod.vu) > ustrip(u"psi", r_drop.vu)
+end
+
+# Critic case (note-4bd021ce): comparable moments on a square edge column.
+# Max-only applied one moment term; superposition applies both.
+@testset "Edge punching — comparable Mux ≈ Muy adds both terms" begin
+    c1 = 16.0u"inch"; c2 = 16.0u"inch"; d = 5.75u"inch"; fc = 4000.0u"psi"
+    Vu = 30.0kip
+    M = 60.0kip * u"ft"
+    r = SS.punching_check(Vu, M, M, d, fc, c1, c2; position = :edge)
+    r_one = SS.punching_check(Vu, M, zero(M), d, fc, c1, c2; position = :edge)
+    @test ustrip(u"psi", r.vu) ≈ _edge_vu_oracle(Vu, M, M, d, c1, c2) rtol=1e-9
+    @test ustrip(u"psi", r.vu) > ustrip(u"psi", r_one.vu)
 end
 
 @testset "P0: pipeline punch geom cache accepts 6-tuple including edge_par" begin
@@ -425,7 +491,8 @@ function _nlp_corner_punching(p::FlatPlateNLPProblem, h_in::Float64, c_in::Float
         [uconvert(kip * u"ft", Mux)],
         uconvert(kip, qu * l2 * ln / 2),
     )
-    shear = SS.check_one_way_shear(moment_results, d, p.fc; λ=p.λ, φ_shear=p.φ_shear)
+    shear = SS.check_one_way_shear(moment_results, d, p.fc; h=h, fy=p.fy,
+                                   λ=p.λ, φ_shear=p.φ_shear)
     return (punch=punch, shear=shear, Mux=Mux, Muy=0.3 * M0_y, Vu=Vu, qu=qu, d=d, h=h)
 end
 
@@ -566,10 +633,11 @@ end
         end
         @test n_corners == 4
 
-        # Iterative DDM pipeline on a fresh 20×30: same corner oracle.
+        # Iterative DDM pipeline on a fresh 20×30: same corner oracle. The
+        # oracle is Eq. (13-1), so the §13.5.3.3 increase is off here.
         skel2 = gen_medium_office(20.0u"ft", 30.0u"ft", 10.0u"ft", 3, 3, 1)
         struc2 = BuildingStructure(skel2)
-        opts2 = FlatPlateOptions(min_h = 7.0u"inch")
+        opts2 = FlatPlateOptions(min_h = 7.0u"inch", moment_transfer_increase = false)
         initialize!(struc2; floor_type = :flat_plate, floor_opts = opts2)
         for col in struc2.columns
             col.c1 = 16.0u"inch"

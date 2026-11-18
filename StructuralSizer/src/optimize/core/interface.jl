@@ -64,6 +64,23 @@ feasibility checks. Called once before the optimization loop.
 function precompute_capacities! end
 
 """
+    cache_matches(checker, cache, catalog, material) -> Bool
+
+True when a caller-supplied `cache` was precomputed for this `catalog` and
+`material` under this `checker`, so an optimizer can reuse it. Checkers
+whose cache records nothing to compare return `true`.
+"""
+cache_matches(checker, cache, catalog, material) = true
+
+"""Throw when a caller-supplied `cache` does not match the catalog and material."""
+function _require_cache_match(checker, cache, catalog, material)
+    cache_matches(checker, cache, catalog, material) || throw(ArgumentError(
+        "supplied capacity cache was not precomputed for this catalog, material, " *
+        "and checker; pass `cache = nothing` to rebuild it"))
+    return cache
+end
+
+"""
     is_feasible(checker, cache, j, section, material, demand, geometry) -> Bool
 
 Check if `section` (at index `j` in catalog) with `material` satisfies all 

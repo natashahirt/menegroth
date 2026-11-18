@@ -22,6 +22,14 @@ function _find_nearest_node(nodes::Vector{Node}, x_m::Float64, y_m::Float64)
     return best, sqrt(best_d2)
 end
 
+"""True when `(x, y)` is within 1 mm of a point already in the mesh."""
+function _near_mat_point(points, x::Float64, y::Float64)
+    for (px, py) in points
+        hypot(px - x, py - y) <= 1e-3 && return true
+    end
+    return false
+end
+
 """
     _mat_apply_column_loads(nodes, positions_loc_m, demands) → Vector{NodeForce}
 

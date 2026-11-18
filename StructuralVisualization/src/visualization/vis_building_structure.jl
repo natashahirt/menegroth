@@ -108,7 +108,7 @@ function visualize(struc::BuildingStructure;
 
     # 1. Elements
     if mode == :original
-        for element in model.elements
+        for element in model.frame_elements
             # get_drawing_pts returns positions in meters (raw Float64)
             p1, p2 = get_drawing_pts(element, show_releases ? 0.05 : 0.0)
             GLMakie.lines!(ax, [p1[1], p2[1]], [p1[2], p2[2]], [p1[3], p2[3]], 
@@ -120,7 +120,7 @@ function visualize(struc::BuildingStructure;
     elseif mode == :deflected
         if show_original_geometry
             # Draw original geometry as thin faded lines for reference
-            for element in model.elements
+            for element in model.frame_elements
                 # get_drawing_pts returns positions in meters (raw Float64)
                 p1, p2 = get_drawing_pts(element, 0.0)
                 GLMakie.lines!(ax, [p1[1], p2[1]], [p1[2], p2[2]], [p1[3], p2[3]], 
@@ -133,13 +133,13 @@ function visualize(struc::BuildingStructure;
 
         # Calculate displacements/forces with a reasonable increment
         # Asap accepts Unitful at API boundary, but visualization math uses Float64
-        avg_len_unitful = model.nElements > 0 ? sum(getproperty.(model.elements, :length)) / model.nElements : 1.0u"m"
+        avg_len_unitful = model.nFrameElements > 0 ? sum(getproperty.(model.frame_elements, :length)) / model.nFrameElements : 1.0u"m"
         avg_len = ustrip(u"m", avg_len_unitful)  # Float64 for internal visualization math
         increment = avg_len_unitful / resolution  # Unitful for Asap API
         
         # Asap provides displacements and forces analysis
         edisps = Asap.displacements(model, increment)
-        isempty(edisps) && error("No element displacements available. Is the model empty or unsolved? (nElements=$(model.nElements), nLoads=$(length(model.loads)))")
+        isempty(edisps) && error("No element displacements available. Is the model empty or unsolved? (nFrameElements=$(model.nFrameElements), nLoads=$(length(model.loads)))")
         println("First element uglobal: ", edisps[1].uglobal[:, 1:3])
 
         # Auto-scale: make max displacement ~10% of avg element length
@@ -266,7 +266,7 @@ function visualize(struc::BuildingStructure;
         model.processed || Asap.process!(model)
 
         # Estimate a good reference size for markers (in meters)
-        avg_len_unitful = model.nElements > 0 ? sum(getproperty.(model.elements, :length)) / model.nElements : 1.0u"m"
+        avg_len_unitful = model.nFrameElements > 0 ? sum(getproperty.(model.frame_elements, :length)) / model.nFrameElements : 1.0u"m"
         avg_len = ustrip(u"m", avg_len_unitful)  # Convert to Float64 in meters
         size_ref = avg_len * 0.15  # Now a Float64 in meters
         

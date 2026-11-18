@@ -353,10 +353,13 @@ using Asap: kip, ksi, psf
         )
 
         @test result isa RCTBeamNLPResult
-        # Ceil-to-bar on this near-rectangular section drops εt below 0.004
-        # (ACI 318-11 §10.3.5, page 142). The catalog checker rejects it.
-        @test result.status === :infeasible
+        # Ceil-to-bar drops εt below ACI 318-11 §10.3.5 (page 142). The
+        # repair must hand back a section the catalog checker accepts.
+        @test result.status ∈ [:optimal, :feasible, :converged]
         @test result.bw_final ≤ 14.0
+        @test StructuralSizer._beam_nlp_passes_checker(result.section, opts;
+            Mu_kipft = 150.0, Mu_neg_kipft = 150.0,
+            Vu_kip = 30.0, Nu_kip = 0.0, Tu_kipin = 0.0)
     end
 
     # ============================================================
@@ -378,6 +381,57 @@ using Asap: kip, ksi, psf
         @test result isa RCTBeamNLPResult
         @test result.status ∈ [:optimal, :feasible]
         @test result.section.n_bars ≥ 3
+    end
+
+    # ============================================================
+    # 17. Joist ribs: §8.13.2 and §8.13.3, and §8.13.8 only if they hold
+    # ============================================================
+    @testset "joist limits constrain the rib and gate the shear increase" begin
+        Mu = 80.0kip * u"ft"
+        Vu = 20.0kip
+        bf = 48.0u"inch"
+        hf = 3.0u"inch"
+        opts = NLPBeamOptions(min_width=6.0u"inch", max_width=12.0u"inch",
+                              min_depth=12.0u"inch", max_depth=30.0u"inch")
+        plain = RCTBeamNLPProblem(Mu, Vu, bf, hf, opts)
+        joist = RCTBeamNLPProblem(Mu, Vu, bf, hf, opts; joist_spacing=16.0u"inch")
+        @test StructuralSizer.n_constraints(joist) == 7
+        @test joist.bw_min ≈ 6.0
+
+        # 8 in web, 16 in total, 3 in flange: stem 13 in ≤ 3.5×8. Clear 8 in.
+        x_ok = [8.0, 16.0, 0.01]
+        c_ok = StructuralSizer.constraint_fns(joist, x_ok)
+        c_plain = StructuralSizer.constraint_fns(plain, x_ok)
+        @test c_ok[5] ≈ 4.0 / 8.0
+        @test c_ok[6] ≈ 13.0 / (3.5 * 8.0)
+        @test c_ok[7] ≈ 8.0 / 30.0
+        @test c_ok[5] < 1 && c_ok[6] < 1 && c_ok[7] < 1
+        # §8.13.8 raises Vc only. The same point without joist spacing does not.
+        @test c_ok[2] < c_plain[2]
+
+        # Stem 25 in against 3.5×6 = 21 in. The increase is withheld.
+        x_deep = [6.0, 28.0, 0.01]
+        c_deep = StructuralSizer.constraint_fns(joist, x_deep)
+        @test c_deep[6] > 1
+        @test c_deep[2] ≈ StructuralSizer.constraint_fns(plain, x_deep)[2]
+
+        @test StructuralSizer.joist_nlp_spacing(16.0u"inch", opts, hf) == 16.0u"inch"
+        wide = NLPBeamOptions(min_width=6.0u"inch", max_width=8.0u"inch",
+                              min_depth=12.0u"inch", max_depth=24.0u"inch")
+        @test StructuralSizer.joist_nlp_spacing(40.0u"inch", wide, hf) === nothing
+        @test StructuralSizer.joist_nlp_spacing(nothing, opts, hf) === nothing
+
+        @test_throws ArgumentError RCTBeamNLPProblem(
+            Mu, Vu, bf, hf,
+            NLPBeamOptions(min_width=6.0u"inch", max_width=8.0u"inch",
+                           min_depth=12.0u"inch", max_depth=24.0u"inch");
+            joist_spacing=40.0u"inch")
+
+        result = size_rc_tbeam_nlp(Mu, Vu, bf, hf, opts; Mu_neg=0.0,
+                                   joist_spacing=16.0u"inch")
+        @test result.status ∈ (:optimal, :feasible)
+        built = JoistConstruction(result.section, 16.0u"inch", :one_way)
+        @test check_joist_construction(built).vc_increase_permitted
     end
 
 end  # @testset "RC T-Beam Optimization"

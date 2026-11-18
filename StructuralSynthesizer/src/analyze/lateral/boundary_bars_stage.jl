@@ -4,8 +4,9 @@
 # boundary-element length when one is required, and 0.15ℓw where §18.10.2.4
 # applies (continuous, one critical section, hw/ℓw ≥ 2). The area is the
 # larger of that minimum and the area the strength combinations still need.
-# A flanged pier that would need these bars throws: the flange steel is not
-# in the section.
+# On a flange, that area is sized on the flanged section, with the return's
+# vertical bars in the flange zone. The added group is still the same at
+# each end.
 
 """End bars placed at one pier, the same group at each end."""
 struct BoundaryEndReinforcement
@@ -89,15 +90,25 @@ function _pier_end_reinforcement(struc, idx, actions, lw, material, previous, el
     lw_m = ustrip(u"m", lw)
     t_m = ustrip(u"m", wall.thickness)
     Ast = wall.ρl * lw_m * t_m
-    needed = boundary_end_area_si(fc_Pa, fy_Pa, Es, lw_m, t_m, Ast, inset_guess, pairs, floor)
-    if decision.flanged && (code_min || (needed !== nothing && needed > 0))
-        throw(ArgumentError(
-            "end bars: wall $idx is flanged. The added bars would be sized on the web " *
-            "only, and the flange bars are not in the section."))
-    end
+    flange = _boundary_flange(wall, struc.walls, idx, assembly, _stacked_wall_height(wall))
+    pos = flange === nothing ? nothing : flange.positive
+    neg = flange === nothing ? nothing : flange.negative
+    one = (pos === nothing) ⊻ (neg === nothing)
+    only = pos !== nothing ? pos : neg
+    needed = boundary_end_area_si(fc_Pa, fy_Pa, Es, lw_m, t_m, Ast, inset_guess, pairs, floor;
+                                 flange_at = one ? (pos !== nothing ? :positive : :negative) : nothing,
+                                 tf = one ? ustrip(u"m", only.tf) : 0.0,
+                                 bf = one ? ustrip(u"m", only.bf) : 0.0,
+                                 As_flange = one ? only.As_m2 : 0.0,
+                                 tf_pos = pos === nothing ? 0.0 : ustrip(u"m", pos.tf),
+                                 bf_pos = pos === nothing ? 0.0 : ustrip(u"m", pos.bf),
+                                 As_pos = pos === nothing ? 0.0 : pos.As_m2,
+                                 tf_neg = neg === nothing ? 0.0 : ustrip(u"m", neg.tf),
+                                 bf_neg = neg === nothing ? 0.0 : ustrip(u"m", neg.bf),
+                                 As_neg = neg === nothing ? 0.0 : neg.As_m2)
     (needed === nothing || needed <= 0) && return nothing
     layout = _layout_that_passes(fc_Pa, fy_Pa, Es, lw_m, t_m, Ast, pairs,
-                                needed, zone.zone, wall.thickness)
+                                needed, zone.zone, wall.thickness; flange)
     layout === nothing && return nothing
     extension = nothing
     if code_min
@@ -120,10 +131,12 @@ end
 Layout of at least `needed`, enlarged until the placed bars pass.
 
 hx can place more steel than `needed`. The check uses the placed area and
-its centroid. Four enlargements cover a step up in bar size. `nothing` when
-No. 11 at hx still fails.
+its centroid. On a flange, the return's bars are in that check. Four
+enlargements cover a step up in bar size. `nothing` when No. 11 at hx still
+fails.
 """
-function _layout_that_passes(fc, fy, Es, lw, t, Ast, pairs, needed, zone, thickness)
+function _layout_that_passes(fc, fy, Es, lw, t, Ast, pairs, needed, zone, thickness;
+                            flange=nothing)
     target = needed * u"m^2"
     for _ in 1:4
         layout = boundary_end_bar_layout(target, zone, thickness)
@@ -137,7 +150,12 @@ function _layout_that_passes(fc, fy, Es, lw, t, Ast, pairs, needed, zone, thickn
                 ok = false
                 break
             end
-            cap = wall_end_bar_capacity_si(fc, fy, Es, lw, t, Ast, As, inset, Nu)
+            cap = if flange === nothing
+                wall_end_bar_capacity_si(fc, fy, Es, lw, t, Ast, As, inset, Nu)
+            else
+                _flange_capacity_si(fc, fy, Es, lw, t, Ast, Nu, flange, Mu;
+                                   As_end = As, inset = inset)
+            end
             if !cap.converged || abs(Mu) > cap.φMn + 1.0
                 ok = false
                 break

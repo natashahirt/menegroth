@@ -69,6 +69,10 @@ end
         # MaterialOptions.concrete should match the preset, not the default
         @test nwc.base_params.materials.concrete === SR.NWC_4000
         @test lwc.base_params.materials.concrete === SR.LWC_4000
+        # The slab axis must not change the column. Both presets keep 6 ksi.
+        @test nwc.base_params.materials.column.concrete === SR.NWC_6000
+        @test lwc.base_params.materials.column.concrete === SR.NWC_6000
+        @test nwc.base_params.materials.column.rebar === SR.Rebar_60
         # FlatPlateOptions.material should be the matching RC preset
         nwc_fp = nwc.base_params.floor isa SR.FlatSlabOptions ?
                  nwc.base_params.floor.base : nwc.base_params.floor

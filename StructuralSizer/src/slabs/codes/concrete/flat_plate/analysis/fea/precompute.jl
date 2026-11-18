@@ -26,6 +26,13 @@ function _precompute_element_data!(cache::FEAModelCache, model, struc, slab)
         @inbounds for k in 1:n
             tri = shell_vec[k]
             tri isa Asap.ShellTri3 || continue
+            # A wall triangle is the pier below the slab. Its area and
+            # moments are not slab-panel data.
+            if tri.id === :wall
+                cache.element_data[k] = FEAElementData(
+                    0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, (1.0, 0.0), (0.0, 1.0))
+                continue
+            end
             sif = Asap.ShellInternalForces(tri, model.u, sif_ws)
             tc = Asap.shell_centroid(tri)
             cache.element_data[k] = FEAElementData(
@@ -54,6 +61,7 @@ function _precompute_element_data!(cache::FEAModelCache, model, struc, slab)
             indices = Int[]
             for k in 1:n
                 ed = cache.element_data[k]
+                ed.area > 0 || continue
                 # Fast bbox rejection
                 (ed.cx < xmin || ed.cx > xmax || ed.cy < ymin || ed.cy > ymax) && continue
                 Asap._point_in_polygon((ed.cx, ed.cy), poly) && push!(indices, k)
@@ -74,6 +82,7 @@ function _precompute_element_data!(cache::FEAModelCache, model, struc, slab)
         @inbounds for k in 1:n
             tri = shell_vec[k]
             tri isa Asap.ShellTri3 || continue
+            tri.id === :wall && continue
             sif = Asap.ShellInternalForces(tri, model.u, sif_ws)
             ed = cache.element_data[k]
             ed.Mxx = sif.Mxx
@@ -118,12 +127,29 @@ function _build_or_update_fea!(
     col_I_factor::Float64 = 0.70,
     qD::Union{Nothing, Pressure} = nothing,
     qL::Union{Nothing, Pressure} = nothing,
-    patch_stiffness_factor::Float64 = 1.0,
+    patch_stiffness_factor::Float64 = 100.0,
     edge_beam_βt::Float64 = 0.0,
     edge_beam_l2::Union{Nothing, Length} = nothing,
     edge_beam_c1_avg::Union{Nothing, Length} = nothing,
+    q_drop::Pressure = 0.0u"Pa",
 )
     split_dl = !isnothing(qD) && !isnothing(qL)
+    # `q_drop` is the unfactored drop self-weight. It takes the dead factor of
+    # the combination that sets `qu`. Without qD/qL that combination is
+    # unknown and the larger dead factor, 1.4, is used.
+    q_drop_Pa = ustrip(u"Pa", isnothing(drop_panel) ? 0.0u"Pa" : q_drop)
+    q_drop_u = (split_dl ? governing_dead_factor(qD, qL) : 1.4) * q_drop_Pa * u"Pa"
+
+    # The update path keeps the mesh, so it is only valid for the geometry the
+    # mesh was built from. A grown column changes its patch polygon and the
+    # refinement edge; rebuild rather than analyze around the old footprint.
+    mesh_key = fea_mesh_key(struc, slab, columns;
+                            target_edge=target_edge, drop_panel=drop_panel)
+    if cache.initialized && cache.mesh_key != mesh_key
+        @debug "FEAModelCache" event=:rebuild reason="mesh_key_changed"
+        _reset_fea_cache!(cache)
+    end
+    cache.q_drop = q_drop_Pa
 
     # If the user toggled edge-beam configuration between iterations (added or
     # removed), we must rebuild the mesh — `_update_and_resolve!` cannot add or
@@ -133,6 +159,7 @@ function _build_or_update_fea!(
     eb_topology_changed = cache.initialized && (eb_active_now != eb_active_cache)
 
     if !cache.initialized || eb_topology_changed
+        cache.n_rebuilds += 1
         @debug "FEAModelCache" event=:rebuild reason=(!cache.initialized ? "uninitialized" : "edge_beam_topology_changed")
         if eb_topology_changed
             cache.initialized = false
@@ -148,6 +175,7 @@ function _build_or_update_fea!(
             edge_beam_βt=edge_beam_βt,
             edge_beam_l2=edge_beam_l2,
             edge_beam_c1_avg=edge_beam_c1_avg,
+            q_drop=q_drop_u,
         )
         cache.model      = fea.model
         cache.col_stubs  = fea.col_stubs
@@ -156,6 +184,7 @@ function _build_or_update_fea!(
         cache.edge_beam_βt = edge_beam_βt
         cache.initialized = true
         cache.drop_panel  = drop_panel
+        cache.mesh_key    = mesh_key
 
         # Precompute geometry (centroids, areas, LCS, cell mapping) from initial solve
         _precompute_element_data!(cache, cache.model, struc, slab)
@@ -182,27 +211,38 @@ function _build_or_update_fea!(
                 qD=qD, qL=qL,
                 edge_beam_βt=edge_beam_βt,
                 edge_beam_l2=edge_beam_l2,
-                edge_beam_c1_avg=edge_beam_c1_avg)
+                edge_beam_c1_avg=edge_beam_c1_avg,
+                q_drop=q_drop)
         end
+        cache.n_updates += 1
         @debug "FEAModelCache" event=:update
         cache.drop_panel  = drop_panel  # may have changed between iterations (same topology)
         cache.edge_beam_βt = edge_beam_βt  # refresh the stored target for this iteration
         if split_dl
-            # Update section/stubs (use qu for the initial update), then D/L split
+            # Update section/stubs (use qu for the initial update), then D/L split.
+            # The update solve is already the factored envelope when `qu` is
+            # bitwise the pressure `_solve_dl_cases!` would restore
+            # (`max(1.2D+1.6L, 1.4D)`). Snapshot that displacement and skip
+            # the third solve. A mismatch re-solves.
             _update_and_resolve!(cache, h, Ecs, ν_concrete, qu, columns, Lc;
                                  Ecc=Ecc, verbose=verbose, col_I_factor=col_I_factor,
                                  patch_stiffness_factor=patch_stiffness_factor,
                                  edge_beam_l2=edge_beam_l2,
-                                 edge_beam_c1_avg=edge_beam_c1_avg)
+                                 edge_beam_c1_avg=edge_beam_c1_avg,
+                                 q_drop=q_drop_u)
+            qu_restore = max(1.2 * qD + 1.6 * qL, 1.4 * qD)
+            U_qu = ustrip(u"Pa", qu) == ustrip(u"Pa", qu_restore) ?
+                copy(cache.model.u) : nothing
             _precompute_element_data!(cache, cache.model, struc, slab)
-            _solve_dl_cases!(cache, qD, qL; verbose=verbose)
+            _solve_dl_cases!(cache, qD, qL; verbose=verbose, U_qu=U_qu)
             _combine_element_moments!(cache; verbose=verbose)
         else
             _update_and_resolve!(cache, h, Ecs, ν_concrete, qu, columns, Lc;
                                  Ecc=Ecc, verbose=verbose, col_I_factor=col_I_factor,
                                  patch_stiffness_factor=patch_stiffness_factor,
                                  edge_beam_l2=edge_beam_l2,
-                                 edge_beam_c1_avg=edge_beam_c1_avg)
+                                 edge_beam_c1_avg=edge_beam_c1_avg,
+                                 q_drop=q_drop_u)
             _precompute_element_data!(cache, cache.model, struc, slab)
         end
     end

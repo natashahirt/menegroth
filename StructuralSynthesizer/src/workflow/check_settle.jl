@@ -11,6 +11,10 @@
 # the costliest section if it passed in none, and that mix is checked the same
 # way. Groups that still fail are sized again. A state already checked is not
 # installed again.
+#
+# The story-shell rounds use the same rule at their boundary. The first round
+# may free-pick. A later round solves the shell on the sections already in the
+# model and resizes only the groups that fail that shell.
 
 """Beam and column sections, in member order, at the end of one sizing pass."""
 struct _MemberState
@@ -750,4 +754,177 @@ function _check_shell_settle!(run, states, service_on, regions, pass, service_co
                               regions = current.regions, service_on,
                               service_converged = service_converged && current.service_converged,
                               shifts = current.shifts)
+end
+
+"""Beam and column options the sizer can check one installed section at a time."""
+function _round_checkable(struc, beam_opts, column_opts)
+    (beam_opts === nothing || column_opts === nothing) && return false
+    _settle_checkable(beam_opts) || return false
+    _settle_checkable(column_opts) || return false
+    return all(_settle_checkable, values(_beam_opts_by_group(struc, beam_opts)))
+end
+
+function _shell_frame_accept(fresh, beams, columns, service_on, region_tol)
+    fresh === nothing && return false
+    beams === nothing && return false
+    columns === nothing && return false
+    regions_ok = all(s -> s <= region_tol, values(fresh.shifts))
+    service_ok = !service_on || fresh.service_converged
+    return regions_ok && service_ok && _all_passed(beams.passed) && _all_passed(columns)
+end
+
+"""Put `kept` back on the column groups that passed. The sizer has no column filter."""
+function _restore_passing_columns!(struc, kept, column_opts, params)
+    isempty(kept) && return struc
+    edges = _edge_ids(struc, (:columns,))
+    rebar = column_opts isa StructuralSizer.ConcreteColumnOptions ?
+        column_opts.rebar_material : nothing
+    for m in struc.columns
+        gid = group_id(m)
+        gid === nothing && continue
+        haskey(kept, gid) || continue
+        sec = kept[gid]
+        (sec === nothing || _sections_identical(section(m), sec)) && continue
+        _install_member_section!(struc, m, sec, edges, column_opts.material,
+                                 params.column_I_factor, rebar)
+    end
+    return struc
+end
+
+"""
+Resize beam groups that failed the shell now solved, and column groups that
+failed the frame. A passing group keeps its section. The column sizer re-picks
+every group, so passing columns are put back afterward unless uniform column
+sizing is on. Returns whether any section moved.
+"""
+function _resize_rejected!(run, failing_beams, column_passed, fresh, params, column_opts)
+    struc = run.struc
+    moved = false
+    demands, spans, regions = fresh.demands, fresh.spans, fresh.regions
+    if !isempty(failing_beams)
+        sized = false
+        for sizing in _beam_sizing_passes(struc, run.opts)
+            accept = gid -> gid in failing_beams &&
+                            (sizing.accept === nothing || sizing.accept(gid))
+            any(accept, failing_beams) || continue
+            if sized
+                _reanalyze_after_section_change!(struc)
+                fresh = _gather_shell_demands!(run; service_on = run.service_on,
+                                               regions = regions)
+                demands, spans, regions = fresh.demands, fresh.spans, fresh.regions
+            end
+            shell_spans = run.service_on ? spans : nothing
+            size_beams!(struc, sizing.opts; run.kwargs..., shell_demands = demands,
+                        shell_spans = shell_spans, group_filter = accept)
+            sized = true
+            moved = true
+        end
+    end
+    if !_all_passed(column_passed)
+        kept = Dict{UInt64, Any}()
+        if params.uniform_column_sizing === :off
+            for m in struc.columns
+                gid = group_id(m)
+                gid === nothing && continue
+                get(column_passed, gid, false) || continue
+                kept[gid] = section(m)
+            end
+        end
+        size_columns!(struc, column_opts; reanalyze = false, tc = get(run.kwargs, :tc, nothing),
+                      I_factor = params.column_I_factor,
+                      gravity_factor = member_self_weight_acceleration(params))
+        _restore_passing_columns!(struc, kept, column_opts, params)
+        _harmonize_columns!(struc, params)
+        moved = true
+    end
+    if moved
+        fallback = params.beams
+        raise_head_face_ribs!(struc, params, fallback;
+                              I_factor = params.beam_I_factor,
+                              gravity_factor = member_self_weight_acceleration(params))
+        conform_rib_lines!(struc, params, fallback; I_factor = params.beam_I_factor)
+        grow_building_solid_heads!(struc, params)
+        _sync_fire_coating_loads!(struc, params)
+        _reanalyze_after_section_change!(struc)
+    end
+    return moved
+end
+
+"""
+    _reconcile_shell_frame!(...) -> NamedTuple
+
+Solve the story shell on the sections already in the model and check every
+beam and column. Groups that pass stay. Groups that fail are sized for that
+shell, then the shell is solved again. Stops when a section vector repeats,
+because that state was already checked. Returns `held = true` only when the
+shell of the installed sections and the frame of those sections both pass.
+"""
+function _reconcile_shell_frame!(struc, params, beam_opts, column_opts, beam_kwargs,
+                                 levels, shells; shell_kwargs, seed_regions = nothing,
+                                 region_tol::Real = 0.05, attempts::Int = 4)
+    build_kwargs, solve_kwargs, want_service = _split_shell_kwargs(shell_kwargs)
+    run = (struc = struc, opts = beam_opts, levels = levels, shells = shells,
+           build_kwargs = build_kwargs, solve_kwargs = solve_kwargs,
+           want_service = want_service, service_on = want_service,
+           region_tol = region_tol, kwargs = beam_kwargs, history = nothing)
+    regions = seed_regions === nothing ? Dict{Int, Vector{NamedTuple}}() :
+              Dict{Int, Vector{NamedTuple}}(seed_regions)
+    seen = [_member_state(struc)]
+    trace = get(ENV, "SS_TRACE_SHELL_PASSES", "") == "1"
+    resolution = get(beam_kwargs, :resolution, 200)
+    last = nothing
+    used = 0
+    for _ in 1:attempts
+        used += 1
+        fresh = _gather_shell_demands!(run; service_on = want_service, regions = regions)
+        regions = fresh.regions
+        last = fresh
+        spans = want_service ? fresh.spans : nothing
+        beams = _beam_group_report(struc, beam_opts; shell_demands = fresh.demands,
+                                   shell_spans = spans, resolution = resolution)
+        columns = _column_group_report(struc, column_opts; resolution = resolution)
+        if beams === nothing || columns === nothing
+            return (held = false, demands = fresh.demands, spans = fresh.spans,
+                    regions = fresh.regions, service_converged = fresh.service_converged,
+                    attempts = used)
+        end
+        n_beam = length(beams.passed)
+        n_col = length(columns)
+        if trace
+            bad_cols = [i for (i, m) in enumerate(struc.columns)
+                        if !get(columns, group_id(m), true)]
+            println("  shell reconcile $used  " *
+                    "beams $(count(values(beams.passed)))/$n_beam  " *
+                    "columns $(count(values(columns)))/$n_col  " *
+                    "failing columns $bad_cols  " *
+                    "regions=$(all(s -> s <= region_tol, values(fresh.shifts)))  " *
+                    "service=$(fresh.service_converged)")
+        end
+        if _shell_frame_accept(fresh, beams, columns, want_service, region_tol)
+            _record_beam_checks!(struc, beams.explanations, beams.hogging)
+            @info "Story shell and frame agree on the installed sections"
+            return (held = true, demands = fresh.demands, spans = fresh.spans,
+                    regions = fresh.regions, service_converged = fresh.service_converged,
+                    attempts = used)
+        end
+        # The last attempt stays as checked. Resizing it would leave a state
+        # the shell has not seen.
+        used == attempts && break
+        failing = _failing_ids(beams.passed)
+        moved = _resize_rejected!(run, failing, columns, fresh, params, column_opts)
+        moved || break
+        state = _member_state(struc)
+        if any(s -> _member_state_identical(state, s), seen)
+            @info "Shell reconcile returned to a section state it had already checked"
+            break
+        end
+        push!(seen, state)
+    end
+    fresh = last
+    return (held = false,
+            demands = fresh === nothing ? Dict{Int, ShellBeamDemand}() : fresh.demands,
+            spans = fresh === nothing ? Dict{Int, Vector{Any}}() : fresh.spans,
+            regions = fresh === nothing ? regions : fresh.regions,
+            service_converged = fresh === nothing ? false : fresh.service_converged,
+            attempts = used)
 end

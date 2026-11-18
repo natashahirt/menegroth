@@ -2,8 +2,9 @@
 #
 # Each straight pier is checked on its own cut, including a leg of a joined
 # assembly. Thickness stays fixed. A joined leg uses its clear length.
-# ρl and ρt are raised on a fixed grid when the given ratios fail a strength
-# check. A failing check is recorded. The corner between legs is shear friction.
+# ρl and ρt are the lightest grid ratios that pass the current demands.
+# A ratio already on the wall is not kept. A failing check is recorded.
+# The corner between legs is shear friction.
 
 """Checks and seismic story-drift comparisons for one ordinary-wall run."""
 struct OrdinaryWallResult
@@ -31,6 +32,8 @@ struct OrdinaryWallResult
     opening_edges::Dict{Int, Vector{SpecialBoundaryDecision}}
     "Added end bars on special piers. Empty when the web steel is enough and §18.10.2.4 does not apply."
     end_bars::Dict{Int, BoundaryEndReinforcement}
+    "Gravity beams and columns under §12.12.4. Empty outside Seismic Design Categories D, E, and F."
+    induced::Vector{GravityInducedCheck}
 end
 
 """
@@ -82,7 +85,7 @@ When lateral design was requested:
   with no reinforced-concrete section is recorded as failing.
 - A joined assembly is checked leg by leg on the clear length. The corner is
   shear friction. The ordinary check does not use a flange. The special-boundary
-  stress does, when one perpendicular wall meets an end (§18.10.5.2).
+  stress does, when a perpendicular wall meets one end or both (§18.10.5.2).
 - A rigid diaphragm puts story forces on the masters. A flexible diaphragm
   sends each `(Fx, Fy)` to the lines of seismic-system walls the declared
   systems name ([`flexible_diaphragm_layout!`](@ref)): simple spans between
@@ -95,8 +98,9 @@ When lateral design was requested:
   weight, accidental torsion as nodal forces, and wind on its exterior edge
   ([`_semirigid_story_loads`](@ref)). Drift is read from the plan rigid motion
   fitted to the seismic-system wall tops ([`semirigid_sfrs!`](@ref)). Like a
-  flexible floor it has no master, so member forces are first-order and
-  θ > 0.10 is refused. A full-plate `:shell` floor is refused.
+  flexible floor it has no master, so member forces are first-order and the
+  seismic ones are multiplied by the §12.8.7 factor. A full-plate `:shell`
+  floor is refused.
 - Demands are the unified frame-shell solution: unfactored gravity, Chapter 27
   wind, and ELF strength cases. Each strength combination is applied once per
   group (gravity with wind and earthquake omitted, each wind case, each `QE`
@@ -104,30 +108,40 @@ When lateral design was requested:
 - Thickness starts as the given pier thickness. When a strength check or
   story drift fails and `params.jump_wall_thickness` is true, each group
   named by `params.wall_thickness_grouping` moves to the thinnest inch the
-  proxy accepts, then this stage remeshes and checks again. `:all` is one
-  group and one confirm. A finer grouping can change relative stiffness,
-  so the stage re-solves until those groups stop growing. Length is not
-  changed. `ρt` is set from the largest shear, then `ρl` walks up the
-  grid until axial-flexure passes. A ratio
-  already on the wall is not reduced at a given thickness. This function
-  does not scale shell `E`. When `wall_inputs` states cracked stiffness,
-  `to_asap!` has already applied it.
+  proxy accepts, then this stage remeshes and checks again. The default
+  grouping is `:pier`, so a local failure thickens that wall only. `:all`
+  is one group and one confirm. A grouping finer than `:all` can change
+  relative stiffness, so the stage re-solves until those groups stop
+  growing. Drift and interactive story shear are building results, so
+  they still move every group. Length is not changed. `ρt` is the lightest
+  grid ratio that covers the largest shear, then `ρl` walks up from the
+  §11.6.2 floor until axial-flexure passes. Both are chosen again from
+  that floor on every call. Special shear and the row F story-shear bump
+  run after that and only raise. This function does not scale shell `E`.
+  When `wall_inputs` states cracked stiffness, `to_asap!` has already
+  applied it.
 - With rigid masters, member forces include second-order story sway. Each
   distinct factored gravity `(D, L, roof)` builds one story stiffness from
   the vertical forces of that gravity, and the unfactored cases are solved
   on it and superposed (Wilson & Habibullah 1987, Eq. 7, corpus:
   wilson-habibullah-1987-pdelta, PDF page 6). ACI 318-19 §11.4.1.3
   (PDF page 169) sends walls to §6.6.4, §6.7, or §6.8, and §6.2.5.3
-  (PDF page 72) records a failing check when a factored moment exceeds 1.4
-  times the first-order moment. A flexible diaphragm has no master, so the
+  (PDF page 72) records a failing check when one action's second-order
+  moment exceeds 1.4 times that action's first-order moment. Gravity is one
+  action. Wind or Eh is the other. The summed moment is the strength demand
+  and is not the ratio. A flexible diaphragm has no master, so the
   lateral run stays first-order. §6.6.4.6 is not applied.
 - Design story drifts stay on the ASCE 7-22 §12.8.7 multiplier `1/(1−θ)`
-  (corpus: asce-7-22, PDF page 188). Member forces are not multiplied by it
-  as well. θ > θmax is refused by the ELF analysis. The factor is 1 where
-  θ ≤ 0.10. A flexible floor's member forces are first-order, so θ > 0.10
-  there is refused by [`require_seismic_wall_demand_provisions`](@ref).
-- Seismic Design Categories D, E, and F do not calculate the moments induced
-  by δu. The gravity frame is detailed to ACI 318-19 §18.14.3.3.
+  (corpus: asce-7-22, PDF page 188). On a rigid diaphragm the member forces
+  come from the story stiffness and are not multiplied again. On a flexible
+  or semirigid floor the seismic member forces are multiplied by the same
+  factor. θ > θmax is refused by the ELF analysis. The factor is 1 where
+  θ ≤ 0.10.
+- Seismic Design Categories D, E, and F calculate the moments and shears
+  the design displacement δDE produces in the reinforced-concrete gravity
+  frame. Within the design strength, the member is detailed to ACI 318-19
+  §18.14.3.2. Otherwise, and when the displacement was not available, it is
+  detailed to §18.14.3.3.
 - "X" and "Y" are the plan axes of `params.lateral.plan_axis`. A wall or a
   row F beam on neither axis is a Type 5 nonparallel system irregularity
   (Table 12.3-1, corpus: asce-7-22, PDF page 180), whatever the caller stated.
@@ -160,7 +174,9 @@ function design_ordinary_walls!(struc::BuildingStructure, params::DesignParamete
         result = out.result
         params.jump_wall_thickness || return false
         targets = propose_wall_thicknesses(struc.walls, out.trials, result;
-                                           grouping, SDS=out.SDS)
+                                           grouping, SDS=out.SDS,
+                                           constraint=params.wall_catalog_constraint,
+                                           t_limit=params.wall_thickness_limit)
         any(_thickness_grows(w.thickness, t) for (w, t) in zip(struc.walls, targets)) ||
             return false
         # The last analysis stands: a jump now would leave walls no pass checked.
@@ -273,7 +289,8 @@ function _analyze_lateral_walls!(struc::BuildingStructure, params::DesignParamet
         Kd=inputs.Kd,
         G=inputs.G,
         GCpi=inputs.GCpi,
-        extra_directions=inputs.extra_directions)
+        extra_directions=inputs.extra_directions,
+        gust_site=inputs.wind_gust_site)
     elf = elf_story_analysis(struc;
         method=inputs.method,
         SDS=inputs.SDS,
@@ -291,15 +308,17 @@ function _analyze_lateral_walls!(struc::BuildingStructure, params::DesignParamet
         Ry=sysy.R,
         Cdy=sysy.Cd,
         Ω0y=sysy.Ω0,
-        plan_axis=axis)
+        plan_axis=axis,
+        flexible_accidental_torsion=inputs.flexible_accidental_torsion)
     effects = seismic_effect_cases(elf; orthogonal)
     θmax = _max_drift_theta(elf)
     # Eh is multiplied by ρ. On a rigid diaphragm the member forces come from
-    # the story stiffness, so the gate is told P-delta is in the forces.
-    # Design story drifts still use 1/(1−θ); that multiplier is not also
-    # applied to the forces. A flexible floor's forces are first-order, so
-    # the gate refuses θ > 0.10 there.
-    pdelta_in_forces = !flexible
+    # the story stiffness, so P-delta is in the forces and is not multiplied
+    # again. A flexible or semirigid floor stays first-order. Its seismic
+    # member forces, including pierced segments and joined corners, are
+    # multiplied by the §12.8.7 factor 1/(1−θ). Design story drifts use that
+    # same factor from the unscaled drift solution, once.
+    pdelta_in_forces = true
     require_seismic_wall_demand_provisions(;
         sdc=inputs.sdc,
         model_uses_cracked_section_stiffness=inputs.model_uses_cracked_section_stiffness,
@@ -349,16 +368,17 @@ function _analyze_lateral_walls!(struc::BuildingStructure, params::DesignParamet
         batches = _pier_action_batches(struc, pier, basic, wind, elf, second,
                                        gravity, inputs, effects)
         grown = CombinedWallAction[]
-        for (_, _, growns, _) in batches
-            append!(grown, growns)
+        for batch in batches
+            append!(grown, batch.growns)
         end
-        lw, Moop, ρt_strength, raised = _select_pier_steel!(
+        lw, Moop, basis, ρt_strength, raised = _select_pier_steel!(
             struc, wall_index, grown, inputs.material)
         raised && (n_raised += 1)
         grown_by_wall[wall_index] = grown
         lw_by_wall[wall_index] = lw
         ρt_by_wall[wall_index] = ρt_strength
-        push!(prepared, (wall_index, assembly, grown, ρt_strength, batches, Moop))
+        push!(prepared, (wall_index, assembly, grown, ρt_strength, batches,
+                         (moment = Moop, basis = basis)))
     end
     interactive = InteractiveStoryShearCheck[]
     frame_members = FrameMemberCheck[]
@@ -410,18 +430,20 @@ function _analyze_lateral_walls!(struc::BuildingStructure, params::DesignParamet
             "special wall: the end bars and the shear steel were still moving after 12 passes."))
     end
     checks = Dict{Int, Vector{WallCheckRecord}}()
-    for (wall_index, assembly, _, _, batches, Moop) in prepared
+    for (wall_index, assembly, _, _, batches, slab) in prepared
         wall = struc.walls[wall_index]
         ρt_strength = ρt_by_wall[wall_index]
         max_ρl = max(max_ρl, wall.ρl)
         max_ρt = max(max_ρt, wall.ρt)
         records = WallCheckRecord[]
         ends = get(end_bars, wall_index, nothing)
-        for (case, firsts, growns, what) in batches
-            _each_second_order(records, wall, firsts, growns;
-                material=inputs.material, wall_index, case,
-                boundary=inputs.boundary, assembly, what, ρt_strength,
-                plan_axis=axis, lw=lw_by_wall[wall_index], Moop=Moop, ends)
+        for batch in batches
+            _each_second_order(records, wall, batch.firsts, batch.growns;
+                material=inputs.material, wall_index, case=batch.case,
+                boundary=inputs.boundary, assembly, what=batch.what, ρt_strength,
+                plan_axis=axis, lw=lw_by_wall[wall_index], Moop=slab.moment,
+                slab_basis=slab.basis, ends,
+                first_parts=batch.first_parts, grown_parts=batch.grown_parts)
         end
         if haskey(shear_terms, wall_index)
             append!(records, special_shear_records(
@@ -443,7 +465,8 @@ function _analyze_lateral_walls!(struc::BuildingStructure, params::DesignParamet
     if joint_sets === nothing && any(a -> a.joined, struc.wall_mesh.assemblies)
         joint_sets = _build_first_order(struc, basic; wind, elf, effects)
     end
-    _record_joined_joints!(checks, struc, basic, wind, joint_sets, effects, inputs, axis)
+    _record_joined_joints!(checks, struc, basic, wind, joint_sets, effects, inputs, axis;
+                           elf = second === nothing ? elf : nothing)
     _record_story_shear!(checks, interactive, struc, axis)
     _record_frame_members!(checks, struc, frame_members, axis)
     @info "Ordinary wall reinforcement" n_piers=length(checks) n_raised max_ρl max_ρt type5 orthogonal
@@ -460,17 +483,19 @@ function _analyze_lateral_walls!(struc::BuildingStructure, params::DesignParamet
             end_area = bars === nothing ? nothing : bars.area_m2,
             end_inset = bars === nothing ? nothing : bars.inset_m)
     end
+    induced = gravity_induced_checks(struc, elf, basic, inputs.material, params, inputs.sdc;
+                                    Cdx = sysx.Cd, Cdy = sysy.Cd, Ie = inputs.Ie, SDS = inputs.SDS)
     result = OrdinaryWallResult(checks, drift, θmax, pdelta_multipliers,
                                 shares, interactive, frame_members,
                                 type5, nonparallel, orthogonal, boundary, opening_edges,
-                                end_bars)
+                                end_bars, induced)
     struc.ordinary_wall_result = result
     trials = WallThicknessTrial[]
-    for (wall_index, assembly, grown, _, _, Moop) in prepared
+    for (wall_index, assembly, grown, _, _, slab) in prepared
         push!(trials, _trial_for_pier(
-            struc, wall_index, grown, lw_by_wall[wall_index], Moop,
+            struc, wall_index, grown, lw_by_wall[wall_index], slab.moment,
             inputs.material, inputs.boundary, assembly,
-            get(shear_terms, wall_index, nothing)))
+            get(shear_terms, wall_index, nothing); slab_basis=slab.basis))
     end
     StructuralSizer.emit!(tc, :pipeline, "design_ordinary_walls!", "stage_ordinary_walls", :exit;
                           n_walls=length(checks), n_drift=length(drift))
@@ -497,9 +522,9 @@ Without those masters the combinations stay first-order. The pier cut is
 the shell and frame solution. Tributary area that was assigned to a column
 is not added again.
 
-A building with no walls returns `nothing`. `ρl` and `ρt` are raised on the same
-grid the lateral stage uses, and a ratio
-already on the wall is not reduced at a given thickness. Concrete comes
+A building with no walls returns `nothing`. `ρl` and `ρt` are chosen on the
+same grid the lateral stage uses, from the code floor, not from the ratios
+already on the wall. Concrete comes
 from the wall when it has one, otherwise from the column material cascade.
 Rebar is that cascade.
 """
@@ -545,7 +570,7 @@ function _analyze_gravity_walls!(struc::BuildingStructure, params::DesignParamet
         firsts = _gravity_strength_actions(gravity)
         growns = second === nothing ? firsts :
                  _second_order_gravity_actions(struc, pier, basic, second)
-        lw, Moop, ρt_strength, raised = _select_pier_steel!(
+        lw, Moop, basis, ρt_strength, raised = _select_pier_steel!(
             struc, wall_index, growns, material)
         raised && (n_raised += 1)
         max_ρl = max(max_ρl, wall.ρl)
@@ -553,10 +578,11 @@ function _analyze_gravity_walls!(struc::BuildingStructure, params::DesignParamet
         records = WallCheckRecord[]
         _each_second_order(records, wall, firsts, growns;
             material, wall_index, case=:D, boundary=:restrained, assembly,
-            what="gravity", ρt_strength, lw=lw, Moop=Moop)
+            what="gravity", ρt_strength, lw=lw, Moop=Moop, slab_basis=basis)
         checks[wall_index] = records
         push!(trials, _trial_for_pier(
-            struc, wall_index, growns, lw, Moop, material, :restrained, assembly))
+            struc, wall_index, growns, lw, Moop, material, :restrained, assembly;
+            slab_basis=basis))
     end
     n_open, max_ρl, max_ρt = _design_pierced_segments!(
         checks, struc, basic, second;
@@ -570,7 +596,8 @@ function _analyze_gravity_walls!(struc::BuildingStructure, params::DesignParamet
         WallGravityShare[], InteractiveStoryShearCheck[], FrameMemberCheck[],
         false, String[], false, Dict{Int, SpecialBoundaryDecision}(),
         Dict{Int, Vector{SpecialBoundaryDecision}}(),
-        Dict{Int, BoundaryEndReinforcement}())
+        Dict{Int, BoundaryEndReinforcement}(),
+        GravityInducedCheck[])
     struc.ordinary_wall_result = result
     StructuralSizer.emit!(tc, :pipeline, "design_ordinary_walls!", "stage_ordinary_walls", :exit;
                           n_walls=length(checks), n_drift=0)
@@ -637,9 +664,11 @@ function _solid_piers(struc)
 end
 
 """
-Raise `ρl` and `ρt` for one pier and return the length, slab moment, and strength `ρt`.
+Raise `ρl` and `ρt` for one pier.
 
-The fourth value is true when either ratio moved up.
+Returns the clear length, the envelope slab moment, the pressure basis that
+pairs that moment with each combination, the strength `ρt`, and whether
+either ratio moved up.
 """
 function _select_pier_steel!(struc, wall_index::Int, grown, material)
     wall = struc.walls[wall_index]
@@ -647,45 +676,123 @@ function _select_pier_steel!(struc, wall_index::Int, grown, material)
     ρt0 = wall.ρt
     lw = joined_clear_length(wall, struc.walls, wall_index) * u"m"
     Moop = _slab_moment_into_wall(struc, wall, lw)
+    basis = _governing_slab_basis(struc, wall)
     ρt_strength = select_ordinary_wall_reinforcement!(
-        wall, grown, material; hw=_stacked_wall_height(wall), lw=lw, Moop=Moop)
+        wall, grown, material; hw=_stacked_wall_height(wall), lw=lw, Moop=Moop,
+        slab_basis=basis)
     raised = wall.ρl > ρl0 + 1e-12 || wall.ρt > ρt0 + 1e-12
-    return lw, Moop, ρt_strength, raised
+    return lw, Moop, basis, ρt_strength, raised
+end
+
+"""
+One basic case on one pier: first-order actions, second-order actions, and
+the moment parts of each.
+
+`first_parts[i]` and `grown_parts[i]` are the gravity moment and the wind or
+Eh moment of action `i`. They add to that action's `M`. The second-order
+actions are the ones the reinforcement search and the recorded checks use.
+"""
+struct PierStrengthBatch
+    case::Symbol
+    firsts::Vector{CombinedWallAction}
+    growns::Vector{CombinedWallAction}
+    what::String
+    first_parts::Vector{Vector{Float64}}
+    grown_parts::Vector{Vector{Float64}}
+    function PierStrengthBatch(case, firsts, growns, what, first_parts, grown_parts)
+        n = length(firsts)
+        (n == length(growns) == length(first_parts) == length(grown_parts)) ||
+            throw(ArgumentError(
+                "ordinary wall stage: $what has $n first-order combinations, " *
+                "$(length(growns)) second-order combinations, " *
+                "$(length(first_parts)) first-order moment parts, and " *
+                "$(length(grown_parts)) second-order moment parts."))
+        _require_moment_parts(firsts, first_parts, what, "first-order")
+        _require_moment_parts(growns, grown_parts, what, "second-order")
+        return new(case, firsts, growns, what, first_parts, grown_parts)
+    end
+end
+
+"The parts of one action add to its in-plane moment, within 1 N·m."
+function _require_moment_parts(actions, parts, what, which)
+    for (i, (action, part)) in enumerate(zip(actions, parts))
+        length(part) == 2 || throw(ArgumentError(
+            "ordinary wall stage: $what $which combination $i has " *
+            "$(length(part)) moment parts. Gravity and the lateral action are the two."))
+        abs(sum(part) - action.M) <= 1.0 || throw(ArgumentError(
+            "ordinary wall stage: $what $which combination $i moment parts " *
+            "sum to $(sum(part)) N·m and the combination moment is $(action.M) N·m."))
+    end
+    return nothing
 end
 
 """
 First-order and second-order strength actions for one pier.
 
-Each entry is `(case, first-order actions, second-order actions, label)`.
-The second-order actions are the ones the reinforcement search and the
-recorded checks both use.
+Each batch is one basic case. The second-order actions are the ones the
+reinforcement search and the recorded checks both use.
 """
 function _pier_action_batches(struc, pier, basic, wind, elf, second, gravity, inputs,
                               effects::AbstractVector{SeismicEffectCase})
-    batches = Tuple{Symbol, Vector{CombinedWallAction}, Vector{CombinedWallAction}, String}[]
+    batches = PierStrengthBatch[]
     # No story stiffness: the combinations stay the first-order actions.
     grav = _gravity_strength_actions(gravity)
-    push!(batches, (:D, grav,
-        second === nothing ? grav : _second_order_gravity_actions(struc, pier, basic, second),
-        "gravity"))
+    grav2 = second === nothing ? grav :
+            _second_order_gravity_actions(struc, pier, basic, second)
+    push!(batches, PierStrengthBatch(:D, grav, grav2, "gravity",
+                                     _paired_moment_parts(grav), _paired_moment_parts(grav2)))
     wind1 = wind_pier_actions(struc, wind, pier)
     for (i, action) in enumerate(wind1)
         first = _wind_strength_actions(gravity, action)
-        push!(batches, (_wind_case_symbol(i, wind.cases[i]), first,
-            second === nothing ? first :
-                _second_order_wind_actions(struc, pier, basic, second, i),
-            "wind case $i"))
+        first_parts = _wind_moment_parts(gravity, action)
+        if second === nothing
+            growns, grown_parts = first, first_parts
+        else
+            growns, grown_parts = _second_order_wind_actions(struc, pier, basic, second, i)
+        end
+        push!(batches, PierStrengthBatch(
+            _wind_case_symbol(i, wind.cases[i]), first, growns, "wind case $i",
+            first_parts, grown_parts))
     end
-    qe_actions = seismic_strength_pier_actions(struc, elf, pier, effects)
+    qe_actions = second === nothing ?
+        [_pdelta_scaled_qe(struc, elf, pier, e) for e in effects] :
+        seismic_strength_pier_actions(struc, elf, pier, effects)
     for (k, action) in enumerate(qe_actions)
         first = _seismic_strength_actions(gravity, action, inputs.rho, inputs.SDS)
-        push!(batches, (effects[k].label, first,
-            second === nothing ? first :
-                _second_order_seismic_actions(struc, pier, basic, second, k,
-                                              inputs.rho, inputs.SDS),
-            "QE $(effects[k].label)"))
+        first_parts = _seismic_moment_parts(gravity, action, inputs.rho, inputs.SDS)
+        if second === nothing
+            growns, grown_parts = first, first_parts
+        else
+            growns, grown_parts = _second_order_seismic_actions(
+                struc, pier, basic, second, k, inputs.rho, inputs.SDS)
+        end
+        push!(batches, PierStrengthBatch(
+            effects[k].label, first, growns, "QE $(effects[k].label)",
+            first_parts, grown_parts))
     end
     return batches
+end
+
+"""
+Gravity moment and a zero lateral moment for each gravity combination.
+
+A gravity reading has no wind and no earthquake, so its combination moment
+is the gravity part.
+"""
+function _paired_moment_parts(actions::Vector{CombinedWallAction})
+    return [[a.M, 0.0] for a in actions]
+end
+
+"Gravity and wind moments of one wind case, in the wind-reading order."
+function _wind_moment_parts(gravity::PierGravityActions, wind::WallAction)
+    return [factored_inplane_moment_parts(combo, gravity; wind, alternative=alt)
+            for (combo, alt, _) in _wind_readings(gravity.roof)]
+end
+
+"Gravity and Eh moments of one strength QE, in the earthquake-reading order."
+function _seismic_moment_parts(gravity::PierGravityActions, qe::WallAction, rho, SDS)
+    return [factored_inplane_moment_parts(combo, gravity; qe, rho, SDS, alternative=alt)
+            for (combo, alt, _) in _seismic_readings(gravity.roof)]
 end
 
 """
@@ -953,25 +1060,29 @@ end
 
 function _second_order_wind_actions(struc, pier, basic, second, i::Int)
     out = CombinedWallAction[]
+    parts = Vector{Float64}[]
     for (combo, alt, key) in _wind_readings(basic.symbols[3])
         set = second[key]
         grown = _second_order_gravity(struc, pier, basic, set)
         wind = _second_order_lateral(struc, pier, set.u[3 + i])
         push!(out, combine_wall_action(combo, grown; wind, alternative=alt))
+        push!(parts, factored_inplane_moment_parts(combo, grown; wind, alternative=alt))
     end
-    return out
+    return out, parts
 end
 
 function _second_order_seismic_actions(struc, pier, basic, second, k::Int, rho, SDS)
     nwind = first(values(second)).nwind
     out = CombinedWallAction[]
+    parts = Vector{Float64}[]
     for (combo, alt, key) in _seismic_readings(basic.symbols[3])
         set = second[key]
         grown = _second_order_gravity(struc, pier, basic, set)
         qe = _second_order_lateral(struc, pier, set.u[3 + nwind + k])
         push!(out, combine_wall_action(combo, grown; qe, rho, SDS, alternative=alt))
+        push!(parts, factored_inplane_moment_parts(combo, grown; qe, rho, SDS, alternative=alt))
     end
-    return out
+    return out, parts
 end
 
 """
@@ -1007,27 +1118,125 @@ function _slab_moment_into_wall(struc, wall, lw)
     return moment * share
 end
 
-function _directed_wall_moment(result, slab, ux, uy)
+"""
+How the slab moment into this pier pairs with each load combination.
+
+`qD` and `qL` are the dead and live pressures, in pascals, of the slab that
+delivers the largest wall moment. `roof` is true when that slab is a roof,
+so its live case is roof live rather than floor live. `faces` holds
+`(D, L, roof)` in N·m for every wall face of every slab at the pier's
+joints, from the panels' `wall_face_parts` in the direction
+[`_directed_wall_moment`](@ref) picks. `faces` is `nothing` when a slab
+that loads the pier has no parts, and the pressures pair the moment
+instead. `nothing` when no flat-plate panel meets the pier.
+"""
+function _governing_slab_basis(struc, wall)
+    hasproperty(struc, :slabs) || return nothing
+    L = wall_length(wall)
+    L > 0 || return nothing
+    ux, uy = (wall.x2 - wall.x1) / L, (wall.y2 - wall.y1) / L
+    height = hasproperty(wall, :base) ? ustrip(u"m", wall.base.L) : nothing
+    z0, z1 = _story_range_m(struc, wall.story, height)
+    best = 0.0
+    basis = nothing
+    faces = NamedTuple{(:D, :L, :roof), Tuple{Float64, Float64, Bool}}[]
+    paired = true
+    for slab in struc.slabs
+        result = slab.result
+        result isa StructuralSizer.FlatPlatePanelResult || continue
+        z = _slab_elevation_m(struc, slab)
+        z === nothing && continue
+        at_joint = (z0 !== nothing && abs(z - z0) <= 0.05) ||
+                   (z1 !== nothing && abs(z - z1) <= 0.05)
+        at_joint || continue
+        m = ustrip(u"N*m", _directed_wall_moment(result, slab, ux, uy))
+        roof = hasproperty(slab, :floor_type) && slab.floor_type === :roof
+        if m > 0
+            parts = _directed_wall_face_parts(result, slab, ux, uy)
+            paired &= !isempty(parts)
+            for (D, Lp) in parts
+                push!(faces, (D = D, L = Lp, roof = roof))
+            end
+        end
+        m > best || continue
+        qD, qL = _slab_gravity_pressures(struc, slab)
+        (qD > 0 || qL > 0) || continue
+        best = m
+        basis = (qD = qD, qL = qL, roof = roof)
+    end
+    basis === nothing && return nothing
+    return (basis..., faces = paired ? faces : nothing)
+end
+
+"Largest cell dead and live pressures on one slab, in pascals."
+function _slab_gravity_pressures(struc, slab)
+    qD = 0.0
+    qL = 0.0
+    hasproperty(slab, :cell_indices) || return qD, qL
+    for ci in slab.cell_indices
+        cell = struc.cells[ci]
+        qD = max(qD, ustrip(u"Pa", cell.sdl + cell.self_weight))
+        qL = max(qL, ustrip(u"Pa", cell.live_load))
+    end
+    return qD, qL
+end
+
+"""
+Span directions whose wall moment loads a wall along `(ux, uy)`.
+
+A wall across the primary span (|cos| ≤ 0.34) takes the primary, a wall
+along it (|cos| ≥ 0.94) the secondary, and a wall between those both.
+"""
+function _wall_span_directions(slab, ux, uy)
     axis = StructuralSizer._get_span_axis(slab)
     dot = abs(ux * axis[1] + uy * axis[2])
-    primary = abs(result.M_wall)
-    secondary = abs(result.M_wall_secondary)
-    chosen = dot <= 0.34 ? primary : (dot >= 0.94 ? secondary : max(primary, secondary))
+    return (primary = dot < 0.94, secondary = dot > 0.34)
+end
+
+function _directed_wall_moment(result, slab, ux, uy)
+    dirs = _wall_span_directions(slab, ux, uy)
+    chosen = max(dirs.primary ? abs(result.M_wall) : zero(result.M_wall),
+                 dirs.secondary ? abs(result.M_wall_secondary) : zero(result.M_wall))
     return uconvert(u"N*m", chosen)
+end
+
+"""`wall_face_parts` in the directions [`_directed_wall_moment`](@ref) reads."""
+function _directed_wall_face_parts(result, slab, ux, uy)
+    dirs = _wall_span_directions(slab, ux, uy)
+    parts = NTuple{2,Float64}[]
+    if dirs.primary && abs(result.M_wall) > zero(result.M_wall)
+        isempty(result.wall_face_parts) && return NTuple{2,Float64}[]
+        append!(parts, result.wall_face_parts)
+    end
+    if dirs.secondary && abs(result.M_wall_secondary) > zero(result.M_wall_secondary)
+        isempty(result.wall_face_parts_secondary) && return NTuple{2,Float64}[]
+        append!(parts, result.wall_face_parts_secondary)
+    end
+    return parts
 end
 
 function _each_second_order(records, wall, first_actions, second_actions;
                              material, wall_index, case, boundary, assembly, what,
                              ρt_strength=nothing, plan_axis=(1.0, 0.0),
                              lw::Union{Nothing,Unitful.Length}=nothing,
-                             Moop=0.0u"N*m", ends=nothing)
+                             Moop=0.0u"N*m", slab_basis=nothing, ends=nothing,
+                             first_parts=nothing, grown_parts=nothing)
     length(first_actions) == length(second_actions) || throw(ArgumentError(
         "ordinary wall stage: $what has $(length(first_actions)) first-order " *
         "combinations and $(length(second_actions)) second-order combinations."))
-    for (first, grown) in zip(first_actions, second_actions)
+    if first_parts !== nothing || grown_parts !== nothing
+        (first_parts !== nothing && grown_parts !== nothing) || throw(ArgumentError(
+            "ordinary wall stage: $what has moment parts on one order only."))
+        (length(first_parts) == length(first_actions) &&
+         length(grown_parts) == length(second_actions)) || throw(ArgumentError(
+            "ordinary wall stage: $what moment parts do not line up with the combinations."))
+    end
+    for (i, (first, grown)) in enumerate(zip(first_actions, second_actions))
         _accept_second_order!(records, wall, first, grown;
                               material, wall_index, case, boundary, assembly,
-                              ρt_strength, plan_axis, lw, Moop, ends)
+                              ρt_strength, plan_axis, lw, Moop, slab_basis, ends,
+                              first_parts=first_parts === nothing ? nothing : first_parts[i],
+                              grown_parts=grown_parts === nothing ? nothing : grown_parts[i])
     end
     return records
 end
@@ -1037,43 +1246,72 @@ function _accept_second_order!(records, wall, first::CombinedWallAction,
                                material, wall_index, case, boundary, assembly,
                                ρt_strength=nothing, plan_axis=(1.0, 0.0),
                                lw::Union{Nothing,Unitful.Length}=nothing,
-                               Moop=0.0u"N*m", ends=nothing)
+                               Moop=0.0u"N*m", slab_basis=nothing, ends=nothing,
+                               first_parts=nothing, grown_parts=nothing)
     (first.combination === grown.combination && first.alternative === grown.alternative) ||
         throw(ArgumentError(
             "ordinary wall stage: first-order $(first.combination)/$(first.alternative) " *
             "does not match second-order $(grown.combination)/$(grown.alternative)."))
-    _record_second_order_moment!(records, wall, first, grown; wall_index, case, plan_axis)
+    _record_second_order_moment!(records, wall, first, grown; wall_index, case, plan_axis,
+                                 first_parts, grown_parts)
     append!(records, check_ordinary_wall(wall, CombinedWallAction[grown];
                                          material, wall_index, case, boundary, assembly,
-                                         ρt_strength, plan_axis, lw, Moop, ends))
+                                         ρt_strength, plan_axis, lw, Moop,
+                                         slab_basis=slab_basis, ends))
     return records
 end
 
 """
-Record ACI 318-19 §6.2.5.3 when the second-order moment is above the limit.
+Record ACI 318-19 §6.2.5.3 when one action's second-order moment is above the limit.
 
-The strength checks still use the second-order forces. This record is the
-limit on them. Both moments under 1 N·m are not a ratio.
+`first_parts` and `grown_parts` are the gravity moment and the wind or Eh
+moment. With neither argument, the combination moment is the one action.
+The strength checks still use the summed second-order forces. A part under
+1 N·m on both orders is not a ratio. The recorded ratio is the largest
+part that exceeds the limit.
 
 # Citation
 ACI 318-19 §6.2.5.3 (corpus: aci-318-19, PDF page 72): Mu including
 second-order effects shall not exceed 1.4 Mu due to first-order effects.
+R6.2.5.3 (same page): 1.4 is the secondary-to-primary moment ratio. A
+stability index Q of 0.2 corresponds to 1.25, and the ASCE 7 stability
+coefficient of 0.25 corresponds to 1.33.
 """
 function _record_second_order_moment!(records, wall, first::CombinedWallAction,
                                       grown::CombinedWallAction; wall_index, case,
-                                      plan_axis=(1.0, 0.0))
-    a2 = abs(grown.M)
-    a1 = abs(first.M)
-    (a2 <= 1.0 && a1 <= 1.0) && return records
-    # ACI 318-19 §6.2.5.3 (corpus: aci-318-19, PDF page 72).
-    limit = 1.4 * a1
-    a2 <= limit + 1.0 && return records
+                                      plan_axis=(1.0, 0.0),
+                                      first_parts=nothing, grown_parts=nothing)
+    parts1 = first_parts === nothing ? [first.M] : first_parts
+    parts2 = grown_parts === nothing ? [grown.M] : grown_parts
+    length(parts1) == length(parts2) || throw(ArgumentError(
+        "ordinary wall stage: $(first.combination) has $(length(parts1)) " *
+        "first-order moment parts and $(length(parts2)) second-order moment parts."))
+    worst = nothing
+    for (m1, m2) in zip(parts1, parts2)
+        found = _second_order_part_ratio(m2, m1)
+        found === nothing && continue
+        if worst === nothing || found.ratio > worst.ratio
+            worst = found
+        end
+    end
+    worst === nothing && return records
     push!(records, WallCheckRecord(
         wall_index, wall.story, _pier_axis_direction(wall, plan_axis), case,
         grown.combination, grown.alternative, "second-order moment",
-        false, a1 == 0.0 ? Inf : a2 / a1, a2, limit,
+        false, worst.ratio, worst.demand, worst.limit,
         "ACI 318-19 §6.2.5.3"))
     return records
+end
+
+"The secondary-to-primary ratio of one moment, or nothing when it is within 1.4."
+function _second_order_part_ratio(m2, m1)
+    a2 = abs(Float64(m2))
+    a1 = abs(Float64(m1))
+    (a2 <= 1.0 && a1 <= 1.0) && return nothing
+    # ACI 318-19 §6.2.5.3 (corpus: aci-318-19, PDF page 72).
+    limit = 1.4 * a1
+    a2 <= limit + 1.0 && return nothing
+    return (ratio = a1 == 0.0 ? Inf : a2 / a1, demand = a2, limit = limit)
 end
 
 

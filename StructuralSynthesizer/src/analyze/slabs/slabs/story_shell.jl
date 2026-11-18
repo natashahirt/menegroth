@@ -499,8 +499,6 @@ function _mesh_story_shell!(shell::StoryShell, inp, struc)
     shell.signature = _story_shell_signature(inp)
     shell.model = nothing
     empty!(shell.reasons)
-    # Walls first, so the in-plane anchor in the pin sees nodes already held.
-    _hold_story_walls!(built.nodes, inp.wall_lines)
     n_pin = _pin_story_supports!(built.nodes, shell.support_points)
     if n_pin < 3 && isempty(inp.wall_lines)
         push!(shell.reasons, n_pin == 0 && length(shell.support_points) < 3 ?
@@ -508,8 +506,13 @@ function _mesh_story_shell!(shell::StoryShell, inp, struc)
             "fewer than three shell nodes were supported")
     else
         _append_slab_edge!(shell, built, inp, struc)
-        shell.model = Asap.Model(built.nodes, built.frames, built.shells,
+        wall_shells, wall_of = _attach_story_walls!(shell, built, struc)
+        shells = vcat(built.shells, wall_shells)
+        shell.model = Asap.Model(built.nodes, built.frames, shells,
                                  _story_shell_loads(built, inp.pressures))
+        # 0 is a slab panel. A positive entry is the wall the triangle belongs to.
+        _ANALYSIS_SHELL_WALLS[shell.model] =
+            vcat(zeros(Int, length(built.shells)), wall_of)
     end
     return shell
 end
@@ -733,7 +736,11 @@ function _set_story_beams!(shell::StoryShell, inp)
     for (el, s) in zip(shell.built.frames, shell.frame_station)
         b = beam_of[el.id]
         el.section = section_at === nothing ? b.section : section_at(b, s)
-        el.eccentricity = b.eccentricity
+        # `b.eccentricity` is the physical offset (positive local y = global
+        # up). Sign slot 3 for this piece. Assigning the beam tuple verbatim
+        # would put a −X web on the wrong side of the slab.
+        el.eccentricity = Asap.orient_up_eccentricity(
+            b.eccentricity, el.nodeStart, el.nodeEnd; roll = el.Ψ)
     end
     return shell
 end
@@ -790,10 +797,20 @@ function _story_shell_inputs(struc, level::Int, concrete, steel, composite_regio
     regions_used = Dict{Int, Vector{NamedTuple}}()
     origins = Dict{Int, NTuple{2, Float64}}()
     stale = Int[]
+    # Generated joists stay in the shell of a slab that touches this story.
+    # `Beam.level` is the support rank, not the story index.
+    generated = Set{Int}()
+    for slab in slabs
+        for fl in slab.framing_levels
+            for bi in level_member_indices(struc, fl)
+                push!(generated, bi)
+            end
+        end
+    end
     for (i, beam) in enumerate(struc.beams)
         chain = _story_vertex_chain(struc, beam)
         on_story = !isempty(chain) && all(v -> v in vertices, chain)
-        on_story || beam.level == level || continue
+        on_story || i in generated || continue
         isempty(chain) && continue
         sec = _story_beam_section(struc, beam)
         if sec === nothing
@@ -970,78 +987,113 @@ function _solid_wall_pieces(wall; tol::Float64 = 1e-6)
 end
 
 """
-Fix the slab on each wall line.
+Join the slab to each wall that supports it.
 
-ACI 318-11 R13.6.3.3 (corpus: aci-318-11, page 254): a slab cast integrally
-with a concrete wall of large flexural stiffness has little rotation at the
-joint. uz is fixed. Rotation about the wall's own axis is fixed too: rx
-when the wall runs along x, ry when it runs along y. A skewed wall keeps
-both global rotations free here; [`_story_wall_springs`](@ref) restrains the
-rotation about that wall's axis.
+ACI 318-11 R13.6.3.3 (corpus: aci-318-11, page 254) chooses a direct-design
+moment coefficient for an edge cast integrally with a stiff wall. It does
+not restrain that edge in space. The slab nodes on the wall line stay free
+and are the top of the wall shell. The wall's base, one pier below the
+slab, is the support: its translations are held and its rotations are not.
+
+The wall uses `Wall.concrete` when that is set, otherwise the story shell's
+concrete. No modulus is assumed when both are missing. Returns the new
+shell triangles and the wall index of each one.
 """
-function _hold_story_walls!(nodes, segments)
-    isempty(segments) && return 0
-    n = 0
-    for node in nodes
-        pt = (ustrip(u"m", node.position[1]), ustrip(u"m", node.position[2]))
-        hit = findfirst(seg -> StructuralSizer._point_on_segment(pt, seg[1], seg[2]), segments)
-        hit === nothing && continue
-        seg = segments[hit]
-        dof = copy(node.dof)
-        dof[3] && (n += 1)
-        dof[3] = false
-        dx = abs(seg[2][1] - seg[1][1])
-        dy = abs(seg[2][2] - seg[1][2])
-        if dx >= 4 * dy
-            dof[4] = false
-        elseif dy >= 4 * dx
-            dof[5] = false
+function _attach_story_walls!(shell::StoryShell, built, struc)
+    shells = Asap.ShellTri3[]
+    wall_of = Int[]
+    pieces = _story_wall_support_pieces(struc, shell.level)
+    isempty(pieces) && return shells, wall_of
+    z_slab = ustrip(u"m", _story_metres(struc.skeleton.stories[shell.level].elevation))
+    bases = Dict{NTuple{3, Int}, Asap.Node}()
+    for (wi, seg) in pieces
+        wall = struc.walls[wi]
+        drop = StructuralSizer._wall_drop_below_slab(struc.skeleton, wall, z_slab)
+        drop === nothing && continue
+        tops = _slab_nodes_on_segment(built.nodes, seg)
+        length(tops) < 2 && continue
+        t_m = _member_metres(wall.thickness)
+        t_m > 0 || throw(ArgumentError(
+            "story shell: wall thickness must be positive, got $(wall.thickness)"))
+        conc = wall.concrete === nothing ? shell.concrete : wall.concrete
+        conc === nothing && throw(ArgumentError(
+            "story shell: wall $(wi) has no concrete and the story shell has none. " *
+            "No modulus is assumed."))
+        E, ν, ρ = _shell_concrete(conc)
+        z_local = -drop
+        row = Asap.Node[]
+        for n in tops
+            x = ustrip(u"m", n.position[1])
+            y = ustrip(u"m", n.position[2])
+            key = (round(Int, 1000 * x), round(Int, 1000 * y), round(Int, 1000 * z_local))
+            b = get(bases, key, nothing)
+            if b === nothing
+                b = Asap.Node([x * u"m", y * u"m", z_local * u"m"], :free)
+                # Held against translation at the level below. Not clamped.
+                b.dof = Bool[false, false, false, true, true, true]
+                bases[key] = b
+                push!(built.nodes, b)
+            end
+            push!(row, b)
         end
-        node.dof = dof
+        for i in 1:(length(tops) - 1)
+            dx = ustrip(u"m", tops[i + 1].position[1] - tops[i].position[1])
+            dy = ustrip(u"m", tops[i + 1].position[2] - tops[i].position[2])
+            hypot(dx, dy) < 1e-4 && continue
+            t = t_m * u"m"
+            push!(shells, Asap.ShellTri3((tops[i], tops[i + 1], row[i + 1]), t, E, ν;
+                                         id = :wall, ρ = ρ))
+            push!(shells, Asap.ShellTri3((tops[i], row[i + 1], row[i]), t, E, ν;
+                                         id = :wall, ρ = ρ))
+            push!(wall_of, wi, wi)
+        end
     end
-    return n
+    return shells, wall_of
 end
 
-"""
-Grounded springs that restrain rotation about a skewed wall's axis.
-
-# ENGINEERING JUDGMENT
-R13.6.3.3 gives no stiffness. The spring is one thousand times the plate
-rigidity `E t³/12` times the mesh spacing, so the rotation about the wall
-is small beside the slab's own flexibility, and the value stays finite.
-An axis-aligned wall is fixed by its degrees of freedom instead.
-"""
-function _story_wall_springs(shell::StoryShell, segments)
-    springs = Asap.Spring[]
-    isempty(segments) && return springs
-    built = shell.built
-    built === nothing && return springs
-    isempty(built.shells) && return springs
-    el = built.shells[1]
-    spacing = ustrip(u"m", shell.target_edge)
-    k = 1.0e3 * el.E * el.thickness^3 / 12 * spacing
+"""Slab nodes, at z = 0, that lie on `seg`, ordered along it."""
+function _slab_nodes_on_segment(nodes, seg)
+    hits = Tuple{Float64, Asap.Node}[]
+    d = (seg[2][1] - seg[1][1], seg[2][2] - seg[1][2])
+    L2 = d[1] * d[1] + d[2] * d[2]
+    L2 > 0 || return Asap.Node[]
     seen = IdDict{Asap.Node, Nothing}()
-    for node in built.nodes
+    for node in nodes
         haskey(seen, node) && continue
+        abs(ustrip(u"m", node.position[3])) < 1e-3 || continue
         pt = (ustrip(u"m", node.position[1]), ustrip(u"m", node.position[2]))
-        hit = findfirst(seg -> StructuralSizer._point_on_segment(pt, seg[1], seg[2]), segments)
-        hit === nothing && continue
-        seg = segments[hit]
-        dx = seg[2][1] - seg[1][1]
-        dy = seg[2][2] - seg[1][2]
-        L = hypot(dx, dy)
-        L > 1e-9 || continue
-        (abs(dx) >= 4 * abs(dy) || abs(dy) >= 4 * abs(dx)) && continue
+        StructuralSizer._point_on_segment(pt, seg[1], seg[2]) || continue
         seen[node] = nothing
-        tx, ty = dx / L, dy / L
-        spring = Asap.Spring(node; id = :wall_axis)
-        spring.K[4, 4] = k * tx * tx
-        spring.K[4, 5] = k * tx * ty
-        spring.K[5, 4] = k * ty * tx
-        spring.K[5, 5] = k * ty * ty
-        push!(springs, spring)
+        s = ((pt[1] - seg[1][1]) * d[1] + (pt[2] - seg[1][2]) * d[2]) / L2
+        push!(hits, (s, node))
     end
-    return springs
+    sort!(hits; by = first)
+    return Asap.Node[n for (_, n) in hits]
+end
+
+"""Modulus, Poisson's ratio and density of a concrete the shell already has."""
+function _shell_concrete(concrete)
+    E = concrete.E
+    E isa Unitful.Quantity || throw(ArgumentError(
+        "story shell: concrete modulus must be a pressure, got $(typeof(E))"))
+    ρ = concrete.ρ
+    ρ = ρ isa Unitful.Quantity ? ustrip(u"kg/m^3", ρ) : Float64(ρ)
+    return E, Float64(concrete.ν), ρ
+end
+
+_member_metres(x) = x isa Unitful.Quantity ? ustrip(u"m", x) : Float64(x)
+
+"""
+`panel_index` names each slab shell. Wall shells, appended after the slab,
+are 0: they are not a panel.
+"""
+function _story_shell_panel_index(model, built)
+    idx = built.panel_index
+    n = length(model.shell_elements)
+    n == length(idx) && return idx
+    n > length(idx) || throw(ArgumentError(
+        "the story shell has fewer shell elements than slab panels"))
+    return vcat(idx, zeros(Int, n - length(idx)))
 end
 
 """
@@ -1079,6 +1131,7 @@ function solve_story_shell!(shell::StoryShell, struc;
     service_spans = Dict{Int, Vector{Any}}()
     service_converged = true
     model = nothing
+    scene = nothing
     if !solve
         push!(reasons, "the story shell was meshed and not solved")
     elseif shell.model === nothing
@@ -1098,13 +1151,13 @@ function solve_story_shell!(shell::StoryShell, struc;
         end
         empty!(model.springs)
         springs = _story_column_springs(struc, level, built.nodes, shell.column_concrete, steel)
-        append!(springs, _story_wall_springs(shell, inp.wall_lines))
         isempty(springs) || Asap.add_springs!(model, springs)
         Asap.solve!(model)
         forces = _shell_beam_forces(built.frames)
-        cases = StructuralSizer.story_load_cases(model, built.panel_index, inp.designs)
+        pidx = _story_shell_panel_index(model, built)
+        cases = StructuralSizer.story_load_cases(model, pidx, inp.designs)
         bars = StructuralSizer.story_panel_reinforcement(
-            model, built.panel_index, inp.designs; cases = cases, fc = concrete.fc′,
+            model, pidx, inp.designs; cases = cases, fc = concrete.fc′,
             fy = rebar.Fy)
         beam_demands = story_shell_beam_demands(model, built.frames, inp.beam_index, cases;
                                                 origins = inp.origins)
@@ -1114,7 +1167,8 @@ function solve_story_shell!(shell::StoryShell, struc;
             cracked = story_cracked_service(
                 model, built, inp.designs, specs;
                 concrete = concrete, rebar = rebar, bars = bars,
-                sustained_live_fraction = sustained_live_fraction)
+                sustained_live_fraction = sustained_live_fraction, keep = true)
+            scene = (model = cracked.service_model, state = :cracked_service)
             for (id, spans) in cracked.spans
                 i = get(inp.beam_index, id, nothing)
                 i === nothing && continue
@@ -1122,10 +1176,13 @@ function solve_story_shell!(shell::StoryShell, struc;
             end
             service_converged = cracked.converged
             service_converged || @warn "Cracked service shell did not settle" level iterations=cracked.iterations
+        else
+            scene = (model = copy_solved_model(model), state = :factored)
         end
         ran = true
     end
     status = (ran && isempty(inp.skipped)) ? :analyzed : :not_analyzed
+    wall_ids = model === nothing ? nothing : analysis_shell_walls(model)
     extra = (
         analysis_status = status,
         analysis_source = :story_shell,
@@ -1133,6 +1190,10 @@ function solve_story_shell!(shell::StoryShell, struc;
         shell_beam_forces = forces,
         shell_beam_ids = inp.beam_ids,
         shell_reinforcement = bars,
+        # The solved story model, for the scene. See `story_shell_scene_model`.
+        shell_scene = scene === nothing ? nothing :
+            merge(scene, (level = level, beam_index = copy(inp.beam_index),
+                          shell_walls = wall_ids === nothing ? nothing : copy(wall_ids))),
     )
     for (k, slab) in enumerate(inp.slabs)
         own = merge(extra, (shell_panels = findall(==(k), inp.panel_slab),))

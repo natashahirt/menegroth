@@ -142,12 +142,17 @@ end
         name = "mesh_refinement_test",
         floor = FlatPlateOptions(method = FEA()),
         materials = MaterialOptions(concrete = NWC_4000),
-        max_iterations = 2,
+        # Two punching passes do not install this floor. The mesh checks need
+        # the design the flat-plate budget actually produces.
+        max_iterations = 10,
         display_units = DisplayUnits(:metric),  # mesh vertices in m, matches col_xy
     )
 
     design = design_building(struc, params)
     @test all_ok(design)
+    # design_building leaves the caller's skeleton untouched. The mesh is on
+    # the sized building.
+    struc = structure(design)
 
     build_analysis_model!(design)
     @test has_analysis_model(design)
@@ -397,11 +402,12 @@ end
             name = "mesh_refinement_nonquad_drape",
             floor = FlatPlateOptions(method = FEA()),
             materials = MaterialOptions(concrete = NWC_4000),
-            max_iterations = 2,
+            max_iterations = 10,
             display_units = DisplayUnits(:metric),
         )
         design_ngon = design_building(struc_ngon, params_ngon)
         @test all_ok(design_ngon)
+        struc_ngon = structure(design_ngon)
 
         build_analysis_model!(design_ngon)
         @test has_analysis_model(design_ngon)

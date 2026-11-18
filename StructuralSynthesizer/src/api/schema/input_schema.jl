@@ -57,6 +57,13 @@ function api_input_schema()
             "required" => false,
             "description" => "Optional. Keys: floor, roof, grade. Values: arrays of polylines [[x,y,z], ...].",
         ),
+        "openings" => Dict(
+            "type" => "array of polylines [[x,y,z], ...]",
+            "required" => false,
+            "description" => "Optional unframed slab openings (stairs, ducts, shafts without beams on every side). " *
+                             "The first vertex's z picks the story; repeat the polyline at each story it cuts. " *
+                             "Openings framed by beams on every side should be left out of `faces` instead.",
+        ),
         "params" => Dict(
             "type" => "object",
             "description" => "Design parameters; all fields optional with defaults below.",
@@ -84,11 +91,12 @@ function api_input_schema()
                 "skip_visualization" => "When true, skip shell mesh build and visualization serialization (faster response, frame-only). Default: false.",
                 "visualization_detail" => "minimal | full. minimal = frame elements + slab boundaries only (no deflected meshes, no per-face analytical). full = full visualization. Default: full.",
                 "scoped_overrides" => "Optional list of scoped floor overrides. Each override provides face polygons and floor-specific options applied only to matching cells.",
-                "framing_levels" => "Optional array requesting auto-generated multi-level framing above each slab (Phase 5). Ordered from the slab outward (index 1 = joists, 2+ = secondary beams / girders). Each entry: material (\"steel\" | \"concrete\" | \"timber\"), spacing_in (optional c-to-c joist spacing, inches), role (\"joist\" | \"beam\", levels >= 2 only), axis ([x, y] joist run-direction; levels >= 2 default to mutually-perpendicular alternation), count (optional member count), end_fixity (optional 2-element per-end releases, e.g. [\"pinned\",\"pinned\"]), catalog_override (optional steel catalog name: \"all_W\" | \"preferred_W\" | \"all_HSS\" | \"all_HSSRound\"). Empty (default) = no auto-generated framing.",
+                "framing_levels" => "Optional array requesting auto-generated multi-level framing above each slab (Phase 5). Ordered from the slab outward (index 1 = joists, 2+ = secondary beams / girders). Each entry: material (\"steel\" | \"concrete\" | \"timber\"), spacing_in (optional c-to-c joist spacing, inches), role (\"joist\" | \"beam\", levels >= 2 only), axis ([x, y] joist run-direction; levels >= 2 default to mutually-perpendicular alternation), count (optional member count), end_fixity (optional 2-element per-end releases, e.g. [\"pinned\",\"pinned\"]), analysis (optional \"tributary\" | \"grillage\"; omitted means tributary, or grillage when n_xi/n_eta or module_spacing_in is set; any other value is an error), n_xi and n_eta (optional rib-bay counts, level 1 only, both required, each >= 1; a grillage on a panel that is not a quadrilateral errors before sizing), module_spacing_in (optional [s1, s2] rib spacings in inches, level 1 only: a module grid over any slab outline and its holes, cut by the boundary), module_angle_deg (optional direction of the first rib family in degrees, with module_spacing_in; default 0), solid_head (optional fraction of the panel from each corner, level 1 grillage with n_xi/n_eta only, in [0, 1/2), snapped up to a whole rib module). spacing_in, the bay counts, and module_spacing_in are mutually exclusive. Empty (default) = no auto-generated framing. Per-level sizing options are the Julia framing_opts beam_options field, not a wire key.",
                 "materials" => Dict(
                     "concrete" => "Slab/floor concrete (e.g. NWC_4000, Earthen_500, Earthen_2000). Default: NWC_4000.",
                     "column_concrete" => "Column concrete (e.g. NWC_6000). Default: NWC_6000.",
                     "rebar" => "Rebar name (e.g. Rebar_60). Default: Rebar_60.",
+                    "rebar_coating" => "uncoated, galvanized, epoxy, or zinc_epoxy. Default: uncoated.",
                     "steel" => "Steel name (e.g. A992). Default: A992.",
                 ),
                 "column_type" => "$(join(API_COLUMN_TYPES, " | ")). Default: rc_rect.",

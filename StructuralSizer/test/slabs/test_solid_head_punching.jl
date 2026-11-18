@@ -121,6 +121,46 @@ end
         side_long = 20.0u"inch", side_short = 20.0u"inch", position = :edge)
 end
 
+@testset "a moment under 2% of direct shear names no face" begin
+    # The center column of the 30 in waffle is about 556 kip and 1 kip·ft.
+    # That moment still enters vu. It does not name a face. ENGINEERING
+    # JUDGMENT in moment_names_a_face, not an ACI factor. R11.11.7.2, page 210,
+    # still places the peak.
+    col = (position = :interior, c1 = 14.0u"inch", c2 = 14.0u"inch",
+           shape = :rectangular, θ = 0.0)
+    d = 14.0u"inch"
+    h = 16.0u"inch"
+    fc = 4000.0u"psi"
+    kw = (θ = 0.0, span_axis = (1.0, 0.0))
+    Vu = 556.0u"kip"
+    quiet = SS.check_punching_for_column(col, Vu, 1.0u"kip" * u"ft", d, h, fc;
+                                        Muy = 1.0u"kip" * u"ft", kw...)
+    axial = SS.check_punching_for_column(col, Vu, 0.0u"kip" * u"ft", d, h, fc; kw...)
+    @test quiet.direction === nothing
+    @test quiet.vu > axial.vu
+    @test quiet.ok == (quiet.vu <= quiet.φvc)
+
+    # About 20 in of eccentricity on both axes, the edge columns on that floor.
+    edge = (position = :edge, c1 = 16.0u"inch", c2 = 16.0u"inch",
+            shape = :rectangular, θ = 0.0)
+    Vu_e = 160.0u"kip"
+    Mu = Vu_e * 20.0u"inch"
+    faced = SS.check_punching_for_column(edge, Vu_e, Mu, d, h, fc;
+                                        Muy = Mu, free_edge_parallel = :c2, kw...)
+    @test faced.direction !== nothing
+
+    corner = (position = :corner, c1 = 16.0u"inch", c2 = 16.0u"inch",
+              shape = :rectangular, θ = 0.0)
+    loud = SS.check_punching_for_column(corner, 50.0u"kip", 200.0u"kip" * u"ft", d, h, fc;
+                                       Muy = 80.0u"kip" * u"ft", kw...)
+    faint = SS.check_punching_for_column(corner, Vu, 1.0u"kip" * u"ft", d, h, fc;
+                                        Muy = 1.0u"kip" * u"ft", kw...)
+    plain = SS.check_punching_for_column(corner, Vu, 0.0u"kip" * u"ft", d, h, fc; kw...)
+    @test loud.direction !== nothing
+    @test faint.direction === nothing
+    @test faint.vu > plain.vu
+end
+
 @testset "hogging compression in the stem grows along that rib" begin
     # ACI 318-11 §10.2.7 and §10.3.4. The limit is max_singly_reinforced at
     # εt = 0.005, φ = 0.90. A wider stem raises the capacity. A deeper block

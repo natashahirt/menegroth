@@ -43,14 +43,14 @@ return is always a typed quantity (`kg` for [`MinWeight`](@ref), `m^3` for
 """
 function objective_value end
 
-"""Objective value for MinWeight: A × L × ρ."""
+"""Objective value for MinWeight: A × L × ρ, with A from [`self_weight_area`](@ref)."""
 function objective_value(::MinWeight, s::AbstractSection, mat::AbstractMaterial, L)
-    section_area(s) * L * mat.ρ
+    self_weight_area(s) * L * mat.ρ
 end
 
 """Objective value for MinVolume (without material): A × L."""
 function objective_value(::MinVolume, s::AbstractSection, L)
-    section_area(s) * L
+    self_weight_area(s) * L
 end
 
 """Objective value for MinVolume (material ignored): A × L."""
@@ -61,7 +61,7 @@ function objective_value(obj::MinCost{<:Real}, s::AbstractSection, mat::Abstract
     cost = isnan(obj.unit_cost) ? mat.cost : obj.unit_cost
     isnan(cost) && error("MinCost requires material.cost to be set (material has cost=NaN). " *
                          "Either set cost on your material or use MinCost(unit_cost_per_kg).")
-    section_area(s) * L * mat.ρ * cost
+    self_weight_area(s) * L * mat.ρ * cost
 end
 
 """Objective value for MinCost with a custom function: f(section, material) × L."""
@@ -71,7 +71,7 @@ end
 
 """Objective value for MinCarbon: A × L × ρ × ecc."""
 function objective_value(::MinCarbon, s::AbstractSection, mat::AbstractMaterial, L)
-    section_area(s) * L * mat.ρ * mat.ecc
+    self_weight_area(s) * L * mat.ρ * mat.ecc
 end
 
 """

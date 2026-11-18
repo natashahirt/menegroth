@@ -68,6 +68,67 @@ function print_header(title::String)
     println()
 end
 
+"""
+    write_run_meta(csv_path; note="", seed=nothing, extra="") -> String
+
+Write `<csv_path>.meta.json` with the git SHA, dirty flag, Asap submodule
+SHA, manifest blob hashes, Julia version, thread count, and the sweep note.
+A dirty tree means the SHA alone does not reproduce the run.
+"""
+function write_run_meta(csv_path::AbstractString; note::AbstractString = "",
+                        seed = nothing, extra::AbstractString = "")
+    repo = normpath(joinpath(@__DIR__, "..", ".."))
+    function git(args...)
+        try
+            readchomp(`git -C $repo $args`)
+        catch
+            ""
+        end
+    end
+    sha = git("rev-parse", "HEAD")
+    dirty = try
+        !isempty(strip(readchomp(`git -C $repo status --porcelain`)))
+    catch
+        true
+    end
+    asap = try
+        readchomp(`git -C $(joinpath(repo, "external", "Asap")) rev-parse HEAD`)
+    catch
+        ""
+    end
+    submodules = git("submodule", "status")
+    function blob(rel)
+        path = joinpath(repo, rel)
+        isfile(path) ? readchomp(`git hash-object $path`) : ""
+    end
+    threads = try
+        string(Threads.nthreads())
+    catch
+        "1"
+    end
+    esc(s) = replace(string(s), "\\" => "\\\\", "\"" => "\\\"", "\n" => "\\n")
+    meta_path = string(csv_path, ".meta.json")
+    open(meta_path, "w") do io
+        println(io, "{")
+        println(io, "  \"csv\": \"$(esc(basename(csv_path)))\",")
+        println(io, "  \"git_sha\": \"$(esc(sha))\",")
+        println(io, "  \"git_dirty\": $(dirty ? "true" : "false"),")
+        println(io, "  \"asap_sha\": \"$(esc(asap))\",")
+        println(io, "  \"submodules\": \"$(esc(submodules))\",")
+        println(io, "  \"manifest_structuralstudies\": \"$(esc(blob("StructuralStudies/Manifest.toml")))\",")
+        println(io, "  \"manifest_structuralsizer\": \"$(esc(blob("StructuralSizer/Manifest.toml")))\",")
+        println(io, "  \"manifest_structuralsynthesizer\": \"$(esc(blob("StructuralSynthesizer/Manifest.toml")))\",")
+        println(io, "  \"julia\": \"$(esc(VERSION))\",")
+        println(io, "  \"nthreads\": \"$(esc(threads))\",")
+        println(io, "  \"seed\": \"$(esc(seed))\",")
+        println(io, "  \"extra\": \"$(esc(extra))\",")
+        println(io, "  \"note\": \"$(esc(note))\"")
+        println(io, "}")
+    end
+    println("  Run meta:    $meta_path")
+    return meta_path
+end
+
 """Print study footer with summary."""
 function print_footer(n_created::Int, n_failed::Int, output_file)
     println()

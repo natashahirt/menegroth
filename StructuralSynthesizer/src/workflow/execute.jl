@@ -66,12 +66,45 @@ function capture_design(struc::BuildingStructure, params::DesignParameters;
     if !isnothing(t_start)
         design.compute_time_s = time() - t_start
     end
-    design.converged = all_ok(design)
-    !design.converged && push!(
+    checks_ok = all_ok(design)
+    !checks_ok && push!(
         design.diagnostics, "One or more finalized design checks did not pass.")
+    for stage in sort!(collect(keys(owned_struc.stage_diagnostics)))
+        push!(design.diagnostics, owned_struc.stage_diagnostics[stage])
+    end
+    design.converged = checks_ok && isempty(owned_struc.stage_diagnostics)
+    if owned_params.lateral === nothing
+        push!(design.scope_notes,
+            "Gravity-only design: no lateral system was given, so wind and " *
+            "seismic demands, story drift, and lateral-frame checks were not run.")
+    end
     design.context_hash = isnothing(context_hash) ?
         content_hash((owned_params, owned_params.framing_opts)) : String(context_hash)
     design.finalized = true
+    return design
+end
+
+"""
+Scene model when visualization is on, otherwise the solved analysis frame.
+
+`design.asap_model` starts empty. The solved frame is
+`design.structure.asap_model`. Visualization builds a separate scene from it.
+When that build is skipped or throws, [`port_analysis_model!`](@ref) copies
+the solved frame across so the design model is not left empty.
+"""
+function _finish_design_model!(design, params)
+    if !params.skip_visualization && isnothing(design.asap_model)
+        target_edge = isnothing(params.visualization_target_edge_m) ? nothing :
+            params.visualization_target_edge_m * u"m"
+        try
+            build_analysis_model!(design; target_edge_length = target_edge)
+        catch err
+            push!(design.diagnostics,
+                "Visualization analysis model failed: $(sprint(showerror, err))")
+            @warn "build_analysis_model! failed — the design model is the solved analysis frame" exception = (err, catch_backtrace())
+        end
+    end
+    isnothing(design.asap_model) && port_analysis_model!(design)
     return design
 end
 
@@ -136,18 +169,11 @@ function _design_building_inplace(struc::BuildingStructure, params::DesignParame
     # Build and execute the design graph. The graph decomposes slab sizing into
     # fine per-slab nodes (batch levels) while keeping members/foundations coarse;
     # `execute_graph!` runs them in dependency levels, flushing `sync_asap!` once
-    # per level — byte-identical to the legacy stage loop (same effective order,
-    # same post-slab / post-member model state). See `build_design_graph`.
+    # per level. A floor with no shared column matches the legacy stage loop.
+    # A flat plate whose slabs share a column proposes, adopts one column
+    # envelope, then commits. See `build_design_graph`.
     graph = build_design_graph(struc, params; tc=tc)
     execute_graph!(graph, struc, params)
-
-    # Uniform column harmonization (after all sizing stages, before capture)
-    if params.uniform_column_sizing !== :off
-        n_harmonized = harmonize_uniform_column_sizes!(struc, params)
-        if n_harmonized > 0
-            sync_asap!(struc; params=params)
-        end
-    end
     t_pipeline = time() - t0
     
     t0 = time()
@@ -157,14 +183,7 @@ function _design_building_inplace(struc::BuildingStructure, params::DesignParame
     # Build the visualization analysis model while struc still has sized
     # dimensions and structural offsets (restore! will wipe them).
     t0 = time()
-    if !params.skip_visualization && isnothing(design.asap_model)
-        target_edge = isnothing(params.visualization_target_edge_m) ? nothing : params.visualization_target_edge_m * u"m"
-        try
-            build_analysis_model!(design; target_edge_length=target_edge)
-        catch e
-            @warn "build_analysis_model! failed — visualization will use frame-only model" exception=(e, catch_backtrace())
-        end
-    end
+    _finish_design_model!(design, params)
     t_analysis = time() - t0
     
     # Restore pristine member dimensions so struc can be reused.
@@ -222,16 +241,7 @@ function design_building(
     design.context_hash = session.context.content_hash
 
     t0 = time()
-    if !design.params.skip_visualization && isnothing(design.asap_model)
-        target_edge = isnothing(design.params.visualization_target_edge_m) ?
-            nothing : design.params.visualization_target_edge_m * u"m"
-        try
-            build_analysis_model!(design; target_edge_length=target_edge)
-        catch e
-            push!(design.diagnostics, "Visualization analysis model failed: $(sprint(showerror, e))")
-            @warn "build_analysis_model! failed — visualization will use frame-only model" exception=(e, catch_backtrace())
-        end
-    end
+    _finish_design_model!(design, design.params)
     design.phase_timings["analysis_model"] = round(time() - t0; digits=3)
     design.phase_timings["total"] = round(time() - t_start; digits=3)
     design.compute_time_s = time() - t_start

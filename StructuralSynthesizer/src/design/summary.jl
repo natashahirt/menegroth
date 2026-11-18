@@ -63,7 +63,8 @@ Base.@kwdef mutable struct DesignSummary
     embodied_carbon_other::CarbonMassQuantity             = 0.0u"kgCO2e"
     # Element × material. Summing a field across these five equals the
     # matching building-level material total above. Drop panels, shear caps,
-    # and studs added only to `concrete_volume` / `rebar_weight` are not here.
+    # and punching studs added only to `concrete_volume` / `rebar_weight` are
+    # not here. Composite headed studs are in the beam steel mass.
     takeoff_slabs::MaterialTakeoff        = MaterialTakeoff()
     takeoff_columns::MaterialTakeoff      = MaterialTakeoff()
     takeoff_beams::MaterialTakeoff        = MaterialTakeoff()

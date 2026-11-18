@@ -10,16 +10,17 @@
 #   2. Compute Ie_DL from Ma_DL (total D+L service moment)
 #   3. Δ_D  = 5 wD L⁴ / (384 Ec Ie_D)
 #   4. Δ_DL = 5 (wD+wL) L⁴ / (384 Ec Ie_DL)
-#   5. Δ_LL = Δ_DL − Δ_D    ← subtraction approach
+#   5. Δ_LL = Δ_DL − Δ_D    ← subtraction approach (full live load)
+#   6. Δ_sus at D + ψL, with ψ the sustained share of live load (default 0)
 #
-# Reference: ACI 318-11 §9.5.2, Table 9.5(b)
+# Reference: ACI 318-11 §9.5.2, Table 9.5(b), R9.5.2.5
 #            DE-Simply-Supported-Reinforced-Concrete-Beam-Analysis-and-Design-
 #            ACI-318-11-spBeam-v1000 (StructurePoint), pg. 11–14
 # ==============================================================================
 
 """
     design_beam_deflection(b, h, d, As, fc, fy, Es, L, w_dead, w_live;
-                           support, wc_pcf, As_prime, ξ, limits) -> NamedTuple
+                           support, wc_pcf, λ, As_prime, ξ, limits) -> NamedTuple
 
 Complete immediate + long-term deflection check for a rectangular RC beam.
 
@@ -37,9 +38,11 @@ different effective stiffness at each load level.
    - `Δ_D  = f(wD, L, Ec, Ie_D)`
    - `Δ_DL = f(wD+wL, L, Ec, Ie_DL)`
    - `Δ_LL = Δ_DL − Δ_D`
-7. Long-term: `λΔ` per ACI 318-11 §9.5.2.5
-8. Total: `Δ_total = λΔ × Δ_D + Δ_LL`
-9. Compare against ACI Table 9.5(b) limits
+7. Long-term: `λΔ` per ACI 318-11 §9.5.2.5, applied to the immediate
+   deflection from the sustained load `D + ψL` (R9.5.2.5). `ψ` defaults to 0.
+8. Total: `Δ_total = λΔ × Δ_sus + (Δ_DL − Δ_sus)`
+9. Compare against ACI Table 9.5(b) limits. The live-load limit uses the full
+   immediate live deflection `Δ_DL − Δ_D`.
 
 # Arguments
 - `b`, `h`, `d`, `As`: Beam geometry and tension steel area
@@ -52,8 +55,13 @@ different effective stiffness at each load level.
 - `wc_pcf`: Concrete unit weight in pcf (default 150). When provided, uses the
   general Ec formula `33 × wc^1.5 × √f'c` (ACI 318-11 §8.5.1). Set to `nothing`
   to use the simplified `57000√f'c` formula.
+- `λ`: Lightweight modification factor in `f_r = 7.5 λ √f'c` (ACI 318-11
+  Eq. 9-10, corpus: aci-318-11, page 132). Default 1.0 is normal weight;
+  a caller that holds a material must pass its `λ`.
 - `As_prime`: Compression steel area for long-term factor (default 0)
 - `ξ`: Time-dependent factor (default 2.0 → 5+ years)
+- `sustained_live_fraction`: Share of live load treated as sustained, per
+  R9.5.2.5 (default 0, so only dead load is sustained)
 - `limits`: Deflection limit types to check (default `[:immediate_ll, :total]`)
 
 # Returns
@@ -71,13 +79,16 @@ function design_beam_deflection(
     L::Length, w_dead, w_live;
     support::Symbol  = :simply_supported,
     wc_pcf::Union{Real, Nothing} = 150,
+    λ::Real          = 1.0,
     As_prime::Area   = 0.0u"inch^2",
     ξ::Float64       = 2.0,
+    sustained_live_fraction::Real = 0.0,
     limits::Vector{Symbol} = [:immediate_ll, :total]
 )
     # --- Material properties ---
+    ψ = _as_sustained_live_fraction(sustained_live_fraction)
     Ec_val = wc_pcf === nothing ? Ec(fc) : Ec(fc, wc_pcf)
-    fr_val = fr(fc)
+    fr_val = fr(fc; λ = λ)   # ACI 318-11 Eq. (9-10)
 
     # --- Gross section ---
     Ig = b * h^3 / 12
@@ -104,14 +115,21 @@ function design_beam_deflection(
     # Total D+L deflection uses Ie_DL
     w_total = w_dead + w_live
     Δ_DL = _beam_deflection(w_total, L, Ec_val, Ie_DL, support)
-    # Live load by subtraction (standard ACI / StructurePoint approach)
+    # Live load by subtraction (standard ACI / StructurePoint approach).
+    # Table 9.5(b) checks this full immediate live deflection.
     Δ_LL = Δ_DL - Δ_D
 
-    # --- Long-term deflection (ACI 318-11 §9.5.2.5) ---
+    # --- Long-term deflection (ACI 318-11 §9.5.2.5, R9.5.2.5) ---
+    # λΔ multiplies the immediate deflection from the sustained load, which is
+    # dead plus the sustained share of live. ψ = 0 keeps sustained = dead.
+    w_sus = w_dead + ψ * w_live
+    Ma_sus = _beam_moment(w_sus, L, support)
+    Ie_sus = effective_moment_of_inertia(Mcr, Ma_sus, Ig, Icr)
+    Δ_sus = _beam_deflection(w_sus, L, Ec_val, Ie_sus, support)
     ρ_prime = ustrip(As_prime / (b * d))
     λΔ = long_term_deflection_factor(ξ, ρ_prime)
-    Δ_lt_dead = λΔ * Δ_D
-    Δ_total   = Δ_lt_dead + Δ_LL   # total long-term deflection after attachments
+    Δ_lt_dead = λΔ * Δ_sus
+    Δ_total   = Δ_lt_dead + (Δ_DL - Δ_sus)
 
     # --- Limit checks ---
     checks = Dict{Symbol, NamedTuple}()
@@ -135,12 +153,15 @@ function design_beam_deflection(
         # Service moments
         Ma_dead    = Ma_dead,
         Ma_live    = Ma_live,
+        Ma_sus     = Ma_sus,
         Ma_total   = Ma_total,
         # Effective Ie (StructurePoint approach: separate D and D+L)
         Ie_D       = Ie_D,
+        Ie_sus     = Ie_sus,
         Ie_DL      = Ie_DL,
         # Immediate deflections
         Δ_D        = Δ_D,
+        Δ_sus      = Δ_sus,
         Δ_DL       = Δ_DL,
         Δ_LL       = Δ_LL,
         # Long-term
@@ -195,8 +216,23 @@ end
 # ==============================================================================
 
 """
+    tbeam_gross_inertia(bw, bf, hf, h) -> (Ig, ȳ)
+
+Gross moment of inertia of a T-section about its centroid, and the centroid
+depth `ȳ` from the top of the flange.
+"""
+function tbeam_gross_inertia(bw::Length, bf::Length, hf::Length, h::Length)
+    Af = bf * hf
+    Aw = bw * (h - hf)
+    ȳ  = (Af * hf / 2 + Aw * (hf + (h - hf) / 2)) / (Af + Aw)
+    Ig = bf * hf^3 / 12 + Af * (ȳ - hf / 2)^2 +
+         bw * (h - hf)^3 / 12 + Aw * (hf + (h - hf) / 2 - ȳ)^2
+    return Ig, ȳ
+end
+
+"""
     design_tbeam_deflection(bw, bf, hf, h, d, As, fc, fy, Es, L, w_dead, w_live;
-                            support, wc_pcf, As_prime, ξ, limits) -> NamedTuple
+                            support, wc_pcf, λ, As_prime, ξ, limits) -> NamedTuple
 
 Complete immediate + long-term deflection check for an RC T-beam.
 
@@ -217,8 +253,11 @@ Follows the same ACI §9.5.2 methodology as `design_beam_deflection` but uses:
 - `w_dead`, `w_live`: Unfactored service loads (force/length)
 - `support`: Support condition (default `:simply_supported`)
 - `wc_pcf`: Concrete unit weight in pcf (default 150)
+- `λ`: Lightweight factor in Eq. (9-10). Default 1.0; pass the material's `λ`.
 - `As_prime`: Compression steel area for long-term factor (default 0)
 - `ξ`: Time-dependent factor (default 2.0)
+- `sustained_live_fraction`: Share of live load treated as sustained, per
+  R9.5.2.5 (default 0, so only dead load is sustained)
 - `limits`: Deflection limit types to check (default `[:immediate_ll, :total]`)
 
 # Returns
@@ -231,24 +270,20 @@ function design_tbeam_deflection(
     L::Length, w_dead, w_live;
     support::Symbol  = :simply_supported,
     wc_pcf::Union{Real, Nothing} = 150,
+    λ::Real          = 1.0,
     As_prime::Area   = 0.0u"inch^2",
     ξ::Float64       = 2.0,
+    sustained_live_fraction::Real = 0.0,
     limits::Vector{Symbol} = [:immediate_ll, :total]
 )
     # --- Material properties ---
+    ψ = _as_sustained_live_fraction(sustained_live_fraction)
     Ec_val = wc_pcf === nothing ? Ec(fc) : Ec(fc, wc_pcf)
-    fr_val = fr(fc)
+    fr_val = fr(fc; λ = λ)   # ACI 318-11 Eq. (9-10)
 
     # --- Gross section (T-shape) ---
-    Af = bf * hf
-    Aw = bw * (h - hf)
-    Ag = Af + Aw
-    ȳ  = (Af * hf / 2 + Aw * (hf + (h - hf) / 2)) / Ag  # from top
+    Ig, ȳ = tbeam_gross_inertia(bw, bf, hf, h)
     yb = h - ȳ  # bottom fiber distance
-
-    Ig_f = bf * hf^3 / 12 + Af * (ȳ - hf / 2)^2
-    Ig_w = bw * (h - hf)^3 / 12 + Aw * (hf + (h - hf) / 2 - ȳ)^2
-    Ig   = Ig_f + Ig_w
 
     Mcr = fr_val * Ig / yb
 
@@ -267,13 +302,20 @@ function design_tbeam_deflection(
     # --- Immediate deflections ---
     Δ_D  = _beam_deflection(w_dead, L, Ec_val, Ie_D, support)
     Δ_DL = _beam_deflection(w_dead + w_live, L, Ec_val, Ie_DL, support)
+    # Table 9.5(b): the live-load limit is the full immediate live deflection.
     Δ_LL = Δ_DL - Δ_D
 
-    # --- Long-term ---
+    # --- Long-term (ACI 318-11 §9.5.2.5, R9.5.2.5) ---
+    # λΔ multiplies the immediate deflection from dead plus the sustained
+    # share of live. ψ = 0 keeps sustained = dead.
+    w_sus = w_dead + ψ * w_live
+    Ma_sus = _beam_moment(w_sus, L, support)
+    Ie_sus = effective_moment_of_inertia(Mcr, Ma_sus, Ig, Icr)
+    Δ_sus = _beam_deflection(w_sus, L, Ec_val, Ie_sus, support)
     ρ_prime = ustrip(As_prime / (bw * d))
     λΔ = long_term_deflection_factor(ξ, ρ_prime)
-    Δ_lt_dead = λΔ * Δ_D
-    Δ_total   = Δ_lt_dead + Δ_LL
+    Δ_lt_dead = λΔ * Δ_sus
+    Δ_total   = Δ_lt_dead + (Δ_DL - Δ_sus)
 
     # --- Limit checks ---
     checks = Dict{Symbol, NamedTuple}()
@@ -290,9 +332,9 @@ function design_tbeam_deflection(
         Ec = Ec_val, fr = fr_val,
         Ig = Ig, Icr = Icr, Mcr = Mcr,
         ȳ = ȳ, yb = yb,
-        Ma_dead = Ma_dead, Ma_live = Ma_live, Ma_total = Ma_total,
-        Ie_D = Ie_D, Ie_DL = Ie_DL,
-        Δ_D = Δ_D, Δ_DL = Δ_DL, Δ_LL = Δ_LL,
+        Ma_dead = Ma_dead, Ma_live = Ma_live, Ma_sus = Ma_sus, Ma_total = Ma_total,
+        Ie_D = Ie_D, Ie_sus = Ie_sus, Ie_DL = Ie_DL,
+        Δ_D = Δ_D, Δ_sus = Δ_sus, Δ_DL = Δ_DL, Δ_LL = Δ_LL,
         λΔ = λΔ, Δ_lt_dead = Δ_lt_dead, Δ_total = Δ_total,
         checks = checks, ok = all_ok,
     )

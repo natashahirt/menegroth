@@ -171,29 +171,35 @@ end
 # Factored Pattern Loads  (ACI 318-11 §13.7.6 / §9.2.1)
 # =============================================================================
 
+# ACI 318-11 §13.7.6.3 (corpus: aci-318-11, page 261): three-quarters of the
+# full factored live load on the patterned panels. §13.7.6.4 requires the
+# all-panels full factored live load as a lower bound; the analysis envelope
+# keeps that case, this function does not replace it.
+const PATTERN_FACTORED_LIVE_FRACTION = 0.75
+
 """
     factored_pattern_loads(pattern, qD, qL) -> Vector{Pressure}
 
-Compute per-span **factored** pressures for a given load pattern.
+Compute per-span **factored** pressures for a patterned arrangement.
 
-Within the governing load combination (1.2D + 1.6L), live load is placed only
-on the loaded spans while dead load acts everywhere:
-- `:dead_plus_live` → max(1.2D + 1.6L, 1.4D)
+Within the governing load combination (1.2D + 1.6L), dead load acts on every
+span and three-quarters of the factored live load acts on the patterned spans:
+- `:dead_plus_live` → max(1.2D + 0.75·1.6L, 1.4D)
 - `:dead_only`      → 1.2D
 
-Using 1.2D (rather than 1.4D) for unloaded spans is correct because all
-spans share the same load combination — we are only varying the placement
-of the live-load component.
+The all-panels case `max(1.2D + 1.6L, 1.4D)` is not returned here. Callers
+envelope these patterns against that full-load case so a pattern cannot
+reduce a demand (ACI 318-11 §13.7.6.4, corpus: aci-318-11, page 261).
 
 # Reference
-- ACI 318-11 §13.7.6 (pattern loading trigger)
-- ACI 318-11 §9.2.1 / ASCE 7 §2.3.1 (factored load combinations)
+- ACI 318-11 §13.7.6.3–.4 (corpus: aci-318-11, page 261)
+- ACI 318-11 §9.2.1 (factored load combinations)
 """
 function factored_pattern_loads(pattern::Vector{Symbol}, qD, qL)
-    qu_loaded = max(1.2 * qD + 1.6 * qL, 1.4 * qD)
-    qu_dead   = 1.2 * qD  # same combo, live portion omitted
-
-    loads = similar([qD], length(pattern))
+    qu_loaded = max(1.2 * qD + PATTERN_FACTORED_LIVE_FRACTION * 1.6 * qL, 1.4 * qD)
+    qu_dead   = 1.2 * qD
+    # The combination is a float even when the inputs are integer quantities.
+    loads = Vector{typeof(qu_loaded)}(undef, length(pattern))
     for (i, load_type) in enumerate(pattern)
         loads[i] = load_type === :dead_plus_live ? qu_loaded : qu_dead
     end

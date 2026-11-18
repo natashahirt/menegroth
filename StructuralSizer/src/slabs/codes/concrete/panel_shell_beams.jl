@@ -11,9 +11,9 @@ A frame beam drawn on the shell.
 
 `xy` is an open polyline in plan, in metres. `eccentricity` is
 `(e_f1_start, e_f1_end, e_f2, e_f3)` in metres: the rigid offset from the
-shell node to the frame centroid. Zeros put the centroid on the shell.
-At the default roll, local y is up, so a web below the slab is a negative
-`e_f2`.
+shell node to the frame centroid. Positive slot 3 is global up. Zeros put
+the centroid on the shell, and a web below the slab is a negative slot 3.
+The piece's local frame is applied when the element is built.
 
 `release` is the whole beam's Asap end release, start and end taken along
 `xy`: `:fixedfixed`, `:freefixed`, `:fixedfree`, `:freefree`, or `:joist`.
@@ -61,9 +61,8 @@ end
 Offset of a web whose top is flush with the slab soffit.
 
 The shell node is on the slab mid-plane. The web centroid sits
-`h_slab/2 + h_web/2` below that. A frame element is created at roll `π/2`,
-which puts local y upward, so the offset is the `e_f2` component and it is
-negative.
+`h_slab/2 + h_web/2` below that. Slot 3 is that distance, negative because
+positive means global up. The element local frame is applied later.
 """
 function web_below_slab_eccentricity(h_slab::Length, h_web::Length)
     e = -ustrip(u"m", h_slab / 2 + h_web / 2)
@@ -75,7 +74,8 @@ Offset of a section whose top is flush with the slab soffit.
 
 `soffit_to_centroid` is half the depth of a rectangle and half the stem of a
 T-beam. The shell node is on the slab mid-plane, so the frame centroid is
-that distance plus half the slab thickness below the node.
+that distance plus half the slab thickness below the node. Slot 3 is
+negative: positive means global up.
 """
 function web_below_slab_eccentricity(h_slab::Length, section::AbstractSection)
     e = -ustrip(u"m", h_slab / 2 + soffit_to_centroid(section))
@@ -229,6 +229,11 @@ The station passed in is the midpoint of that piece.
 releases the local stiffness before the rigid offset, so the hinge is at the
 centroid end of the piece and the offset still carries axial force to the
 shell node.
+
+`beam.eccentricity` is the physical offset, positive slot 3 meaning global
+up. Each piece stores that offset in its own local frame at roll `π/2`, the
+roll the element is built with. A beam running the other way in plan has
+local y pointing down, so the same physical offset changes sign.
 """
 function frame_elements_on_shell(nodes, beams; tol::Float64 = 1e-4, section_at = nothing)
     frames = Asap.Element[]
@@ -236,8 +241,6 @@ function frame_elements_on_shell(nodes, beams; tol::Float64 = 1e-4, section_at =
         ordered = _nodes_on_polyline(nodes, beam.xy; tol = tol)
         length(ordered) < 2 && throw(ArgumentError(
             "beam $(beam.id) does not meet two shell nodes"))
-        e = beam.eccentricity
-        ecc = (e[1] * u"m", e[2] * u"m", e[3] * u"m", e[4] * u"m")
         n = length(ordered) - 1
         for i in 1:n
             sec = beam.section
@@ -250,6 +253,10 @@ function frame_elements_on_shell(nodes, beams; tol::Float64 = 1e-4, section_at =
                 s2 = _station_on_polyline(x2, y2, beam.xy)[2]
                 sec = section_at(beam, 0.5 * (s1 + s2))
             end
+            # The constructor stores roll π/2. Sign the physical offset for
+            # that frame; a −X piece has local y pointing down.
+            ecc = Asap.orient_up_eccentricity(
+                beam.eccentricity, ordered[i], ordered[i + 1]; roll = π / 2)
             push!(frames, Asap.Element(ordered[i], ordered[i + 1], sec, beam.id;
                                        release = _piece_release(beam.release, i, n),
                                        eccentricity = ecc))

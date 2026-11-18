@@ -1,10 +1,11 @@
-# Walls are line supports of the story shell.
+# The slab is joined to the walls. It is not fixed in space.
 #
-# ACI 318-11 R13.6.3.3 (corpus: aci-318-11, page 254): a slab cast integrally
-# with a stiff concrete wall has little rotation at the joint. The shell
-# fixes uz and rotation about the wall's own axis. The moment and deflection
-# checks below are the statics of a fixed strip under uniform pressure, the
-# consequence of that restraint. q L²/12 and q L⁴/(384 D) are not code
+# ACI 318-11 R13.6.3.3 (corpus: aci-318-11, page 254) chooses a direct-design
+# moment coefficient for an edge cast with a stiff wall. The shell shares the
+# slab nodes with the wall and holds the wall's base, one pier below the slab.
+# q L²/12 and q L⁴/(384 D) are the statics of a fully fixed strip. They are
+# the comparison, not the answer: a wall of finite stiffness rotates, so the
+# edge moment is smaller and the deflection is larger. They are not code
 # coefficients.
 
 using Test
@@ -150,49 +151,53 @@ end
     model = result.model
     @test model !== nothing
 
-    held = 0
+    edge = 0
+    bases = 0
     for node in result.built.nodes
         y = ustrip(u"m", node.position[2])
+        z = ustrip(u"m", node.position[3])
         (abs(y) < 1e-6 || abs(y - Ly) < 1e-6) || continue
-        @test node.dof[3] == false
-        @test node.dof[4] == false
-        @test node.dof[5] == true
-        held += 1
+        if abs(z) < 1e-6
+            @test node.dof[3] == true
+            @test node.dof[4] == true
+            @test node.dof[5] == true
+            edge += 1
+        elseif z < -1.0
+            @test node.dof[1] == false
+            @test node.dof[2] == false
+            @test node.dof[3] == false
+            @test node.dof[4] == true
+            @test node.dof[5] == true
+            @test node.dof[6] == true
+            bases += 1
+        end
     end
-    @test held > 4
+    @test edge > 4
+    @test bases > 4
+    @test any(el -> el.id === :wall, result.model.shell_elements)
 
-    # Axis-aligned walls are fixed by degrees of freedom, not by a spring.
-    @test isempty(SY._story_wall_springs(result.shell, lines))
     mid = argmin(n -> hypot(ustrip(u"m", n.position[1]) - Lx / 2,
                             ustrip(u"m", n.position[2]) - Ly / 2),
                  result.built.nodes)
-    pt = (ustrip(u"m", mid.position[1]), ustrip(u"m", mid.position[2]))
-    # Shorter than the mesh spacing, so the diagonal meets this node only.
-    skew = SY._story_wall_springs(result.shell, [((pt[1] - 0.05, pt[2] - 0.05),
-                                                  (pt[1] + 0.05, pt[2] + 0.05))])
-    @test length(skew) == 1
-    @test skew[1].K[4, 4] > 0
-    @test skew[1].K[4, 5] ≈ skew[1].K[4, 4] rtol = 1e-9
-    @test skew[1].K[5, 5] ≈ skew[1].K[4, 4] rtol = 1e-9
-
     el = result.built.shells[1]
     q = ustrip(u"Pa", SY.total_factored_pressure(struc.cells[1]))
     D = el.E * el.thickness^3 / (12 * (1 - el.ν^2))
     δ_fixed = q * Ly^4 / (384 * D)
     uz = ustrip(u"m", mid.displacement[3])
+    # The wall rotates with the slab, so the deflection is past the fixed
+    # strip and short of the simple strip (five times the fixed value).
     @test uz < 0
-    @test abs(uz) ≈ δ_fixed rtol = 0.15
-    @test abs(uz) < 0.4 * (5 * δ_fixed)
+    @test abs(uz) > δ_fixed
+    @test abs(uz) < 5 * δ_fixed
 
     # ShellTri3 sets κyy = −∂θx/∂y. The strip sags downward (uz < 0 above),
-    # so Myy is negative at midspan and positive at the wall. The magnitudes
-    # are the fixed-strip statics, compared at the sampled centroid.
+    # so Myy is negative at midspan and positive at the wall. The edge moment
+    # is below the fixed-end value because the wall is not rigid.
     xc = Lx / 2
     support = _band_myy(result.built.shells, model, xc - 1.0, xc + 1.0, 0.0, 0.60)
     middle = _band_myy(result.built.shells, model, xc - 1.0, xc + 1.0, Ly / 2 - 0.40, Ly / 2 + 0.40)
-    @test support.Myy ≈ -_strip_M(q, Ly, support.y) rtol = 0.15
+    @test 0 < support.Myy < -_strip_M(q, Ly, support.y)
     @test middle.Myy ≈ -_strip_M(q, Ly, middle.y) rtol = 0.15
-    @test support.Myy > 0
     @test middle.Myy < 0
 
     total = 0.0

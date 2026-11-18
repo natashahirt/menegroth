@@ -44,6 +44,7 @@ using StructuralSizer
 using Test
 using Unitful
 using Asap  # registers u"kgCO2e" (embodied-carbon unit)
+using Meshes
 
 const _SR = StructuralSizer
 const _SS = StructuralSynthesizer
@@ -291,15 +292,16 @@ function _design_signature(design::BuildingDesign)
     return sig
 end
 
-"Compare two design signatures; returns (ok, first_mismatch_label)."
+"Compare two design signatures; returns (ok, sorted mismatch labels)."
 function _same_signature(a::Vector{Pair{String, Any}}, b::Vector{Pair{String, Any}};
                          rtol::Float64 = 1e-8, atol::Float64 = 1e-10)
     da = Dict(a); db = Dict(b)
     Set(keys(da)) == Set(keys(db)) || return (false, "field set differs")
-    for (k, va) in da
-        _close(va, db[k]; rtol = rtol, atol = atol) || return (false, k)
+    bad = String[]
+    for k in sort!(collect(keys(da)))
+        _close(da[k], db[k]; rtol = rtol, atol = atol) || push!(bad, k)
     end
-    return (true, "none")
+    return (isempty(bad), isempty(bad) ? "none" : join(bad, ", "))
 end
 
 # -----------------------------------------------------------------------------
@@ -408,10 +410,6 @@ function _run_coarse_reference(struc::BuildingStructure, params::DesignParameter
         stage.fn(struc)
         stage.needs_sync && sync_asap!(struc; params = params)
     end
-    if params.uniform_column_sizing !== :off
-        n_harmonized = _SS.harmonize_uniform_column_sizes!(struc, params)
-        n_harmonized > 0 && sync_asap!(struc; params = params)
-    end
     design = capture_design(struc, params; t_start = t_start)
     restore!(struc; geometry_is_centerline = params.geometry_is_centerline)
     return design
@@ -442,10 +440,6 @@ function _design_with_slab_order(struc::BuildingStructure, params::DesignParamet
     for stage in build_pipeline(params)[2:end]
         stage.fn(struc)
         stage.needs_sync && sync_asap!(struc; params = params)
-    end
-    if params.uniform_column_sizing !== :off
-        n_harmonized = _SS.harmonize_uniform_column_sizes!(struc, params)
-        n_harmonized > 0 && sync_asap!(struc; params = params)
     end
     design = capture_design(struc, params; t_start = t_start)
     restore!(struc; geometry_is_centerline = params.geometry_is_centerline)
@@ -530,11 +524,12 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
         @test !requires_new_engine(session; beams = beams_variant)
 
         inc = redesign(session; beams = beams_variant)
-        @test last_recomputed(session) == [NODE_MEMBERS]
+        # The wall node takes the member params: after a thickness jump it
+        # sizes the members again.
+        @test last_recomputed(session) == [NODE_MEMBERS, NODE_ORDINARY_WALLS]
         @test !any(_SS.is_slab_node_key, last_recomputed(session))
-        # No foundations on the vault. The wall node is restored, not recomputed.
-        @test Set(last_restored(session)) ==
-              (_slab_set(_graph_of(session)) ∪ Set([NODE_ORDINARY_WALLS]))
+        # No foundations on the vault.
+        @test Set(last_restored(session)) == _slab_set(_graph_of(session))
 
         # (b) EXACT — comprehensive per-member equivalence to a from-scratch design
         # with the SAME override (not just the 15 aggregate scalars).
@@ -841,7 +836,20 @@ println("Testing DesignSession invalidation matrix (skip + comprehensive equival
             @test _close(getproperty(ref_inv, col), getproperty(inc_inv, col))
         end
         ok_sig, bad_sig = _same_signature(_design_signature(ref), _design_signature(inc))
-        @test ok_sig || error("multi-node-level signature mismatch at $bad_sig")
+        if !ok_sig
+            da = Dict(_design_signature(ref))
+            db = Dict(_design_signature(inc))
+            first = split(bad_sig, ", ")[1]
+            detail = haskey(da, first) ? " ref=$(da[first]) inc=$(db[first])" : ""
+            m = match(r"^col(\d+)\.", first)
+            if m !== nothing
+                col = ref.structure.columns[parse(Int, m.captures[1])]
+                v = ref.structure.skeleton.vertices[col.vertex_idx]
+                xy = Meshes.coords(v)
+                detail *= " story=$(col.story) position=$(col.position) xy=($(ustrip(u"ft", xy.x)), $(ustrip(u"ft", xy.y)))"
+            end
+            error("multi-node-level signature mismatch at $bad_sig$detail")
+        end
     end
 
     # ── EXACT-FIRST GUARD (P1): a partial-slab target is REJECTED ────────────────

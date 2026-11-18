@@ -2866,3 +2866,42 @@ end
     @test encl(evN, wXon, Set([1]))                 == true     # centroid-only (no map) still passes ⇒ the
                                                                 # FALSE above is the body test, not the centroid
 end
+
+@testset "nonsway magnification of a slab moment" begin
+    # ACI 318-19 §19.2.2.1(b), §6.6.4.4.4(a), §6.6.4.4.2, §6.6.4.5.2–5.3.
+    # βdns = 0.6 makes (EI)eff = 0.25 Ec Ig. k = 1. The far end is unknown,
+    # so M1/M2 = 0 and Cm = 0.6.
+    fc = 4000 * _PSI
+    @test isapprox(StructuralSizer.wall_modulus_si(fc) / _PSI, 57000 * sqrt(4000); rtol=1e-9)
+    Ec = StructuralSizer.wall_modulus_si(fc)
+    Ig = 8.0 * 0.3^3 / 12
+    lu = 3.6
+    Pu = 1.0e6
+    M = 1.0e5
+    mag = StructuralSizer.nonsway_slenderness_moment(Pu, M, Ec, Ig, lu)
+    Pc = π^2 * (0.25 * Ec * Ig) / lu^2
+    δ = max(0.6 / (1 - Pu / (0.75 * Pc)), 1.0)
+    @test mag.stable
+    @test mag.Cm == 0.6
+    @test isapprox(mag.Pc, Pc; rtol=1e-9)
+    @test isapprox(mag.δ, δ; rtol=1e-9)
+    @test mag.δ >= 1
+    @test isapprox(mag.Mc, δ * M; rtol=1e-9)
+
+    tension = StructuralSizer.nonsway_slenderness_moment(-Pu, M, Ec, Ig, lu)
+    @test tension.stable && tension.δ == 1.0 && tension.Mc == M
+    zero = StructuralSizer.nonsway_slenderness_moment(0.0, M, Ec, Ig, lu)
+    @test zero.δ == 1.0 && zero.Mc == M
+    unstable = StructuralSizer.nonsway_slenderness_moment(0.75 * Pc, M, Ec, Ig, lu)
+    @test !unstable.stable
+
+    conc = Concrete(24.855e9u"Pa", (fc)u"Pa", 2400u"kg/m^3", 0.2, 0.1)
+    ws = WallSection(8.0u"m", 0.3u"m"; ρl=0.0025, ρt=0.0025)
+    light = StructuralSizer.check_wall_out_of_plane_axial_flexure(
+        ws, conc, 5.0e5u"N", 1.0u"N*m"; fy=60u"ksi", Es=29000u"ksi")
+    @test light.passed
+    @test occursin("out-of-plane", light.name)
+    heavy = StructuralSizer.check_wall_out_of_plane_axial_flexure(
+        ws, conc, 5.0e5u"N", 5.0e6u"N*m"; fy=60u"ksi", Es=29000u"ksi")
+    @test !heavy.passed
+end

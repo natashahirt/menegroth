@@ -293,11 +293,14 @@ function assign_panel_analysis!(floor::Union{OneWay, TwoWay}, struc, slab, dead,
     if hasproperty(slab, :design_details)
         existing = slab.design_details
         already = existing !== nothing && hasproperty(existing, :column_results)
-        already || (slab.design_details = (
-            analysis_status = :not_analyzed,
-            analysis_planned = method,
-            analysis_reasons = reasons,
-        ))
+        if !already
+            planned = (
+                analysis_status = :not_analyzed,
+                analysis_planned = method,
+                analysis_reasons = reasons,
+            )
+            slab.design_details = existing isa NamedTuple ? merge(existing, planned) : planned
+        end
     end
     return method, reasons
 end
@@ -394,4 +397,300 @@ function approximate_one_way_moments(wu, ln;
         V_exterior = V_other,
         V_first_interior = V_first,
     )
+end
+
+"""
+Shrinkage and temperature ratio of a slab, ACI 318-11 §7.12.2.1
+(corpus: aci-318-11, page 106).
+
+Grade 40 and Grade 50 use 0.0020. Grade 60 uses 0.0018. Above 60 ksi the
+ratio is `0.0018 × 60 ksi / fy`, and not less than 0.0014. A yield strength
+below 60 ksi that is not Grade 40 or 50 still uses 0.0020, the same reading
+already used for footings.
+"""
+function shrinkage_temperature_ratio(fy)
+    fy_psi = ustrip(u"psi", fy)
+    # ACI 318-11 §7.12.2.1(a)–(c), page 106.
+    return fy_psi < 60_000.0 ? 0.0020 :
+           fy_psi == 60_000.0 ? 0.0018 :
+           max(0.0014, 0.0018 * 60_000.0 / fy_psi)
+end
+
+"""
+    elastic_strip_moments(wu, spans) -> (M_pos, M_neg)
+
+Sagging and hogging moments, per unit width, of a prismatic strip under a
+uniform pressure. Both are positive.
+
+ACI 318-11 §8.3.1 (corpus: aci-318-11, page 112) requires elastic analysis
+where §8.3.3 does not apply. The support moments come from the three-moment
+equation. That equation is beam theory, not an ACI coefficient.
+
+# ENGINEERING JUDGMENT
+The outer ends are pinned. This strip does not include the torsional
+stiffness of the ribs it lands on.
+"""
+function elastic_strip_moments(wu, spans)
+    L = collect(spans)
+    n = length(L)
+    n >= 1 || throw(ArgumentError("an elastic strip needs a span"))
+    for (i, s) in enumerate(L)
+        s > zero(s) || throw(ArgumentError("span $i is not positive, got $s"))
+    end
+    wu > zero(wu) || throw(ArgumentError("the strip pressure is not positive, got $wu"))
+    if n == 1
+        return (M_pos = wu * L[1]^2 / 8, M_neg = zero(wu * L[1]^2))
+    end
+    # Lengths in metres, pressure in N/m². A unit-width strip then has moments
+    # in N·m per metre of width, which is a number of newtons.
+    Lm = [ustrip(u"m", s) for s in L]
+    w = ustrip(u"N/m^2", wu)
+    M_pos, M_neg = _three_moment_strip(fill(w, n), Lm)
+    unit = wu * L[1]^2 / (w * Lm[1]^2)
+    return (M_pos = M_pos * unit, M_neg = M_neg * unit)
+end
+
+"""
+    patterned_strip_moments(wD, wL, spans) -> (M_pos, M_neg)
+
+[`elastic_strip_moments`](@ref) enveloped over live-load arrangements.
+
+ACI 318-11 §8.11.2 (corpus: aci-318-11, pages 118–119) permits the live load
+to be limited to combinations of (a) factored dead load on all spans with full
+factored live load on two adjacent spans, and (b) factored dead load on all
+spans with full factored live load on alternate spans. Both are enveloped
+here, with full live load on every span as well. `wD` and `wL` are the
+factored dead and live pressures.
+"""
+function patterned_strip_moments(wD, wL, spans)
+    L = collect(spans)
+    n = length(L)
+    n >= 1 || throw(ArgumentError("an elastic strip needs a span"))
+    for (i, s) in enumerate(L)
+        s > zero(s) || throw(ArgumentError("span $i is not positive, got $s"))
+    end
+    wD > zero(wD) || throw(ArgumentError("the factored dead pressure is not positive, got $wD"))
+    wL >= zero(wL) || throw(ArgumentError("the factored live pressure is negative, got $wL"))
+    n == 1 && return elastic_strip_moments(wD + wL, L)
+    Lm = [ustrip(u"m", s) for s in L]
+    d = ustrip(u"N/m^2", wD)
+    l = ustrip(u"N/m^2", wL)
+    arrangements = Vector{Vector{Bool}}()
+    push!(arrangements, fill(true, n))
+    push!(arrangements, [isodd(i) for i in 1:n])
+    push!(arrangements, [iseven(i) for i in 1:n])
+    for i in 1:(n - 1)
+        push!(arrangements, [j == i || j == i + 1 for j in 1:n])
+    end
+    M_pos = 0.0
+    M_neg = 0.0
+    for loaded in arrangements
+        p, q = _three_moment_strip([d + (on ? l : 0.0) for on in loaded], Lm)
+        M_pos = max(M_pos, p)
+        M_neg = max(M_neg, q)
+    end
+    w = wD + wL
+    unit = w * L[1]^2 / (ustrip(u"N/m^2", w) * Lm[1]^2)
+    return (M_pos = M_pos * unit, M_neg = M_neg * unit)
+end
+
+"""
+Peak sagging and hogging moments (N·m per metre) of a continuous strip with
+pinned outer ends, from the three-moment equation with pressure `w[i]` (N/m²)
+on span `i` of `Lm[i]` metres. Both are positive.
+"""
+function _three_moment_strip(w::Vector{Float64}, Lm::Vector{Float64})
+    n = length(Lm)
+    m = n - 1
+    diag = Vector{Float64}(undef, m)
+    upper = Vector{Float64}(undef, m)
+    rhs = Vector{Float64}(undef, m)
+    for i in 1:m
+        Li, Lj = Lm[i], Lm[i + 1]
+        diag[i] = 2 * (Li + Lj)
+        upper[i] = i == m ? 0.0 : Lj
+        rhs[i] = -0.25 * (w[i] * Li^3 + w[i + 1] * Lj^3)
+    end
+    for i in 2:m
+        t = Lm[i] / diag[i - 1]
+        diag[i] -= t * upper[i - 1]
+        rhs[i] -= t * rhs[i - 1]
+    end
+    support = zeros(n + 1)
+    support[n] = rhs[m] / diag[m]
+    for i in (m - 1):-1:1
+        support[i + 1] = (rhs[i] - upper[i] * support[i + 2]) / diag[i]
+    end
+
+    M_pos = 0.0
+    for i in 1:n
+        ML, MR = support[i], support[i + 1]
+        wL2 = w[i] * Lm[i]^2
+        ξ = 0.5 - (ML - MR) / wL2
+        peak = if 0.0 < ξ < 1.0
+            ML * (1 - ξ) + MR * ξ + 0.5 * wL2 * ξ * (1 - ξ)
+        else
+            max(ML, MR)
+        end
+        M_pos = max(M_pos, peak)
+    end
+    M_neg = maximum(-s for s in support)
+    return max(M_pos, 0.0), max(M_neg, 0.0)
+end
+
+"""One topping strip. The area is at least §7.12. `max_spacing` is the caller's limit."""
+function _topping_strip(location::Symbol, m_per_width, b, d, h, fc, fy; max_spacing)
+    # ACI 318-11 §7.12.2.1, page 106. Area of the  unit strip.
+    As_temp = shrinkage_temperature_ratio(fy) * b * h
+    Mu = m_per_width * b
+    As_req = Mu > zero(Mu) ?
+        required_reinforcement(Mu, b, d, fc, fy; εt_min = tension_controlled_strain(fy)) :
+        zero(As_temp)
+    if !isfinite(ustrip(u"m^2", As_req))
+        return StripReinforcement(location, to_newton_meters(Mu) * u"N*m",
+            Inf * u"m^2", uconvert(u"m^2", As_temp), Inf * u"m^2",
+            0, 0.0u"m", 0, false)
+    end
+    As = max(As_req, As_temp)
+    bars = select_bars(As, b; max_spacing = max_spacing)
+    return StripReinforcement(location, to_newton_meters(Mu) * u"N*m",
+        uconvert(u"m^2", As_req), uconvert(u"m^2", As_temp),
+        uconvert(u"m^2", bars.As_provided), bars.bar_size,
+        uconvert(u"m", bars.spacing), bars.n_bars, true)
+end
+
+"""
+    one_way_topping_bars(h, ln, dead, live, concrete, rebar; n_spans, cover, bar_size, inner_layer=false)
+
+Flexural bars for a unit strip of the slab that spans from rib to rib.
+
+`ln` is that span. The caller passes the center-to-center rib spacing, which
+is not shorter than the clear span. `dead` and `live` are unfactored
+pressures. ACI 318-11 §8.13.6.2 (corpus: aci-318-11, page 120) requires this
+steel for flexure, and not less than §7.12.
+
+When the rib-to-rib spans meet §8.3.3, the moments are those coefficients
+(page 113), including `wu·ln²/12` where every span is at most 10 ft. The
+discontinuous end is integral with the edge rib. Otherwise the moments are
+[`patterned_strip_moments`](@ref), the elastic strip enveloped over the
+§8.11.2 live-load arrangements. The §7.12 mat is placed either way.
+
+`inner_layer = true` is the direction placed inside the other one, so its
+effective depth is one `bar_size` diameter less.
+
+`max_spacing` defaults to five times the thickness and 18 in, which is
+§7.12.2.2 (page 106). §7.6.5's three-thickness limit is for slabs other than
+joist construction (page 96), so a joist topping does not use it. A solid
+slab passes that tighter limit itself. `span`, `discontinuous`, and
+`support_face` are the §8.3.3 arguments; the defaults are an end span built
+into a spandrel.
+"""
+function one_way_topping_bars(h, ln, dead, live, concrete, rebar;
+                              n_spans::Int, cover, bar_size::Int, inner_layer::Bool = false,
+                              max_spacing = nothing, span::Symbol = :end,
+                              discontinuous::Symbol = :spandrel,
+                              support_face::Symbol = :first_interior)
+    n_spans >= 1 || throw(ArgumentError("a topping needs at least one span, got $n_spans"))
+    ln > zero(ln) || throw(ArgumentError("the rib-to-rib span is not positive, got $ln"))
+    spans = fill(ln, n_spans)
+    ok, reasons = coefficients_permitted(;
+        n_spans = n_spans, clear_spans = spans,
+        live = live, dead = dead, rectangular = true)
+    wu = factored_pressure(default_combo, dead, live)
+    if ok
+        analysis = :coefficients
+        short_slab = ln <= 10.0u"ft"
+        moms = approximate_one_way_moments(wu, ln;
+            span = span, discontinuous = discontinuous, n_spans = n_spans,
+            support_face = support_face, short_slab = short_slab)
+        m_pos, m_ext, m_int = moms.M_pos, moms.M_neg_exterior, moms.M_neg_interior
+    else
+        analysis = :elastic
+        push!(reasons, "ACI 318-11 §8.3.1: elastic strip, outer ends pinned; " *
+                       "live load patterned per §8.11.2")
+        elastic = patterned_strip_moments(default_combo.D * dead, default_combo.L * live, spans)
+        m_pos, m_ext, m_int = elastic.M_pos, zero(elastic.M_neg), elastic.M_neg
+    end
+    db = bar_diameter(bar_size)
+    d = effective_depth(h; cover = cover, bar_diameter = db, two_way = false) -
+        (inner_layer ? db : zero(db))
+    b = 1.0u"m"
+    fc = concrete.fc′
+    fy = rebar.Fy
+    # Joist default: ACI 318-11 §7.12.2.2, page 106. Not §7.6.5 (page 96).
+    s_max = something(max_spacing, min(5 * h, 18.0u"inch"))
+    strip(location, m) = _topping_strip(location, m, b, d, h, fc, fy; max_spacing = s_max)
+    return (
+        bars = (pos = strip(:pos, m_pos), ext_neg = strip(:ext_neg, m_ext),
+                int_neg = strip(:int_neg, m_int)),
+        reasons = reasons,
+        analysis = analysis,
+    )
+end
+
+"""
+    shrinkage_topping_bars(h, rebar) -> NamedTuple
+
+The topping direction that does not span rib to rib, such as the direction
+parallel to one-way joists. It carries no flexure, so it is the ACI 318-11
+§7.12 mat only (corpus: aci-318-11, page 106): area §7.12.2.1, spacing
+§7.12.2.2. Same shape as [`one_way_topping_bars`](@ref); the negative strips
+are empty.
+"""
+function shrinkage_topping_bars(h, rebar)
+    b = 1.0u"m"
+    As_temp = shrinkage_temperature_ratio(rebar.Fy) * b * h
+    bars = select_bars(As_temp, b; max_spacing = min(5 * h, 18.0u"inch"))
+    As = uconvert(u"m^2", As_temp)
+    mat = StripReinforcement(:pos, 0.0u"N*m", 0.0u"m^2", As,
+        uconvert(u"m^2", bars.As_provided), bars.bar_size,
+        uconvert(u"m", bars.spacing), bars.n_bars, true)
+    none = StripReinforcement(:neg, 0.0u"N*m", 0.0u"m^2", 0.0u"m^2", 0.0u"m^2",
+        bars.bar_size, 0.0u"m", 0, true)
+    return (bars = (pos = mat, ext_neg = none, int_neg = none),
+            reasons = ["ACI 318-11 §7.12: shrinkage and temperature only, parallel to the ribs"],
+            analysis = :shrinkage)
+end
+
+"""
+    solid_slab_spacing(h) -> Length
+
+Primary flexural spacing in a solid slab, not joist construction.
+
+ACI 318-11 §7.6.5 (corpus: aci-318-11, page 96): not farther apart than
+three times the slab thickness, nor farther apart than 18 in.
+"""
+solid_slab_spacing(h::Length) = min(3 * h, 18.0u"inch")
+
+"""
+    area_direction_bars(As_bot, As_top; max_spacing, reason) -> NamedTuple
+
+One bar direction from required areas per metre of width.
+
+`As_bot` and `As_top` are bare m²/m. Bottom steel is the positive strip.
+Top steel is the interior negative strip. The same shape as
+[`one_way_topping_bars`](@ref), so [`detail_rib_topping`](@ref) can place it.
+A non-positive area leaves that face empty.
+"""
+function area_direction_bars(As_bot::Real, As_top::Real; max_spacing, reason::AbstractString)
+    bot = _area_strip(:pos, As_bot, max_spacing)
+    top = _area_strip(:int_neg, As_top, max_spacing)
+    none = _area_strip(:ext_neg, 0.0, max_spacing)
+    return (bars = (pos = bot, ext_neg = none, int_neg = top),
+            reasons = [String(reason)],
+            analysis = :shell)
+end
+
+"A face with no required area. Spacing zero so the placer skips it."
+function _area_strip(location::Symbol, as_per_m::Real, max_spacing)
+    b = 1.0u"m"
+    As = max(float(as_per_m), 0.0) * u"m^2"
+    if ustrip(As) <= 0
+        return StripReinforcement(location, 0.0u"N*m", 0.0u"m^2", 0.0u"m^2",
+            0.0u"m^2", 4, 0.0u"m", 0, true)
+    end
+    bars = select_bars(As, b; max_spacing = max_spacing)
+    return StripReinforcement(location, 0.0u"N*m", uconvert(u"m^2", As), 0.0u"m^2",
+        uconvert(u"m^2", bars.As_provided), bars.bar_size,
+        uconvert(u"m", bars.spacing), bars.n_bars, true)
 end

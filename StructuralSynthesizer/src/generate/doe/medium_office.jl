@@ -74,17 +74,21 @@ function gen_medium_office(x::Unitful.Length, y::Unitful.Length, floor_height::U
 
     # get elements
     for k in 0:n_stories
-        # x direction beams
-        for j in 0:y_bays, i in 0:(x_bays-1)
-            p1 = get_pt(i, j, k)
-            p2 = get_pt(i+1, j, k)
-            add_element!(skel, Meshes.Segment(p1, p2), group=:beams, level_idx=k)
-        end
-        # y direction beams
-        for i in 0:x_bays, j in 0:(y_bays-1)
-            p1 = get_pt(i, j, k)
-            p2 = get_pt(i, j+1, k)
-            add_element!(skel, Meshes.Segment(p1, p2), group=:beams, level_idx=k)
+        # Story 0 is the support level. Its faces stay in `:grade`. It is not
+        # a floor, so it does not get a beam grid between the column bases.
+        if k > 0
+            # x direction beams
+            for j in 0:y_bays, i in 0:(x_bays-1)
+                p1 = get_pt(i, j, k)
+                p2 = get_pt(i+1, j, k)
+                add_element!(skel, Meshes.Segment(p1, p2), group=:beams, level_idx=k)
+            end
+            # y direction beams
+            for i in 0:x_bays, j in 0:(y_bays-1)
+                p1 = get_pt(i, j, k)
+                p2 = get_pt(i, j+1, k)
+                add_element!(skel, Meshes.Segment(p1, p2), group=:beams, level_idx=k)
+            end
         end
         # columns
         for i in 0:x_bays, j in 0:y_bays

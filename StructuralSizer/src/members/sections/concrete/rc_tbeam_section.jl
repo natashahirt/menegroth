@@ -102,7 +102,14 @@ function RCTBeamSection(;
     hf_in = float(uconvert(u"inch", hf))
     cov   = float(uconvert(u"inch", cover))
 
-    bf_in ≥ bw_in || throw(ArgumentError("Flange width bf must be ≥ web width bw"))
+    # bf ≥ bw. A flange that is exactly the web, summed with a zero length in
+    # another unit, can convert to a few ulps under bw. That shortfall is
+    # rounding, not a narrower flange. Anything larger still rejects.
+    if bf_in < bw_in
+        (bw_in - bf_in) < 1e-6u"inch" ||
+            throw(ArgumentError("Flange width bf must be ≥ web width bw"))
+        bf_in = bw_in
+    end
     hf_in < h_in  || throw(ArgumentError("Flange thickness hf must be < total depth h"))
 
     # Bar properties from catalog
@@ -152,6 +159,9 @@ end
 
 """Gross T-shaped cross-sectional area: Ag = bf × hf + bw × (h − hf)."""
 section_area(s::RCTBeamSection) = s.bf * s.hf + s.bw * (s.h - s.hf)
+
+"""Stem below the flange, `bw × (h − hf)`: the flange is the slab's concrete."""
+self_weight_area(s::RCTBeamSection) = s.bw * (s.h - s.hf)
 
 """Total depth."""
 section_depth(s::RCTBeamSection) = s.h

@@ -172,12 +172,7 @@ function _dowels_fit(legs, plan, h, fc, fy, λ, ϕf, ϕb, opts)
     As = max(_wall_tension_steel(legs, ϕf, fy), As_b,
              _wall_min_dowel(legs, opts.bar_size_long, fy))
     As <= zero(As) && return true
-    avail = h - opts.cover
-    for size in opts.bar_size_long:-1:3
-        db = bar_diameter(size)
-        _development_length_footing(size, fc, fy, λ, db) <= avail && return true
-    end
-    return false
+    return _bar_develops_in(opts.bar_size_long, h - opts.cover, fc, fy, λ, opts.cover)
 end
 
 # ── Rigid design ────────────────────────────────────────────────────────────
@@ -592,6 +587,8 @@ function _wall_finish(legs, soil, opts, plan, extremes, q_gov, q_service_peak,
         Bn_out,
         Float64(sqA),
         analysis,
+        FoundationUtilizations(; bearing = Float64(util_q),
+                               one_way_shear = Float64(util_shear)),
     )
     return result
 end
@@ -642,12 +639,48 @@ ACI 318-11 §15.8.2.2 (corpus: aci-318-11, page 275) requires the minimum of
 least 60 ksi, otherwise 0.0015 for other deformed bars.
 """
 function _wall_min_dowel(legs, bar_size, fy)
+    # ACI 318-11 §14.3.2 (corpus: aci-318-11, page 264): ρℓ is 0.0012 for
+    # No. 5 and smaller at fy ≥ 60 ksi, otherwise 0.0015. §15.8.2.2 (page 275)
+    # requires that ratio across the joint. The area is ρℓ times the concrete
+    # that exists at the base, `leg.solid`, not the centerline through a door.
     ρ = bar_size <= 5 && ustrip(u"psi", fy) >= 60_000.0 ? 0.0012 : 0.0015
     As = 0.0u"m^2"
     for leg in legs
-        As += ρ * leg.tw * (_leg_length_m(leg) * u"m")
+        As += ρ * leg.tw * leg.solid
     end
     return As
+end
+
+"""
+Dowel area for compression above the supported member's bearing strength.
+
+ACI 318-11 §15.8.1.2(a) (corpus: aci-318-11, page 275) and §10.14.1
+(page 162): the supported member's bearing strength is ϕ·0.85·f′c·A1.
+§15.8.2.1's 0.005Ag is a column minimum and is not added for a wall.
+"""
+function _interface_dowel_area(Pu, A1, fc_col, fy, ϕb)
+    Pu <= zero(Pu) && return 0.0u"m^2"
+    A1 <= zero(A1) && return 0.0u"m^2"
+    Bn = ϕb * 0.85 * fc_col * A1
+    Pu > Bn || return 0.0u"m^2"
+    return max((Pu - Bn) / (ϕb * fy), 0.0u"m^2")
+end
+
+"""
+True when some bar from No. 3 up to `bar_size` develops in `avail`.
+
+`avail` is the footing thickness above the cover. ACI 318-11 §12.2.1
+(corpus: aci-318-11, page 214) is applied inside
+[`_development_length_footing`](@ref).
+"""
+function _bar_develops_in(bar_size::Int, avail, fc, fy, λ, clear_cover)
+    avail <= zero(avail) && return false
+    for size in bar_size:-1:3
+        db = bar_diameter(size)
+        _development_length_footing(size, fc, fy, λ, db;
+                                     clear_cover = clear_cover) <= avail && return true
+    end
+    return false
 end
 
 function _wall_bearing(legs, plan, h, fc, fy, ϕb, opts)
@@ -667,10 +700,9 @@ function _wall_bearing(legs, plan, h, fc, fy, ϕb, opts)
             Pu, L, leg.tw, plan.B * u"m", plan.along * u"m", h,
             fc, fc_col, fy, ϕb, :rectangular;
             col_along = col_along, col_across = (plan.B / 2) * u"m")
-        As = bearing.need_dowels ?
-            max((Pu - bearing.Bn_column) / (ϕb * fy), 0.0u"m^2") : 0.0u"m^2"
         # §15.8.2.1's 0.005 Ag is a column minimum. A wall uses §15.8.2.2,
-        # applied by the caller, so the 0.005 Ag inside the helper is not kept.
+        # applied by the caller. A1 is the concrete at the base.
+        As = _interface_dowel_area(Pu, leg.solid * leg.tw, fc_col, fy, ϕb)
         return As, bearing.Bn_footing, bearing.sqA
     end
     for (i, leg) in enumerate(legs)
@@ -684,9 +716,7 @@ function _wall_bearing(legs, plan, h, fc, fy, ϕb, opts)
             Pu, L, leg.tw, across, along, h,
             fc, fc_col, fy, ϕb, :rectangular;
             col_along = along / 2, col_across = across / 2)
-        if bearing.need_dowels
-            As += max((Pu - bearing.Bn_column) / (ϕb * fy), 0.0u"m^2")
-        end
+        As += _interface_dowel_area(Pu, leg.solid * leg.tw, fc_col, fy, ϕb)
         if !have || bearing.sqA < sqA
             sqA = bearing.sqA
             Bn = bearing.Bn_footing

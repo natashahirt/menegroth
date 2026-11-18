@@ -63,6 +63,7 @@ function check_ordinary_wall(wall::Wall, actions::AbstractVector{CombinedWallAct
                              plan_axis::NTuple{2, Float64}=(1.0, 0.0),
                              lw::Union{Nothing,Unitful.Length}=nothing,
                              Moop::Unitful.Quantity=0.0u"N*m",
+                             slab_basis=nothing,
                              ends=nothing)
     material isa ReinforcedConcreteMaterial || throw(ArgumentError(
         "ordinary wall check: material must be a ReinforcedConcreteMaterial " *
@@ -103,7 +104,8 @@ function check_ordinary_wall(wall::Wall, actions::AbstractVector{CombinedWallAct
                                             ends.area_m2 * u"m^2", ends.inset_m * u"m",
                                             material, action.N, action.M)
         push!(records, _ordinary_record(wall_index, wall.story, direction, case, action, flexure))
-        e = _out_of_plane_eccentricity(action.N, Moop)
+        moment = _action_slab_moment(Moop, action, slab_basis)
+        e = _out_of_plane_eccentricity(action.N, moment)
         # Inside h/6 the simplified method applies with this eccentricity.
         # Outside it, §11.5.3.1 does not, and the magnified weak-axis moment does.
         if e <= section.t / 6
@@ -114,7 +116,7 @@ function check_ordinary_wall(wall::Wall, actions::AbstractVector{CombinedWallAct
         else
             push!(records, _ordinary_record(
                 wall_index, wall.story, direction, case, action,
-                _out_of_plane_strength(section, material, action.N, Moop, story_height)))
+                _out_of_plane_strength(section, material, action.N, moment, story_height)))
         end
         if assembly !== nothing && assembly.joined
             # Reported only. ratio 0 keeps a passing design from treating
@@ -134,6 +136,51 @@ function check_ordinary_wall(wall::Wall, actions::AbstractVector{CombinedWallAct
         end
     end
     return records
+end
+
+"""
+Slab moment that belongs with this action.
+
+`Moop` is the envelope the slab stored, over `1.4D` and `1.2D + 1.6L`.
+`basis` comes from [`_governing_slab_basis`](@ref). The scale is this
+combination's slab moment over that envelope, and it is not allowed to
+exceed 1.
+
+With `basis.faces`, each wall face's moment is `max(αD·D + αL·L, 0)` from
+its own dead and live parts, and the combination's slab moment is the
+largest over the faces. Otherwise the scale is this combination's gravity
+pressure on the governing slab over the larger of `1.4 qD` and
+`1.2 qD + 1.6 qL`.
+
+A floor's live factor is the combination's `L`, and the `:W` reading of
+combination 3 drops floor live. A roof's live factor is the combination's
+factor on `:Lr`. Wind and `Eh` do not scale the slab moment.
+
+No basis leaves the envelope on every action.
+"""
+function _action_slab_moment(Moop, action, basis)
+    basis === nothing && return Moop
+    combo = nothing
+    for c in asce7_strength_combinations
+        c.name === action.combination || continue
+        combo = c
+        break
+    end
+    combo === nothing && return Moop
+    # Combination 3's :W reading keeps the roof live and drops floor live.
+    live_factor(roof) = roof ? combo.Lr : (action.alternative === :W ? 0.0 : combo.L)
+    faces = hasproperty(basis, :faces) ? basis.faces : nothing
+    if faces !== nothing && !isempty(faces)
+        face_moment(f, αD, αL) = max(αD * f.D + αL * f.L, 0.0)
+        env = maximum(f -> max(face_moment(f, 1.4, 0.0), face_moment(f, 1.2, 1.6)), faces)
+        env > 0 || return Moop
+        m = maximum(f -> face_moment(f, combo.D, live_factor(f.roof)), faces)
+        return Moop * min(m / env, 1.0)
+    end
+    q = combo.D * basis.qD + live_factor(basis.roof) * basis.qL
+    q_gov = max(1.4 * basis.qD, 1.2 * basis.qD + 1.6 * basis.qL)
+    q_gov > 1.0 || return Moop
+    return Moop * min(q / q_gov, 1.0)
 end
 
 """e = M/N. No moment is concentric. Moment with no compression is outside the wall."""
@@ -349,12 +396,14 @@ function _flexure_passes!(lw, t, ρl, material, actions)
     return true
 end
 
-function _out_of_plane_passes(lw, t, ρl, ρt, material, actions, Moop, hw)
+function _out_of_plane_passes(lw, t, ρl, ρt, material, actions, Moop, hw, basis=nothing)
     ustrip(u"N*m", Moop) <= 1.0 && return true
     section = WallSection(lw * u"m", t * u"m"; ρl=ρl, ρt=ρt)
     for a in actions
-        _out_of_plane_eccentricity(a.N, Moop) <= section.t / 6 && continue
-        _out_of_plane_strength(section, material, a.N, Moop, hw).passed || return false
+        moment = _action_slab_moment(Moop, a, basis)
+        ustrip(u"N*m", moment) <= 1.0 && continue
+        _out_of_plane_eccentricity(a.N, moment) <= section.t / 6 && continue
+        _out_of_plane_strength(section, material, a.N, moment, hw).passed || return false
     end
     return true
 end
@@ -362,22 +411,24 @@ end
 """
     select_ordinary_wall_reinforcement!(wall, actions, material; hw, lw=nothing) -> ρt_strength
 
-Raise `wall.ρt`, then `wall.ρl`, to the lightest ratios on the grid that
-the pier's strength checks can pass. Thickness is unchanged. `lw`, when
-passed, is the clear length of a joined leg. Otherwise the centerline
+Set `wall.ρt`, then `wall.ρl`, to the lightest ratios that pass the pier's
+strength checks at the current thickness. Thickness is unchanged. `lw`,
+when passed, is the clear length of a joined leg. Otherwise the centerline
 length is used.
 
-`ρt` is solved from the largest `|V|` and rounded up on the grid. `ρl`
-then walks upward from the §11.6.2 floor and stops at the first value
-that passes every action. Returns the transverse ratio required for
-shear strength, or `nothing` when the shear is above the §11.5.4.2 cap.
+`ρt` is solved from the largest `|V|` and rounded up on the grid from
+0.0025. `ρl` then walks upward from the §11.6.2 floor and stops at the
+first value that passes every action. Returns the transverse ratio
+required for shear strength, or `nothing` when the shear is above the
+§11.5.4.2 cap.
 
-A ratio the wall already carries is not reduced. A demand the grid cannot
+The ratios already on the wall are not a floor. A demand the grid cannot
 cover leaves the wall at the top of the grid.
 """
 function select_ordinary_wall_reinforcement!(wall::Wall, actions, material; hw::Unitful.Length,
                              lw::Union{Nothing,Unitful.Length}=nothing,
                              Moop::Unitful.Quantity=0.0u"N*m",
+                             slab_basis=nothing,
                              ends=nothing)
     material isa ReinforcedConcreteMaterial || throw(ArgumentError(
         "ordinary wall reinforcement: material must be a ReinforcedConcreteMaterial."))
@@ -395,20 +446,21 @@ function select_ordinary_wall_reinforcement!(wall::Wall, actions, material; hw::
     Vu = maximum(a -> abs(Float64(a.V)), actions)
     ρt_strength = _rho_t_for_shear_strength(fc, fyt, λ, lw, t, hw_m, Vu)
     required_t = ρt_strength === nothing ? Inf : ρt_strength
-    chosen_t = _rho_on_grid(required_t, wall.ρt)
+    # 0.0 is not a carried ratio. The grid floor is 0.0025 inside `_rho_on_grid`.
+    chosen_t = _rho_on_grid(required_t, 0.0)
     if chosen_t === nothing
-        chosen_t = max(wall.ρt, ORDINARY_WALL_RHO_GRID[end])
+        chosen_t = ORDINARY_WALL_RHO_GRID[end]
     elseif ρt_strength !== nothing
         chosen_t = _rho_t_covering_shear(chosen_t, material, lw, t, hw, Vu)
     end
     wall.ρt = chosen_t
-    floor_l = _rho_l_floor(chosen_t, ρt_strength, hw_m, lw, wall.ρl)
+    floor_l = _rho_l_floor(chosen_t, ρt_strength, hw_m, lw, 0.0)
     order = collect(actions)
     chosen_l = floor_l
     for ρl in _rho_l_candidates(floor_l)
         chosen_l = ρl
         _flexure_passes!(lw, t, ρl, material, order) || continue
-        _out_of_plane_passes(lw, t, ρl, wall.ρt, material, order, Moop, hw) && break
+        _out_of_plane_passes(lw, t, ρl, wall.ρt, material, order, Moop, hw, slab_basis) && break
     end
     wall.ρl = chosen_l
     return ρt_strength

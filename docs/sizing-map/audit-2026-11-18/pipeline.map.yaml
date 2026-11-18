@@ -1,0 +1,602 @@
+area: pipeline
+# Paths: SY = StructuralSynthesizer/src, SS = StructuralSizer/src (written out in anchors).
+# trace_labels: "<layer>/<stage>[/<element_id>]" from StructuralSizer.emit!(tc, layer, stage, element_id, event).
+nodes:
+  # ---------------------------------------------------------------- L0
+  - id: pipeline.input
+    level: L0
+    kind: input
+    anchor: StructuralSynthesizer/src/workflow/execute.jl::design_building
+    summary: BuildingStructure (skeleton, walls, openings) + DesignParameters (+ framing_opts)
+    reads: []
+    writes: []
+    trace_labels: ["pipeline/design_building", "pipeline/design_building_kwargs"]
+  - id: pipeline.prepare
+    level: L0
+    kind: stage
+    anchor: StructuralSynthesizer/src/workflow/prepare.jl::prepare!
+    summary: Resolve floor/framing options, initialize, seed columns, lateral model, build and solve the frame, snapshot
+    reads: [params.floor, params.loads, params.framing_opts, params.lateral]
+    writes: [column.c1, column.c2, asap_model]
+  - id: pipeline.element_split
+    level: L0
+    kind: stage
+    anchor: StructuralSynthesizer/src/core/initialize.jl::initialize!
+    summary: Faces to cells, cells to slabs, edges to segments and to columns/beams/struts/walls, column tributaries, framing levels
+    reads: [skeleton]
+    writes: [cells, slabs, columns, beams, struts, walls]
+  - id: pipeline.stages
+    level: L0
+    kind: stage
+    anchor: StructuralSynthesizer/src/workflow/graph_builder.jl::build_design_graph
+    summary: Slab level(s), members, walls with member recheck, foundations, run by the incremental scheduler (default) or execute_graph!
+    reads: []
+    writes: []
+  - id: pipeline.capture
+    level: L0
+    kind: stage
+    anchor: StructuralSynthesizer/src/workflow/execute.jl::capture_design
+    summary: Copy the sized structure, fill result tables, converged = all checks pass and no stage diagnostics
+    reads: [stage_diagnostics]
+    writes: [design]
+  - id: pipeline.outputs
+    level: L0
+    kind: output
+    anchor: StructuralSynthesizer/src/workflow/execute.jl::_finish_design_model!
+    summary: BuildingDesign with scene or solved frame, diagnostics, phase timings
+    reads: [design]
+    writes: []
+
+  # ---------------------------------------------------------------- L1 entry / scheduler
+  - id: pipeline.session
+    level: L1
+    kind: policy
+    parent: pipeline.stages
+    anchor: StructuralSynthesizer/src/design_graph/session.jl::DesignSession
+    summary: Default design_building path; prepare_engine on a deep copy, run_target! to the terminal node, capture_incremental_design
+    reads: []
+    writes: []
+  - id: pipeline.scheduler.run_target
+    level: L1
+    kind: policy
+    parent: pipeline.stages
+    anchor: StructuralSynthesizer/src/design_graph/scheduler.jl::run_target!
+    summary: Rebuild graph, restore baseline, walk levels; run dirty nodes, barrier sync, whole-struc snapshot and output hash per dirty level
+    reads: []
+    writes: [asap_model]
+  - id: pipeline.executor
+    level: L1
+    kind: policy
+    parent: pipeline.stages
+    anchor: StructuralSynthesizer/src/design_graph/executor.jl::execute_graph!
+    summary: Level-barrier executor, used only by design_building(restore=false)
+    reads: []
+    writes: []
+  - id: pipeline.validation
+    level: L1
+    kind: check
+    parent: pipeline.prepare
+    anchor: StructuralSynthesizer/src/workflow/validation.jl::run_pre_sizing_validation
+    summary: DDM/EFM/FEA applicability checks before sizing; throws PreSizingValidationError
+    reads: [slabs]
+    writes: []
+    trace_labels: ["workflow/run_pre_sizing_validation"]
+
+  # ---------------------------------------------------------------- L1 element split
+  - id: pipeline.split.cells
+    level: L1
+    kind: element
+    parent: pipeline.element_split
+    anchor: StructuralSynthesizer/src/core/initialize.jl::initialize!
+    summary: initialize_cells! one cell per floor face with sdl, live, spans
+    reads: [skeleton, params.loads]
+    writes: [cell.sdl, cell.live_load, cell.spans]
+  - id: pipeline.split.slabs
+    level: L1
+    kind: element
+    parent: pipeline.element_split
+    anchor: StructuralSynthesizer/src/analyze/slabs/slabs/support_classification.jl::_apply_two_way_supports!
+    summary: initialize_slabs! groups cells; beamless two_way panels become flat_plate and merge one slab per story
+    reads: [cells, beams]
+    writes: [slab.floor_type, slab.cell_indices]
+  - id: pipeline.split.members
+    level: L1
+    kind: element
+    parent: pipeline.element_split
+    anchor: StructuralSynthesizer/src/analyze/members/members/initialize.jl::initialize_members!
+    summary: Edge chains become Column/Beam/Strut/Wall or absent; beam roles; column_above links; wall stacks
+    reads: [skeleton, params.wall_thickness]
+    writes: [columns, beams, struts, walls, column.column_above]
+  - id: pipeline.split.column_tributaries
+    level: L1
+    kind: element
+    parent: pipeline.element_split
+    anchor: StructuralSynthesizer/src/analyze/tributaries/support_tributaries.jl::compute_column_tributaries!
+    summary: Tributary cells and areas per column; defines which slabs a column supports
+    reads: [cells, columns]
+    writes: [column.tributary_cell_indices]
+  - id: pipeline.split.framing
+    level: L1
+    kind: element
+    parent: pipeline.element_split
+    anchor: StructuralSynthesizer/src/workflow/prepare.jl::prepare!
+    summary: populate_levels! joists and deck fill beams, after initialize! and before to_asap!
+    reads: [params.framing_opts]
+    writes: [beams, skeleton]
+  - id: pipeline.split.supports
+    level: L1
+    kind: element
+    parent: pipeline.element_split
+    anchor: StructuralSynthesizer/src/workflow/capture_results.jl::_size_foundations!
+    summary: initialize_supports! runs at the foundation stage, not at prepare
+    reads: [asap_model]
+    writes: [supports]
+
+  # ---------------------------------------------------------------- L1 prepare steps
+  - id: pipeline.prepare.column_seed
+    level: L1
+    kind: policy
+    parent: pipeline.prepare
+    anchor: StructuralSynthesizer/src/analyze/members/members/size_columns.jl::estimate_column_sizes!
+    summary: Square seed; default start=:axial (Ag at rho=0.01 over floors above, min 14 in), span/15 only if column_span_minimum; clamped to max_column_size
+    reads: [column.tributary_cell_indices, cell.sdl, cell.live_load, params.floor]
+    writes: [column.c1, column.c2]
+  - id: pipeline.analysis.to_asap
+    level: L1
+    kind: analysis
+    parent: pipeline.prepare
+    anchor: StructuralSynthesizer/src/analyze/asap/asap/model_builder.jl::to_asap!
+    summary: Build frame + wall shells, placeholder frame sections, no member self-weight; process + solve (1 factorization)
+    fidelity: frame
+    reads: [cells, columns, beams, walls]
+    writes: [asap_model]
+  - id: pipeline.prepare.snapshot
+    level: L1
+    kind: policy
+    parent: pipeline.prepare
+    anchor: StructuralSynthesizer/src/core/snapshot.jl::snapshot!
+    summary: Pristine snapshot for restore!
+    reads: []
+    writes: []
+
+  # ---------------------------------------------------------------- L1 slab level
+  - id: pipeline.stage.slabs.sequential
+    level: L1
+    kind: loop
+    parent: pipeline.stages
+    anchor: StructuralSynthesizer/src/workflow/graph_builder.jl::_make_slab_node_fn
+    summary: L1 one root per slab in eachindex order; design_floor! installs slab and grows columns in place (no shared flat-plate column)
+    reads: [column.c1, column.c2, column.section, cell.sdl, cell.live_load]
+    writes: [slab.h, slab.result, cell.self_weight, column.c1, column.c2, column.section]
+    loop:
+      iterates: slab
+      budget: one sweep (slab kernel max_iterations inside)
+      growth: grow-only
+      converges_when: every slab designed once
+      ratchet: true
+    trace_labels: ["pipeline/build_pipeline/stage_1_slabs", "slab/size_slabs!", "slab/size_slab!/<slab_idx>"]
+  - id: pipeline.stage.slabs.propose
+    level: L1
+    kind: stage
+    parent: pipeline.stages
+    anchor: StructuralSynthesizer/src/workflow/graph_builder.jl::_push_two_level_slab_nodes!
+    summary: L2 propose; each slab designed on a private copy against the same pre-slab columns
+    reads: [column.c1, column.c2]
+    writes: []
+    trace_labels: ["pipeline/build_pipeline/stage_1_slabs", "slab/size_slabs!", "slab/size_slab!/<slab_idx>"]
+  - id: pipeline.stage.slabs.envelope
+    level: L1
+    kind: policy
+    parent: pipeline.stages
+    anchor: StructuralSynthesizer/src/workflow/graph_builder.jl::_apply_support_envelope!
+    summary: Per column adopt the largest-footprint proposal not smaller in c1 or c2 (_support_beats); tie by Ast then lowest slab
+    reads: [column.c1, column.c2]
+    writes: [column.c1, column.c2, column.shape, column.section]
+  - id: pipeline.stage.slabs.commit
+    level: L1
+    kind: stage
+    parent: pipeline.stages
+    anchor: StructuralSynthesizer/src/workflow/graph_builder.jl::_commit_floor!
+    summary: Install each slab (install_supports=false); redesign if its proposal's supports are no longer installed
+    reads: [column.c1, column.c2]
+    writes: [slab.h, slab.result, cell.self_weight]
+  - id: pipeline.stage.slabs.lock
+    level: L1
+    kind: loop
+    parent: pipeline.stages
+    anchor: StructuralSynthesizer/src/workflow/graph_builder.jl::_push_two_level_slab_nodes!
+    summary: L3 settle; envelope over committed outcomes then redesign slabs whose columns grew
+    reads: [column.c1, column.c2]
+    writes: [column.c1, column.c2, column.section, slab.h, slab.result]
+    loop:
+      iterates: column.c1, column.c2
+      budget: monotone_budget(max_iterations, 48) = 48
+      growth: grow-only
+      converges_when: an envelope round enlarges no column (else throws)
+      ratchet: true
+    trace_labels: ["slab/size_slabs!", "pipeline/build_pipeline/stage_1_slabs"]
+  - id: pipeline.sync.slab_barrier
+    level: L1
+    kind: sync
+    parent: pipeline.stages
+    anchor: StructuralSynthesizer/src/analyze/asap/asap/model_sync.jl::sync_asap!
+    summary: L14 once after the slab level; loads_only when the stiffness token is unchanged (usual for slab-only changes)
+    reads: [slab.result, cells]
+    writes: [cell.self_weight, asap_model]
+  - id: pipeline.analysis.sync_asap
+    level: L1
+    kind: analysis
+    parent: pipeline.stages
+    anchor: StructuralSynthesizer/src/analyze/asap/asap/model_sync.jl::sync_asap!
+    summary: Push slab self-weight, pressures, eccentricity, wall/drop/member self-weight, coating; full update or loads-only; solve (+ pattern cases)
+    fidelity: frame
+    reads: [slab.result, cells, columns, beams]
+    writes: [asap_model, cell.self_weight]
+
+  # ---------------------------------------------------------------- L1 members (flat)
+  - id: pipeline.stage.members
+    level: L1
+    kind: stage
+    parent: pipeline.stages
+    anchor: StructuralSynthesizer/src/workflow/pipeline_spec.jl::build_pipeline
+    summary: Members node; flat -> _design_flat_plate_members!, else _size_beams_columns!; all-flat two_way rerouted
+    reads: [asap_model, slabs, columns, beams]
+    writes: [columns, beams, slabs, asap_model, stage_diagnostics]
+    trace_labels: ["pipeline/build_pipeline/stage_2_reconcile", "pipeline/build_pipeline/stage_2_beams_columns"]
+  - id: pipeline.flat.member_loop
+    level: L1
+    kind: loop
+    parent: pipeline.stage.members
+    anchor: StructuralSynthesizer/src/workflow/graph_builder.jl::_design_flat_plate_members!
+    summary: L4 reconcile+harmonize once, then settle - redesign stale slabs, envelope, raise floors, sync, reconcile(floors), harmonize
+    reads: [slab.design_details.designed_supports, column.c1, column.c2, asap_model]
+    writes: [slab.h, slab.result, column.c1, column.c2, column.section]
+    loop:
+      iterates: stale slabs and column.c1/c2
+      budget: monotone_budget(max_iterations, 48) = 48
+      growth: free+guard
+      converges_when: no slab checked at a column other than the installed one (else throws)
+      ratchet: true
+    trace_labels: ["workflow/_design_flat_plate_members!"]
+  - id: pipeline.flat.raise_floors
+    level: L1
+    kind: policy
+    parent: pipeline.flat.member_loop
+    anchor: StructuralSynthesizer/src/workflow/graph_builder.jl::_raise_column_floors!
+    summary: A column the slab redesign grew back is floored at that plan size for the rest of this member-stage call
+    reads: [column.c1, column.c2]
+    writes: [column.floor]
+  - id: pipeline.flat.install_frame
+    level: L1
+    kind: analysis
+    parent: pipeline.flat.member_loop
+    anchor: StructuralSynthesizer/src/workflow/column_reconciliation.jl::_install_sized_column_frame!
+    summary: Put RC column sections and self-weight on the frame, always values-only update + solve + pattern refresh
+    fidelity: frame
+    reads: [column.c1, column.c2]
+    writes: [asap_model]
+  - id: pipeline.flat.reconcile_axial
+    level: L1
+    kind: policy
+    parent: pipeline.flat.member_loop
+    anchor: StructuralSynthesizer/src/workflow/column_reconciliation.jl::_reconcile_columns!
+    summary: L5 grow c to Ag at ACI 318-11 Eq. (10-2), rho=0.01, from frame Pu; re-solve if grown; then call the full-load fit
+    reads: [demand.Pu, column.c1, column.c2]
+    writes: [column.c1, column.c2, column.section]
+    trace_labels: ["workflow/_reconcile_columns!"]
+  - id: pipeline.flat.joint_moments
+    level: L1
+    kind: policy
+    parent: pipeline.flat.member_loop
+    anchor: StructuralSynthesizer/src/workflow/flat_plate_column_check.jl::_flat_plate_joint_moments
+    summary: L6a max over slabs of below/above joint moments; DDM/EFM split by ACI 318-11 §13.6.9.2 factors; single curvature assumed
+    reads: [slab.design_details.column_results]
+    writes: [demand.Mu]
+  - id: pipeline.flat.column_fit
+    level: L1
+    kind: loop
+    parent: pipeline.flat.member_loop
+    anchor: StructuralSynthesizer/src/workflow/flat_plate_column_check.jl::check_flat_plate_columns!
+    summary: L6 settle - lightest catalog plan size passing P-M (both orientations), ACI 318-11 §10.12 joints, §11.11 punching at trial size, cap; can shrink when uniform sizing off and punching demand stored
+    reads: [demand.Pu, demand.Mu, demand.Vu, demand.Mub, column.floor, column.c1, column.c2]
+    writes: [column.c1, column.c2, column.section, column.volumes, asap_model]
+    loop:
+      iterates: column.section
+      budget: monotone_budget(max_iterations, length(catalog))
+      growth: free+guard
+      converges_when: a round changes no section (else stage_diagnostics[:flat_plate_columns])
+      ratchet: false
+    trace_labels: ["workflow/check_flat_plate_columns!"]
+  - id: pipeline.flat.stack
+    level: L1
+    kind: policy
+    parent: pipeline.flat.member_loop
+    anchor: StructuralSynthesizer/src/workflow/flat_plate_column_check.jl::_stack_flat_plate_columns!
+    summary: REMOVED L7 - dead code, no caller; only _non_monotone_columns is reported
+    reads: []
+    writes: []
+  - id: pipeline.members.harmonize
+    level: L1
+    kind: policy
+    parent: pipeline.stage.members
+    anchor: StructuralSynthesizer/src/workflow/member_iteration.jl::harmonize_uniform_column_sizes!
+    summary: L8 opt-in group max c1 and max c2 (RC) or largest area (steel); re-solve if changed; also turns L6 grow-only
+    reads: [column.c1, column.c2, column.section]
+    writes: [column.c1, column.c2, column.section, asap_model]
+    loop:
+      iterates: column group
+      budget: single pass per call
+      growth: grow-only
+      converges_when: single pass
+      ratchet: true
+  - id: pipeline.analysis.resolve_values_only
+    level: L1
+    kind: analysis
+    parent: pipeline.stage.members
+    anchor: StructuralSynthesizer/src/workflow/column_reconciliation.jl::_resolve_after_column_change!
+    summary: Asap.update!(values_only) + solve + pattern refresh after column section changes
+    fidelity: frame
+    reads: [column.section]
+    writes: [asap_model]
+
+  # ---------------------------------------------------------------- L1 members (beam)
+  - id: pipeline.beam.loop
+    level: L1
+    kind: loop
+    parent: pipeline.stage.members
+    anchor: StructuralSynthesizer/src/workflow/member_iteration.jl::_iterate_beams_columns!
+    summary: L9 size_beams!, rib/head raise, stiffness re-analysis, size_columns!, harmonize, re-analysis; repeat until no section changes or a state repeats
+    reads: [asap_model, frame_section_floors]
+    writes: [beam.section, column.section, asap_model]
+    loop:
+      iterates: beam.section, column.section
+      budget: max_iterations (20)
+      growth: free
+      converges_when: no section changed, or check-settle passes on a repeated cycle
+      ratchet: false
+    trace_labels: ["workflow/_size_beams_columns!"]
+  - id: pipeline.beam.check_settle
+    level: L1
+    kind: loop
+    parent: pipeline.beam.loop
+    anchor: StructuralSynthesizer/src/workflow/check_settle.jl::_check_settle!
+    summary: L9b install each cycle state, pinned group checks, keep cheapest fully passing; else per-group mix; else resize failing groups (3 tries)
+    reads: [beam.section, column.section, asap_model]
+    writes: [beam.section, column.section, column.c1, column.c2, asap_model]
+    loop:
+      iterates: member state
+      budget: n_cycle + 1 mix + 3 resize rounds
+      growth: free
+      converges_when: every beam and column group passes the installed state's analysis
+      ratchet: false
+    trace_labels: ["workflow/_size_beams_columns!"]
+  - id: pipeline.beam.columns_only
+    level: L1
+    kind: loop
+    parent: pipeline.stage.members
+    anchor: StructuralSynthesizer/src/workflow/member_iteration.jl::_size_beams_columns!
+    summary: L10 no beam edges - column MIP, harmonize, coating, stiffness re-analysis until no change
+    reads: [asap_model]
+    writes: [column.section, asap_model]
+    loop:
+      iterates: column.section
+      budget: max_iterations
+      growth: free
+      converges_when: no column section changed
+      ratchet: false
+    trace_labels: ["workflow/_size_beams_columns!"]
+  - id: pipeline.beam.story_shell
+    level: L1
+    kind: loop
+    parent: pipeline.stage.members
+    anchor: StructuralSynthesizer/src/workflow/member_iteration.jl::_size_with_story_shell!
+    summary: L11 shell beam sizing then L9 with shell demands; 1 round when checkable (then L11b), else up to 3 with upward_only floor
+    reads: [beam.section, column.section]
+    writes: [beam.section, column.section, slab.design_details]
+    loop:
+      iterates: beam.section, column.section
+      budget: 3 rounds (1 when checkable)
+      growth: grow-only
+      converges_when: shell and service converged and beams and columns held
+      ratchet: true
+    trace_labels: ["workflow/_size_beams_columns!"]
+  - id: pipeline.beam.shell_reconcile
+    level: L1
+    kind: loop
+    parent: pipeline.beam.story_shell
+    anchor: StructuralSynthesizer/src/workflow/check_settle.jl::_reconcile_shell_frame!
+    summary: L11b solve shell on installed sections, keep passing groups, resize failing beams/columns, restore passing columns
+    reads: [beam.section, column.section]
+    writes: [beam.section, column.section, asap_model]
+    loop:
+      iterates: failing groups
+      budget: 4 attempts
+      growth: free+guard
+      converges_when: shell and frame both pass; stops on a repeated state
+      ratchet: true
+  - id: pipeline.analysis.reanalyze_stiffness
+    level: L1
+    kind: analysis
+    parent: pipeline.stage.members
+    anchor: StructuralSynthesizer/src/workflow/member_iteration.jl::_reanalyze_after_section_change!
+    summary: Solid-head sections, full Asap.update! (or process!), solve, pattern refresh; used by update_analysis!(:stiffness)
+    fidelity: frame
+    reads: [beam.section, column.section]
+    writes: [asap_model]
+  - id: pipeline.sync.after_members
+    level: L1
+    kind: sync
+    parent: pipeline.stages
+    anchor: StructuralSynthesizer/src/analyze/asap/asap/model_sync.jl::sync_asap!
+    summary: Level barrier after the members node on the beam path (needs_sync = !flat); full update since K changed
+    reads: [columns, beams]
+    writes: [asap_model]
+
+  # ---------------------------------------------------------------- L1 walls / foundations / capture
+  - id: pipeline.stage.walls_recheck
+    level: L1
+    kind: loop
+    parent: pipeline.stages
+    anchor: StructuralSynthesizer/src/workflow/pipeline_spec.jl::_walls_with_member_recheck!
+    summary: L13 walls stage; if thickness, row-F floors or overstressed frame columns changed, rerun the whole member stage (+ sync on beam path)
+    reads: [wall.t, frame_section_floors, column.section, beam.section]
+    writes: [wall.t, frame_section_floors, column.section, beam.section, slabs, asap_model, stage_diagnostics]
+    loop:
+      iterates: wall.t and the member stage
+      budget: 4 rounds
+      growth: grow-only
+      converges_when: walls and floors unchanged and no overstress, or members held (else stage_diagnostics[:wall_members])
+      ratchet: true
+    trace_labels: ["workflow/_walls_with_member_recheck!"]
+  - id: pipeline.walls.overstress_floor
+    level: L1
+    kind: policy
+    parent: pipeline.stage.walls_recheck
+    anchor: StructuralSynthesizer/src/workflow/pipeline_spec.jl::_floor_overstressed_frame_columns!
+    summary: L17 RC frame column (not flat-plate supported) failing P-M on the wall solution gets a frame_section_floor at its current section
+    reads: [column.section, demand.Pu, demand.Mu]
+    writes: [frame_section_floors]
+  - id: pipeline.analysis.geometry_rebuild
+    level: L1
+    kind: analysis
+    parent: pipeline.stage.walls_recheck
+    anchor: StructuralSynthesizer/src/analyze/asap/asap/model_sync.jl::update_analysis!
+    summary: :geometry - to_asap! rebuild, restore sized frame sections and self-weight, full sync_asap!; called on every wall thickness jump
+    fidelity: frame
+    reads: [wall.t]
+    writes: [asap_model]
+    trace_labels: ["workflow/update_analysis!"]
+  - id: pipeline.stage.foundations
+    level: L1
+    kind: stage
+    parent: pipeline.stages
+    anchor: StructuralSynthesizer/src/workflow/capture_results.jl::_size_foundations!
+    summary: initialize_supports! then strategy-aware size_foundations!; one unfactored D+L solve on cached factor; no feedback
+    reads: [asap_model, supports]
+    writes: [supports, foundations]
+    trace_labels: ["workflow/_size_foundations!", "workflow/size_foundations!"]
+  - id: pipeline.capture.restore
+    level: L1
+    kind: policy
+    parent: pipeline.capture
+    anchor: StructuralSynthesizer/src/core/snapshot.jl::restore!
+    summary: Only on the in-place path; session path works on an engine-owned copy
+    reads: []
+    writes: [column.c1, column.c2]
+
+  # ---------------------------------------------------------------- legacy / guarded
+  - id: pipeline.legacy.size
+    level: L1
+    kind: loop
+    parent: pipeline.stages
+    anchor: StructuralSynthesizer/src/core/size.jl::size!
+    summary: L15 exported legacy beam/column loop, not used by design_building
+    reads: [asap_model]
+    writes: [beam.section, column.section]
+    loop:
+      iterates: beam.section, column.section
+      budget: 3
+      growth: free
+      converges_when: max relative column Pu change < 0.05
+      ratchet: false
+  - id: pipeline.scheduler.adopt_larger_column
+    level: L1
+    kind: policy
+    parent: pipeline.scheduler.run_target
+    anchor: StructuralSynthesizer/src/core/snapshot.jl::_adopt_larger_column!
+    summary: L16 max-merge on partial slab overlay; guarded unreachable end-to-end
+    reads: [column.c1, column.c2]
+    writes: [column.c1, column.c2]
+
+edges:
+  # L0 spine
+  - {from: pipeline.input, to: pipeline.prepare, kind: control}
+  - {from: pipeline.prepare, to: pipeline.element_split, kind: call}
+  - {from: pipeline.element_split, to: pipeline.prepare.column_seed, kind: data, var: column.tributary_cell_indices}
+  - {from: pipeline.prepare, to: pipeline.stages, kind: control}
+  - {from: pipeline.stages, to: pipeline.capture, kind: control}
+  - {from: pipeline.capture, to: pipeline.outputs, kind: data, var: design}
+
+  # entry / scheduling
+  - {from: pipeline.input, to: pipeline.session, kind: call}
+  - {from: pipeline.session, to: pipeline.prepare, kind: call}
+  - {from: pipeline.session, to: pipeline.scheduler.run_target, kind: call}
+  - {from: pipeline.input, to: pipeline.executor, kind: call}
+  - {from: pipeline.prepare, to: pipeline.validation, kind: call}
+  - {from: pipeline.scheduler.run_target, to: pipeline.capture, kind: control}
+
+  # element split
+  - {from: pipeline.split.cells, to: pipeline.split.slabs, kind: data, var: cells}
+  - {from: pipeline.split.members, to: pipeline.split.column_tributaries, kind: data, var: columns}
+  - {from: pipeline.split.slabs, to: pipeline.split.framing, kind: control}
+  - {from: pipeline.split.framing, to: pipeline.analysis.to_asap, kind: data, var: beams}
+  - {from: pipeline.prepare.column_seed, to: pipeline.analysis.to_asap, kind: control}
+  - {from: pipeline.prepare.column_seed, to: pipeline.stage.slabs.sequential, kind: data, var: column.c1}
+  - {from: pipeline.prepare.column_seed, to: pipeline.stage.slabs.propose, kind: data, var: column.c1}
+  - {from: pipeline.analysis.to_asap, to: pipeline.prepare.snapshot, kind: control}
+
+  # slab level
+  - {from: pipeline.stage.slabs.sequential, to: slab.flat_plate, kind: call}
+  - {from: pipeline.stage.slabs.propose, to: slab.flat_plate, kind: call}
+  - {from: pipeline.stage.slabs.propose, to: pipeline.stage.slabs.envelope, kind: data, var: column.c1}
+  - {from: pipeline.stage.slabs.envelope, to: pipeline.stage.slabs.commit, kind: data, var: column.c1}
+  - {from: pipeline.stage.slabs.commit, to: pipeline.stage.slabs.lock, kind: control}
+  - {from: pipeline.stage.slabs.lock, to: pipeline.stage.slabs.lock, kind: feedback, var: column.c1}
+  - {from: pipeline.stage.slabs.sequential, to: pipeline.sync.slab_barrier, kind: data, var: slab.h}
+  - {from: pipeline.stage.slabs.lock, to: pipeline.sync.slab_barrier, kind: data, var: slab.h}
+  - {from: pipeline.sync.slab_barrier, to: pipeline.analysis.sync_asap, kind: call}
+  - {from: pipeline.sync.slab_barrier, to: pipeline.stage.members, kind: data, var: demand.Pu}
+
+  # flat members
+  - {from: pipeline.stage.members, to: pipeline.flat.member_loop, kind: call}
+  - {from: pipeline.flat.member_loop, to: pipeline.flat.reconcile_axial, kind: call}
+  - {from: pipeline.flat.reconcile_axial, to: pipeline.flat.install_frame, kind: call}
+  - {from: pipeline.flat.install_frame, to: pipeline.flat.reconcile_axial, kind: data, var: demand.Pu}
+  - {from: pipeline.flat.reconcile_axial, to: pipeline.flat.column_fit, kind: call}
+  - {from: pipeline.flat.joint_moments, to: pipeline.flat.column_fit, kind: data, var: demand.Mu}
+  - {from: pipeline.flat.column_fit, to: pipeline.analysis.resolve_values_only, kind: call}
+  - {from: pipeline.analysis.resolve_values_only, to: pipeline.flat.column_fit, kind: feedback, var: demand.Pu}
+  - {from: pipeline.flat.column_fit, to: slab.flat_plate.punching, kind: call}
+  - {from: pipeline.flat.column_fit, to: pipeline.members.harmonize, kind: control}
+  - {from: pipeline.members.harmonize, to: pipeline.flat.column_fit, kind: data, var: params.uniform_column_sizing}
+  - {from: pipeline.flat.column_fit, to: pipeline.flat.member_loop, kind: feedback, var: column.c1}
+  - {from: pipeline.flat.member_loop, to: slab.flat_plate, kind: call}
+  - {from: pipeline.flat.member_loop, to: pipeline.stage.slabs.envelope, kind: call}
+  - {from: pipeline.stage.slabs.envelope, to: pipeline.flat.raise_floors, kind: data, var: column.c1}
+  - {from: pipeline.flat.raise_floors, to: pipeline.flat.column_fit, kind: data, var: column.floor}
+  - {from: pipeline.flat.member_loop, to: pipeline.analysis.sync_asap, kind: call}
+
+  # beam members
+  - {from: pipeline.stage.members, to: pipeline.beam.loop, kind: call}
+  - {from: pipeline.stage.members, to: pipeline.beam.story_shell, kind: call}
+  - {from: pipeline.stage.members, to: pipeline.beam.columns_only, kind: call}
+  - {from: pipeline.beam.story_shell, to: pipeline.beam.loop, kind: call}
+  - {from: pipeline.beam.story_shell, to: pipeline.beam.shell_reconcile, kind: call}
+  - {from: pipeline.beam.loop, to: member.beam.size_beams, kind: call}
+  - {from: pipeline.beam.loop, to: member.column.size_columns, kind: call}
+  - {from: pipeline.beam.loop, to: pipeline.analysis.reanalyze_stiffness, kind: call}
+  - {from: pipeline.analysis.reanalyze_stiffness, to: pipeline.beam.loop, kind: feedback, var: demand.Mu}
+  - {from: pipeline.beam.loop, to: pipeline.beam.check_settle, kind: call}
+  - {from: pipeline.beam.check_settle, to: pipeline.analysis.reanalyze_stiffness, kind: call}
+  - {from: pipeline.beam.loop, to: pipeline.members.harmonize, kind: call}
+  - {from: pipeline.beam.loop, to: pipeline.sync.after_members, kind: control}
+  - {from: pipeline.sync.after_members, to: pipeline.analysis.sync_asap, kind: call}
+
+  # walls, recheck, foundations
+  - {from: pipeline.stage.members, to: pipeline.stage.walls_recheck, kind: control}
+  - {from: pipeline.stage.walls_recheck, to: wall.ordinary.stage, kind: call}
+  - {from: wall.ordinary.stage, to: pipeline.analysis.geometry_rebuild, kind: call}
+  - {from: pipeline.analysis.geometry_rebuild, to: pipeline.analysis.sync_asap, kind: call}
+  - {from: lateral.row_f.frame_floors, to: pipeline.stage.walls_recheck, kind: data, var: frame_section_floors}
+  - {from: pipeline.stage.walls_recheck, to: pipeline.walls.overstress_floor, kind: call}
+  - {from: pipeline.walls.overstress_floor, to: member.column.size_columns, kind: data, var: frame_section_floors}
+  - {from: pipeline.stage.walls_recheck, to: pipeline.stage.members, kind: feedback, var: wall.t}
+  - {from: pipeline.stage.walls_recheck, to: pipeline.stage.foundations, kind: data, var: demand.reactions}
+  - {from: pipeline.stage.members, to: pipeline.stage.foundations, kind: data, var: demand.reactions}
+  - {from: pipeline.stage.foundations, to: fdn.size_foundations, kind: call}
+  - {from: pipeline.split.supports, to: pipeline.stage.foundations, kind: data, var: supports}
+
+  # capture
+  - {from: pipeline.stage.foundations, to: pipeline.capture, kind: control}
+  - {from: pipeline.capture, to: pipeline.capture.restore, kind: control}
+  - {from: pipeline.scheduler.run_target, to: pipeline.scheduler.adopt_larger_column, kind: call}

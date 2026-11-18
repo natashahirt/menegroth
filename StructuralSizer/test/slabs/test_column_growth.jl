@@ -611,12 +611,97 @@ end
 # 13. FEA Column Force Extraction — Mx/My Preserved
 # =============================================================================
 @testset "FEA Column Forces — Directional Moments" begin
-    # The _extract_fea_column_forces function now returns Mx and My.
-    # We can't easily test it without a solved FEA model, but we can
-    # verify the return type includes the new fields.
-    # (Integration with the full FEA pipeline is tested in test_fea_flat_plate.jl)
+    # The extractor also returns the below-stub moment (`Mub_below`,
+    # `Mx_below`, `My_below`) beside the summed joint moment. A solved
+    # model is required to call it. The design-moment helper is the
+    # contract the slab loop uses.
 
-    # Verify that the function signature expects and returns 5 fields
     @test hasmethod(StructuralSizer._extract_fea_column_forces,
                     Tuple{Any, NTuple{2,Float64}, Int})
+end
+
+@testset "FEA below-stub moment is not the joint sum" begin
+    # Vertical stub. Local My maps to global Mx, so a span axis of (0, 1)
+    # reads that component as the design moment.
+    function fake_stub(P, My_l; node_end::Bool)
+        forces = zeros(12)
+        if node_end
+            forces[7] = P
+            forces[11] = My_l
+        else
+            forces[1] = P
+            forces[5] = My_l
+        end
+        LCS = ((0.0, 0.0, 1.0), (1.0, 0.0, 0.0), (0.0, 1.0, 0.0))
+        return (element = (LCS = LCS, forces = forces),)
+    end
+    stubs = (below = fake_stub(1000.0, 2000.0; node_end = true),
+             above = fake_stub(400.0, 1000.0; node_end = false))
+    forces = StructuralSizer._extract_fea_column_forces([stubs], (0.0, 1.0), 1)
+    below = uconvert(kip * u"ft", 2000.0u"N*m")
+    joint = uconvert(kip * u"ft", 3000.0u"N*m")
+    above = uconvert(kip * u"ft", 1000.0u"N*m")
+    @test forces.Mub_below[1] ≈ below
+    @test forces.Mub_above[1] ≈ above
+    @test forces.Mub[1] ≈ joint
+    @test forces.Mx_below[1] ≈ below
+    @test forces.Mx_above[1] ≈ above
+    @test forces.Mx[1] ≈ joint
+    # No column above: the joint moment is the below-stub moment.
+    roof = (below = fake_stub(1000.0, 2000.0; node_end = true), above = nothing)
+    roof_forces = StructuralSizer._extract_fea_column_forces([roof], (0.0, 1.0), 1)
+    @test roof_forces.Mub[1] ≈ below
+    @test roof_forces.Mub_below[1] ≈ below
+    @test iszero(roof_forces.Mub_above[1])
+end
+
+@testset "Column design moment" begin
+    joint = [10.0, 20.0] .* (1.0kip * u"ft")
+    below = [7.0, 3.0] .* (1.0kip * u"ft")
+    above = joint .- below
+    shared = (unbalanced_moments = joint,)
+    shell = (unbalanced_moments = joint, stub_moments_below = below,
+             stub_moments_above = above)
+    @test StructuralSizer.stub_moments(shared) === nothing
+    @test StructuralSizer.stub_moments(shell).above == above
+
+    # DDM / EFM: stiffness share of the joint moment.
+    @test StructuralSizer.column_design_moment(shared, 1, 0.4) ≈ 4.0
+    @test StructuralSizer.column_design_moment(shared, 2, 1.0) ≈ 20.0
+    # FEA: the stub below the slab, not the share of the summed joint.
+    @test StructuralSizer.column_design_moment(shell, 1, 0.4) ≈ 7.0
+    @test StructuralSizer.column_design_moment(shell, 2, 0.5) ≈ 3.0
+    # An unset field (the struct default) falls through to the share.
+    unset = (unbalanced_moments = joint, stub_moments_below = nothing,
+             stub_moments_above = nothing)
+    @test StructuralSizer.column_design_moment(unset, 1, 0.25) ≈ 2.5
+end
+
+@testset "Unsized columns start from the axial load" begin
+    mk() = [TestColumn(0.0u"inch", 0.0u"inch", :interior),
+            TestColumn(18.0u"inch", 18.0u"inch", :interior)]
+    copts = ConcreteColumnOptions()
+    Pu = [400.0, 400.0]  # kip
+    ln = 30.0u"ft"
+    fc = copts.material.fc′
+    fy = copts.rebar_material.Fy
+
+    cols = mk()
+    StructuralSizer._initialize_unsized_columns!(cols, Pu, ln,
+        FlatPlateOptions(column_span_minimum = false), copts)
+    Ag = StructuralSizer.tied_column_area_for_axial(Pu[1] * kip, fc; fy = fy)
+    # ACI 318-11 Eq. (10-2) at ρg = 0.01, rounded up to the inch.
+    @test 0.80 * 0.65 * (0.85 * fc * 0.99 * Ag + fy * 0.01 * Ag) ≈ Pu[1] * kip
+    @test cols[1].c1 == cols[1].c2 == max(ceil(ustrip(u"inch", sqrt(Ag))), 14.0) * u"inch"
+    @test cols[2].c1 == 18.0u"inch"   # already sized: untouched
+
+    cols = mk()
+    StructuralSizer._initialize_unsized_columns!(cols, Pu, ln,
+        FlatPlateOptions(column_span_minimum = true), copts)
+    @test cols[1].c1 == StructuralSizer.estimate_column_size_from_span(ln)
+
+    cols = mk()
+    StructuralSizer._initialize_unsized_columns!(cols, [5.0, 5.0], ln,
+        FlatPlateOptions(column_span_minimum = false), copts)
+    @test cols[1].c1 == 14.0u"inch"   # light load: 14" floor
 end

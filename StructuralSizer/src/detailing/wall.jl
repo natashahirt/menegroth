@@ -11,7 +11,8 @@
     detail_wall(; length, height, thickness, ρl, ρt, openings, curtains,
                 cover, bar_sizes, spacing_step, Vu, shear_reinforcement_required,
                 ends, below, above, slab_above, slab_cover, foundation_depth,
-                fc, fy, λ, coating, stock, special, hw) -> MemberDetail
+                fc, fy, λ, coating, stock, special, hw, boundary_zones,
+                critical_reach) -> MemberDetail
 
 Place the bars of one cast-in-place wall story.
 
@@ -21,9 +22,12 @@ are `(s0, z0, width, height)` from the start of the wall and the base.
 `below` is `:foundation` or `:wall`. `above` is `:roof` or `:wall`.
 `hw` is the height of the whole wall stack; it defaults to `height`.
 
-`special = true` applies §18.10.2 on top of Chapter 11. Boundary-element bars
-(§18.10.6.4) are not placed: that length needs the neutral-axis depth from a
-special-wall design, which this function does not have.
+`special = true` applies §18.10.2 on top of Chapter 11. `boundary_zones`
+are the §18.10.6.4 lengths, measured from each end of the wall. Each entry
+is `(zone, bar, spacing)`: the element length, the longitudinal bar size,
+and the longitudinal spacing. A bar size of 0 uses the web vertical bar.
+Hoops and crossties are placed over those lengths. With no zone, the
+boundary bars are not placed.
 """
 function detail_wall(; length::Length, height::Length, thickness::Length,
                      ρl::Real, ρt::Real,
@@ -44,7 +48,9 @@ function detail_wall(; length::Length, height::Length, thickness::Length,
                      λ::Real = 1.0, coating::Symbol = :uncoated,
                      stock::Length = 60.0u"ft",
                      special::Bool = false,
-                     hw::Union{Length, Nothing} = nothing)
+                     hw::Union{Length, Nothing} = nothing,
+                     boundary_zones::AbstractVector = NamedTuple[],
+                     critical_reach::Union{Length, Nothing} = nothing)
     foreach(e -> e in (:free, :joined) || throw(ArgumentError(
         "wall end must be :free or :joined, got :$e")), ends)
     below in (:foundation, :wall) || throw(ArgumentError(
@@ -109,10 +115,21 @@ function detail_wall(; length::Length, height::Length, thickness::Length,
     end
     below === :foundation && vert !== nothing && _place_dowels!(
         md, vert, ncurt, cover_m, foundation_depth, fc, fy, lam, coating, lap_v)
-    _wall_tie_warning!(md, ρl_use, fy, special)
-    special && push!(md.notes,
-        "§18.10.2.3's 12 ft extension is not placed: the uniform ratio has no flexural cutoff. " *
-        "§18.10.6.4 boundary bars are not placed: the neutral-axis depth is not on the design.")
+    placed_boundary = false
+    if special && vert !== nothing && !isempty(boundary_zones)
+        reach = something(critical_reach, length)
+        for zone in boundary_zones
+            placed_boundary |= _place_boundary_hoops!(
+                md, zone, vert, Lm, Hm, tm, cover, fy, reach)
+        end
+    end
+    _wall_tie_warning!(md, ρl_use, fy, special, placed_boundary)
+    if special
+        push!(md.notes,
+            "§18.10.2.3's 12 ft extension is not placed: the uniform ratio has no flexural cutoff.")
+        placed_boundary || push!(md.notes,
+            "§18.10.6.4 boundary bars are not placed: the neutral-axis depth is not on the design.")
+    end
 
     push!(md.outline, (0.0, Lm, 0.0, Hm))
     slab_m = ustrip(u"m", slab_above)
@@ -127,7 +144,34 @@ function detail_wall(; length::Length, height::Length, thickness::Length,
         push!(md.voids, (x0, x1, z0, z1))
     end
     _report_wall_areas!(md, ρl_use, ρt_use, length, height, thickness)
+    _locate_wall!(md, ncurt, Lm, Hm, tm, cover_m, vert === nothing ? 0.0 : ustrip(u"m", bar_diameter(vert.size)))
     return md
+end
+
+"""
+Centerlines in the wall frame: `x` along the wall, `y` through the thickness,
+`z` up. Each curtain is the layer already used for the plan dots.
+"""
+function _locate_wall!(md::MemberDetail, ncurt::Int, L, H, t, cover, db)
+    ys = ncurt == 1 ? [0.0] : [-(t / 2 - cover - db / 2), t / 2 - cover - db / 2]
+    for i in eachindex(md.groups)
+        g = md.groups[i]
+        wires = Vector{NTuple{3, Float64}}[]
+        if !isempty(g.x_positions)
+            for x in g.x_positions, y in ys
+                push!(wires, [(x + p[1], y, p[2]) for p in g.path])
+            end
+        elseif !isempty(g.z_positions)
+            for z in g.z_positions, y in ys
+                push!(wires, [(p[1], y, p[2] + z) for p in g.path])
+            end
+        else
+            continue
+        end
+        md.groups[i] = _with_centerlines(g, wires)
+    end
+    md.solid = (0.0, L, -t / 2, t / 2, 0.0, H)
+    return nothing
 end
 
 # ------------------------------------------------------------------------------
@@ -142,10 +186,9 @@ pp. 172 and 320).
 """
 function _wall_concrete_shear(fc, λ, hw, lw, t)
     αc = wall_alpha_c(ustrip(u"m", lw) > 0 ? ustrip(u"m", hw) / ustrip(u"m", lw) : Inf)
-    fc_psi = ustrip(u"psi", fc)
-    Acv = ustrip(u"inch", t) * ustrip(u"inch", lw)
-    root = λ * sqrt(max(fc_psi, 0.0)) * Acv
-    return (with_αc = (αc * root) * u"lbf", plain = root * u"lbf")
+    Acv = ustrip(u"inch", t) * ustrip(u"inch", lw) * u"inch^2"
+    plain = lambda_sqrt_fc_Acv(λ, fc, Acv)
+    return (with_αc = αc * plain, plain = plain)
 end
 
 function _wall_curtain_count(thickness, curtains, special, Vu, plain, hw_over_lw)
@@ -232,20 +275,144 @@ function _wall_lap(bar_size, fc, fy, λ, coating, cover)
                            coating = coating, favorable_cover = fav)))
 end
 
-function _wall_hook_free_ends(special, Vu, plain)
-    # §18.10.6.5(a) (p. 332): hooks, except where Vu < λ√f′c·Acv.
-    special && Vu !== nothing && ustrip(u"N", Vu) < ustrip(u"N", plain) && return false
+"""
+Closed hoops and crossties over one boundary element, at both ends of the wall.
+
+`zone.zone` is the §18.10.6.4 length from the wall end. `zone.bar` is the
+longitudinal bar; 0 uses the web vertical. `zone.spacing` is that bar's
+spacing. A hoop leg is at most twice the wall thickness (§18.10.6.4(f)).
+A longer element is covered by overlapping hoops. A crosstie crosses the
+thickness at every longitudinal station that is not a hoop corner.
+
+The vertical spacing is §18.10.6.4(e). Inside `reach`, which the caller
+sets to the greater of ℓw and Mu/(4Vu), the Table 18.10.6.5(b) limit is
+the tighter one.
+"""
+function _place_boundary_hoops!(md, zone, vert, Lm, Hm, tm, cover, fy, reach)
+    zone_m = ustrip(u"m", zone.zone)
+    zone_m > 0 || return false
+    cover_m = ustrip(u"m", cover)
+    bar = zone.bar == 0 ? vert.size : Int(zone.bar)
+    spacing_m = ustrip(u"m", zone.spacing)
+    spacing_m > 0 || (spacing_m = vert.spacing)
+    tie = boundary_tie_bar_size(bar).tie
+    arranged = boundary_hoop_arrangement(tm * u"m", zone_m * u"m")
+    if spacing_m * u"m" > arranged.hx + 1e-6u"m"
+        push!(md.warnings,
+            "boundary bars at $(round(spacing_m / 0.0254; digits = 1)) in. " *
+            "are farther apart than hx of §18.10.6.4(f)")
+    end
+    hx = min(spacing_m * u"m", arranged.hx)
+    grade = _boundary_grade(fy)
+    least = min(tm, zone_m) * u"m"
+    db = bar_diameter(bar)
+    tight = boundary_element_vertical_spacing(least, db, hx;
+                                            grade = grade, within_critical_reach = true)
+    loose = boundary_element_vertical_spacing(least, db, hx;
+                                            grade = grade, within_critical_reach = false)
+    reach_m = min(max(ustrip(u"m", reach), cover_m), Hm - cover_m)
+    z_tight = _spaced_positions(cover_m, reach_m, ustrip(u"m", tight.required))
+    z_loose = reach_m >= Hm - cover_m - 1e-9 ? Float64[] :
+              _spaced_positions(reach_m, Hm - cover_m, ustrip(u"m", loose.required))
+    zs = unique(vcat(z_tight, z_loose))
+    isempty(zs) && return false
+    dt = ustrip(u"m", bar_diameter(tie))
+    along = min(zone_m - 2 * cover_m - dt, ustrip(u"m", arranged.hoop_leg))
+    through = tm - 2 * cover_m - dt
+    (along > dt && through > dt) || return false
+    overlap = ustrip(u"m", arranged.overlap)
+    starts = _boundary_hoop_starts(zone_m - 2 * cover_m - dt, along, overlap)
+    len = _closed_loop_length(along, through, tie; hook_angle = 135) * u"m"
+    wires = Vector{NTuple{3, Float64}}[]
+    for origin in (cover_m + dt / 2, Lm - zone_m + cover_m + dt / 2)
+        for x0 in origin .+ starts
+            for z in zs
+                y0 = -through / 2
+                y1 = through / 2
+                x1 = x0 + along
+                push!(wires, [(x0, y0, z), (x1, y0, z), (x1, y1, z),
+                              (x0, y1, z), (x0, y0, z)])
+            end
+        end
+    end
+    s_in = round(ustrip(u"inch", tight.required); digits = 2)
+    push!(md.groups, BarGroup(; mark = "WBH", role = :tie, direction = :transverse,
+        bar_size = tie, count = length(wires), length = len, shape = :closed_tie,
+        centerlines = wires,
+        note = "boundary hoops, $(s_in) in. within the critical reach (§18.10.6.4(e), §18.10.6.4(f))"))
+    _place_boundary_crossties!(md, zone_m, spacing_m, cover_m, Lm, tie, through, zs, starts, along)
     return true
 end
 
-function _wall_tie_warning!(md, ρl, fy, special)
+"""Hoop starts along a zone, each leg at most `leg` long, overlapping by `overlap`."""
+function _boundary_hoop_starts(available, leg, overlap)
+    available <= leg + 1e-9 && return [0.0]
+    step = max(leg - overlap, leg / 2)
+    starts = Float64[]
+    x = 0.0
+    while x + leg < available - 1e-6
+        push!(starts, x)
+        x += step
+    end
+    push!(starts, max(available - leg, 0.0))
+    return starts
+end
+
+"""A crosstie at each longitudinal station that is not a hoop corner."""
+function _place_boundary_crossties!(md, zone_m, spacing_m, cover_m, Lm, tie, through, zs, starts, along)
+    first = cover_m + spacing_m / 2
+    last = zone_m - cover_m - spacing_m / 2
+    last + 1e-9 < first && return nothing
+    stations = _spaced_positions(first, last, spacing_m)
+    isempty(stations) && return nothing
+    corners = Float64[]
+    for x0 in starts
+        push!(corners, x0, x0 + along)
+    end
+    interior = [x for x in stations if all(c -> abs(x - c) > 0.5 * spacing_m, corners)]
+    isempty(interior) && return nothing
+    hook = ustrip(u"m", hook_centerline_length(tie; angle = 135, role = :stirrup))
+    len = (through + 2 * hook) * u"m"
+    wires = Vector{NTuple{3, Float64}}[]
+    y0 = -through / 2
+    y1 = through / 2
+    for origin in (0.0, Lm - zone_m)
+        for x in origin .+ interior
+            for z in zs
+                push!(wires, [(x, y0, z), (x, y1, z)])
+            end
+        end
+    end
+    push!(md.groups, BarGroup(; mark = "WBC", role = :crosstie, direction = :transverse,
+        bar_size = tie, count = length(wires), length = len, shape = :crosstie,
+        centerlines = wires,
+        note = "a crosstie at every boundary bar that is not a hoop corner (§18.10.6.4(f))"))
+    return nothing
+end
+
+function _boundary_grade(fy)
+    ksi = ustrip(u"ksi", fy)
+    abs(ksi - 60) <= 0.5 && return 60
+    abs(ksi - 80) <= 0.5 && return 80
+    abs(ksi - 100) <= 0.5 && return 100
+    throw(ArgumentError(
+        "boundary hoops: fy must be Grade 60, 80, or 100 (got $fy)"))
+end
+
+function _wall_hook_free_ends(special, Vu, plain)
+    # §18.10.6.5(a) applies on a special wall. An ordinary wall keeps the hook.
+    (special && Vu !== nothing) || return true
+    return horizontal_edge_anchorage(Vu, plain).hook_required
+end
+
+function _wall_tie_warning!(md, ρl, fy, special, placed_boundary = false)
     # §11.7.4.1 (p. 174): ties when compression steel has Ast > 0.001 Ag.
     # The design does not say the vertical bars are required for compression,
     # so this is reported and not placed.
     ρl > 0.001 && push!(md.notes,
         "§11.7.4.1 ties are not placed: the design does not mark the vertical bars as compression steel")
     # §18.10.6.5(b): boundary ties when the boundary ratio exceeds 400/fy.
-    if special && ρl > 400 / ustrip(u"psi", fy)
+    if special && !placed_boundary && boundary_longitudinal_ratio(ρl, fy).exceeds
         push!(md.warnings,
             "boundary ratio exceeds 400/fy (§18.10.6.5(b)); ties need the §18.10.6.4 length, which is not on the design")
     end
@@ -421,6 +588,34 @@ function _horizontal_path(x0, x1, ext, hook_left, hook_right, up)
     push!(path, (x0, 0.0), (x1, 0.0))
     hook_right && push!(path, (x1, signz * ext))
     return path
+end
+
+"""
+    wall_horizontal_end_gap(detail, length) -> length or nothing
+
+The larger gap between a concrete end and the horizontal web bars.
+
+Each end's gap is the smallest distance from that end to a `:horizontal`
+bar. A bar that crosses the end has gap zero. No horizontal bar returns
+`nothing`. Whether that gap is within 6 in. is §18.10.6.4(k).
+"""
+function wall_horizontal_end_gap(md::MemberDetail, length::Length)
+    L = ustrip(u"m", length)
+    L > 0 || throw(ArgumentError(
+        "horizontal end gap: wall length must be positive (got $length)"))
+    left = Inf
+    right = Inf
+    found = false
+    for g in md.groups
+        g.role === :horizontal || continue
+        isempty(g.path) && continue
+        found = true
+        x0, x1 = extrema(p[1] for p in g.path)
+        left = min(left, max(0.0, x0))
+        right = min(right, max(0.0, L - x1))
+    end
+    found || return nothing
+    return max(left, right) * u"m"
 end
 
 function _place_trim!(md, holes, ncurt, Lm, Hm, cover, fc, fy, λ, coating)

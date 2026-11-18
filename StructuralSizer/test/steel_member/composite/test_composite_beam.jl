@@ -781,6 +781,30 @@ end
         @test 0 < layout.n_half < n_full
     end
 
+    @testset "Uniform stations are the centers of equal spaces" begin
+        L_span = 30.0u"ft"
+        region = (s_left = 0.0, s_right = 1.0, s_peak = 0.5, M_peak = 0.0)
+        placed = place_shear_anchors(fix.section, fix.anchor, fix.slab,
+                                     [region], [(ok = true, n_rows = 3)], L_span)
+        ft = ustrip(u"m", 1.0u"ft")
+        @test placed.s ≈ [2.5, 7.5, 12.5, 17.5, 22.5, 27.5] .* ft atol = 1e-9
+        @test all(isapprox(y, 0.0; atol = 1e-9) for y in placed.y)
+        @test placed.mass ≈ 6 * stud_mass(fix.anchor)
+        @test placed.d_sa ≈ fix.anchor.d_sa
+        @test placed.l_sa ≈ fix.anchor.l_sa
+        @test placed.z_flange ≈ ustrip(u"m", fix.section.d) / 2
+        half = ustrip(u"m", 15.0u"ft")
+        @test length(studs_on_interval(placed, 0.0, half)) == 3
+        @test length(studs_on_interval(placed, half, 2 * half; include_end = true)) == 3
+        two = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0ksi, 50.0ksi,
+                               7850.0u"kg/m^3"; n_per_row = 2)
+        pair = place_shear_anchors(fix.section, two, fix.slab,
+                                   [region], [(ok = true, n_rows = 1)], L_span)
+        @test length(pair.s) == 4
+        @test pair.y[1] ≈ -pair.y[2]
+        @test pair.y[1] < 0
+    end
+
     @testset "Steel alone places no studs" begin
         w = composite_stud_contribution(ctx, fix.section, fix.material, MinWeight();
                                         Mu=0.5 * ϕ_steel, Lb=L)
@@ -945,6 +969,22 @@ end
         propped = construction_with_shape(stage, w_ref * L^2 / 8, (5 / 8) * w_ref * L, w_ref)
         pre_p = construction_span_demand(fix.section, fix.material, propped, L)
         @test isapprox(uconvert(u"N", pre_p.Vu), uconvert(u"N", simple.Vu) * 1.25; rtol=1e-10)
+
+        # A constant width passed as a pressure shape is the same demand.
+        # The area load scales by pressure; the steel weight scales the unit line load.
+        b = 2.0u"m"
+        p_ref = 5000.0u"Pa"
+        w1 = 1.0u"N/m"
+        split = construction_with_split(stage, p_ref * b * L^2 / 8, p_ref * b * L / 2, p_ref,
+                                        w1 * L^2 / 8, w1 * L / 2)
+        pre_s = construction_span_demand(fix.section, fix.material, split, L)
+        @test pre_s.moment_model == :analysis_tributary
+        @test isapprox(uconvert(u"N*m", pre_s.Mu), uconvert(u"N*m", simple.Mu); rtol=1e-10)
+        @test isapprox(uconvert(u"N", pre_s.Vu), uconvert(u"N", simple.Vu); rtol=1e-10)
+        fixed_s = construction_with_split(stage, p_ref * b * L^2 / 12, p_ref * b * L / 2, p_ref,
+                                          w1 * L^2 / 12, w1 * L / 2)
+        pre_fs = construction_span_demand(fix.section, fix.material, fixed_s, L)
+        @test isapprox(uconvert(u"N*m", pre_fs.Mu), uconvert(u"N*m", simple.Mu) * (2 / 3); rtol=1e-10)
     end
 
     @testset "Commentary Eq. C-F1-5" begin
@@ -1547,6 +1587,28 @@ end
         @test unknown.ok == false && unknown.reason === :rib_pitch_unknown
         # Parallel deck is not tied to crossings.
         @test lay(0.0).ok
+    end
+
+    @testset "Deck studs are drawn on rib crossings" begin
+        L_span = 20.0u"ft"
+        region = (s_left = 0.0, s_right = 1.0, s_peak = 0.5, M_peak = 0.0)
+        # Perpendicular, 12 in pitch: crossings at 6, 18, … in. Four rows per
+        # 10 ft side take crossings 1, 4, 7 and 10 of that side's ten.
+        placed = place_shear_anchors(fix.section, stud(1), deck(π / 2),
+                                     [region], [(ok = true, n_rows = 4)], L_span)
+        inches = [ustrip(u"inch", s * u"m") for s in placed.s]
+        @test inches ≈ [6, 42, 78, 114, 126, 162, 198, 234] atol = 1e-4
+        @test all(isapprox(y, 0.0; atol = 1e-9) for y in placed.y)
+        # A skewed row shares the rib, so the two studs are not at one station.
+        skew = place_shear_anchors(fix.section, stud(2), deck(deg2rad(30)),
+                                   [region], [(ok = true, n_rows = 1)], L_span)
+        @test length(skew.s) == 4
+        @test skew.s[1] != skew.s[2]
+        @test skew.y[1] ≈ -skew.y[2]
+        none = place_shear_anchors(fix.section, stud(1), deck(π / 2),
+                                   [region], [(ok = false, n_rows = 0)], L_span)
+        @test isempty(none.s)
+        @test none.mass == 0.0u"kg"
     end
 
     @testset "Checker reports the skew and falls back to steel alone" begin

@@ -125,14 +125,53 @@ function _boundary_end(wall, x, y)
     return nothing
 end
 
+"One end of a flanged pier: flange thickness, effective width, and return steel."
+struct BoundaryFlangeEnd
+    tf::typeof(1.0u"m")
+    bf::typeof(1.0u"m")
+    "Vertical return steel inside the effective flange [m²]."
+    As_m2::Float64
+end
+
 """
-One flange at one end, or `nothing` for a rectangular pier.
+Flanges on a pier, one at each end or only one.
+
+`nothing` at an end means that end is the web face. `tw` is the web thickness.
+"""
+struct BoundaryFlange
+    tw::typeof(1.0u"m")
+    positive::Union{Nothing, BoundaryFlangeEnd}
+    negative::Union{Nothing, BoundaryFlangeEnd}
+end
+
+"""
+The flange at `face`, or `nothing` when that end is the web face.
+
+`face` is `:positive` or `:negative`.
+"""
+function _compression_flange(flange, face::Symbol)
+    flange === nothing && return nothing
+    face === :positive && return flange.positive
+    face === :negative && return flange.negative
+    throw(ArgumentError(
+        "special boundary: the compression face is :positive or :negative (got :$face)"))
+end
+
+"""
+One flange at either end, or both, or `nothing` for a rectangular pier.
 
 `bf` is the web thickness plus the overhang past each web face. Each
 overhang is the lesser of the concrete that is there and the §18.10.5.2
 limit. No adjacent web is assumed, so the limit is 25 percent of the height
-above the section. Two flanges, one at each end, throw: the section model
-is one flange.
+above the section. `As_m2` is the return's vertical steel inside that
+flange: ρℓ times the return thickness times the centerline length from the
+joint out to the effective-flange end, and not past the return's own end.
+Two returns on one side keep the longer reach, so the shared centerline is
+not summed. The web's own bars stay in the web steel. A flange at each end
+is one section: each end keeps its own thickness, width, and bars.
+
+# Citation
+ACI 318-19 §18.10.5.2 (corpus: aci-318-19, page 325).
 """
 function _boundary_flange(wall, walls, wall_index, assembly, height_above)
     assembly === nothing && return nothing
@@ -153,14 +192,77 @@ function _boundary_flange(wall, walls, wall_index, assembly, height_above)
         push!(ends, (at, perps))
     end
     isempty(ends) && return nothing
-    length(ends) == 1 || throw(ArgumentError(
-        "special boundary: wall $wall_index has a flange at both ends. " *
-        "The gross section used here has one flange."))
-    at, perps = only(ends)
-    _, _, nx, ny = _pier_plan_axes(wall)
+    length(ends) <= 2 || throw(ArgumentError(
+        "special boundary: wall $wall_index has flanges at $(length(ends)) places."))
+    length(unique(first.(ends))) == length(ends) || throw(ArgumentError(
+        "special boundary: wall $wall_index has two flanges at one end."))
+    built = Dict{Symbol, BoundaryFlangeEnd}()
     tw = wall.thickness
+    for (at, perps) in ends
+        end_ = _one_flange_end(wall, walls, wall_index, at, perps, tw, height_above)
+        end_ === nothing && continue
+        built[at] = end_
+    end
+    isempty(built) && return nothing
+    return BoundaryFlange(tw, get(built, :positive, nothing), get(built, :negative, nothing))
+end
+
+"""
+Return bars of `flange` that fall inside the segment `[s0, s1]`.
+
+`s` is metres from the wall's negative end. The segment stays a rectangle
+of thickness `thickness`: a bar zone shorter than the segment is a flange
+end of that width, and bars that fill the segment are `extra_ast`, smeared
+with the web steel. The gross pier's flange width is not attached.
+`nothing` when no return steel is inside the segment.
+"""
+function _segment_return_steel(flange, s0::Real, s1::Real, lw::Real, thickness)
+    flange === nothing && return nothing
+    lw_seg = s1 - s0
+    lw_seg > 0 || return nothing
+    function piece(end_, zone0)
+        end_ === nothing && return nothing
+        tf = ustrip(u"m", end_.tf)
+        (tf > 0 && end_.As_m2 > 0) || return nothing
+        lo = max(Float64(s0), zone0)
+        hi = min(Float64(s1), zone0 + tf)
+        overlap = hi - lo
+        overlap > 1e-9 || return nothing
+        return (overlap = overlap, As = end_.As_m2 * overlap / tf)
+    end
+    neg = piece(flange.negative, 0.0)
+    pos_tf = flange.positive === nothing ? 0.0 : ustrip(u"m", flange.positive.tf)
+    pos = piece(flange.positive, lw - pos_tf)
+    extra = 0.0
+    pos_end = nothing
+    neg_end = nothing
+    if neg !== nothing
+        if neg.overlap >= lw_seg - 1e-6
+            extra += neg.As
+        else
+            neg_end = BoundaryFlangeEnd(neg.overlap * u"m", thickness, neg.As)
+        end
+    end
+    if pos !== nothing
+        if pos.overlap >= lw_seg - 1e-6
+            extra += pos.As
+        else
+            pos_end = BoundaryFlangeEnd(pos.overlap * u"m", thickness, pos.As)
+        end
+    end
+    pos_end === nothing && neg_end === nothing && extra <= 0 && return nothing
+    built = pos_end === nothing && neg_end === nothing ? nothing :
+        BoundaryFlange(thickness, pos_end, neg_end)
+    return (flange = built, extra_ast = extra)
+end
+
+"Effective flange at one end. `nothing` when no return has a plan reach."
+function _one_flange_end(wall, walls, wall_index, at, perps, tw, height_above)
+    _, _, nx, ny = _pier_plan_axes(wall)
     code = effective_flange_overhang(height_above).overhang
     side = Dict{Int, typeof(1.0u"m")}(-1 => zero(tw), 1 => zero(tw))
+    reach_m = Dict(-1 => 0.0, 1 => 0.0)
+    side_As = Dict(-1 => 0.0, 1 => 0.0)
     tf = nothing
     for j in perps
         other = walls[j]
@@ -180,22 +282,59 @@ function _boundary_flange(wall, walls, wall_index, assembly, height_above)
         reach = hypot(far[1] - jx, far[2] - jy)
         overhang = max(zero(tw), reach * u"m" - tw / 2)
         side[key] = max(side[key], overhang)
+        # The longer return defines this side. Its bars replace a shorter
+        # return on the same centerline; the two are not added.
+        if reach >= reach_m[key]
+            reach_m[key] = reach
+            counted = min(reach * u"m", tw / 2 + code)
+            side_As[key] = other.ρl * ustrip(u"m", other.thickness) * ustrip(u"m", counted)
+        end
     end
     tf === nothing && return nothing
     left = min(side[-1], code)
     right = min(side[1], code)
-    return (at = at, tw = tw, tf = tf, bf = tw + left + right)
+    return BoundaryFlangeEnd(tf, tw + left + right, side_As[-1] + side_As[1])
 end
 
 "Fiber stress. Positive `M` compresses the positive end, matching the pier cut."
 function _boundary_fiber_stress(N, M, lw, tw, flange)
     P = N * u"N"
     moment = M * u"N*m"
-    if flange === nothing
-        return wall_gross_fiber_stress(P, moment, lw, tw)
+    flange === nothing && return wall_gross_fiber_stress(P, moment, lw, tw)
+    pos, neg = flange.positive, flange.negative
+    if pos !== nothing && neg !== nothing
+        return wall_two_flange_fiber_stress(
+            P, moment, lw, flange.tw, pos.tf, pos.bf, neg.tf, neg.bf)
     end
-    return wall_flanged_fiber_stress(P, moment, lw, flange.tw, flange.tf, flange.bf;
-                                    flange_at = flange.at)
+    end_ = pos !== nothing ? pos : neg
+    at = pos !== nothing ? :positive : :negative
+    return wall_flanged_fiber_stress(P, moment, lw, flange.tw, end_.tf, end_.bf;
+                                    flange_at = at)
+end
+
+"""
+Nominal moment at factored axial `Nu`. A positive `moment` compresses the
+positive end and selects that flange as the compression face.
+"""
+function _flange_capacity_si(fc, fy, Es, lw, t, Ast, Nu, flange, moment;
+                            As_end=0.0, inset=0.0)
+    pos, neg = flange.positive, flange.negative
+    if pos !== nothing && neg !== nothing
+        return wall_two_flange_c_at_axial_si(
+            fc, fy, Es, lw, t,
+            ustrip(u"m", pos.tf), ustrip(u"m", pos.bf),
+            ustrip(u"m", neg.tf), ustrip(u"m", neg.bf),
+            Ast, Nu;
+            compress_positive = moment >= 0,
+            As_pos = pos.As_m2, As_neg = neg.As_m2,
+            As_end = As_end, inset = inset)
+    end
+    end_ = pos !== nothing ? pos : neg
+    at = pos !== nothing ? :positive : :negative
+    return wall_flanged_c_at_axial_si(
+        fc, fy, Es, lw, t, ustrip(u"m", end_.tf), ustrip(u"m", end_.bf), Ast, Nu;
+        flange_in_compression = flange_end_compressed(at, moment),
+        As_flange = end_.As_m2, As_end = As_end, inset = inset)
 end
 
 """
@@ -210,16 +349,16 @@ function _boundary_neutral_axis(material, lw, tw, ρl, Nu, flange, compression_e
     lw_m = ustrip(u"m", lw)
     tw_m = ustrip(u"m", tw)
     Ast = ρl * lw_m * tw_m
-    if end_area !== nothing
-        flange === nothing || throw(ArgumentError(
-            "special boundary: end bars are not placed in a flanged section."))
+    moment = compression_end === :positive ? 1.0 : -1.0
+    if flange !== nothing
+        area = end_area === nothing ? 0.0 : end_area
+        inset = end_area === nothing ? 0.0 : end_inset
+        found = _flange_capacity_si(fc, fy, Es, lw_m, tw_m, Ast, Nu, flange, moment;
+                                   As_end = area, inset = inset)
+    elseif end_area !== nothing
         found = wall_end_bar_capacity_si(fc, fy, Es, lw_m, tw_m, Ast, end_area, end_inset, Nu)
-    elseif flange === nothing
-        found = wall_moment_capacity_at_axial_si(fc, fy, Es, lw_m, tw_m, Ast, Nu)
     else
-        found = wall_flanged_c_at_axial_si(
-            fc, fy, Es, lw_m, tw_m, ustrip(u"m", flange.tf), ustrip(u"m", flange.bf),
-            Ast, Nu; flange_in_compression = compression_end === flange.at)
+        found = wall_moment_capacity_at_axial_si(fc, fy, Es, lw_m, tw_m, Ast, Nu)
     end
     found.converged || return nothing
     return found.c
@@ -447,14 +586,15 @@ function special_boundary_decision(wall, walls, wall_index, assembly, actions, m
     elseif classified.triggered && c_m !== nothing
         # §18.10.6.4(b) measures the compression zone that is in compression.
         # A flange there is bf. The web is the zone otherwise.
-        web_is_zone = flange === nothing || governing !== flange.at
-        b = web_is_zone ? wall.thickness : flange.bf
+        compressed = _compression_flange(flange, governing)
+        web_is_zone = compressed === nothing
+        b = web_is_zone ? wall.thickness : compressed.bf
         result = special_boundary_composer(;
             lw = lw, hwcs = hwcs, hw = hw,
             continuous = continuous, single_critical_section = false,
             σ = σ_check, fc = fc, b = b, hu = hu, c = c_m * u"m",
-            in_compression = flange !== nothing && governing === flange.at,
-            effective_flange_width = flange === nothing ? nothing : flange.bf,
+            in_compression = compressed !== nothing,
+            effective_flange_width = compressed === nothing ? nothing : compressed.bf,
             height_above_section = flange === nothing ? nothing : hwcs)
         result.route === :stress || throw(ArgumentError(
             "special boundary: wall $wall_index took the $(result.route) route. " *
@@ -536,7 +676,7 @@ gates inside [`compression_zone_width`](@ref). A flange in compression does
 not resize the web, so its shortfall is zero.
 """
 function _boundary_zone_record(wall, flange, face, lw, hu, hw, c_m, continuous, critical)
-    web_is_zone = flange === nothing || face !== flange.at
+    web_is_zone = _compression_flange(flange, face) === nothing
     # §18.10.6.4(a) and (b)–(c) (corpus: aci-318-19, page 327).
     length = boundary_element_horizontal_length(c_m * u"m", lw)
     zone = compression_zone_width(hu, hw, lw, c_m * u"m";

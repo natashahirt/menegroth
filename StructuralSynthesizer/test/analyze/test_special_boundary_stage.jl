@@ -206,10 +206,29 @@ end
                     walls=[web, long],
                     assembly=StructuralSynthesizer.WallAssembly(0, [1, 2], true))
     @test capped.σ_Pa ≈ flanged.σ_Pa rtol=1e-8
+    # Height above the section is 4 m, so §18.10.5.2 stops the flange 1 m
+    # past the web face. The return's bars run from the joint out to that
+    # end: half the 0.30 m web plus the 1 m overhang.
+    flange.ρl = 0.01
+    counted = StructuralSynthesizer._boundary_flange(web, [web, flange], 1, assembly, 4.0u"m")
+    @test counted.positive.As_m2 ≈ 0.01 * 0.20 * (0.15 + 1.0)
+    @test counted.negative === nothing
+    short = _wall(; thick=0.20, x1=6.0, y1=0.0, x2=6.0, y2=0.50)
+    short.ρl = 0.01
+    stub = StructuralSynthesizer._boundary_flange(
+        web, [web, short], 1, StructuralSynthesizer.WallAssembly(0, [1, 2], true), 4.0u"m")
+    @test stub.positive.As_m2 ≈ 0.01 * 0.20 * 0.50
+    # A return at each end is one section. The same axial sits on more area.
     other = _wall(; thick=0.20, x1=0.0, y1=0.0, x2=0.0, y2=3.0)
-    @test_throws ArgumentError _decide(web, [_eq(_axial(0.10))];
+    other.ρl = 0.01
+    one = _decide(web, [_eq(_axial(0.10))];
+        walls=[web, flange],
+        assembly=StructuralSynthesizer.WallAssembly(0, [1, 2], true))
+    two = _decide(web, [_eq(_axial(0.10))];
         walls=[web, flange, other],
         assembly=StructuralSynthesizer.WallAssembly(0, [1, 2, 3], true))
+    @test two.flanged
+    @test two.σ_Pa < one.σ_Pa
 end
 
 function _boundary_office()

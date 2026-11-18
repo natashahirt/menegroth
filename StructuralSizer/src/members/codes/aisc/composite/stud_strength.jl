@@ -74,12 +74,15 @@ AISC 360-16 §I8.2a User Note table (corpus aisc-360-16, p. 163):
     `Rp = 0.75` when `slab.e_mid_ht ≥ 2 in. (50 mm)`, else `0.6`. An unknown
     `e_mid_ht` (`nothing`) takes 0.6 (AISC 360-22 §I8.2a, corpus:
     aisc-360-22, PDF pp. 181–182).
+- **Skewed deck** takes the perpendicular values, with `n_per_row` the studs
+  in one rib crossing. AISC gives no skewed-rib values; see
+  [`DeckSlabOnBeam`](@ref) for the basis.
 """
 function _Rg_Rp(anchor::HeadedStudAnchor, slab::DeckSlabOnBeam)
     if slab.deck_orientation === :parallel
         ratio = ustrip(slab.wr / slab.hr)
         return ratio >= 1.5 ? (1.0, 0.75) : (0.85, 0.75)
-    else  # :perpendicular
+    else  # :perpendicular or :skewed
         n = anchor.n_per_row
         e = slab.e_mid_ht
         Rp = (e !== nothing && e >= 2.0u"inch") ? 0.75 : 0.6
@@ -397,7 +400,12 @@ function _stud_center_limits(section::ISymmSection, anchor::HeadedStudAnchor,
 end
 
 """`n_per_row` studs fit on the flange at four diameters and, on a solid slab,
-keep 1 in. clear cover to each transverse slab edge."""
+keep 1 in. clear cover to each transverse slab edge.
+
+On perpendicular or skewed deck the studs of one row share a rib crossing, so
+they are placed along the rib centerline. The length of that line over the
+usable flange width is `(y_hi - y_lo) / sin θ`. At `θ = π/2` it is the flange
+width, as for a transverse row."""
 function _transverse_studs_fit(section::ISymmSection, anchor::HeadedStudAnchor,
                                slab::AbstractSlabOnBeam)
     y_lo, y_hi = _stud_center_limits(section, anchor, slab)
@@ -405,7 +413,79 @@ function _transverse_studs_fit(section::ISymmSection, anchor::HeadedStudAnchor,
     n = anchor.n_per_row
     n <= 1 && return true
     need = (n - 1) * 4 * ustrip(u"m", anchor.d_sa)
-    return (y_hi - y_lo) + 1e-9 >= need
+    avail = y_hi - y_lo
+    if slab isa DeckSlabOnBeam && slab.deck_orientation !== :parallel
+        avail /= sin(slab.rib_angle)
+    end
+    return avail + 1e-9 >= need
+end
+
+"""
+    rib_crossing_spacing(slab) -> Union{Length, Nothing, Symbol}
+
+Distance along the beam between successive low-flute crossings of the flange,
+`rib_pitch / sin θ`, for perpendicular or skewed deck. `nothing` for a solid
+slab or parallel deck, where studs are not tied to rib crossings. `:unknown`
+when the deck is not parallel and `rib_pitch` was not given.
+"""
+rib_crossing_spacing(::SolidSlabOnBeam) = nothing
+function rib_crossing_spacing(slab::DeckSlabOnBeam)
+    slab.deck_orientation === :parallel && return nothing
+    slab.rib_pitch === nothing && return :unknown
+    return uconvert(u"m", slab.rib_pitch / sin(slab.rib_angle))
+end
+
+"""
+    rib_row_bounds(L, p_cross, s_min, s_max) -> (n_min, n_max)
+
+Row bounds over a shear span `L` when rows can only sit at rib crossings
+`p_cross` apart. The span holds at least `N = ⌊L / p_cross⌋` crossings
+whatever their phase, so `n_max = N` (also capped by the §I8.2d(d) minimum
+`s_min`). Using every `k`-th crossing, with `k = ⌊s_max / p_cross⌋`, keeps the
+center-to-center spacing within the §I8.2d(e) maximum `s_max` (corpus:
+aisc-360-22, PDF p. 183), so `n_min = ⌈N / k⌉`. `k = 0`, crossings farther
+apart than `s_max`, returns `(1, 0)`: no layout exists.
+"""
+function rib_row_bounds(L, p_cross, s_min, s_max)
+    Ls = ustrip(u"m", uconvert(u"m", L))
+    p = ustrip(u"m", uconvert(u"m", p_cross))
+    k = floor(Int, ustrip(u"m", uconvert(u"m", s_max)) / p + 1e-9)
+    k == 0 && return (1, 0)
+    N = floor(Int, Ls / p + 1e-9)
+    smin = ustrip(u"m", uconvert(u"m", s_min))
+    smin > 0 && (N = min(N, floor(Int, Ls / smin + 1e-9)))
+    N == 0 && return (1, 0)
+    return (cld(N, k), N)
+end
+
+"""Rib-crossing row bounds that hold on every shear span."""
+function _combined_rib_row_bounds(spans, p_cross, s_min, s_max)
+    n_min, n_max = 1, typemax(Int) ÷ 4
+    for L in spans
+        lo, hi = rib_row_bounds(L, p_cross, s_min, s_max)
+        n_min = max(n_min, lo)
+        n_max = min(n_max, hi)
+    end
+    return (n_min, n_max)
+end
+
+"""
+    deck_rib_note(slab) -> String
+
+One line for the anchor check clause on perpendicular or skewed deck: the rib
+angle, the rib crossing spacing, and, when skewed, that the perpendicular
+`Rg`/`Rp` were used. Empty for a solid slab or parallel deck.
+"""
+deck_rib_note(::SolidSlabOnBeam) = ""
+function deck_rib_note(slab::DeckSlabOnBeam)
+    slab.deck_orientation === :parallel && return ""
+    θ = round(rad2deg(slab.rib_angle); digits=1)
+    p = rib_crossing_spacing(slab)
+    cross = p === :unknown ? "rib pitch not supplied, crossings unchecked" :
+        "rib crossings every $(round(u"inch", p; digits=2)) along beam"
+    slab.deck_orientation === :perpendicular && return "deck ribs at $(θ)°; $cross"
+    return "deck ribs skewed $(θ)° to beam; $cross; perpendicular Rg/Rp and " *
+           "no rib concrete used (AISC 360-22 I3.2c/I8.2a cover 0° and 90° only)"
 end
 
 function _lowest_passing(lo::Int, hi::Int, pred)
@@ -472,7 +552,18 @@ function design_shear_anchors(section::ISymmSection, material, slab::AbstractSla
     ustrip(u"N", Qn) > 0 || return (; blank..., reason=:strength, Qn=Qn)
     Cf = uconvert(u"N", _Cf_max(section, material, slab, b_eff))
     s_min, s_max = _stud_spacing_limits(anchor, slab)
-    n_min, n_max = _combined_row_bounds(spans, s_min, s_max)
+    p_cross = rib_crossing_spacing(slab)
+    rib_reason = nothing
+    if p_cross isa Unitful.Length
+        n_min, n_max = _combined_rib_row_bounds(spans, p_cross, s_min, s_max)
+        n_max < max(n_min, 1) && (rib_reason = :rib_spacing)
+    else
+        # A skewed rib with no pitch has no known crossing positions. A
+        # perpendicular rib without pitch keeps the plain §I8.2d limits.
+        p_cross === :unknown && slab.deck_orientation === :skewed &&
+            (rib_reason = :rib_pitch_unknown)
+        n_min, n_max = _combined_row_bounds(spans, s_min, s_max)
+    end
     L_long = maximum(spans)
     per = anchor.n_per_row
 
@@ -526,6 +617,9 @@ function design_shear_anchors(section::ISymmSection, material, slab::AbstractSla
     # §I3.2c applies to composite construction on deck. When it fails, only
     # the steel section alone (no studs counted) can be used.
     deck_ok || return (; at(0)..., ok=false, reason=:deck_limits)
+    # Rib crossings farther apart than the §I8.2d(e) maximum, or unknown on a
+    # skewed rib: no compliant stud layout exists, so the steel acts alone.
+    rib_reason === nothing || return (; at(0)..., ok=false, reason=rib_reason)
     chosen = n_max >= max(n_min, 1) ? _lowest_passing(max(n_min, 1), n_max, passes) : nothing
     if chosen !== nothing
         lay = at(chosen)
@@ -550,4 +644,165 @@ function design_shear_anchors(section::ISymmSection, material, slab::AbstractSla
         :interaction
     end
     return (; probe..., ok=false, reason=reason)
+end
+
+# ==============================================================================
+# Anchor positions — the schedule `design_shear_anchors` counted
+# ==============================================================================
+
+"""
+Positions of the headed studs [`design_shear_anchors`](@ref) counted.
+
+`s` is the distance in metres from station 0 of the beam. `y` is the offset
+in metres from the beam centerline, in the flange-width direction. `z_flange`
+is the top of steel in the centroid frame of [`section_polygon`](@ref), metres,
+positive toward the slab. The shank runs from that point a distance `l_sa`
+in the same direction. One entry of `s` and `y` per stud. `mass` and `ec`
+cover every stud in `s`.
+"""
+struct ShearAnchorLayout
+    s::Vector{Float64}
+    y::Vector{Float64}
+    d_sa::typeof(1.0u"m")
+    l_sa::typeof(1.0u"m")
+    z_flange::Float64
+    mass::typeof(1.0u"kg")
+    ec::CarbonMassQuantity
+end
+
+ShearAnchorLayout() = ShearAnchorLayout(Float64[], Float64[], 0.0u"m", 0.0u"m", 0.0,
+                                        0.0u"kg", 0.0u"kgCO2e")
+
+"""
+    studs_on_interval(layout, s0, s1; include_end=false)
+        -> Vector of (s_local, y)
+
+Studs whose station lies in `[s0, s1)`, or in `[s0, s1]` when `include_end`.
+`s_local` is the station minus `s0`. Stations are metres.
+"""
+function studs_on_interval(layout::ShearAnchorLayout, s0::Real, s1::Real;
+                           include_end::Bool=false)
+    out = Tuple{Float64, Float64}[]
+    for i in eachindex(layout.s)
+        s = layout.s[i]
+        inside = include_end ? (s0 - 1e-8 <= s <= s1 + 1e-8) :
+                               (s0 - 1e-8 <= s < s1 - 1e-8)
+        inside && push!(out, (s - s0, layout.y[i]))
+    end
+    return out
+end
+
+"""
+    place_shear_anchors(section, anchor, slab, regions, layouts, L)
+        -> ShearAnchorLayout
+
+Stations and flange offsets for one layout per sagging region.
+
+Each shear span — the peak moment to one adjacent zero, AISC 360-22 §I8.2c
+(corpus: aisc-360-22, PDF p. 183) — gets `layout.n_rows` rows. A side shorter
+than 0.1 mm is not a span, matching [`region_shear_spans`](@ref).
+
+# ENGINEERING JUDGMENT
+§I8.2d(a) (PDF p. 183) distributes the anchors uniformly between the maximum
+moment and the zero. `n` rows on a span of length `L` sit at the centers of
+`n` equal spaces, so the center-to-center pitch is `L/n`, the spacing
+[`design_shear_anchors`](@ref) checks, and the end margins are half a space.
+
+On perpendicular or skewed deck the rows also have to sit at rib crossings.
+The sheet's position along the beam is not in the model. Crossings are taken
+at half a pitch, then every pitch, measured from station 0. The `n` crossings
+inside the span are an even subsample of that grid.
+
+Across the flange, `n_per_row` studs are spaced equally between the center
+limits of [`_stud_center_limits`](@ref): §I8.2d(b) cover, §I8.2d(d) four
+diameters, and the shank held `d_sa/2` inside each flange tip. One stud sits
+on the centerline when the centerline is inside those limits. On a skewed
+rib the studs of one row share the rib, so a transverse offset `y` moves the
+station by `y · cot θ`.
+"""
+function place_shear_anchors(section::ISymmSection, anchor::HeadedStudAnchor,
+                             slab::AbstractSlabOnBeam, regions, layouts, L)
+    L_m = ustrip(u"m", uconvert(u"m", L isa Unitful.Quantity ? L : L * u"m"))
+    ys = _stud_transverse_ordinates(section, anchor, slab)
+    pitch = rib_crossing_spacing(slab)
+    p = pitch isa Unitful.Length ? ustrip(u"m", uconvert(u"m", pitch)) : nothing
+    shift = _stud_station_shift(ys, slab)
+    ss = Float64[]
+    yy = Float64[]
+    for (region, lay) in zip(regions, layouts)
+        (lay.ok && lay.n_rows > 0) || continue
+        for (side_lo, side_hi) in _shear_span_ends(region, L_m)
+            rows = p === nothing ?
+                _uniform_row_stations(side_lo, side_hi, lay.n_rows) :
+                _rib_row_stations(side_lo, side_hi, lay.n_rows, p)
+            for s_row in rows, (k, y) in enumerate(ys)
+                push!(ss, s_row + shift[k])
+                push!(yy, y)
+            end
+        end
+    end
+    n = length(ss)
+    mass = n * stud_mass(anchor)
+    # Top of the top flange. The I-shape polygon puts that fibre at +d/2.
+    z_flange = ustrip(u"m", section_depth(section)) / 2
+    return ShearAnchorLayout(ss, yy, uconvert(u"m", anchor.d_sa),
+                             uconvert(u"m", anchor.l_sa), z_flange,
+                             mass, uconvert(u"kgCO2e", mass * anchor.ecc))
+end
+
+"""Transverse ordinates, metres, one per stud in a row."""
+function _stud_transverse_ordinates(section::ISymmSection, anchor::HeadedStudAnchor,
+                                    slab::AbstractSlabOnBeam)
+    y_lo, y_hi = _stud_center_limits(section, anchor, slab)
+    n = anchor.n_per_row
+    n <= 1 && return [clamp(0.0, y_lo, y_hi)]
+    return [y_lo + (i - 1) * (y_hi - y_lo) / (n - 1) for i in 1:n]
+end
+
+"""Along-beam station change, metres, for each transverse ordinate on a skewed rib. Zeros otherwise."""
+_stud_station_shift(section_ys::Vector{Float64}, ::AbstractSlabOnBeam) = zeros(length(section_ys))
+
+function _stud_station_shift(section_ys::Vector{Float64}, slab::DeckSlabOnBeam)
+    slab.deck_orientation === :parallel && return zeros(length(section_ys))
+    rib_crossing_spacing(slab) isa Unitful.Length || return zeros(length(section_ys))
+    θ = slab.rib_angle
+    abs(sin(θ)) < 1e-6 && return zeros(length(section_ys))
+    cotθ = cos(θ) / sin(θ)
+    return [y * cotθ for y in section_ys]
+end
+
+function _shear_span_ends(region, L_m::Float64)
+    spans = Tuple{Float64, Float64}[]
+    lo = region.s_left * L_m
+    peak = region.s_peak * L_m
+    hi = region.s_right * L_m
+    peak - lo > 1e-4 && push!(spans, (lo, peak))
+    hi - peak > 1e-4 && push!(spans, (peak, hi))
+    return spans
+end
+
+"Centers of `n` equal spaces on `[span_lo, span_hi]`."
+function _uniform_row_stations(span_lo::Float64, span_hi::Float64, n::Int)
+    s = (span_hi - span_lo) / n
+    return [span_lo + (i - 0.5) * s for i in 1:n]
+end
+
+"""
+Even subsample of the rib crossings inside `(span_lo, span_hi)`.
+
+Crossings lie at `(k + 1/2) · pitch` from station 0.
+"""
+function _rib_row_stations(span_lo::Float64, span_hi::Float64, n::Int, pitch::Float64)
+    k_first = ceil(Int, span_lo / pitch - 0.5 + 1e-9)
+    k_last = floor(Int, span_hi / pitch - 0.5 - 1e-9)
+    k_last < k_first && return Float64[]
+    xs = [(k + 0.5) * pitch for k in k_first:k_last]
+    n_use = min(n, length(xs))
+    n_use <= 0 && return Float64[]
+    if n_use == 1
+        mid = (span_lo + span_hi) / 2
+        return [xs[argmin(abs.(xs .- mid))]]
+    end
+    idx = [1 + round(Int, (i - 1) * (length(xs) - 1) / (n_use - 1)) for i in 1:n_use]
+    return xs[unique!(idx)]
 end

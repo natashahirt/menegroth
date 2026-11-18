@@ -396,31 +396,29 @@ end
 _rib_web_dims(::Any) = nothing
 
 """
-Sized rib outside the solid head, or `nothing` when no rib is sized yet.
+Web the solid-head checks use, or `nothing` when no rib is sized yet.
 
-Two sized ribs that disagree on width, effective depth, or overall depth
-are an error. The head uses one section.
+ENGINEERING JUDGMENT: rib pieces are sized one by one, so they need not match.
+The head's soffit is the deepest rib (`h`). The rib-web check uses the
+narrowest web and the smallest effective depth, which is a section no larger
+than every rib framing into the head. One shared section returns that section.
 """
 function _sized_rib_web(struc, level::FramingLevel)
     gid = level.solid_group_id
-    found = nothing
+    dims = Tuple{typeof(1.0u"m"), typeof(1.0u"m"), typeof(1.0u"m")}[]
     for bi in level_member_indices(struc, level)
         gid !== nothing && group_id(struc.beams[bi]) == gid && continue
+        _level_rib(level, struc.beams[bi]) || continue
         sec = section(struc.beams[bi])
         sec === nothing && continue
-        dims = _rib_web_dims(sec)
-        dims === nothing && throw(ArgumentError(
+        one = _rib_web_dims(sec)
+        one === nothing && throw(ArgumentError(
             "slab $(level.slab_idx) has a solid head, and a sized rib is a $(typeof(sec))."))
-        if found === nothing
-            found = dims
-            continue
-        end
-        for (a, b) in zip(found, dims)
-            abs(ustrip(u"m", a - b)) <= 1e-6 || throw(ArgumentError(
-                "slab $(level.slab_idx) ribs do not share one section ($(a) and $(b))"))
-        end
+        push!(dims, one)
     end
-    return found
+    isempty(dims) && return nothing
+    return (minimum(d[1] for d in dims), minimum(d[2] for d in dims),
+            maximum(d[3] for d in dims))
 end
 
 """Columns whose vertex is within `tol` metres of `xy`."""

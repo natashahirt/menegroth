@@ -90,6 +90,13 @@ const PREPARE_AFFECTING_FIELDS = Symbol[
     :geometry_is_centerline, :diaphragm_mode, :diaphragm_E, :diaphragm_ν,
     :default_frame_E, :default_frame_G, :default_frame_ρ,
     :pattern_loading, :framing_opts,
+    # The lateral system sets beam releases before `to_asap!`, so a change needs a fresh build.
+    :lateral,
+    # Pier thickness is baked by `initialize_members!` (`prepare!` forwards
+    # `params.wall_thickness`). The ordinary-wall jump reads
+    # `jump_wall_thickness` and `wall_thickness_grouping`, not this field, so
+    # an incremental edit would leave the meshed walls at the old thickness.
+    :wall_thickness,
     # ACI 318-11 §10.10.4.1 — flat-plate slab column stubs are baked at prepare! (via _apply_col_I_factor in _process_single_slab_group); only a fresh prepare picks up a changed factor. The fresh prepare also re-runs the members node, so frame columns (size_columns!) are covered too.
     :column_I_factor,
 ]
@@ -108,7 +115,7 @@ last run is observable via [`last_recomputed`](@ref) / [`last_restored`](@ref)
 """
 mutable struct IncrementalEngine
     graph::DesignGraph
-    params::DesignParameters
+    context::ResolvedDesignContext
     baseline::BuildingStructure
     base_hash::String
     memo::Dict{NodeKey, NodeMemo}
@@ -122,15 +129,15 @@ mutable struct IncrementalEngine
     # (`NodeWarmState` / `WarmContext`) for why the CHOLMOD factorization stays out
     # of these snapshots (it lives only on the live `struc.asap_model`).
     warm_memo::Dict{NodeKey, NodeWarmState}
-    # P0-2 Step B memo-shrink mode. `:whole` (default) captures an independent
-    # whole-struc snapshot per node. `:shared` captures ONE post-level snapshot
-    # and shares it by reference across the level's co-recomputed nodes (the
-    # snapshot is immutable and only ever `deepcopy`ed on restore), collapsing an
-    # N-slab level's memo from N whole-struc copies to 1 with byte-identical
-    # results. `:composable` stores a `SlabNodeSnapshot` per fine slab node and
-    # rebuilds a clean slab level from the baseline + overlay + one `sync_asap!`
-    # (drops the solved Asap model from the slab memo; exact-first gated, not
-    # the default).
+    # P0-2 Step B memo-shrink mode. `:shared` (default) captures ONE post-level
+    # snapshot and shares it by reference across the level's co-recomputed
+    # nodes (the snapshot is immutable and only ever `deepcopy`ed on restore),
+    # collapsing an N-slab level's memo from N whole-struc copies to 1 with
+    # byte-identical results. `:whole` captures an independent whole-struc
+    # snapshot per node. `:composable` stores a `SlabNodeSnapshot` per fine
+    # slab node and rebuilds a clean slab level from the baseline + overlay +
+    # one `sync_asap!` (drops the solved Asap model from the slab memo;
+    # exact-first gated, not the default).
     snapshot_mode::Symbol
 end
 
@@ -145,9 +152,9 @@ a shared memo. Returns an empty vector when the model has not been built yet.
 """
 function _geometry_fingerprint(struc::BuildingStructure)
     model = struc.asap_model
-    (model === nothing || isempty(model.elements)) && return Any[]
+    (model === nothing || isempty(model.frame_elements)) && return Any[]
     coords = Any[]
-    for el in model.elements
+    for el in model.frame_elements
         p1 = el.nodeStart.position
         p2 = el.nodeEnd.position
         push!(coords, (ustrip(u"m", p1[1]), ustrip(u"m", p1[2]), ustrip(u"m", p1[3]),
@@ -173,20 +180,24 @@ function engine_base_hash(struc::BuildingStructure, params::DesignParameters)
     ))
 end
 
+function engine_base_hash(struc::BuildingStructure, context::ResolvedDesignContext)
+    return content_hash((context.content_hash, _geometry_fingerprint(struc)))
+end
+
 """Valid [`IncrementalEngine`](@ref) memo-shrink modes (P0-2 Step B)."""
 const SNAPSHOT_MODES = (:whole, :shared, :composable)
 
 """
     _default_snapshot_mode() -> Symbol
 
-The default `snapshot_mode` for new engines. `:whole` (today's byte-identical
-per-node capture) unless the `SS_SNAPSHOT_MODE` environment variable opts into an
-alternative — the single switch the exact-first gates flip to A/B a shrink mode
-over the WHOLE invalidation matrix without touching any call site. Production
-never sets the var, so the default is always `:whole`.
+The default `snapshot_mode` for new engines. `:shared` (one immutable
+post-level snapshot, restored by deepcopy, byte-identical to `:whole`) unless
+the `SS_SNAPSHOT_MODE` environment variable opts into `:whole` or
+`:composable`. The exact-first gates flip that variable to A/B a mode over
+the invalidation matrix without touching any call site.
 """
 function _default_snapshot_mode()
-    mode = Symbol(get(ENV, "SS_SNAPSHOT_MODE", "whole"))
+    mode = Symbol(get(ENV, "SS_SNAPSHOT_MODE", "shared"))
     mode in SNAPSHOT_MODES || throw(ArgumentError(
         "SS_SNAPSHOT_MODE=$(mode) is not a valid snapshot mode; expected one of $(SNAPSHOT_MODES)."))
     return mode
@@ -216,24 +227,35 @@ function prepare_engine(struc::BuildingStructure, params::DesignParameters;
                         framing_opts::NamedTuple = NamedTuple(),
                         snapshot_mode::Symbol = _default_snapshot_mode(),
                         tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
+    context = resolve_design_context(params; framing_opts=framing_opts)
+    return prepare_engine(struc, context; snapshot_mode=snapshot_mode, tc=tc)
+end
+
+function prepare_engine(
+    struc::BuildingStructure,
+    context::ResolvedDesignContext;
+    snapshot_mode::Symbol = _default_snapshot_mode(),
+    tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
+)
     snapshot_mode in SNAPSHOT_MODES || throw(ArgumentError(
         "prepare_engine: snapshot_mode=$(snapshot_mode) invalid; expected one of $(SNAPSHOT_MODES)."))
+    params = context.params
     # Prepare on an independent copy so repeated prepares of the caller's `struc`
     # never accumulate auto-generated framing (skeleton joist edges / host-edge
     # subdivisions). `capture_node_state` deepcopies while safely skipping the
     # Asap model's non-copyable CHOLMOD factorization cache.
     struc = capture_node_state(struc)
-    prepare!(struc, params; framing_opts = framing_opts)
+    prepare!(struc, params; framing_opts=context.framing_opts)
 
     ok, val_errors = run_pre_sizing_validation(struc, params; tc = tc)
     ok || throw(PreSizingValidationError(val_errors))
 
     graph     = build_design_graph(struc, params; tc = tc)
     baseline  = capture_node_state(struc)          # prepared, pre-sizing
-    base_hash = engine_base_hash(struc, params)
+    base_hash = engine_base_hash(struc, context)
     working   = restore_node_state(baseline)
 
-    return IncrementalEngine(graph, params, baseline, base_hash,
+    return IncrementalEngine(graph, context, baseline, base_hash,
                              Dict{NodeKey, NodeMemo}(), working,
                              NodeKey[], NodeKey[],
                              Dict{NodeKey, NodeWarmState}(), snapshot_mode)
@@ -310,7 +332,7 @@ Dirty frontier for changing the engine's parameters to `new_params`, diffing
 against the parameters the engine currently holds.
 """
 dirty_frontier(engine::IncrementalEngine, new_params::DesignParameters) =
-    dirty_frontier(engine.graph, changed_param_fields(engine.params, new_params))
+    dirty_frontier(engine.graph, changed_param_fields(engine.context.params, new_params))
 
 # -----------------------------------------------------------------------------
 # Warm-state (Run 6): build/reuse the shared read-only column P-M cache.
@@ -324,7 +346,7 @@ warm slab-node reruns. Reuses a cache already stored in `engine.warm_memo` when
 present (column catalog/material/objective are prepare-affecting and therefore
 FIXED for an engine's lifetime — a change to them is refused by the baseline
 guard — so a once-built cache stays valid across warm reruns). Otherwise builds
-one via `StructuralSizer._precompute_flat_plate_col_cache` when the baseline has
+one through the public floor-workspace contract when the baseline has
 flat-plate/flat-slab slabs, else returns `nothing`. Identical in content to the
 cache the cold per-slab path rebuilds internally (see design_workflow.jl FINDING
 5), so reusing it is result-neutral.
@@ -333,8 +355,20 @@ function _warm_shared_col_cache!(engine::IncrementalEngine, params::DesignParame
     for (_, ws) in engine.warm_memo
         ws.col_cache === nothing || return ws.col_cache
     end
-    any(s -> s.floor_type in (:flat_plate, :flat_slab), engine.baseline.slabs) || return nothing
-    return StructuralSizer._precompute_flat_plate_col_cache(_get_column_opts(params))
+    slab_idx = findfirst(
+        slab -> slab.floor_type in (:flat_plate, :flat_slab),
+        engine.baseline.slabs,
+    )
+    isnothing(slab_idx) && return nothing
+    request = floor_design_request(
+        engine.baseline,
+        slab_idx;
+        options = resolve_floor_options(params),
+        column_options = _get_column_opts(params),
+        max_iterations = params.max_iterations,
+        fire_rating = params.fire_rating,
+    )
+    return StructuralSizer.prepare_floor_design_workspace(request).column_cache
 end
 
 """
@@ -396,7 +430,7 @@ function run_target!(engine::IncrementalEngine, params::DesignParameters;
     # Guard: the fixed baseline is only valid for params sharing the same
     # prepared state. Refuse (rather than silently reuse a stale baseline) if a
     # prepare-affecting field changed.
-    changed = changed_param_fields(engine.params, params)
+    changed = changed_param_fields(engine.context.params, params)
     bad = intersect(Set(changed), Set(PREPARE_AFFECTING_FIELDS))
     isempty(bad) || throw(ArgumentError(
         "IncrementalEngine: parameter(s) $(sort(collect(bad))) affect the prepared " *
@@ -409,8 +443,13 @@ function run_target!(engine::IncrementalEngine, params::DesignParameters;
     # ascending `slab_idx` (eachindex) order (NOT `slab_parallel_batches`; see
     # build_design_graph — Finding 1), so the fine per-slab node topology is
     # stable across the rebuild. Then re-fingerprint the baseline.
-    engine.graph  = build_design_graph(engine.baseline, params; tc = tc)
-    engine.params = params
+    if !isempty(framing_opts) &&
+       content_hash(framing_opts) != content_hash(engine.context.framing_opts)
+        throw(ArgumentError(
+            "IncrementalEngine: framing_opts differ from the resolved run context; " *
+            "build a new engine for framing changes."))
+    end
+    engine.graph = build_design_graph(engine.baseline, params; tc=tc)
 
     haskey(engine.graph.index, target) ||
         throw(ArgumentError("run_target!: unknown target node :$target"))
@@ -631,8 +670,8 @@ function run_target!(engine::IncrementalEngine, params::DesignParameters;
         #     snapshot is immutable and only ever `deepcopy`ed on restore
         #     (`restore_node_state`) or read field-wise (`restore_slab_node_writes!`),
         #     so sharing can never let one node's restore corrupt another. In
-        #     `:whole` mode (default) each node captures its own copy, exactly as
-        #     before. Either way the RESTORED state is identical.
+        #     `:whole` mode each node captures its own copy. Either way the
+        #     RESTORED state is identical. `:shared` is the default.
         shared_state = engine.snapshot_mode === :shared ? capture_node_state(engine.struc) : nothing
         for key in dirty_keys
             node = get_node(engine.graph, key)
@@ -659,7 +698,7 @@ function run_target!(engine::IncrementalEngine, params::DesignParameters;
 
     # If the walk ended on an all-clean suffix, the deferred restore was never
     # materialized. The tail consumer (`capture_incremental_design` →
-    # `harmonize_uniform_column_sizes!` / `sync_asap!` / `capture_design`) reads and
+    # `capture_design`) reads and
     # mutates `engine.struc`, so materialize the pending post-state once here, as a
     # true independent copy (never an alias into the memo). [P0-2 Step A]
     if pending_rep !== nothing
@@ -674,31 +713,28 @@ function run_target!(engine::IncrementalEngine, params::DesignParameters;
 end
 
 """
-    capture_incremental_design(engine, params; harmonize=true, tc=nothing, t_start=nothing)
+    capture_incremental_design(engine, params; tc=nothing, t_start=nothing)
         -> BuildingDesign
 
 Capture a `BuildingDesign` from the engine's current working structure, mirroring
-the post-pipeline tail of [`design_building`](@ref): optional uniform-column
-harmonization (with a follow-up `sync_asap!` when it changes columns) then
-`capture_design`. Visualization-model building and the final `restore!` are NOT
+the tail of [`design_building`](@ref). Uniform column sizing already ran in the
+member node. Visualization-model building and the final `restore!` are NOT
 performed (the engine keeps its working structure); pass `skip_visualization` in
 `params` accordingly.
 
 Intended to be called after [`run_target!`](@ref) has run to the terminal node.
 """
 function capture_incremental_design(engine::IncrementalEngine, params::DesignParameters;
-                                    harmonize::Bool = true,
                                     tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
                                     t_start = nothing)
-    if harmonize && params.uniform_column_sizing !== :off
-        n = harmonize_uniform_column_sizes!(engine.struc, params)
-        n > 0 && sync_asap!(engine.struc; params = params)
-    end
-    return capture_design(engine.struc, params; t_start = t_start, tc = tc)
+    return capture_design(
+        engine.struc, params;
+        t_start=t_start, tc=tc,
+        context_hash=content_hash((params, engine.context.framing_opts)))
 end
 
 """
-    redesign_incremental!(engine, params; target=terminal_node, harmonize=true, kwargs...)
+    redesign_incremental!(engine, params; target=terminal_node, kwargs...)
         -> BuildingDesign
 
 Convenience wrapper: [`run_target!`](@ref) to `target`, then
@@ -708,7 +744,6 @@ the recomputed / restored node sets remain queryable via
 """
 function redesign_incremental!(engine::IncrementalEngine, params::DesignParameters;
                                target::NodeKey = terminal_node(engine.graph),
-                               harmonize::Bool = true,
                                framing_opts::NamedTuple = NamedTuple(),
                                warm::Bool = false,
                                tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
@@ -724,5 +759,5 @@ function redesign_incremental!(engine::IncrementalEngine, params::DesignParamete
     _assert_member_group_overrides_unsupported(params, engine.baseline)
     run_target!(engine, params; target = target, framing_opts = framing_opts,
                 warm = warm, tc = tc)
-    return capture_incremental_design(engine, params; harmonize = harmonize, tc = tc)
+    return capture_incremental_design(engine, params; tc = tc)
 end

@@ -7,12 +7,12 @@ title: D/A1 with the slab joined to the walls does not pass
 node_label: D/A1 with the slab joined to the walls does not pa
 tags: sdc,D/A1,story-shell,second-order
 status: active
-open_threads: 0
+open_threads: 1
 success: 'false'
 files: ''
 session_id: sess-74524385
 created_at: '2026-11-16T12:38:08.029491+00:00'
-updated_at: '2026-11-16T12:38:08.029491+00:00'
+updated_at: '2026-11-16T16:43:14.577679+00:00'
 has_child_rationale: The joined slab edge changed the wall gravity path and the ground-story
   second-order moment.
 ---

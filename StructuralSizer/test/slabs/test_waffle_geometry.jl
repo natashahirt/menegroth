@@ -8,6 +8,7 @@
 # =============================================================================
 
 using Test
+using Unitful
 using StructuralSizer
 
 # Aliases for internal (unexported) waffle geometry functions
@@ -517,3 +518,153 @@ end  # @testset "Waffle Geometry"
     end
 
 end  # @testset "Wachspress Panel"
+
+@testset "rib network" begin
+    rect = IsoParametricPanel(((0.0, 0.0), (6.0, 0.0), (6.0, 4.0), (0.0, 4.0)))
+    grid = WaffleRibGrid(rect, 2, 2)
+    net = SS.rib_network(grid)
+    # Crossings of a 2×2 module grid, and one piece on each side of each bay.
+    @test length(net.nodes) == 9
+    @test length(net.pieces) == 12
+    @test net.nodes[1] == (0.0, 0.0)
+    @test net.nodes[9] == (6.0, 4.0)
+    @test net.nodes[5] == (3.0, 2.0)
+
+    # The center crossing belongs to both families.
+    center = 5
+    incident = [p for p in net.pieces if p.a == center || p.b == center]
+    @test length(incident) == 4
+    @test count(p -> p.family === :ξ, incident) == 2
+    @test count(p -> p.family === :η, incident) == 2
+
+    # One ξ-rib is the three nodes at x = 0, in order.
+    chain = SS.rib_chain(net, 1)
+    @test length(chain) == 3
+    @test net.nodes[chain[1]] == (0.0, 0.0)
+    @test net.nodes[chain[2]] == (0.0, 2.0)
+    @test net.nodes[chain[3]] == (0.0, 4.0)
+
+    # A bilinear iso-line is straight: the piece midpoint is the parametric midpoint.
+    p = net.pieces[1]
+    mid = ((net.nodes[p.a][1] + net.nodes[p.b][1]) / 2,
+           (net.nodes[p.a][2] + net.nodes[p.b][2]) / 2)
+    @test mid == physical_coords(rect, 0.0, 0.25)
+
+    headed = WaffleRibGrid(rect, 4, 4; solid_head = 0.2)
+    solid_net = SS.rib_network(headed)
+    @test any(p -> p.solid, solid_net.pieces)
+    @test any(p -> !p.solid, solid_net.pieces)
+
+    # L = 4, R = 2, δ = 1/4. sqrt(8 R δ) = 2, so the rib is two pieces.
+    @test SS.circular_rib_pieces(4.0, 2.0, 0.25) == 2
+    @test SS.circular_rib_pieces(4.0, 2.0, 100.0) == 1
+    @test SS.circular_rib_pieces(4.0, Inf, 0.25) == 1
+    @test_throws ArgumentError SS.circular_rib_pieces(0.0, 2.0, 0.25)
+    arc = [(0.0, 0.0), (2.0, 1.0), (4.0, 0.0)]
+    @test SS.rib_sagitta(arc) ≈ 1.0
+    @test SS.curved_rib_pieces(arc, 0.25) == SS.circular_rib_pieces(4.0, 2.0, 0.25)
+    @test SS.curved_rib_pieces(arc, 1.0) == 1
+    @test SS.curved_rib_pieces([(0.0, 0.0), (4.0, 0.0)], 0.01) == 1
+
+    # 6×4 panel, solid_head 1/4, four bays. Two ξ ribs bound each head, so
+    # each takes half of 0.25×6 m. Two η ribs take half of 0.25×4 m.
+    headed4 = WaffleRibGrid(rect, 4, 4; solid_head = 0.25)
+    widths = SS.solid_piece_widths(headed4)
+    solid4 = SS.rib_network(headed4)
+    @test length(widths) == length(solid4.pieces)
+    @test all(w > 0 for (w, p) in zip(widths, solid4.pieces) if p.solid)
+    @test all(w == 0 for (w, p) in zip(widths, solid4.pieces) if !p.solid)
+    ξw = [w for (w, p) in zip(widths, solid4.pieces) if p.family === :ξ && p.solid]
+    ηw = [w for (w, p) in zip(widths, solid4.pieces) if p.family === :η && p.solid]
+    @test all(w -> w ≈ 0.75, ξw)
+    @test all(w -> w ≈ 0.5, ηw)
+    @test sum(ξw) ≈ 4 * 0.25 * 6
+    @test sum(ηw) ≈ 4 * 0.25 * 4
+
+    # A head two modules deep: three ξ lines cross it, each in two pieces
+    # along its length. The pieces are in series, so each line keeps a third
+    # of 0.2×6 m, and each family covers the head's plan area once.
+    headed10 = WaffleRibGrid(rect, 10, 10; solid_head = 0.2)
+    net10 = SS.rib_network(headed10)
+    w10 = SS.solid_piece_widths(headed10)
+    @test all(w -> w ≈ 0.2 * 6 / 3,
+              (w for (w, p) in zip(w10, net10.pieces) if p.family === :ξ && p.solid))
+    @test all(w -> w ≈ 0.2 * 4 / 3,
+              (w for (w, p) in zip(w10, net10.pieces) if p.family === :η && p.solid))
+
+    # A 1 m by 0.3 m head. Vertical I = b h³/12. Shear area = 5/6 of the area.
+    sec = SS.solid_head_section(1.0u"m", 0.3u"m", NWC_4000)
+    @test sec.A ≈ 0.3u"m^2"
+    @test sec.Iy ≈ (1.0 * 0.3^3 / 12) * u"m^4"
+    @test sec.Ix ≈ (0.3 * 1.0^3 / 12) * u"m^4"
+    @test sec.Ay ≈ (5 / 6) * 0.3u"m^2"
+    @test sec.Az ≈ sec.Ay
+    @test sec.J ≈ (1 - 0.63 * 0.3) * (0.3^3 / 3) * u"m^4"
+    @test sec.G ≈ NWC_4000.E / (2 * (1 + NWC_4000.ν))
+    @test isfinite(ustrip(u"m^2", sec.Az))
+    # Half density is the caller's mass split. Stiffness is unchanged.
+    half = SS.solid_head_section(1.0u"m", 0.3u"m", NWC_4000; density = NWC_4000.ρ / 2)
+    @test half.Iy ≈ sec.Iy
+    @test half.ρ ≈ NWC_4000.ρ / 2
+
+    # ACI 318-11 §13.2.5: h/4 and span/6, both ways, is a drop panel.
+    # §13.2.6: short of that, but past the column face by the projection, is a shear cap.
+    drop = SS.classify_solid_head(;
+        span_x = 9.0u"m", span_y = 9.0u"m",
+        from_center_x = 1.5u"m", from_center_y = 1.5u"m",
+        projection = 0.05u"m", slab_thickness = 0.2u"m",
+        column_x = 0.4u"m", column_y = 0.4u"m")
+    @test drop.kind === :drop_panel
+    @test drop.drop_panel
+    @test drop.shear_cap
+    cap = SS.classify_solid_head(;
+        span_x = 9.0u"m", span_y = 9.0u"m",
+        from_center_x = 1.0u"m", from_center_y = 1.0u"m",
+        projection = 0.05u"m", slab_thickness = 0.2u"m",
+        column_x = 0.4u"m", column_y = 0.4u"m")
+    @test cap.kind === :shear_cap
+    @test !cap.drop_panel
+    # R13.2.5: deep enough in plan, but the projection is under h/4, so it is a shear cap.
+    shallow = SS.classify_solid_head(;
+        span_x = 9.0u"m", span_y = 9.0u"m",
+        from_center_x = 1.5u"m", from_center_y = 1.5u"m",
+        projection = 0.04u"m", slab_thickness = 0.2u"m",
+        column_x = 0.4u"m", column_y = 0.4u"m")
+    @test shallow.kind === :shear_cap
+    small = SS.classify_solid_head(;
+        span_x = 9.0u"m", span_y = 9.0u"m",
+        from_center_x = 0.3u"m", from_center_y = 0.3u"m",
+        projection = 0.2u"m", slab_thickness = 0.2u"m",
+        column_x = 0.4u"m", column_y = 0.4u"m")
+    @test small.kind === :undersized
+
+    # 0.2 of a 4-bay panel grows to one module, 0.25. 0.4 would meet the opposite head.
+    @test SS.snapped_solid_head(0.0, 4, 4) == 0.0
+    @test SS.snapped_solid_head(0.2, 4, 4) ≈ 0.25
+    @test SS.snapped_solid_head(0.25, 4, 4) ≈ 0.25
+    @test_throws ArgumentError SS.snapped_solid_head(0.4, 4, 4)
+
+    cuts = SS.solid_head_transitions(headed4)
+    @test !isempty(cuts)
+    @test all(p -> p[1] ≈ 0.0 || p[1] ≈ 1.5 || p[1] ≈ 4.5 || p[1] ≈ 6.0 ||
+                    p[2] ≈ 0.0 || p[2] ≈ 1.0 || p[2] ≈ 3.0 || p[2] ≈ 4.0, cuts)
+
+    # 6×4 rectangle: long edges carry 8 m², short edges 4 m², peak width 2 m.
+    long_s, long_w = SS.rectangle_edge_tributary(6.0, 4.0)
+    short_s, short_w = SS.rectangle_edge_tributary(4.0, 6.0)
+    @test SS.tributary_profile_area(6.0, long_s, long_w) ≈ 8.0
+    @test SS.tributary_profile_area(4.0, short_s, short_w) ≈ 4.0
+    @test maximum(long_w) ≈ 2.0
+    @test maximum(short_w) ≈ 2.0
+
+    profiles = SS.rectangle_rib_tributaries(6.0, 4.0, 2, 2)
+    @test length(profiles) == length(net.pieces)
+    area = 0.0
+    for (piece, profile) in zip(net.pieces, profiles)
+        a = net.nodes[piece.a]
+        b = net.nodes[piece.b]
+        along = hypot(b[1] - a[1], b[2] - a[2])
+        area += SS.tributary_profile_area(along, profile.positions, profile.widths)
+    end
+    @test area ≈ 6.0 * 4.0
+end

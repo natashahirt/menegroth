@@ -50,7 +50,7 @@ add_coating_loads!
 Notes:
 
 - `to_asap!` returns a **frame-only** `Asap.Model`. Shell elements created for diaphragm modeling are not currently coupled into `struc.asap_model` (use `build_analysis_model!` for the frame+shell visualization/deflection model).
-- Fire protection self-weight is added by calling `add_coating_loads!(struc, params; ...)` **after** member sizing assigns sections, then re-solving (typically via `sync_asap!`).
+- Fire protection self-weight is an `Asap.LineLoad` with id `:fire_coating`, factored by the same dead factor as member self-weight. The beam/column loop rewrites it after every sizing pass, so members are sized with their own coating; `sync_asap!` rewrites it too. `add_coating_loads!(struc, params; member_edge_group)` replaces one group's coating. Unfactored cases (service reactions, gravity basic cases, ELF seismic weight) use `unfactored_fire_coating_loads(model)`.
 
 ### sync_asap!
 

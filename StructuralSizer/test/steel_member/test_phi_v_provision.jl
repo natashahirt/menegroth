@@ -656,3 +656,27 @@ end
     @test urs.ur_t_neg ≈ 0.60 + (8 / 9) * 0.60 atol=1e-12
     @test urs.ur_t_neg > 1.0
 end
+
+@testset "NLP W-beam keeps a compact web" begin
+    # The NLP flexure model is AISC 360-16 §F2, which needs a compact web
+    # (corpus: aisc-360-16, page 103): h/tw ≤ 3.76 √(E/Fy), Table B4.1b
+    # Case 15 (page 75). A 40 ft span, 12 ft tributary, 75 psf dead and
+    # 80 psf live once drove the web to h/tw = 112, and get_Mn threw.
+    mat = A992_Steel
+    L = 40.0u"ft"
+    wD = 75.0u"lbf/ft^2" * 12.0u"ft"
+    wL = 80.0u"lbf/ft^2" * 12.0u"ft"
+    wu = 1.2 * wD + 1.6 * wL
+    Mu = uconvert(kip * u"ft", wu * L^2 / 8)
+    Vu = uconvert(kip, wu * L / 2)
+    geom = SteelMemberGeometry(L; Lb = 1.0u"ft", Cb = 1.14)
+    opts = NLPWOptions(min_depth = 8.0u"inch", max_depth = 36.0u"inch")
+    Ix_req = required_Ix_for_deflection(wL, L, opts.material.E; limit_ratio = 1/360)
+    for Ix_min in (nothing, Ix_req)
+        r = size_steel_w_beam_nlp(Mu, Vu, geom, opts; Ix_min = Ix_min)
+        @test r.status ∈ (:optimal, :feasible, :converged)
+        @test get_slenderness(r.section, mat).class_w === :compact
+        @test r.section.λ_w <= 3.76 * sqrt(mat.E / mat.Fy)
+        @test get_ϕMn(r.section, mat; Lb = geom.Lb, Cb = geom.Cb, axis = :strong, ϕ = 0.9) >= Mu
+    end
+end

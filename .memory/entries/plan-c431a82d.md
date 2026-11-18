@@ -8,12 +8,12 @@ title: 'Special walls: composer, rest of §18.10, flanged section, then building
 node_label: Special wall integration plan
 tags: walls,aci-318-19,18.10,special-wall,plan
 status: active
-open_threads: 17
+open_threads: 25
 success: 'null'
 files: ''
 session_id: sess-ad654b18
 created_at: '2026-11-10T17:22:23.971942+00:00'
-updated_at: '2026-11-14T12:08:34.681885+00:00'
+updated_at: '2026-11-17T22:08:30.345244+00:00'
 has_child_rationale: The §18.10.6 checks are in and the two unclear expressions are
   resolved, so the composer and building integration can be sequenced.
 ---

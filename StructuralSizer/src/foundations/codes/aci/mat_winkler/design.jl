@@ -24,7 +24,8 @@ function _design_mat_winkler_fea(
     positions::Vector{<:NTuple{2, <:Length}},
     soil::Soil,
     method::WinklerFEA;
-    opts::MatParams = MatParams()
+    opts::MatParams = MatParams(),
+    walls::Vector{<:WallLineDemand} = WallLineDemand[],
 )
     N_col = length(demands)
     soil.ks !== nothing || error("WinklerFEA requires soil.ks to be provided")
@@ -44,19 +45,22 @@ function _design_mat_winkler_fea(
     Ec_c = Ec(fc)
 
     # ── Step 1: Plan Sizing (first-principles overhang) ──
-    plan = _mat_plan_sizing(positions, opts; demands = demands, soil = soil)
+    plan = _mat_plan_sizing(positions, opts; demands = demands, soil = soil, walls = walls)
     B, Lm = plan.B, plan.Lm
     B_m  = ustrip(u"m", B)
     Lm_m = ustrip(u"m", Lm)
 
-    Ps_total = sum(d.Ps for d in demands)
+    Ps_total = isempty(demands) ? 0.0u"N" : sum(d.Ps for d in demands)
+    for leg in walls, smp in leg.samples
+        Ps_total += smp.Ps
+    end
     util_bearing = to_kip(Ps_total) / to_kip(soil.qa * B * Lm)
     util_bearing > 1.0 && @warn "Mat bearing exceeds allowable: util=$(round(util_bearing, digits=3))"
 
     # Per-column dimensions (in metres) for ShellPatch sizing & mesh refinement
     col_c1_m = [ustrip(u"m", demands[j].c1) for j in 1:N_col]
     col_c2_m = [ustrip(u"m", demands[j].c2) for j in 1:N_col]
-    c_max_m  = maximum(max(col_c1_m[j], col_c2_m[j]) for j in 1:N_col)
+    c_max_m  = N_col == 0 ? 0.3 : maximum(max(col_c1_m[j], col_c2_m[j]) for j in 1:N_col)
 
     # ── Step 2: Mesh parameters ──
     # Adaptive target edge: ~20 elements per shortest bay, clamped [0.15, 0.75] m
@@ -95,9 +99,29 @@ function _design_mat_winkler_fea(
     )
 
     # Interior nodes at column positions (ensures mesh nodes exist at columns)
+    # and at each wall-line sample, so the line load stays on the wall.
     interior_nodes = Node[]
     for (cx, cy) in positions_loc_m
         push!(interior_nodes, Node([cx * u"m", cy * u"m", 0.0u"m"], :free))
+    end
+    wall_loads = Tuple{Float64, Float64, Float64}[]
+    placed = Tuple{Float64, Float64}[(cx, cy) for (cx, cy) in positions_loc_m]
+    for leg in walls
+        x1 = ustrip(u"m", leg.p1[1]) - ustrip(u"m", plan.x_left)
+        y1 = ustrip(u"m", leg.p1[2]) - ustrip(u"m", plan.y_bot)
+        x2 = ustrip(u"m", leg.p2[1]) - ustrip(u"m", plan.x_left)
+        y2 = ustrip(u"m", leg.p2[2]) - ustrip(u"m", plan.y_bot)
+        L = hypot(x2 - x1, y2 - y1)
+        for smp in leg.samples
+            s = clamp(ustrip(u"m", smp.s), 0.0, L)
+            t = L == 0 ? 0.0 : s / L
+            x = x1 + t * (x2 - x1)
+            y = y1 + t * (y2 - y1)
+            push!(wall_loads, (x, y, ustrip(u"N", smp.Pu)))
+            _near_mat_point(placed, x, y) && continue
+            push!(placed, (x, y))
+            push!(interior_nodes, Node([x * u"m", y * u"m", 0.0u"m"], :free))
+        end
     end
 
     # Pin in-plane DOFs on boundary (same as slab FEA)
@@ -128,7 +152,11 @@ function _design_mat_winkler_fea(
     h_seed = _mat_punching_h_seed(demands, fc, λ_c, ϕv, cover, db_eff)
     k_h = _mat_depth_index(h, h_incr, h_seed)
     if k_h > 0
-        qu_seed = sum(dem.Pu for dem in demands) / (B * Lm)
+        Pu_for_q = isempty(demands) ? 0.0u"N" : sum(dem.Pu for dem in demands)
+        for leg in walls, smp in leg.samples
+            Pu_for_q += smp.Pu
+        end
+        qu_seed = Pu_for_q / (B * Lm)
         for k in 0:k_h
             h_k = _mat_grid_h(opts.min_depth, h_incr, k)
             d_k = h_k - cover - db_eff
@@ -174,6 +202,10 @@ function _design_mat_winkler_fea(
     # Apply column loads (ShellPatch guarantees a node at each column).
     # NodeForce magnitudes are independent of thickness, so this is built once.
     loads = _mat_apply_column_loads(nodes, positions_loc_m, demands)
+    for (x, y, Pu) in wall_loads
+        node, _ = _find_nearest_node(nodes, x, y)
+        push!(loads, NodeForce(node, [0.0, 0.0, -Pu] .* u"N"))
+    end
 
     # Generate Winkler springs (one per node, tributary-area based).
     # `elem.area` is computed from node positions (independent of thickness),
@@ -336,7 +368,9 @@ function _design_mat_winkler_fea(
                                        (gov_My_total_neg * u"N*m", B)),
                                       d_eff, fc, fy, ϕf)
 
-        punch_ok && flex_ok && break
+        embeds = isempty(walls) || _bar_develops_in(
+            opts.bar_size_x, h - cover, fc, fy, λ_c, cover)
+        punch_ok && flex_ok && embeds && break
         h += h_incr
         iter == n_thick && @warn "WinklerFEA mat thickness did not converge at h=$h"
     end
@@ -435,5 +469,8 @@ function _design_mat_winkler_fea(
 
     return _mat_build_result(plan, demands, opts, h, d_eff,
                              As_x_bot, As_x_top, As_y_bot, As_y_top,
-                             utilization)
+                             utilization; analysis = :winkler,
+                             checks = FoundationUtilizations(; bearing = Float64(util_bearing),
+                                                             punching = Float64(util_punch)),
+                             As_dowel = _mat_wall_dowels(walls, opts, fc, fy, ϕf))
 end

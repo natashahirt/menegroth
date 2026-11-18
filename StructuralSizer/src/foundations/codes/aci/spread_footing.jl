@@ -162,15 +162,155 @@ function _min_steel_footing(b::Length, h::Length, fy::Pressure)
     return ρ_min * b * h
 end
 
-"""ACI 25.4.2 — simplified development length for deformed bars in tension."""
+"""√f′c in psi, not above 100. ACI 318-11 §12.1.2 (corpus: aci-318-11, page 213)."""
+function _sqrt_fc_chapter12(fc::Pressure)
+    return min(sqrt(ustrip(u"psi", fc)), 100.0)
+end
+
+"""
+Straight tension development length, ACI 318-11 Eq. (12-1) (corpus:
+aci-318-11, page 214).
+
+Ktr = 0. (cb + Ktr)/db is not taken above 2.5. ψt, ψe, and ψs are §12.2.4
+(page 215): bottom bars have ψt = 1, uncoated bars have ψe = 1, and ψs is
+0.8 for No. 6 and smaller. The product ψt·ψe is not taken above 1.7. §12.2.5
+is not applied. ld is at least 12 in (§12.2.1).
+
+`clear_cover` is the clear side or bottom cover. cb is the smaller of the
+cover to the bar center and half the center-to-center `spacing`. Omitting
+`spacing` means the bars are placed so spacing does not reduce cb.
+`top_bar` sets ψt = 1.3 (§12.2.4(a)).
+"""
 function _development_length_footing(bar_size::Int, fc::Pressure, fy::Pressure,
-                                      λ::Float64, db::Length)
-    sqrt_fc = sqrt(ustrip(u"psi", fc))
-    fy_psi  = ustrip(u"psi", fy)
-    db_in   = ustrip(u"inch", db)
-    coeff   = bar_size ≤ 6 ? 25.0 : 20.0
-    ld_in   = (fy_psi / (coeff * λ * sqrt_fc)) * db_in   # ψt = ψe = 1.0
+                                      λ::Float64, db::Length;
+                                      clear_cover::Union{Length, Nothing} = nothing,
+                                      spacing::Union{Length, Nothing} = nothing,
+                                      top_bar::Bool = false)
+    sqrt_fc = _sqrt_fc_chapter12(fc)
+    fy_psi = ustrip(u"psi", fy)
+    db_in = ustrip(u"inch", db)
+    ψt = top_bar ? 1.3 : 1.0
+    ψe = 1.0
+    ψs = bar_size <= 6 ? 0.8 : 1.0
+    ψ = min(ψt * ψe, 1.7) * ψs
+    cb_over_db = 1.0
+    if clear_cover !== nothing
+        cb = ustrip(u"inch", clear_cover) + db_in / 2
+        if spacing !== nothing
+            cb = min(cb, ustrip(u"inch", spacing) / 2)
+        end
+        cb_over_db = min(cb / db_in, 2.5)
+    end
+    ld_in = ((3 / 40) * fy_psi * ψ / (λ * sqrt_fc * cb_over_db)) * db_in
     return max(ld_in, 12.0) * u"inch"
+end
+
+"""
+Development length of a 90-degree standard hook, ACI 318-11 §12.5.2
+(corpus: aci-318-11, page 217).
+
+ldh is at least 8 db and 6 in. §12.5.3(a) multiplies by 0.7 for No. 11 and
+smaller when the side cover is at least 2.5 in and the cover beyond the tail
+is at least 2 in. Ties (§12.5.3(b), (c)) and the excess-reinforcement factor
+are not applied. Hooks do not develop compression (§12.5.5).
+"""
+function _hooked_development_length(bar_size::Int, fc::Pressure, fy::Pressure,
+                                     λ::Float64, db::Length;
+                                     side_cover::Length, tail_cover::Length)
+    sqrt_fc = _sqrt_fc_chapter12(fc)
+    db_in = ustrip(u"inch", db)
+    ldh = (0.02 * ustrip(u"psi", fy) / (λ * sqrt_fc)) * db_in
+    if bar_size <= 11 && ustrip(u"inch", side_cover) >= 2.5 &&
+            ustrip(u"inch", tail_cover) >= 2.0
+        ldh *= 0.7
+    end
+    return max(ldh, 8 * db_in, 6.0) * u"inch"
+end
+
+"""
+Height from the soffit to the outside of a 90-degree hook tail.
+
+The bend is Table 7.2 (corpus: aci-318-11, page 94) and the tail is §7.1.2
+(page 93): 12 db past the bend. The centerline radius is half the inside
+diameter plus half the bar diameter.
+"""
+function _hook_top(bar_size::Int, clear_cover::Length)
+    db = bar_diameter(bar_size)
+    bend = bar_size <= 8 ? 6db : bar_size <= 11 ? 8db : 10db
+    radius = (bend + db) / 2
+    return clear_cover + db / 2 + radius + 12db + db / 2
+end
+
+"""Center-to-center spacing of `n` bars across `width`, inset by cover and db/2."""
+function _bar_spacing(n::Int, width::Length, clear_cover::Length, db::Length)
+    n <= 1 && return width
+    clear_span = width - 2 * (clear_cover + db / 2)
+    clear_span <= zero(clear_span) && return db
+    return clear_span / (n - 1)
+end
+
+"""
+How the bottom bars of one plan develop from each column face.
+
+Straight Eq. (12-1) first, at this bar and then at smaller bars. A 90-degree
+hook is tried before the plan grows. §15.6.3 (corpus: aci-318-11, page 274):
+each direction is measured from its own face.
+"""
+function _spread_anchorage(bar_size, As_gov, B, h, cover, fc, fy, λ,
+                           avail_x, avail_y, max_s)
+    for size in bar_size:-1:3
+        db = bar_diameter(size)
+        n = max(ceil(Int, As_gov / bar_area(size)), 2, ceil(Int, B / max_s))
+        spacing = _bar_spacing(n, B, cover, db)
+        ld = _development_length_footing(size, fc, fy, λ, db;
+                                          clear_cover = cover, spacing = spacing)
+        straight_x = ld <= avail_x
+        straight_y = ld <= avail_y
+        if straight_x && straight_y
+            how = size == bar_size ? :straight : :smaller_bar
+            return (ok = true, size = size, how = how)
+        end
+        tail_room = h - _hook_top(size, cover)
+        ldh = _hooked_development_length(size, fc, fy, λ, db;
+                                          side_cover = cover, tail_cover = tail_room)
+        function dir_ok(straight, avail)
+            straight && return true
+            return tail_room >= zero(tail_room) && ldh <= avail
+        end
+        if dir_ok(straight_x, avail_x) && dir_ok(straight_y, avail_y)
+            return (ok = true, size = size, how = :hook)
+        end
+    end
+    return (ok = false, size = bar_size, how = :larger_plan)
+end
+
+"""
+Whether one direction's bars develop in `avail` beyond the column face.
+
+Straight Eq. (12-1) at `bar_size`, then a smaller bar, then a 90-degree
+hook whose tail fits in `h`. `width` is the width those bars are spaced
+across. ACI 318-11 §15.6.3 and §12.5 (corpus: aci-318-11, pages 274 and 217).
+"""
+function _one_way_anchorage(bar_size, As, width, h, cover, fc, fy, λ, avail, max_s)
+    for size in bar_size:-1:3
+        db = bar_diameter(size)
+        n = max(ceil(Int, As / bar_area(size)), 2, ceil(Int, width / max_s))
+        spacing = _bar_spacing(n, width, cover, db)
+        ld = _development_length_footing(size, fc, fy, λ, db;
+                                          clear_cover = cover, spacing = spacing)
+        if ld <= avail
+            how = size == bar_size ? :straight : :smaller_bar
+            return (ok = true, size = size, how = how)
+        end
+        tail_room = h - _hook_top(size, cover)
+        tail_room < zero(tail_room) && continue
+        ldh = _hooked_development_length(size, fc, fy, λ, db;
+                                          side_cover = cover, tail_cover = tail_room)
+        if ldh <= avail
+            return (ok = true, size = size, how = :hook)
+        end
+    end
+    return (ok = false, size = bar_size, how = :larger_plan)
 end
 
 """ACI 318-11 §10.14.1 — bearing check at column-footing interface (corpus: aci-318-11, page 162). Circular diameter is named `c1`. `col_along` / `col_across` are column-center stations on `Lf` and `B` (default: centered on the canonical `Lf` / `B`)."""
@@ -574,115 +714,123 @@ function design_footing(::SpreadFooting,
         end
     end
 
-    # Factored net soil pressure — size structural checks from q_max
-    # only after the plan is in the kern (ACI 336.2R §3.2.1 / §4.1).
-    # Mux/Muy also go to punching_check.
-    q_u = _eccentric_soil_pressure(Pu, demand.Mux, demand.Muy, B, Lf)
-    if P_abs > zero(P_abs) && !_eccentric_in_kern(q_u)
-        error("Spread footing Eq. (3-1) q_min < 0 at B=$B (ACI 336.2R §3.2.1, " *
-              "corpus: aci-336-combined-footings-mats, page 6); refuse rather than " *
-              "treat partial uplift as full-contact pressure.")
-    end
-    qu = q_u.q_max
-
-    # =====================================================================
-    # Step 2 & 3: Thickness (Punching + One-Way Shear)
-    # =====================================================================
-    # Effective depth d per ACI 318-11 §2.2 — "distance from extreme
-    # compression fiber to centroid of longitudinal tension reinforcement"
-    # (corpus: aci-318-11, page 37).  For a single layer of bars in a
-    # footing, the centroid sits db/2 above the bar's clear-cover face,
-    # so d = h − cover − db/2.
-    #
-    # Same discrete grid the linear scan walked, h_k = min_depth +
-    # k·depth_increment for k = 0..59.  The predicate improves with h
-    # on this fixed plan, so the lowest passing index is a bisection.
-    # The punching estimate is only the first index. It is not a lower
-    # bound: a seed above h_0 is still bisected back down.
-    # Face-of-column cantilever moments (Step 4) do not depend on h, so the
-    # flexure check joins the depth predicate.
-    arm_x = (Lf - c1) / 2
-    arm_y = (B  - c2) / 2
-    Mu_x = qu * B  * arm_x^2 / 2
-    Mu_y = qu * Lf * arm_y^2 / 2
-
-    function _depth_passes(h)
-        d_try = h - cover - db / 2
-        d_try < 4.0u"inch" && return (ok = false, punch = nothing, ow_ok = false)
-        _footing_flexure_ok(((Mu_x, B), (Mu_y, Lf)), d_try, fc, fy, ϕf) ||
-            return (ok = false, punch = nothing, ow_ok = false)
-
-        # Two-way (punching) shear with biaxial moments
-        Ac = col_shape == :circular ?
-             π * (c1 + d_try)^2 / 4 : (c1 + d_try) * (c2 + d_try)
-        Vu_p = qu * (B * Lf - Ac)
-        punch_try = punching_check(Vu_p, demand.Mux, demand.Muy, d_try, fc, c1, c2;
-                                    position = :interior, shape = col_shape,
-                                    λ = λ, ϕ = ϕv)
-
-        # One-way shear in both directions
-        ϕVc = ϕv * one_way_shear_capacity(fc, B, d_try; λ = λ)
-        cant_x = (Lf - c1) / 2 - d_try
-        cant_y = (B  - c2) / 2 - d_try
-        ow_ok = true
-        if cant_x > 0u"inch"
-            Vu_x = uconvert(u"lbf", qu * B * cant_x)
-            ow_ok = ow_ok && Vu_x ≤ ϕVc
+    # Thickness, flexure, then development. A bar that does not develop
+    # steps down, then a 90-degree hook, then a larger plan. Each larger
+    # plan repeats punching, one-way shear, and flexure.
+    bar_size = opts.bar_size
+    anchorage = :straight
+    h = opts.min_depth
+    punch = nothing
+    d = h - cover - db / 2
+    n_bars = 2
+    As_provided = Ab
+    developed = false
+    for attempt in 1:40
+        db = bar_diameter(bar_size)
+        Ab = bar_area(bar_size)
+        # Factored net soil pressure — size structural checks from q_max
+        # only after the plan is in the kern (ACI 336.2R §3.2.1 / §4.1).
+        q_u = _eccentric_soil_pressure(Pu, demand.Mux, demand.Muy, B, Lf)
+        if P_abs > zero(P_abs) && !_eccentric_in_kern(q_u)
+            error("Spread footing Eq. (3-1) q_min < 0 at B=$B (ACI 336.2R §3.2.1, " *
+                  "corpus: aci-336-combined-footings-mats, page 6); refuse rather than " *
+                  "treat partial uplift as full-contact pressure.")
         end
-        if cant_y > 0u"inch"
-            Vu_y = uconvert(u"lbf", qu * Lf * cant_y)
-            ow_ok = ow_ok && Vu_y ≤ ϕVc
+        qu = q_u.q_max
+
+        # Effective depth d per ACI 318-11 §2.2 (corpus: aci-318-11, page 37):
+        # d = h − cover − db/2 for one layer. The depth grid is
+        # h_k = min_depth + k·depth_increment, k = 0..59.
+        arm_x = (Lf - c1) / 2
+        arm_y = (B  - c2) / 2
+        Mu_x = qu * B  * arm_x^2 / 2
+        Mu_y = qu * Lf * arm_y^2 / 2
+
+        function _depth_passes(h_try)
+            d_try = h_try - cover - db / 2
+            d_try < 4.0u"inch" && return (ok = false, punch = nothing, ow_ok = false)
+            _footing_flexure_ok(((Mu_x, B), (Mu_y, Lf)), d_try, fc, fy, ϕf) ||
+                return (ok = false, punch = nothing, ow_ok = false)
+
+            Ac = col_shape == :circular ?
+                 π * (c1 + d_try)^2 / 4 : (c1 + d_try) * (c2 + d_try)
+            Vu_p = qu * (B * Lf - Ac)
+            punch_try = punching_check(Vu_p, demand.Mux, demand.Muy, d_try, fc, c1, c2;
+                                        position = :interior, shape = col_shape,
+                                        λ = λ, ϕ = ϕv)
+
+            ϕVc = ϕv * one_way_shear_capacity(fc, B, d_try; λ = λ)
+            cant_x = (Lf - c1) / 2 - d_try
+            cant_y = (B  - c2) / 2 - d_try
+            ow_ok = true
+            if cant_x > 0u"inch"
+                Vu_x = uconvert(u"lbf", qu * B * cant_x)
+                ow_ok = ow_ok && Vu_x ≤ ϕVc
+            end
+            if cant_y > 0u"inch"
+                Vu_y = uconvert(u"lbf", qu * Lf * cant_y)
+                ow_ok = ow_ok && Vu_y ≤ ϕVc
+            end
+            return (ok = punch_try.ok && ow_ok, punch = punch_try, ow_ok = ow_ok)
         end
 
-        return (ok = punch_try.ok && ow_ok, punch = punch_try, ow_ok = ow_ok)
-    end
-
-    h_seed = _spread_punching_depth_seed(qu, B, Lf, c1, c2, col_shape, fc, λ, ϕv, cover, db)
-    k_seed = _spread_depth_index(opts.min_depth, opts.depth_increment, h_seed)
-    selected = _smallest_spread_footing_depth(opts.min_depth, opts.depth_increment,
-                                               _depth_passes; k_seed=k_seed)
-    if !selected.ok
+        h_seed = _spread_punching_depth_seed(qu, B, Lf, c1, c2, col_shape, fc, λ, ϕv, cover, db)
+        k_seed = _spread_depth_index(opts.min_depth, opts.depth_increment, h_seed)
+        selected = _smallest_spread_footing_depth(opts.min_depth, opts.depth_increment,
+                                                   _depth_passes; k_seed = k_seed)
+        if !selected.ok
+            StructuralSizer.emit!(tc, :checker, "design_footing_spread_aci",
+                                  "foundation_group_$(demand.group_idx)", :failure;
+                                  reason = "depth_iteration_nonconvergence",
+                                  h_in = Float64(ustrip(u"inch", selected.h)),
+                                  last_punch_ok = selected.punch !== nothing && selected.punch.ok,
+                                  last_punch_ratio = selected.punch === nothing ? nothing :
+                                                     Float64(selected.punch.utilization),
+                                  last_one_way_ok = Bool(selected.ow_ok))
+            error("Spread footing depth did not converge after 60 iterations (h=$(selected.h)). " *
+                  "Check bearing pressure, column dimensions, or increase max depth.")
+        end
         h = selected.h
         punch = selected.punch
-        ow_ok = selected.ow_ok
-        StructuralSizer.emit!(tc, :checker, "design_footing_spread_aci", "foundation_group_$(demand.group_idx)", :failure;
-                              reason="depth_iteration_nonconvergence",
-                              h_in=Float64(ustrip(u"inch", h)),
-                              last_punch_ok=Bool(punch === nothing ? false : punch.ok),
-                              last_punch_ratio=punch === nothing ? nothing : Float64(punch.utilization),
-                              last_one_way_ok=Bool(ow_ok))
-        error("Spread footing depth did not converge after 60 iterations (h=$h). " *
-              "Check bearing pressure, column dimensions, or increase max depth.")
+        d = h - cover - db / 2
+
+        As_x = max(_flexural_steel_footing(Mu_x, B, d, fc, fy, ϕf),
+                   _min_steel_footing(B, h, fy))
+        As_y = max(_flexural_steel_footing(Mu_y, Lf, d, fc, fy, ϕf),
+                   _min_steel_footing(Lf, h, fy))
+        As_gov = max(As_x, As_y)
+        # Spacing ≤ min(3h, 18 in.): ACI 318-11 §7.6.5 (corpus: aci-318-11, page 96).
+        max_s = min(3h, 18.0u"inch")
+        n_bars = max(ceil(Int, As_gov / Ab), 2, ceil(Int, B / max_s))
+        As_provided = n_bars * Ab
+
+        if !opts.check_development
+            anchorage = attempt == 1 ? :straight : :larger_plan
+            developed = true
+            break
+        end
+        fit = _spread_anchorage(opts.bar_size, As_gov, B, h, cover, fc, fy, λ,
+                                arm_x - cover, arm_y - cover, max_s)
+        if fit.ok
+            if fit.size != bar_size
+                bar_size = fit.size
+                db = bar_diameter(bar_size)
+                Ab = bar_area(bar_size)
+                n_bars = max(ceil(Int, As_gov / Ab), 2, ceil(Int, B / max_s))
+                As_provided = n_bars * Ab
+                d = h - cover - db / 2
+            end
+            anchorage = attempt == 1 ? fit.how : :larger_plan
+            developed = true
+            break
+        end
+        B += si
+        Lf = B
     end
-    h = selected.h
-    punch = selected.punch
-    d = h - cover - db / 2  # ACI 318-11 §2.2 — centroid of tension reinforcement
-
-    # =====================================================================
-    # Step 4: Flexural Reinforcement (ACI 7.5)
-    # =====================================================================
-    As_x = max(_flexural_steel_footing(Mu_x, B,  d, fc, fy, ϕf),
-               _min_steel_footing(B, h, fy))
-    As_y = max(_flexural_steel_footing(Mu_y, Lf, d, fc, fy, ϕf),
-               _min_steel_footing(Lf, h, fy))
-    As_gov = max(As_x, As_y)
-
-    # Bar selection — n_bars is the larger of (As / A_bar) and the count
-    # required to keep spacing ≤ `min(3h, 18 in.)` for primary flexural
-    # reinforcement in slabs / footings (ACI 318-11 §7.6.5, corpus:
-    # aci-318-11, page 96).  Floor of 2 bars each way for constructability.
-    n_bars = max(ceil(Int, As_gov / Ab), 2)
-    max_s  = min(3h, 18.0u"inch")
-    n_bars = max(n_bars, ceil(Int, B / max_s))
-    As_provided = n_bars * Ab
-
-    # =====================================================================
-    # Step 5: Development Length (ACI 25.4.2)
-    # =====================================================================
-    if opts.check_development
-        ld    = _development_length_footing(opts.bar_size, fc, fy, λ, db)
-        avail = min(arm_x, arm_y) - cover
-        ld > avail && @warn "Development length: ld=$ld > available=$avail"
+    if !developed
+        error("Spread footing reinforcement does not develop from the column " *
+              "face within 40 plan increments (B=$B). ACI 318-11 §15.6.3 " *
+              "(corpus: aci-318-11, page 274).")
     end
 
     # =====================================================================
@@ -721,12 +869,16 @@ function design_footing(::SpreadFooting,
         V_conc,
         V_steel,
         utilization,
+        FoundationUtilizations(; bearing = Float64(util_bearing),
+                               punching = Float64(punch.utilization)),
     )
     StructuralSizer.emit!(tc, :checker, "design_footing_spread_aci", "foundation_group_$(demand.group_idx)", :exit;
                           B_m=Float64(ustrip(u"m", result.B)),
                           L_m=Float64(ustrip(u"m", result.L_ftg)),
                           D_m=Float64(ustrip(u"m", result.D)),
-                          utilization=Float64(result.utilization))
+                          utilization=Float64(result.utilization),
+                          anchorage=String(anchorage),
+                          bar_size=bar_size)
     return result
     # (unreachable) — kept to avoid accidentally placing emit! after return
 end

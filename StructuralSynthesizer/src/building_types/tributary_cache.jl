@@ -123,6 +123,17 @@ mutable struct TributaryCache
     # `tributary_axis`, or `ScopedFloorOverride.span_axis`). The direction
     # wins over `axis_override` for that cell. A setting: `clear!` keeps it.
     cell_axes::Dict{Int, NTuple{2, Float64}}
+
+    # Slab past the centerline already added to the support areas above:
+    # (story, vertex_idx) → (cell_idx → m²) for columns, and wall → (cell_idx
+    # → m²). Kept so `refresh_edge_strip_tributaries!` can replace them.
+    strip_columns::Dict{Tuple{Int, Int}, Dict{Int, Float64}}
+    strip_walls::IdDict{Any, Dict{Int, Float64}}
+
+    # Cell edges with a corner that has no column and no wall: cell_idx →
+    # plan segments (m). That half of the edge polygon went to the nearest
+    # support around the cell boundary, so the slab there overhangs.
+    overhang::Dict{Int, Vector{NTuple{2, NTuple{2, Float64}}}}
 end
 
 """Create an empty `TributaryCache` with no stored results and no axis override."""
@@ -132,7 +143,10 @@ TributaryCache() = TributaryCache(
     Dict{TributaryCacheKey, DateTime}(),
     Dict{Int, DateTime}(),
     nothing,
-    Dict{Int, NTuple{2, Float64}}()
+    Dict{Int, NTuple{2, Float64}}(),
+    Dict{Tuple{Int, Int}, Dict{Int, Float64}}(),
+    IdDict{Any, Dict{Int, Float64}}(),
+    Dict{Int, Vector{NTuple{2, NTuple{2, Float64}}}}(),
 )
 
 # -----------------------------------------------------------------------------
@@ -187,4 +201,7 @@ function clear!(cache::TributaryCache)
     empty!(cache.vertex)
     empty!(cache.edge_computed)
     empty!(cache.vertex_computed)
+    empty!(cache.strip_columns)
+    empty!(cache.strip_walls)
+    empty!(cache.overhang)
 end

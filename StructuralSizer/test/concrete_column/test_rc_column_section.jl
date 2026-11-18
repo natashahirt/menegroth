@@ -246,6 +246,28 @@ end
                 end
             end
         end
+
+        @testset "Interior bars stay off a face that cannot hold them" begin
+            # 8 × 14 in, #8, 1.5 in cover, #4 tie: corners 2.5 in from each face.
+            # Face lengths between corners are 3 in and 9 in; pitch is 2.5 in.
+            # The 3 in face holds no interior bar (3/2.5 − 1 < 1); the 9 in
+            # face holds 2. The proportional split put one on the short face.
+            f = StructuralSizer._split_perimeter
+            @test StructuralSizer._face_capacity(3.0, 2.5) == 0
+            @test StructuralSizer._face_capacity(9.0, 2.5) == 2
+            @test StructuralSizer._face_capacity(15.0, 2.5) == 5  # exact fit
+            @test f(4, 3.0, 9.0) == (1, 1, 0)
+            @test f(4, 3.0, 9.0; cap_tb=0, cap_lr=2) == (0, 2, 0)
+            # No room anywhere: left unchanged for the spacing check to reject.
+            @test f(6, 3.0, 9.0; cap_tb=0, cap_lr=2) == f(6, 3.0, 9.0)
+
+            sec = RCColumnSection(b=8u"inch", h=14u"inch", bar_size=8, n_bars=8)
+            @test length(sec.bars) == 8
+            xs = [ustrip(u"inch", bar.x) for bar in sec.bars]
+            @test all(x -> isapprox(x, 2.5) || isapprox(x, 5.5), xs)
+            @test_throws ArgumentError RCColumnSection(
+                b=8u"inch", h=14u"inch", bar_size=8, n_bars=10)
+        end
     end
 
     # ==========================================================================
@@ -399,6 +421,74 @@ end
         
         # Number of bars
         @test StructuralSizer.n_bars(sec) == 8
+    end
+
+    # ==========================================================================
+    # Test 13: Detailing — tie size (§25.7.2.2) and clear spacing (§25.2.3)
+    # ==========================================================================
+    @testset "Detailing: tie size and clear spacing" begin
+        # Bar centers sit at clear cover + tie diameter + d_b/2 from each face.
+        sec = RCColumnSection(b = 16u"inch", h = 16u"inch", bar_size = 9, n_bars = 4)
+        @test sec.tie_bar_size == 4
+        @test ustrip(u"inch", sec.bars[1].x) ≈ 1.5 + 0.5 + 1.128 / 2
+        sec3 = RCColumnSection(b = 16u"inch", h = 16u"inch", bar_size = 9, n_bars = 4,
+                               tie_bar_size = 3)
+        @test ustrip(u"inch", sec3.bars[1].x) ≈ 1.5 + 0.375 + 1.128 / 2
+        @test StructuralSizer.scale_column_section(sec3, 20u"inch", 20u"inch").tie_bar_size == 3
+
+        # §25.7.2.2: No. 3 ties only around No. 10 and smaller bars.
+        @test_throws ArgumentError RCColumnSection(
+            b = 24u"inch", h = 24u"inch", bar_size = 11, n_bars = 8, tie_bar_size = 3)
+
+        # §25.2.3: 20×20 with #8 — faces of 15 in. at a 2.5 in. minimum pitch
+        # hold 24 bars (clear = 1.5 in. exactly); 28 bars do not fit.
+        @test length(RCColumnSection(b = 20u"inch", h = 20u"inch",
+                                     bar_size = 8, n_bars = 24).bars) == 24
+        @test_throws ArgumentError RCColumnSection(
+            b = 20u"inch", h = 20u"inch", bar_size = 8, n_bars = 28)
+
+        # Explicit bars closer than 1.5 d_b clear are rejected too.
+        As9 = 1.0u"inch^2"
+        tight = [StructuralSizer.RebarLocation(x * u"inch", y * u"inch", As9)
+                 for (x, y) in ((2.5, 2.5), (4.0, 2.5), (13.5, 2.5), (2.5, 13.5), (13.5, 13.5))]
+        @test_throws ArgumentError RCColumnSection(16u"inch", 16u"inch", tight)
+
+        # Every default catalog section satisfies §25.2.3 and uses clear cover.
+        for s in standard_rc_columns()
+            @test s.cover ≈ 1.5u"inch"
+            @test StructuralSizer._check_column_bar_spacing(
+                s.bars, StructuralSizer.DEFAULT_AGGREGATE_SIZE) === nothing
+        end
+    end
+
+    # ==========================================================================
+    # §10.9.1: 0.01Ag ≤ Ast ≤ 0.08Ag is rejected, not warned.
+    # ==========================================================================
+    @testset "§10.9.1 reinforcement limits" begin
+        @test StructuralSizer._check_compression_rho(0.01) === nothing
+        @test StructuralSizer._check_compression_rho(0.08) === nothing
+        @test_throws ArgumentError StructuralSizer._check_compression_rho(0.009)
+        @test_throws ArgumentError StructuralSizer._check_compression_rho(0.081)
+        # 4 #4 on 16×16: As = 0.80 in², Ag = 256 in², ρg = 0.003125.
+        err = try
+            RCColumnSection(b = 16u"inch", h = 16u"inch", bar_size = 4, n_bars = 4)
+            nothing
+        catch e
+            e
+        end
+        @test err isa ArgumentError
+        @test occursin("10.9.1", sprint(showerror, err))
+    end
+
+    @testset "Rectangle slenderness matches the section ratio" begin
+        sec = RCColumnSection(b = 16u"inch", h = 12u"inch", bar_size = 8, n_bars = 6)
+        geom = ConcreteMemberGeometry(3.6; kx = 1.2, ky = 0.8, braced = true)
+        @test StructuralSizer.rectangular_kLu_over_r(
+            ustrip(u"inch", sec.h), ustrip(u"inch", geom.Lu), geom.kx) ≈
+            slenderness_ratio(sec, geom, StrongAxis())
+        @test StructuralSizer.rectangular_kLu_over_r(
+            ustrip(u"inch", sec.b), ustrip(u"inch", geom.Lu), geom.ky) ≈
+            slenderness_ratio(sec, geom, WeakAxis())
     end
 
 end

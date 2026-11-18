@@ -7,7 +7,8 @@
 #
 # When the inputs state cracked stiffness, to_asap! multiplies wall-shell E
 # by 0.35. The stage itself does not scale E. Thickness and length stay
-# fixed. ρl and ρt may be raised above the ratios the wall already carries.
+# fixed. ρl and ρt are set to the lightest ratios that pass. A ratio
+# already on the wall is not kept.
 #
 # Three stories on a 12 m square, two bays each way. Four piers per story,
 # two along X and two along Y, chosen so no two walls share an end. That
@@ -121,6 +122,44 @@ function _stage_across(skel, eidx)
     return abs(y2 - y1) <= abs(x2 - x1) ? (y1 + y2) / 2 : (x1 + x2) / 2
 end
 
+"""
+Story 0 is the support level and has no beam grid. Copy the story-1 beam
+plan down to the column bases so a ground wall has an edge to claim.
+"""
+function _stage_grade_beams!(skel)
+    beams = Set(get(skel.groups_edges, :beams, Int[]))
+    any(e -> e in beams && _stage_horizontal(skel, e), skel.stories[0].edges) && return skel
+    z0 = skel.stories_z[1]
+    for e in skel.stories[1].edges
+        (e in beams && _stage_horizontal(skel, e)) || continue
+        v1, v2 = skel.edge_indices[e]
+        x1, y1 = _stage_xy(skel, v1)
+        x2, y2 = _stage_xy(skel, v2)
+        StructuralSynthesizer.add_element!(skel, Meshes.Segment(
+            Meshes.Point(x1 * u"m", y1 * u"m", z0),
+            Meshes.Point(x2 * u"m", y2 * u"m", z0));
+            group=:beams, level_idx=0)
+    end
+    grade_of = Dict{NTuple{2, Float64}, Int}()
+    for (k, v) in enumerate(skel.vertices)
+        c = Meshes.coords(v)
+        abs(ustrip(u"m", c.z) - ustrip(u"m", z0)) <= 1e-6 || continue
+        grade_of[(round(ustrip(u"m", c.x); digits=6), round(ustrip(u"m", c.y); digits=6))] = k
+    end
+    for face in skel.stories[1].faces
+        cycle = Int[]
+        for v in skel.face_vertex_indices[face]
+            x, y = _stage_xy(skel, v)
+            key = (round(x; digits=6), round(y; digits=6))
+            haskey(grade_of, key) || error("ordinary-wall fixture: no grade vertex at $key")
+            push!(cycle, grade_of[key])
+        end
+        StructuralSynthesizer.add_face!(skel, Meshes.Ngon(skel.vertices[cycle]...);
+                                        group=:grade, level_idx=0, v_indices=cycle)
+    end
+    return skel
+end
+
 """Ground beam on the plan segment, still in `:beams`."""
 function _stage_ground_edge(skel, beams, x1, y1, x2, y2)
     ground = [e for e in skel.stories[0].edges if e in beams && _stage_horizontal(skel, e)]
@@ -167,6 +206,7 @@ const _STAGE_THREE_BAY = (
 function _stage_office(; x=12.0u"m", y=12.0u"m", x_bays=2, y_bays=2,
                        segments=_STAGE_BOTH_AXES, thickness=0.3u"m")
     skel = gen_medium_office(x, y, 4.0u"m", x_bays, y_bays, 3)
+    _stage_grade_beams!(skel)
     beams = Set(get(skel.groups_edges, :beams, Int[]))
     _stage_claim_segments!(skel, beams, segments)
     struc = BuildingStructure(skel)
@@ -198,6 +238,7 @@ end
 """10×6 m, three stories, one wall line along X. Y has no wall."""
 function _stage_office_unstable()
     skel = gen_medium_office(10.0u"m", 6.0u"m", 4.0u"m", 1, 2, 3)
+    _stage_grade_beams!(skel)
     beams = Set(get(skel.groups_edges, :beams, Int[]))
     ground = [e for e in skel.stories[0].edges if e in beams && _stage_horizontal(skel, e)]
     @assert !isempty(ground)
@@ -227,6 +268,7 @@ end
 """One story, 10×6 m, a wall on each long side. No wall above a lintel."""
 function _stage_office_one_story()
     skel = gen_medium_office(10.0u"m", 6.0u"m", 4.0u"m", 1, 2, 1)
+    _stage_grade_beams!(skel)
     beams = Set(get(skel.groups_edges, :beams, Int[]))
     ground = [e for e in skel.stories[0].edges if e in beams && _stage_horizontal(skel, e)]
     longest = maximum(_stage_plan_length(skel, e) for e in ground)
@@ -590,12 +632,14 @@ end
     @test any(m -> m > 1.0, result.pdelta_multipliers)
     @test any(r -> startswith(string(r.case), "QE") && r.check == "in-plane shear",
               result.checks[1])
-    # Wind alone amplifies by about 1/(1−θ). On the pier where factored dead
-    # and wind moments oppose, the net second-order moment exceeds 1.4 times
-    # the net first-order moment, so §6.2.5.3 records a failure.
-    @test any(r -> r.check == "second-order moment" && !r.passed &&
-                   r.clause == "ACI 318-19 §6.2.5.3",
-              Iterators.flatten(values(result.checks)))
+    # The story magnifier is about 1/(1−θ). This fixture also multiplies the
+    # Y pier's stiffness by 0.001, so a pier's own wind moment can still
+    # exceed 1.4. That record is the action's ratio. Dead and wind opposing
+    # each other is not the check; the unit test below covers that case.
+    second_order = [r for r in Iterators.flatten(values(result.checks))
+                    if r.check == "second-order moment"]
+    @test all(r -> !r.passed && r.clause == "ACI 318-19 §6.2.5.3" && r.ratio > 1.4,
+              second_order)
     @test all(i -> struc.walls[i].thickness == sections[i][1], eachindex(struc.walls))
     @test all(i -> struc.walls[i].ρl + 1e-12 >= sections[i][2] &&
                    struc.walls[i].ρt + 1e-12 >= sections[i][3], eachindex(struc.walls))
@@ -760,6 +804,7 @@ end
     @test all(records -> !isempty(records), values(gdesign.walls))
     @test all(records -> all(r -> r.case === :D, records), values(gdesign.walls))
     @test isempty(gdesign.seismic_story_drift)
+
     gjson = design_to_json(gdesign)
     @test !isempty(gjson.walls)
     @test isempty(gjson.seismic_story_drift)
@@ -805,6 +850,61 @@ function _ratio_wall(; ρl=0.0025, ρt=0.0025, lw=6.0, t=0.3, h=4.0)
 end
 
 _ratio_action(N, V, M) = CombinedWallAction(:strength_1_2D_1_6L, :only, N, V, M)
+
+@testset "§6.2.5.3 is the ratio of each action" begin
+    wall = _ratio_wall()
+    records = WallCheckRecord[]
+    first = _ratio_action(0.0, 0.0, 20.0)
+    grown = _ratio_action(0.0, 0.0, 50.0)
+    # Gravity 1000 → 1050 and earthquake −980 → −1000. The nets are 20 and 50.
+    StructuralSynthesizer._record_second_order_moment!(
+        records, wall, first, grown; wall_index=1, case=:QE,
+        first_parts=[1000.0, -980.0], grown_parts=[1050.0, -1000.0])
+    @test isempty(records)
+
+    # The earthquake moment itself doubles. That part is the ratio.
+    StructuralSynthesizer._record_second_order_moment!(
+        records, wall, first, grown; wall_index=1, case=:QE,
+        first_parts=[1000.0, 100.0], grown_parts=[1050.0, 200.0])
+    @test length(records) == 1
+    @test records[1].ratio ≈ 2.0
+    @test records[1].demand ≈ 200.0
+    @test records[1].capacity ≈ 140.0
+    @test records[1].clause == "ACI 318-19 §6.2.5.3"
+    @test !records[1].passed
+
+    # One action, and no parts: the combination moment is that action.
+    empty!(records)
+    StructuralSynthesizer._record_second_order_moment!(
+        records, wall,
+        _ratio_action(0.0, 0.0, 100.0), _ratio_action(0.0, 0.0, 150.0);
+        wall_index=1, case=:D)
+    @test length(records) == 1
+    @test records[1].ratio ≈ 1.5
+
+    gravity = PierGravityActions(:Lr,
+        WallAction(1.0e6, 100.0, 50.0), WallAction(10.0, 20.0, 30.0),
+        WallAction(0.0, 0.0, 4.0))
+    qe = WallAction(2.0e5, 5.0e5, 8.0e6)
+    seismic = StructuralSynthesizer._seismic_strength_actions(gravity, qe, 1.0, 1.0)
+    seismic_parts = StructuralSynthesizer._seismic_moment_parts(gravity, qe, 1.0, 1.0)
+    earthquake_factor = Dict(combo.name => combo.E for combo in asce7_strength_combinations)
+    @test length(seismic) == length(seismic_parts) > 0
+    for (action, part) in zip(seismic, seismic_parts)
+        @test length(part) == 2
+        @test sum(part) ≈ action.M
+        @test part[2] ≈ earthquake_factor[action.combination] * qe.M
+    end
+    wind = WallAction(0.0, 1.0e5, 2.0e6)
+    wind_actions = StructuralSynthesizer._wind_strength_actions(gravity, wind)
+    wind_parts = StructuralSynthesizer._wind_moment_parts(gravity, wind)
+    wind_factor = Dict(combo.name => combo.W for combo in asce7_strength_combinations)
+    @test length(wind_actions) == length(wind_parts) > 0
+    for (action, part) in zip(wind_actions, wind_parts)
+        @test sum(part) ≈ action.M
+        @test part[2] ≈ wind_factor[action.combination] * wind.M
+    end
+end
 
 "First grid ratio at or above `floor` whose in-plane flexure passes, else nothing."
 function _first_passing_ρl(floor, lw, t, material, N, M)
@@ -874,14 +974,12 @@ end
     @test bent.ρl == expected
     @test bent.ρl > 0.0025
 
-    # A caller ratio that already meets the requirement is kept, including
-    # one that is not on the grid. Here the §11.6.2 formula would ask for
-    # about 0.0039, and the strength cap brings that back to 0.0025, so the
-    # caller's 0.0030 is not raised.
-    kept = _ratio_wall(; ρl=0.0030, ρt=0.0081)
-    select!(kept, [_ratio_action(1e3, 1e3, 1e3)], mat; hw)
-    @test kept.ρl == 0.0030
-    @test kept.ρt == 0.0081
+    # A carried ratio above the requirement is not kept. The shear here is
+    # inside the concrete term, so both ratios return to the 0.0025 floor.
+    carried = _ratio_wall(; ρl=0.0030, ρt=0.0081)
+    select!(carried, [_ratio_action(1e3, 1e3, 1e3)], mat; hw)
+    @test carried.ρl == 0.0025
+    @test carried.ρt == 0.0025
 
     # Shear above φ·Vn,max does not throw. ρt goes to the top of the grid and
     # the recorded shear check fails.
@@ -895,28 +993,35 @@ end
                                        boundary=:pinned, hw, ρt_strength=ρ_over)
     @test any(r -> r.check == "in-plane shear" && !r.passed, over_records)
 
-    # A caller ratio already above the grid is kept when the cap is exceeded.
+    # A carried ratio above the grid is not kept when the cap is exceeded.
+    # The wall stops at the top of the grid.
     above_caller = _ratio_wall(; ρt=0.03)
     select!(above_caller, [_ratio_action(1e3, Vu_over, 1e3)], mat; hw)
-    @test above_caller.ρt == 0.03
+    @test above_caller.ρt == StructuralSynthesizer.ORDINARY_WALL_RHO_GRID[end]
 
-    # Squat wall: Eq. (11.6.2) at ρt = 0.005 and hw/lw = 1 is 0.004375.
-    # ρt required for strength is 0.003, so ρl stops at 0.003, and the
-    # recorded minimum check uses that same cap.
+    # Squat wall: ρt required for strength is 0.003. The selector drops the
+    # carried 0.005 to the lightest covering grid ratio. ρl is Eq. (11.6.2)
+    # at that ratio, and need not exceed the strength requirement. The
+    # recorded minimum check uses that same floor.
     cap0s = wall_shear_capacity_si(fc, fyt, 4.0, 0.3, 0.0, 4.0; λ=λ)
     capps = wall_shear_capacity_si(fc, fyt, 4.0, 0.3, 1e-4, 4.0; λ=λ)
     Vu_squat = cap0s.ϕVn + 0.003 * (capps.ϕVn - cap0s.ϕVn) / 1e-4
     squat = _ratio_wall(; ρt=0.005, lw=4.0, h=4.0)
     ρ_squat = select!(squat, [_ratio_action(1e3, Vu_squat, 1e3)], mat; hw=4.0u"m")
     @test isapprox(ρ_squat, 0.003; rtol=1e-4)
-    @test squat.ρt == 0.005
-    @test isapprox(squat.ρl, 0.003; atol=1e-6)
+    @test squat.ρt in StructuralSynthesizer.ORDINARY_WALL_RHO_GRID
+    @test 0.003 - 1e-6 <= squat.ρt < 0.005
+    # ACI 318-19 Eq. (11.6.2) at hw/ℓw = 1, capped by ρt required for strength.
+    formula = 0.0025 + 0.5 * (2.5 - 1.0) * (squat.ρt - 0.0025)
+    expect_l = min(max(formula, 0.0025), max(ρ_squat, 0.0025))
+    @test isapprox(squat.ρl, expect_l; atol=1e-6)
+    @test squat.ρl <= ρ_squat + 1e-6
     squat_records = check_ordinary_wall(squat, [_ratio_action(1e3, Vu_squat, 1e3)];
                                         material=mat, wall_index=1, case=:D,
                                         boundary=:pinned, hw=4.0u"m", ρt_strength=ρ_squat)
     min_l = only(r for r in squat_records if r.check == "min longitudinal reinf ρl")
     @test min_l.passed
-    @test isapprox(min_l.demand, 0.003; atol=1e-6)
+    @test isapprox(min_l.demand, expect_l; atol=1e-6)
 end
 
 @testset "Building frame gravity share" begin

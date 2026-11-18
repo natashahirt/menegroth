@@ -360,6 +360,13 @@ function _iterate_beams_columns!(struc, params, beam_opts, column_opts, beam_kwa
                     shell_spans = shell_spans,
                     section_floor = upward_only ? _section_floors(struc) : nothing,
                     beam_kwargs...)
+        # Ribs at the head carry shear on concrete alone, then a line of
+        # pieces shares the §8.13.2 width and a limited soffit step. The head
+        # grows only for what that does not clear.
+        raise_head_face_ribs!(struc, params, beam_opts;
+                              I_factor = params.beam_I_factor,
+                              gravity_factor = member_self_weight_acceleration(params))
+        conform_rib_lines!(struc, params, beam_opts; I_factor = params.beam_I_factor)
         # The solid head is the bays around each column. A failing check grows
         # those bays, which adds beams, so the next pass sizes against them.
         grow_building_solid_heads!(struc, params)
@@ -410,19 +417,22 @@ end
 Beam and column sizing for the stories in `levels`, which the story shell
 designs (see [`_story_shell_design_levels`](@ref)).
 
-Each round resizes the beams against the story shell
+The first round resizes the beams against the story shell
 ([`size_beams_with_story_shell!`](@ref)), then runs the beam and column loop
-with those shell demands held. Columns are rotational springs on the
-shell and beam stiffness sets the shell's beam demands, so a round that
-changed a beam section after the shell, or a column section the shell
-solved with, is followed by another. The next round starts from this one's
-shell demands. Each story is meshed once for all rounds.
+with those shell demands held. Columns are rotational springs on the shell
+and beam stiffness sets the shell's beam demands, so a round that changed a
+beam or a column after the shell has not yet checked those sections.
+
+When that round does not hold and the sections can be checked one at a time,
+later rounds do not free-pick. [`_reconcile_shell_frame!`](@ref) solves the
+shell on the sections the frame left and resizes only the groups that fail
+it. A passing group keeps its section. Each story is meshed once.
 
 When the rounds settle, the slab bars on each story come from a shell solve
 with the final beam and column sections. Each slab on those stories records
 `converged` and, when the rounds did not settle, why. Returns
-`(converged, iterations)`, where `converged` requires both the rounds and
-the last beam and column loop to settle.
+`(converged, iterations)`, where `converged` requires the shell of the
+installed sections and the frame of those sections to both pass.
 """
 function _size_with_story_shell!(struc, params, beam_opts, column_opts, beam_kwargs,
                                  levels; tc = nothing, max_rounds::Int = 3)
@@ -435,8 +445,10 @@ function _size_with_story_shell!(struc, params, beam_opts, column_opts, beam_kwa
     held = false
     # Discrete steel and rectangular concrete beams only move up once the first
     # shell call settles, so a beam that attracts load and fails cannot trade
-    # places with a lighter one.
+    # places with a lighter one. T-beams are not floored; a later round checks
+    # the sections in place instead of free-picking them again.
     upward_only = _shell_ratchet_ok(struc, beam_opts, beam_kwargs)
+    checkable = _round_checkable(struc, beam_opts, column_opts)
     floor = nothing
     for round in 1:max_rounds
         columns_before = [section(c) for c in struc.columns]
@@ -483,6 +495,19 @@ function _size_with_story_shell!(struc, params, beam_opts, column_opts, beam_kwa
         held && break
         seed = (demands = sb.demands, spans = sb.spans, regions = sb.regions)
         upward_only && (floor = _section_floors(struc))
+        # A checkable catalog keeps the sections this round left and tests
+        # them against a shell solved on those sections. Another free pass
+        # would replace a group that already passes.
+        checkable && break
+    end
+    if !held && checkable
+        closed = _reconcile_shell_frame!(struc, params, beam_opts, column_opts, beam_kwargs,
+                                         levels, shells; shell_kwargs = shell_kwargs,
+                                         seed_regions = seed.regions)
+        iters += closed.attempts
+        closed.held && (converged = true; held = true)
+        get(ENV, "SS_TRACE_SHELL_PASSES", "") == "1" &&
+            println("story-shell reconcile held=$(closed.held)  attempts=$(closed.attempts)")
     end
     held || @warn "Story-shell sizing did not settle after $max_rounds rounds" levels
     _record_story_shell_wall_axials!(struc, shells)

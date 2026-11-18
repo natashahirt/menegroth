@@ -71,7 +71,7 @@ println("\n=== P0-1 reused frame node at lowest base ===")
 frame = _frame_node(0.0, 0.0, 4.0)
 dof_before = copy(frame.dof)
 vec_before = frame.dof
-shells, _ = _mesh([_wall(0.0, 0.0, 6.0, 0.0, 1, 3.0u"m")], Asap.Node[frame])
+shells, _, _, _ = _mesh([_wall(0.0, 0.0, 6.0, 0.0, 1, 3.0u"m")], Asap.Node[frame])
 p0_1 = _report(
     "reused (0,0,4) dof unchanged and not all-false",
     frame.dof == FRAME_DOF && frame.dof === vec_before && frame.dof == dof_before && frame.dof != FIXED,
@@ -98,7 +98,7 @@ p0_2b = _report(
 println("\n=== P0-2 new base nodes, frame 2 m away ===")
 frame_far = _frame_node(0.0, 0.0, 4.0)
 dof_far_before = copy(frame_far.dof)
-shells2, _ = _mesh([_wall(2.0, 0.0, 8.0, 0.0, 1, 3.0u"m")], Asap.Node[frame_far])
+shells2, _, _, _ = _mesh([_wall(2.0, 0.0, 8.0, 0.0, 1, 3.0u"m")], Asap.Node[frame_far])
 p0_2_flags = Bool[]
 for (x, name) in ((2.0, "start"), (5.0, "mid"), (8.0, "end"))
     hits = _dof_of(shells2, x, 0.0, 4.0)
@@ -191,7 +191,7 @@ _report(
 # Probe: second wall whose base is not the lowest, no frame node nearby.
 # ---------------------------------------------------------------------------
 println("\n=== probe: grade wall and a wall based 4 m higher ===")
-shells3, nodes3 = _mesh([
+shells3, nodes3, _, _ = _mesh([
     _wall(0.0, 0.0, 4.0, 0.0, 0, 4.0u"m"),   # base z = 0
     _wall(20.0, 0.0, 24.0, 0.0, 1, 4.0u"m"), # base z = 4, isolated in plan
 ], Asap.Node[])
@@ -218,7 +218,7 @@ println("  upper-wall nodes that are fully free: $n_free_upper / $(count(nd -> u
 println("\n=== probe: pier height 0.5 mm ===")
 function _probe_short()
     try
-        short_shells, _ = _mesh([_wall(0.0, 0.0, 2.0, 0.0, 0, 0.0005u"m")], Asap.Node[])
+        short_shells, _, _, _ = _mesh([_wall(0.0, 0.0, 2.0, 0.0, 0, 0.0005u"m")], Asap.Node[])
         b = _dof_of(short_shells, 0.0, 0.0, 0.0)
         t = _dof_of(short_shells, 0.0, 0.0, 0.0005)
         same = !isempty(b) && !isempty(t) && b[1] === t[1]
@@ -258,7 +258,7 @@ _probe_solve(shells3)
 
 println("\n=== probe: 0.5 mm shell nodes ===")
 function _probe_short_nodes()
-    short_shells, _ = _mesh([_wall(0.0, 0.0, 2.0, 0.0, 0, 0.0005u"m")], Asap.Node[])
+    short_shells, _, _, _ = _mesh([_wall(0.0, 0.0, 2.0, 0.0, 0, 0.0005u"m")], Asap.Node[])
     zs = Float64[]
     for sh in short_shells
         println("  area=$(sh.area) nodes=" * join((
@@ -281,7 +281,7 @@ dummy = Asap.ShellTri3(
      Asap.Node([1.0u"m", 0.0u"m", 4.0u"m"], :free),
      Asap.Node([0.0u"m", 1.0u"m", 4.0u"m"], :free)),
     0.2u"m", NWC_4000.E, NWC_4000.ν; id=:diaphragm, ρ=0.0)
-shells4, _ = _mesh([_wall(0.0, 0.0, 6.0, 0.0, 1, 3.0u"m")], Asap.Node[];
+shells4, _, _, _ = _mesh([_wall(0.0, 0.0, 6.0, 0.0, 1, 3.0u"m")], Asap.Node[];
                    shells=Asap.ShellElement[dummy])
 _report("reused free shell node at (0,0,4) keeps all-free dof",
         shell_nd.dof == shell_dof_before == Asap.fixDict[:free],

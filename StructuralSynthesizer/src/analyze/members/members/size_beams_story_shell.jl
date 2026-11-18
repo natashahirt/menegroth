@@ -124,7 +124,10 @@ Every step ends on a pass that changed no section, so each section was
 checked against a shell solved with those same sections. `section_floor`
 (group id → `(section, exact)`) starts upward-only from the first pass and
 skips the trim, for a caller continuing an earlier call. Other beam options
-keep the free passes throughout.
+keep the free passes throughout. A pass that returns to a section vector
+already left is settled by [`_check_shell_settle!`](@ref): each state in that
+cycle is checked against a shell solved with those sections, and the cheapest
+state that passes is kept.
 
 Returns `(converged, passes, demands, spans, regions, shells,
 service_converged, region_mismatch)`. `converged` is true when a pass that
@@ -180,8 +183,8 @@ function size_beams_with_story_shell!(struc::BuildingStructure,
         "section_floor needs discrete beam options with n_max_sections = 0 and one " *
         "material on every framing level. Concrete beams must be rectangular."))
 
-    size_beams!(struc, opts; shell_demands = shell_demands, shell_spans = shell_spans,
-                section_floor = section_floor, kwargs...)
+    _size_story_beams!(struc, opts; shell_demands = shell_demands, shell_spans = shell_spans,
+                       section_floor = section_floor, kwargs...)
     # Diagnosis only. SS_TRACE_SHELL_PASSES=1 prints each pass's section
     # changes and whether the section vector repeats an earlier pass.
     tracing = get(ENV, "SS_TRACE_SHELL_PASSES", "") == "1"
@@ -226,6 +229,50 @@ function size_beams_with_story_shell!(struc::BuildingStructure,
             service_converged = r.service_converged, region_mismatch = r.region_mismatch)
 end
 
+"""Solve every story shell on the current beam sections and merge the demands."""
+function _gather_shell_demands!(run; service_on::Bool, regions)
+    struc = run.struc
+    demands = Dict{Int, ShellBeamDemand}()
+    spans = Dict{Int, Vector{Any}}()
+    used = Dict{Int, Vector{NamedTuple}}()
+    service_converged = true
+    for level in run.levels
+        shell = get!(run.shells, level) do
+            build_story_shell(struc, level; composite_regions = regions,
+                              run.build_kwargs...)
+        end
+        res = solve_story_shell!(shell, struc; composite_regions = regions,
+                                 run.solve_kwargs..., service = service_on)
+        res.analysis_status === :analyzed || throw(ArgumentError(
+            "story $level shell was not analyzed: $(join(res.reasons, "; "))"))
+        _merge_shell_demand!(demands, res.beam_demands)
+        _merge_shell_spans!(spans, res.service_spans)
+        merge!(used, res.composite_regions)
+        service_on && (service_converged &= res.service_converged)
+    end
+    return (demands = demands, spans = spans, used = used,
+            service_converged = service_converged,
+            shifts = _region_shifts(demands, used),
+            regions = _next_shell_regions(demands, used))
+end
+
+_shell_pass_result(; converged, passes, demands, spans, regions, service_on,
+                   service_converged, shifts) =
+    (converged = converged, passes = passes, demands = demands, spans = spans,
+     regions = regions, service_on = service_on,
+     service_converged = service_converged, region_mismatch = shifts)
+
+"""
+`size_beams!`, then rebuild and re-solve the frame on the sections it wrote.
+The story-shell callers size with `reanalyze = false`, and the next sizing
+call reads frame forces and deflections from that frame.
+"""
+function _size_story_beams!(struc, opts; kwargs...)
+    size_beams!(struc, opts; kwargs...)
+    _reanalyze_after_section_change!(struc)
+    return struc
+end
+
 """
 Up to `run.max_passes` story-shell passes: solve every story's shell with the
 current sections, then resize. `floor` floors each group's next pick (see
@@ -234,7 +281,9 @@ becomes the sections just chosen. `first_pass` numbers the passes for the
 trace and the returned count.
 
 Stops on a pass that changed no section and moved no composite region, once
-the service solve is on (when wanted).
+the service solve is on (when wanted). A pass that returns to a section
+vector already left is settled by checking each state in that cycle against
+a shell solved on those sections.
 """
 function _story_shell_passes!(run; service_on::Bool, regions, floor,
                               ratchet_from::Int, first_pass::Int)
@@ -244,50 +293,54 @@ function _story_shell_passes!(run; service_on::Bool, regions, floor,
     service_converged = true
     next_regions = regions
     shifts = Dict{Int, Float64}()
+    history = Vector{Vector{Any}}()
     last_pass = first_pass + run.max_passes - 1
     for k in 1:run.max_passes
         pass = first_pass + k - 1
-        empty!(demands)
-        empty!(spans)
-        used = Dict{Int, Vector{NamedTuple}}()
-        for level in run.levels
-            shell = get!(run.shells, level) do
-                build_story_shell(struc, level; composite_regions = next_regions,
-                                  run.build_kwargs...)
-            end
-            res = solve_story_shell!(shell, struc; composite_regions = next_regions,
-                                     run.solve_kwargs..., service = service_on)
-            res.analysis_status === :analyzed || throw(ArgumentError(
-                "story $level shell was not analyzed: $(join(res.reasons, "; "))"))
-            _merge_shell_demand!(demands, res.beam_demands)
-            _merge_shell_spans!(spans, res.service_spans)
-            merge!(used, res.composite_regions)
-            service_on && (service_converged &= res.service_converged)
-        end
+        fresh = _gather_shell_demands!(run; service_on, regions = next_regions)
+        demands, spans = fresh.demands, fresh.spans
+        service_on && (service_converged &= fresh.service_converged)
         before = [_story_beam_section(struc, b) for b in struc.beams]
-        size_beams!(struc, run.opts; shell_demands = demands,
-                    shell_spans = service_on ? spans : nothing,
-                    section_floor = floor, run.kwargs...)
+        _size_story_beams!(struc, run.opts; shell_demands = demands,
+                           shell_spans = service_on ? spans : nothing,
+                           section_floor = floor, run.kwargs...)
         after = [_story_beam_section(struc, b) for b in struc.beams]
-        shifts = _region_shifts(demands, used)
-        next_regions = _next_shell_regions(demands, used)
+        shifts = fresh.shifts
+        next_regions = fresh.regions
         held = all(_sections_identical(a, b) for (a, b) in zip(before, after))
         settled = all(<=(run.region_tol), values(shifts))
         run.history === nothing ||
             _trace_shell_pass!(run.history, pass, struc.beams, before, after,
                                demands, service_on)
+        # A held strength pass still has to run service. That is not a cycle.
+        turned_service = false
         if held && settled
             (service_on || !run.want_service) &&
-                return (converged = true, passes = pass, demands = demands, spans = spans,
-                        regions = next_regions, service_on = service_on,
-                        service_converged = service_converged, region_mismatch = shifts)
+                return _shell_pass_result(; converged = true, passes = pass, demands, spans,
+                                          regions = next_regions, service_on,
+                                          service_converged, shifts)
             service_on = true
+            turned_service = true
+        end
+        earlier = turned_service ? nothing :
+                  findfirst(s -> _beam_sections_identical(s, after), history)
+        push!(history, after)
+        if earlier !== nothing
+            outcome = _check_shell_settle!(run, history[earlier:end - 1], service_on,
+                                           next_regions, pass, service_converged)
+            if outcome !== nothing
+                if outcome.converged && !service_on && run.want_service
+                    service_on = true
+                    next_regions = outcome.regions
+                else
+                    return outcome
+                end
+            end
         end
         k >= ratchet_from && (floor = _section_floors(struc))
     end
-    return (converged = false, passes = last_pass, demands = demands, spans = spans,
-            regions = next_regions, service_on = service_on,
-            service_converged = service_converged, region_mismatch = shifts)
+    return _shell_pass_result(; converged = false, passes = last_pass, demands, spans,
+                              regions = next_regions, service_on, service_converged, shifts)
 end
 
 """
@@ -306,7 +359,8 @@ function _trim_story_shell!(run, r)
     obj_kept = _beams_objective(struc, opts)
     spans_kw = r.service_on ? r.spans : nothing
     before = [_story_beam_section(struc, b) for b in struc.beams]
-    size_beams!(struc, opts; shell_demands = r.demands, shell_spans = spans_kw, run.kwargs...)
+    _size_story_beams!(struc, opts; shell_demands = r.demands, shell_spans = spans_kw,
+                       run.kwargs...)
     after = [_story_beam_section(struc, b) for b in struc.beams]
     if run.history !== nothing
         println("—— trim: free pick on the converged demands ——")
@@ -328,12 +382,12 @@ function _trim_story_shell!(run, r)
         println("—— trim dropped (converged=$(t.converged), objective $(obj_trim) vs $(obj_kept)) ——")
     exact = Dict(gid => (section = f.section, exact = true) for (gid, f) in kept)
     try
-        size_beams!(struc, opts; shell_demands = r.demands, shell_spans = spans_kw,
-                    section_floor = exact, run.kwargs...)
+        _size_story_beams!(struc, opts; shell_demands = r.demands, shell_spans = spans_kw,
+                           section_floor = exact, run.kwargs...)
     catch e
         (e isa ArgumentError && occursin("No feasible sections", e.msg)) || rethrow()
-        size_beams!(struc, opts; shell_demands = r.demands, shell_spans = spans_kw,
-                    section_floor = kept, run.kwargs...)
+        _size_story_beams!(struc, opts; shell_demands = r.demands, shell_spans = spans_kw,
+                           section_floor = kept, run.kwargs...)
     end
     return _story_shell_passes!(run; service_on = r.service_on, regions = r.regions,
                                 floor = _section_floors(struc), ratchet_from = 0,

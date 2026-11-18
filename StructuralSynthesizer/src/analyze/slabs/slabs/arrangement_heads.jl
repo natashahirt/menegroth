@@ -23,6 +23,9 @@ head keep the stem section `bw` by `h_rib`. Ribs on a head take the gross
 rectangle from [`solid_edge_widths`](@ref), of depth `depth`. The model has
 no self-weight: `pressure` is the whole load.
 
+`rib_dims[e]`, when given, is `(bw, d, h)` in metres of the rib on edge `e`,
+or `nothing` for an edge that takes `bw` by `h_rib`.
+
 Returns the model, the upward reaction at each column, and the element index
 of each arrangement edge.
 """
@@ -33,7 +36,8 @@ function analyze_arrangement_grillage(arr::StructuralSizer.RibArrangement,
                                       depth::Length,
                                       bw::Length, h_rib::Length,
                                       column_size::Length = 0.40u"m",
-                                      column_height::Length = 3.0u"m")
+                                      column_height::Length = 3.0u"m",
+                                      rib_dims = nothing)
     isfinite(pressure) || throw(ArgumentError("panel pressure must be finite, got $pressure"))
     pressure >= 0 || throw(ArgumentError("panel pressure is not negative, got $pressure"))
     depth > zero(depth) || throw(ArgumentError("the solid head depth is positive, got $depth"))
@@ -44,10 +48,13 @@ function analyze_arrangement_grillage(arr::StructuralSizer.RibArrangement,
     column_height > zero(column_height) || throw(ArgumentError(
         "the column stub is positive, got $column_height"))
     length(columns) >= 1 || throw(ArgumentError("the grillage needs a column"))
+    rib_dims === nothing || length(rib_dims) == length(arr.edges) || throw(ArgumentError(
+        "rib_dims has $(length(rib_dims)) entries for $(length(arr.edges)) rib edges"))
     widths = StructuralSizer.solid_edge_widths(arr, heads)
     profiles = StructuralSizer.bay_edge_profiles(arr)
     ρ = 0.0u"kg/m^3"
     rib_sec = StructuralSizer.solid_head_section(bw, h_rib, concrete; density = ρ)
+    own_secs = Dict{NTuple{2, Float64}, Any}()
     col_sec = StructuralSizer.solid_head_section(column_size, column_size, concrete; density = ρ)
     nodes = Asap.Node[]
     for (x, y) in arr.nodes
@@ -57,6 +64,13 @@ function analyze_arrangement_grillage(arr::StructuralSizer.RibArrangement,
     loads = Asap.AbstractLoad[]
     for (e, (a, b)) in enumerate(arr.edges)
         sec = rib_sec
+        own = rib_dims === nothing ? nothing : rib_dims[e]
+        if own !== nothing
+            sec = get!(own_secs, (own[1], own[3])) do
+                StructuralSizer.solid_head_section(own[1] * u"m", own[3] * u"m", concrete;
+                                                   density = ρ)
+            end
+        end
         w = get(widths, e, 0.0)
         if w > 0
             sec = StructuralSizer.solid_head_section(w * u"m", depth, concrete; density = ρ)
@@ -210,14 +224,35 @@ function _arrangement_rib_path(arr, e::Int, from::Int, bounds_head)
     return path
 end
 
+"""`(bw, d, h)` of the rib on edge `e`, metres, or the shared section."""
+function _edge_rib_dims(rib_dims, e::Int, bw, d_rib, h_rib)
+    own = rib_dims === nothing ? nothing : rib_dims[e]
+    own === nothing && return (bw = bw, d = d_rib, h = h_rib)
+    return (bw = own[1] * u"m", d = own[2] * u"m", h = own[3] * u"m")
+end
+
+"""Edge of `path` that holds the point `x` metres from the head face."""
+function _path_edge_at(arr, path, x::Real)
+    s = 0.0
+    for (e, _) in path
+        a, b = arr.edges[e]
+        s += hypot((arr.nodes[b] .- arr.nodes[a])...)
+        x <= s + 1e-9 && return e
+    end
+    return path[end][1]
+end
+
 """
 Column punching, one-way shear, and stem compression for one solved head.
 
 The punching section is [`column_head_section`](@ref), at d/2 outside the
 outline. The column reaction includes the load inside that section; the
 shear on the section is the reaction minus that load, the same deduction
-as [`check_rib_web_punching`](@ref). One-way shear is at `d_rib` from the
-face. Hogging is at the face, and only the positive hogging component.
+as [`check_rib_web_punching`](@ref). One-way shear is at d from the face,
+where d is that of the rib piece at the face, and the section there is the
+piece that holds that point. Hogging is at the face on the face piece, and
+only the positive hogging component. `rib_dims` gives each edge its own
+section; without it every rib is `bw`, `d_rib`, `h_rib`.
 """
 function check_arrangement_head(arr, head, solved, pressure::Real;
                                 concrete::StructuralSizer.Concrete,
@@ -225,7 +260,8 @@ function check_arrangement_head(arr, head, solved, pressure::Real;
                                 bw::Length, d_rib::Length, h_rib::Length,
                                 fy::Pressure,
                                 topping::Union{Nothing, Length} = nothing,
-                                free_loops = ())
+                                free_loops = (),
+                                rib_dims = nothing)
     d_head > zero(d_head) || throw(ArgumentError(
         "the head's effective depth is positive, got $d_head"))
     section = StructuralSizer.column_head_section(arr, head, d_head; free_loops = free_loops)
@@ -245,26 +281,27 @@ function check_arrangement_head(arr, head, solved, pressure::Real;
         closed = section.closed, αs = αs, λ = concrete.λ)
     col = (ok = column.ok, ratio = column.utilization, direction = column.direction)
     load_map = Asap.get_elemental_loads(solved.model)
-    d_m = ustrip(u"m", d_rib)
-    stem = topping === nothing ? nothing : h_rib - topping
-    if stem !== nothing && stem < zero(stem)
-        throw(ArgumentError("the topping is deeper than the rib, got $topping in $h_rib"))
-    end
     one_way = NamedTuple[]
     hogging = NamedTuple[]
     for rib in _arrangement_leaving_ribs(arr, head, solved.n_edges)
-        # The section is at d from the face, or at the end of the rib when
-        # the rib ends first.
+        face = _edge_rib_dims(rib_dims, rib.path[1][1], bw, d_rib, h_rib)
+        stem = topping === nothing ? nothing : face.h - topping
+        if stem !== nothing && stem < zero(stem)
+            throw(ArgumentError("the topping is deeper than the rib, got $topping in $(face.h)"))
+        end
+        # ACI 318-11 §11.1.3.1: the section is at d from the face, or at the
+        # end of the rib when the rib ends first.
         reach = _arrangement_path_length(arr, rib.path)
-        Vu_rib = _path_shear(solved.model, rib.path, solved.model.u, load_map,
-                             min(d_m, max(reach - 1e-6, 0.0)))
-        chk = StructuralSizer.check_rib_shear_at_head(Vu_rib, bw, d_rib, concrete.fc′;
+        x = min(ustrip(u"m", face.d), max(reach - 1e-6, 0.0))
+        at = _edge_rib_dims(rib_dims, _path_edge_at(arr, rib.path, x), bw, d_rib, h_rib)
+        Vu_rib = _path_shear(solved.model, rib.path, solved.model.u, load_map, x)
+        chk = StructuralSizer.check_rib_shear_at_head(Vu_rib, at.bw, at.d, concrete.fc′;
                                                       λ = concrete.λ)
-        push!(one_way, merge(chk, (outward = rib.outward,)))
+        push!(one_way, merge(chk, (outward = rib.outward, bw = at.bw, d = at.d)))
         Mu = _path_hogging(solved.model, rib.path, solved.model.u, load_map, 0.0)
-        hog = StructuralSizer.check_rib_hogging_at_head(Mu, bw, d_rib, concrete.fc′, fy;
+        hog = StructuralSizer.check_rib_hogging_at_head(Mu, face.bw, face.d, concrete.fc′, fy;
                                                         stem = stem)
-        push!(hogging, merge(hog, (outward = rib.outward,)))
+        push!(hogging, merge(hog, (outward = rib.outward, bw = face.bw, d = face.d)))
     end
     governed = StructuralSizer.govern_solid_head_checks(col, one_way, hogging; Vu = Vu)
     return merge(governed, (section = section, column_check = column))
@@ -280,16 +317,32 @@ function _arrangement_path_length(arr, path)
     return s
 end
 
+"""Share of the arrangement area that the heads cover."""
+function _solid_fraction(arr, heads)
+    total = sum(b.area for b in arr.bays)
+    total > 0 || return 0.0
+    solid = 0.0
+    for h in heads, b in h.bays
+        solid += arr.bays[b].area
+    end
+    return solid / total
+end
+
 """
     resolve_arrangement_heads(arr, columns, pressure; kwargs...) -> NamedTuple
 
 Seed a head at each column, cast those bays solid, solve, and grow.
 `heads` starts from those bays instead of the seed.
 
-Each step grows the worst failing head and solves again: one bay toward a
-named direction, or one ring all the way around when the check names none
-([`grow_checked_column_head`](@ref)). The step is kept when its ratio
-falls. A step that meets another head or the slab edge, whose outline is not
+Each step grows the worst failing head and solves again. Column punching and
+rib one-way shear at d from the head face grow it; stem compression does not.
+The step goes one bay toward the column punching face when that check fails,
+otherwise toward the failing ribs' shared outward direction, or one ring all
+the way around when no side is named ([`grow_checked_column_head`](@ref)).
+When that side is the slab edge or another head, the next of those is tried
+([`_head_growth_directions`](@ref)).
+The step is kept when the larger of the column punching and rib one-way
+ratios falls. A step that meets another head or the slab edge, whose outline is not
 one critical section, or that does not lower the ratio, is not taken,
 and that head is left where it is. Another head
 growing changes the frame, so a head that could not grow is tried again.
@@ -311,7 +364,9 @@ function resolve_arrangement_heads(arr::StructuralSizer.RibArrangement, columns,
                                   topping::Union{Nothing, Length} = nothing,
                                   column_size::Length = 0.40u"m",
                                   column_height::Length = 3.0u"m",
-                                  heads::Union{Nothing, AbstractVector{<:StructuralSizer.ColumnSolidHead}} = nothing)
+                                  heads::Union{Nothing, AbstractVector{<:StructuralSizer.ColumnSolidHead}} = nothing,
+                                  max_solid_fraction::Union{Nothing, Real} = nothing,
+                                  rib_dims = nothing)
     if heads === nothing
         heads = StructuralSizer.ColumnSolidHead[
             StructuralSizer.seed_column_head(arr, xy) for xy in columns]
@@ -320,6 +375,7 @@ function resolve_arrangement_heads(arr::StructuralSizer.RibArrangement, columns,
     end
     free_loops = isempty(outline) ? () : (outline, holes...)
     steps = 0
+    capped = false
     stuck = falses(length(heads))
     local solved, checks
     while true
@@ -327,26 +383,54 @@ function resolve_arrangement_heads(arr::StructuralSizer.RibArrangement, columns,
             concrete = concrete, depth = depth, d_head = d_head,
             bw = bw, d_rib = d_rib, h_rib = h_rib, fy = fy, topping = topping,
             column_size = column_size, column_height = column_height,
-            free_loops = free_loops)
+            free_loops = free_loops, rib_dims = rib_dims)
         all(c -> c.ok, checks) && return (
             ok = true, heads = heads, checks = checks, steps = steps,
             stop = :passed, solved = solved)
-        open = [i for i in eachindex(heads) if !checks[i].ok && !stuck[i]]
+        # The solid head grows for column punching and for a rib that fails
+        # one-way shear on concrete alone. Stem compression is a rib-depth
+        # problem and does not fill more pans.
+        open = [i for i in eachindex(heads) if _head_grows(checks[i]) && !stuck[i]]
         if isempty(open)
             return (ok = false, heads = heads, checks = checks, steps = steps,
-                    stop = :stopped, solved = solved)
+                    stop = capped ? :solid_cap : :stopped, solved = solved)
         end
-        i = open[argmax([checks[k].ratio for k in open])]
-        grown = try
-            taken = [b for (k, h) in enumerate(heads) if k != i for b in h.bays]
-            StructuralSizer.grow_checked_column_head(arr, heads[i], checks[i];
-                                                     taken = taken, free_loops = free_loops)
-        catch err
-            err isa ArgumentError || rethrow()
-            stuck[i] = true
-            continue
+        i = open[argmax([_head_growth_ratio(checks[k]) for k in open])]
+        taken = [b for (k, h) in enumerate(heads) if k != i for b in h.bays]
+        grown = nothing
+        # The preferred side can be the slab edge: a column moment toward the
+        # next slab names a face this slab's head cannot grow across. The
+        # next side in the order is tried instead.
+        for dir in _head_growth_directions(checks[i])
+            step = try
+                face = merge(checks[i], (direction = dir,))
+                StructuralSizer.grow_checked_column_head(arr, heads[i], face;
+                                                         taken = taken, free_loops = free_loops)
+            catch err
+                err isa ArgumentError || rethrow()
+                _trace_head_step(heads[i], checks[i],
+                                 "toward $(dir) threw: " * sprint(showerror, err))
+                nothing
+            end
+            step === nothing && continue
+            step.bays == heads[i].bays && continue
+            # ENGINEERING JUDGMENT: growth stops once the solid bays cover
+            # more than `max_solid_fraction` of the rib arrangement.
+            if max_solid_fraction !== nothing
+                trial_heads = copy(heads)
+                trial_heads[i] = step
+                if _solid_fraction(arr, trial_heads) > Float64(max_solid_fraction) + 1e-9
+                    capped = true
+                    _trace_head_step(heads[i], checks[i],
+                                     "toward $(dir) would pass the solid-area cap")
+                    continue
+                end
+            end
+            grown = step
+            break
         end
-        if grown.bays == heads[i].bays
+        if grown === nothing
+            _trace_head_step(heads[i], checks[i], "no side can grow")
             stuck[i] = true
             continue
         end
@@ -358,9 +442,11 @@ function resolve_arrangement_heads(arr::StructuralSizer.RibArrangement, columns,
                 concrete = concrete, depth = depth, d_head = d_head,
                 bw = bw, d_rib = d_rib, h_rib = h_rib, fy = fy, topping = topping,
                 column_size = column_size, column_height = column_height,
-                free_loops = free_loops)
+                free_loops = free_loops, rib_dims = rib_dims)
         catch err
             err isa ArgumentError || rethrow()
+            _trace_head_step(heads[i], checks[i],
+                             "trial with $(length(grown.bays)) bays threw: " * sprint(showerror, err))
             nothing
         end
         if trial_solved === nothing
@@ -368,7 +454,11 @@ function resolve_arrangement_heads(arr::StructuralSizer.RibArrangement, columns,
             continue
         end
         _, trial_checks = trial_solved
-        if trial_checks[i].ratio < checks[i].ratio - 1e-9
+        # Kept only when the ratio that grows the head falls.
+        if _head_growth_ratio(trial_checks[i]) < _head_growth_ratio(checks[i]) - 1e-9
+            _trace_head_step(heads[i], checks[i],
+                             "grew to $(length(grown.bays)) bays, ratio " *
+                             "$(round(_head_growth_ratio(trial_checks[i]); digits = 3))")
             heads = trial
             steps += 1
             # The other heads were judged on the previous frame.
@@ -376,19 +466,86 @@ function resolve_arrangement_heads(arr::StructuralSizer.RibArrangement, columns,
             steps <= length(arr.bays) || throw(ArgumentError(
                 "the solid heads grew once for every bay and have not passed"))
         else
+            _trace_head_step(heads[i], checks[i],
+                             "trial with $(length(grown.bays)) bays did not lower the ratio " *
+                             "($(round(_head_growth_ratio(trial_checks[i]); digits = 3)))")
             stuck[i] = true
         end
     end
+end
+
+"""One line per growth attempt when `SS_TRACE_SOLID_HEADS=1`."""
+function _trace_head_step(head, check, outcome::AbstractString)
+    get(ENV, "SS_TRACE_SOLID_HEADS", "") == "1" || return
+    println("solid head at $(head.column)  bays=$(length(head.bays))  ",
+            "ratio=$(round(_head_growth_ratio(check); digits = 3))  ",
+            "governing=$(check.governing)  $(outcome)")
+    return
+end
+
+"""Ribs leaving the head that fail one-way shear on concrete alone."""
+function _failing_one_way(check)
+    hasproperty(check, :ribs) || return NamedTuple[]
+    return [r for r in check.ribs if !r.ok]
+end
+
+"""
+True when column punching fails or a rib leaving the head fails one-way shear.
+
+Stem compression alone does not grow the head.
+"""
+function _head_grows(check)
+    hasproperty(check, :column) && !check.column.ok && return true
+    return !isempty(_failing_one_way(check))
+end
+
+"""
+The side a growth step follows, or `nothing` for a ring.
+
+A failing column punching check chooses: its face, including the 2% band in
+`moment_names_a_face`. Otherwise the failing one-way ribs choose: their shared
+outward direction, or none when they leave in different directions.
+"""
+function _head_growth_direction(check)
+    if hasproperty(check, :column) && !check.column.ok
+        return hasproperty(check.column, :direction) ? check.column.direction : nothing
+    end
+    failing = _failing_one_way(check)
+    isempty(failing) && return hasproperty(check, :direction) ? check.direction : nothing
+    return StructuralSizer._one_way_growth_direction(failing)
+end
+
+"""
+Sides a growth step tries, in order: [`_head_growth_direction`](@ref), then
+the failing ribs' shared outward direction, then one ring (`nothing`).
+"""
+function _head_growth_directions(check)
+    dirs = Any[_head_growth_direction(check)]
+    failing = _failing_one_way(check)
+    isempty(failing) || push!(dirs, StructuralSizer._one_way_growth_direction(failing))
+    push!(dirs, nothing)
+    return unique(dirs)
+end
+
+"""
+The ratio a growth step is judged on: the larger of column punching and rib
+one-way shear. Stem compression is not in it.
+"""
+function _head_growth_ratio(check)
+    hasproperty(check, :column) && hasproperty(check.column, :ratio) || return check.ratio
+    rib = hasproperty(check, :ribs) && !isempty(check.ribs) ?
+          maximum(r.ratio for r in check.ribs) : 0.0
+    return max(check.column.ratio, rib)
 end
 
 """Solve `heads` and check each column."""
 function _solve_arrangement_heads(arr, heads, columns, pressure;
                                  free_loops, concrete, depth, d_head,
                                  bw, d_rib, h_rib, fy, topping,
-                                 column_size, column_height)
+                                 column_size, column_height, rib_dims = nothing)
     solved = analyze_arrangement_grillage(arr, heads, columns, pressure;
         concrete = concrete, depth = depth, bw = bw, h_rib = h_rib,
-        column_size = column_size, column_height = column_height)
+        column_size = column_size, column_height = column_height, rib_dims = rib_dims)
     checks = map(enumerate(heads)) do (i, head)
         one = (
             model = solved.model,
@@ -399,7 +556,7 @@ function _solve_arrangement_heads(arr, heads, columns, pressure;
         check_arrangement_head(arr, head, one, pressure;
             concrete = concrete, d_head = d_head, h_head = depth,
             bw = bw, d_rib = d_rib, h_rib = h_rib, fy = fy, topping = topping,
-            free_loops = free_loops)
+            free_loops = free_loops, rib_dims = rib_dims)
     end
     return solved, checks
 end

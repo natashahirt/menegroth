@@ -44,10 +44,18 @@ function initialize!(struc::BuildingStructure;
                      cell_groupings::Union{Symbol, Vector{Vector{Int}}}=:auto,
                      slab_group_ids::Union{Nothing, AbstractVector}=nothing,
                      braced_by_slabs::Bool=true,
-                     wall_thickness=nothing)
+                     wall_thickness=nothing,
+                     topping_span=nothing,
+                     rib_bays=nothing,
+                     joists_planned::Bool=false)
     skel = struc.skeleton
     
     find_faces!(skel)
+    # Beam-supported floors get trimmers and headers before cells are cut,
+    # because the new beams change the faces. Flat plate, flat slab, waffle,
+    # and vault openings are left unframed.
+    frame_slab_openings!(skel; floor_type=floor_type, plan_axis=plan_axis,
+                         tributary_axis=tributary_axis, joists_planned=joists_planned)
     rebuild_geometry_cache!(skel)
     
     # Slabs: cells → slabs
@@ -57,12 +65,16 @@ function initialize!(struc::BuildingStructure;
                       cell_groupings=cell_groupings,
                       slab_group_ids=slab_group_ids,
                       scoped_floor_overrides=scoped_floor_overrides,
-                      col_I_factor=col_I_factor)
+                      col_I_factor=col_I_factor,
+                      topping_span=topping_span,
+                      rib_bays=rib_bays,
+                      joists_planned=joists_planned)
     
     # Framing: segments → members
     initialize_segments!(struc)
     update_bracing!(struc; braced_by_slabs=braced_by_slabs)
     initialize_members!(struc; wall_thickness=wall_thickness, plan_axis=plan_axis)
+    assert_one_way_slabs_supported(struc; joists_planned=joists_planned)
     
     # Compute slab coloring for concurrent sizing
     compute_slab_parallel_batches!(struc)
@@ -72,4 +84,32 @@ function initialize!(struc::BuildingStructure;
     
     @debug "Initialized BuildingStructure" cells=length(struc.cells) slabs=length(struc.slabs) segments=length(struc.segments) beams=length(struc.beams) columns=length(struc.columns) struts=length(struc.struts) walls=length(struc.walls) slab_batches=length(struc.slab_parallel_batches)
     return struc
+end
+
+"""
+    assert_one_way_slabs_supported(struc)
+
+Throw `ArgumentError` when a `:one_way` slab has a cell with no `:beams` or
+`:walls` edge on its boundary. A one-way slab spans between line supports;
+on columns alone it is a two-way (flat plate) system, so the input is invalid.
+"""
+function assert_one_way_slabs_supported(struc::BuildingStructure; joists_planned::Bool=false)
+    # Ribs are added after this check. A planned joist spacing is the support.
+    joists_planned && return nothing
+    skel = struc.skeleton
+    support_edges = union(Set(get(skel.groups_edges, :beams, Int[])),
+                          Set(get(skel.groups_edges, :walls, Int[])))
+    unsupported = Int[]
+    for slab in struc.slabs
+        slab.floor_type === :one_way || continue
+        for cell_idx in slab.cell_indices
+            face_idx = struc.cells[cell_idx].face_idx
+            any(in(support_edges), skel.face_edge_indices[face_idx]) || push!(unsupported, face_idx)
+        end
+    end
+    isempty(unsupported) && return nothing
+    throw(ArgumentError(
+        "floor_type :one_way needs beams or walls to span between, but face(s) " *
+        "$(sort!(unique!(unsupported))) have no :beams or :walls edge. Add beams, " *
+        "or use :flat_plate / :flat_slab for column-only supports."))
 end

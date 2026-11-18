@@ -1,9 +1,8 @@
 # ---------------------------------------------------------------------------
 # Model preferences for the built-in coordinator roster.
 #
-# Policy: prefer Anthropic (Claude) and xAI (Grok) models. The reasoning-heavy
-# checkers (reviewer, critic) run on Anthropic Opus; lighter planning/meta work
-# runs on Sonnet; the hands-on implementers (engineer, tester) run on xAI Grok.
+# Policy: run the coordinator roster on xAI Grok 4.7. The critic stays on
+# Anthropic Opus. The zettelkasten extractor stays on Anthropic Sonnet.
 # These are model-only partial overrides, so each built-in agent keeps its
 # stock persona, role, and passes; only the model changes (see
 # .cursor/rules/coordinator.mdc > "Custom Agents").
@@ -29,21 +28,21 @@ tester:
   model: grok-4.7-high
 
 reviewer:
-  # Anthropic Sonnet — opt-in only (critic is the baseline checker; see
-  # coordinator-local.mdc), so it doesn't need Opus.
-  model: claude-sonnet-5-thinking-high
+  # xAI Grok 4.7 high — opt-in only (critic is the baseline checker; see
+  # coordinator-local.mdc).
+  model: grok-4.7-high
 
 critic:
-  # Anthropic Opus 5.5 — strongest adversarial reasoning.
+  # Anthropic Opus — adversarial check of code-derived math.
   model: claude-opus-5-5-thinking-high
 
 explore:
-  # Anthropic Sonnet — read-only planning / codebase scoping.
-  model: claude-sonnet-5-thinking-high
+  # xAI Grok 4.7 high — read-only planning / codebase scoping.
+  model: grok-4.7-high
 
 memory:
-  # Anthropic Sonnet — session recording / bookkeeping.
-  model: claude-sonnet-5-thinking-high
+  # xAI Grok 4.7 high — session recording / bookkeeping.
+  model: grok-4.7-high
 
 zettelkasten-extractor:
   description: "Summarizes sources into structured zettelkasten notes with cross-linking and Zotero integration"

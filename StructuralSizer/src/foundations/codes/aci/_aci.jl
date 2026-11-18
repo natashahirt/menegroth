@@ -1,5 +1,7 @@
 include("spread_footing.jl")
 include("strip_footing.jl")
+include("wall_plan.jl")
+include("wall_strip_footing.jl")
 include("mat_footing.jl")
 include("mat_shukla.jl")
 include("mat_winkler_fea.jl")

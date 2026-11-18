@@ -319,7 +319,8 @@ function _composite_child_ids(struc::BuildingStructure, group_ids)
     return ids
 end
 
-"""Cell-dead, self-weight, wall, drop-panel, and fire-coating weight stay on the steel section.
+"""Cell-dead, self-weight, wall, drop-panel, fire-coating, and curtain-wall weight stay on
+the steel section.
 
 Fire coating is taken as applied before the slab is composite (user decision
 2026-11-09), so the bare steel carries it.
@@ -344,6 +345,7 @@ function _is_pattern_dead_load(ld, dead_ids::Set{UInt})
     ld isa Asap.GravityLoad && return true
     ld isa Asap.NodeForce && ld.id === DROP_PANEL_LOAD_ID && return true
     ld isa Asap.LineLoad && ld.id === FIRE_COATING_LOAD_ID && return true
+    ld isa Asap.LineLoad && ld.id === :cladding && return true
     return ld isa Asap.AreaLoad && ld.id === :wall_self_weight
 end
 

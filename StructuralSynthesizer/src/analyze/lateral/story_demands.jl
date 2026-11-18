@@ -172,6 +172,7 @@ function factored_seismic_cases(analysis::ElfStoryAnalysis, combo::LoadCombinati
     return out
 end
 
+"""Largest stability coefficient on the ELF drift cases. ASCE 7-22 §12.8.7."""
 function _max_drift_theta(analysis::ElfStoryAnalysis)
     θmax = 0.0
     found = false

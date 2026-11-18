@@ -24,6 +24,13 @@ using Asap: kip, ksi, to_ksi, to_kip, to_kipft
 # Checker Type
 # ==============================================================================
 
+"""One concurrent shear row, in kip and kip·in. `Nu_kip` is compression-positive."""
+struct RCBeamShearCase
+    Vu_kip::Float64
+    Nu_kip::Float64
+    Tu_kipin::Float64
+end
+
 """
     ACIBeamChecker <: AbstractCapacityChecker
 
@@ -47,6 +54,9 @@ with `optimize_discrete`.
 - `stirrup_shear`: when `false`, shear adequacy is ``Vu \\le \\phi V_c`` and `Vs`
   is not credited. ENGINEERING JUDGMENT: ACI 318-11 §11.1.1 permits
   ``V_n = V_c + V_s``. A rib at a solid-head face is checked on concrete alone.
+- `shear_cases`: One list of [`RCBeamShearCase`](@ref) per demand, indexed by
+  `member_idx`. Shear and torsion are checked on each concurrent row. Empty
+  keeps the demand's own `Vu`, `Nu`, and `Tu`.
 
 # Usage
 ```julia
@@ -84,6 +94,8 @@ struct ACIBeamChecker <: AbstractCapacityChecker
     # ENGINEERING JUDGMENT. `false` withholds Vs at a solid-head face.
     # ACI 318-11 §11.1.1 permits Vc + Vs (corpus: aci-318-11).
     stirrup_shear::Bool
+    # One list per demand, indexed by `member_idx`. Empty keeps the demand envelope.
+    shear_cases::Vector{Vector{RCBeamShearCase}}
 end
 
 function ACIBeamChecker(;
@@ -100,11 +112,16 @@ function ACIBeamChecker(;
     shell_spans::AbstractVector = Vector{RCShellSpan}[],
     shell_limits::AbstractVector{Symbol} = [:immediate_ll, :total],
     joist_spacing::Union{Nothing, Length} = nothing,
+    joist_spacing_in::Real = 0.0,
     joist_direction::Symbol = :one_way,
     stirrup_shear::Bool = true,
+    shear_cases::AbstractVector = Vector{RCBeamShearCase}[],
 )
     max_d = isa(max_depth, Length) ? ustrip(u"m", max_depth) : Float64(max_depth)
-    s_in = joist_spacing === nothing ? 0.0 : Float64(ustrip(u"inch", joist_spacing))
+    (joist_spacing !== nothing && joist_spacing_in > 0) && throw(ArgumentError(
+        "give the joist spacing once: `joist_spacing` (length) or `joist_spacing_in` (inches)"))
+    s_in = joist_spacing === nothing ? Float64(joist_spacing_in) :
+                                       Float64(ustrip(u"inch", joist_spacing))
     ACIBeamChecker(Float64(fy_ksi), Float64(fyt_ksi), Float64(Es_ksi),
                    Float64(λ), max_d,
                    Float64(w_dead_kplf), Float64(w_live_kplf),
@@ -112,7 +129,20 @@ function ACIBeamChecker(;
                    _as_sustained_live_fraction(defl_sustained_live),
                    Vector{RCShellSpan}[collect(RCShellSpan, s) for s in shell_spans],
                    collect(Symbol, shell_limits),
-                   s_in, joist_direction, stirrup_shear)
+                   s_in, joist_direction, stirrup_shear,
+                   Vector{RCBeamShearCase}[RCBeamShearCase[c for c in rows] for rows in shear_cases])
+end
+
+"""Shear rows for this demand. An empty list keeps the demand's own Vu, Nu, and Tu."""
+function _demand_shear_rows(checker::ACIBeamChecker, demand::RCBeamDemand)
+    lists = checker.shear_cases
+    if !isempty(lists)
+        i = demand.member_idx
+        1 <= i <= length(lists) ||
+            throw(ArgumentError("shear_cases has no list for demand $i"))
+        isempty(lists[i]) || return lists[i]
+    end
+    return [RCBeamShearCase(to_kip(demand.Vu), _get_Nu_kip(demand), _get_Tu_kipin(demand))]
 end
 
 """1 when stirrups may carry shear, 0 when the section is checked on concrete alone."""

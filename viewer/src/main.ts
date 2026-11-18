@@ -2635,9 +2635,17 @@ function requestedScene(): string | null {
 }
 
 async function loadDefault() {
-  const names = requestedScene()
-    ? [requestedScene()!]
-    : ["core_office_v7.mgscene", "core_office.mgscene", "demo.mgscene"]
+  const asked = requestedScene()
+  let names = ["core_office_v7.mgscene", "core_office.mgscene", "demo.mgscene"]
+  const listed = await fetch("/scenes.json").catch(() => null)
+  if (listed?.ok) {
+    const parsed = await listed.json().catch(() => null)
+    if (Array.isArray(parsed)) {
+      const valid = parsed.filter((name): name is string => typeof name === "string" && /^[\w.-]+\.mgscene$/.test(name))
+      if (valid.length > 0) names = valid
+    }
+  }
+  if (asked) names = [asked, ...names.filter((name) => name !== asked)]
   for (const name of names) {
     const response = await fetch(`/${name}`)
     if (response.ok) {

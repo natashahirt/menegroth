@@ -59,6 +59,63 @@ end
 # ACI 318-11 dispatch
 # ─────────────────────────────────────────────────────────────────────────────
 
+"""
+Gross concrete inertia of the columns on this mat and of the concrete beams
+that frame into those supports.
+
+ACI 336.2R Eq. (5-2) (corpus: aci-336-combined-footings-mats, PDF page 8).
+`I_B` is about the axis of the strip checked on width `B` (spans in x,
+`c1` taken along x). `I_L` is the other axis. A steel beam is left out:
+the equation uses one modulus, the footing's `E'`. A T-beam contributes
+its stem only. The slab width that belongs in `Ib` was not readable.
+"""
+function _mat_framed_inertia(struc, supp_indices)
+    I_B = 0.0u"m^4"
+    I_L = 0.0u"m^4"
+    verts = Set{Int}()
+    for i in supp_indices
+        s = struc.supports[i]
+        push!(verts, s.vertex_idx)
+        c1, c2 = s.c1, s.c2
+        (isnothing(c1) || isnothing(c2) || c1 <= 0u"m" || c2 <= 0u"m") && continue
+        if s.shape == :circular
+            I = π * c1^4 / 64
+            I_B += I
+            I_L += I
+        else
+            I_B += c2 * c1^3 / 12
+            I_L += c1 * c2^3 / 12
+        end
+    end
+    skel = struc.skeleton
+    for beam in struc.beams
+        sec = section(beam)
+        I = if sec isa StructuralSizer.RCBeamSection
+            sec.b * sec.h^3 / 12
+        elseif sec isa StructuralSizer.RCTBeamSection
+            sec.bw * sec.h^3 / 12
+        else
+            nothing
+        end
+        I === nothing && continue
+        isempty(beam.base.segment_indices) && continue
+        edge = struc.segments[beam.base.segment_indices[1]].edge_idx
+        (edge < 1 || edge > length(skel.edge_indices)) && continue
+        v1, v2 = skel.edge_indices[edge]
+        (v1 in verts || v2 in verts) || continue
+        p1 = Meshes.coords(skel.vertices[v1])
+        p2 = Meshes.coords(skel.vertices[v2])
+        dx = abs(Float64(ustrip(u"m", p2.x - p1.x)))
+        dy = abs(Float64(ustrip(u"m", p2.y - p1.y)))
+        if dx >= dy
+            I_B += I
+        else
+            I_L += I
+        end
+    end
+    return (I_B = I_B, I_L = I_L)
+end
+
 """Dispatch a single foundation through the ACI 318 sizing path (spread, strip, or mat)."""
 function _size_fnd_aci!(struc, f_idx, fnd, n_supp, demands, soil, opts;
                         tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
@@ -85,22 +142,28 @@ function _size_fnd_aci!(struc, f_idx, fnd, n_supp, demands, soil, opts;
             "interface steel; form a strip or refuse (ACI 318-11 §15.8.1.2(b), " *
             "corpus: aci-318-11, page 275).")
         # Mat foundation — all supports in one slab
-        mat_demands = [demands[i] for i in fnd.support_indices]
+        mat_demands = [_lateral_column_demand(struc, demands[i]) for i in fnd.support_indices]
         positions = _support_positions_xy(struc, fnd.support_indices)
+        framed = _mat_framed_inertia(struc, fnd.support_indices)
         result = StructuralSizer.design_footing(StructuralSizer.MatFoundation(), 
-            mat_demands, positions, soil; opts=opts.mat_params, tc=tc)
+            mat_demands, positions, soil; opts=opts.mat_params, tc=tc,
+            framed_I_B = framed.I_B, framed_I_L = framed.I_L)
         _assign_foundation!(struc, f_idx, fnd, result, :mat, mat)
 
     elseif fnd.foundation_type == :spread && n_supp == 1
         demand = demands[fnd.support_indices[1]]
-        result = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), demand, soil; opts=opts.spread_params, tc=tc)
+        actions = foundation_actions_at(struc, demand.group_idx)
+        result = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), demand, soil;
+            opts=opts.spread_params, tc=tc,
+            service_actions = actions === nothing ? StructuralSizer.FootingAction[] : actions.service,
+            strength_actions = actions === nothing ? StructuralSizer.FootingAction[] : actions.strength)
         _assign_foundation!(struc, f_idx, fnd, result, :spread, mat)
 
     elseif fnd.foundation_type in (:combined, :strip) || n_supp > 1
         # ACI 318-11 §15.8.1.2(b) (corpus: aci-318-11, page 275): a mixed-sign
         # couple must be a strip so tensile interface steel is designed, not
         # omitted by an isolated spread.
-        strip_demands = [demands[i] for i in fnd.support_indices]
+        strip_demands = [_lateral_column_demand(struc, demands[i]) for i in fnd.support_indices]
         axes = _support_strip_axes(struc, fnd.support_indices)
         results = map(axes) do axis
             positions = _support_positions_along_axis(struc, fnd.support_indices, axis)

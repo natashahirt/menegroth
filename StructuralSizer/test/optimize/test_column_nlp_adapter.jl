@@ -256,6 +256,26 @@ end
     dup = RCColumnNLPProblem(RCColumnDemandSet(1, [hi, hi]), geom, nlp_opts)
     @test length(dup.cases) == 1
     @test n_constraints(dup) == 2
+
+    # Same forces with magnification off are a different case. Row F moments
+    # already include story P-delta (ACI 318-19 §6.7), so the NLP must not
+    # apply §6.6 on top of them.
+    bare = RCColumnDemand(1; Pu=200.0, Mux=40.0, Muy=0.0)
+    rowf = RCColumnDemand(1; Pu=200.0, Mux=40.0, Muy=0.0, magnify=false)
+    long = ConcreteMemberGeometry(12.0u"m"; k=1.0, braced=true)
+    slender = NLPColumnOptions(material=NWC_4000, include_slenderness=true,
+                               maxiter=1, n_multistart=0)
+    noslender = NLPColumnOptions(material=NWC_4000, include_slenderness=false,
+                                 maxiter=1, n_multistart=0)
+    p_on = RCColumnNLPProblem(bare, long, slender)
+    p_rowf = RCColumnNLPProblem(rowf, long, slender)
+    p_off = RCColumnNLPProblem(bare, long, noslender)
+    u_on = StructuralSizer._rc_rect_nlp_case_rows(p_on, 12.0, 12.0, 0.02, bare)[1]
+    u_rowf = StructuralSizer._rc_rect_nlp_case_rows(p_rowf, 12.0, 12.0, 0.02, rowf)[1]
+    u_off = StructuralSizer._rc_rect_nlp_case_rows(p_off, 12.0, 12.0, 0.02, bare)[1]
+    @test u_rowf ≈ u_off
+    @test u_on > u_rowf
+    @test length(RCColumnNLPProblem(RCColumnDemandSet(1, [bare, rowf]), long, slender).cases) == 2
     @test n_constraints(RCCircularNLPProblem(set, geom, nlp_opts)) == 2
 
     # The envelope demand is the one the old path would have solved. It is not

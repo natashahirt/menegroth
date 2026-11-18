@@ -440,11 +440,13 @@ larger of the frame solve and a solve with the joist ends pinned
 ([`_pinned_joist_releases`](@ref)). Service deflections are the frame solve's.
 """
 function _beam_group_demands(struc::BuildingStructure, accept; resolution::Int,
-                             shell_demands, service_deflection::Bool = true)
+                             shell_demands, service_deflection::Bool = true,
+                             beam_shear_cases = nothing)
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
         member_group_demands(struc; member_edge_group = BEAM_GROUP_SYMBOLS,
                              resolution = resolution, shell_demands = shell_demands,
-                             service_deflection = service_deflection)
+                             service_deflection = service_deflection,
+                             beam_shear_cases = beam_shear_cases)
     releases = _pinned_joist_releases(struc)
     if !isempty(releases)
         pinned_ids, pinned = _with_pinned_joists(struc, releases) do
@@ -458,6 +460,11 @@ function _beam_group_demands(struc::BuildingStructure, accept; resolution::Int,
     accept === nothing &&
         return group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs
     keep = [i for (i, gid) in enumerate(group_ids) if accept(gid)]
+    if beam_shear_cases !== nothing
+        kept = beam_shear_cases[keep]
+        empty!(beam_shear_cases)
+        append!(beam_shear_cases, kept)
+    end
     return group_ids[keep], demands[keep], L_totals[keep], Lb_govs[keep],
            Cb_govs[keep], Kx_govs[keep], Ky_govs[keep]
 end
@@ -782,6 +789,9 @@ function _size_beams_impl!(
         catalog = catalog_kw,
         feasible = feasible_kw,
         composite = composite_kw,
+        # Floor load acts between the supports. App. 8 §8.2.1(b) takes
+        # Cm = 1.0 (corpus: aisc-360-16, PDF page 306).
+        transverse_load = true,
         shell_spans = _group_shell_spans(struc, group_ids, shell_spans,
                                          StructuralSizer.SteelShellSpan),
     )
@@ -968,8 +978,15 @@ function _composite_lock_catalog(struc::BuildingStructure, group_ids)
 end
 
 """Objective of `s` per unit length under `opts`, the order the catalog search minimizes."""
-_section_objective(opts, s) =
-    StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
+function _section_objective(opts, s)
+    rebar = hasproperty(opts, :rebar_material) ? opts.rebar_material : nothing
+    rebar === nothing &&
+        return StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
+    transverse = hasproperty(opts, :transverse_rebar_material) ?
+                 StructuralSizer.get_transverse_rebar(opts) : rebar
+    return StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m";
+                                           rebar=rebar, transverse=transverse)
+end
 
 """
     _section_floor_supported(opts, strategy) -> Bool
@@ -1051,23 +1068,26 @@ nothing in that set passes; a feasibility mask would otherwise stop that
 growth. Without a floor, a row-F frame floor is applied exactly as before.
 """
 function _rectangular_rc_beam_result(struc, opts, group_ids, Mu, Vu, Mu_neg, Nu,
-                                    geoms, shell_spans, section_floor)
+                                    geoms, shell_spans, section_floor, shear_cases = nothing)
     has_frame = any(gid -> haskey(struc.frame_section_floors, gid), group_ids)
     if has_frame
         (opts.materials === nothing && opts.n_max_sections == 0) ||
             _refuse_frame_floors(struc, group_ids, "this concrete beam sizing")
     end
     objective_of = s -> StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
+    frame = has_frame ? _beam_floor_frame(opts) : nothing
     if section_floor === nothing
         floor_kw = (;)
         if has_frame
             cat = isnothing(opts.custom_catalog) ?
                 StructuralSizer.rc_beam_catalog(opts.catalog) : opts.custom_catalog
             floor_kw = (; catalog = cat,
-                        feasible = _frame_floor_mask(struc, group_ids, cat, objective_of))
+                        feasible = _frame_floor_mask(struc, :beam, group_ids, cat, frame;
+                                                     objective_of))
         end
         return StructuralSizer.size_beams(Mu, Vu, geoms, opts; Mu_neg = Mu_neg, Nu = Nu,
-                                          shell_spans = shell_spans, floor_kw...)
+                                          shell_spans = shell_spans,
+                                          shear_cases = shear_cases, floor_kw...)
     end
 
     tier = (opts.catalog_constraint === :soft && opts.custom_catalog === nothing) ?
@@ -1076,12 +1096,13 @@ function _rectangular_rc_beam_result(struc, opts, group_ids, Mu, Vu, Mu_neg, Nu,
         StructuralSizer.rc_beam_catalog(opts.catalog) : opts.custom_catalog
     while true
         frame_feasible = has_frame ?
-            _frame_floor_mask(struc, group_ids, cat, objective_of) : nothing
+            _frame_floor_mask(struc, :beam, group_ids, cat, frame; objective_of) : nothing
         catalog_kw, feasible_kw = _apply_section_floor(opts, group_ids, cat,
                                                        frame_feasible, section_floor)
         try
             return StructuralSizer.size_beams(Mu, Vu, geoms, opts; Mu_neg = Mu_neg, Nu = Nu,
                                               shell_spans = shell_spans,
+                                              shear_cases = shear_cases,
                                               catalog = catalog_kw, feasible = feasible_kw)
         catch e
             grown = tier isa Symbol ? StructuralSizer.grow_rc_beam_catalog(cat, tier) : nothing
@@ -1111,31 +1132,25 @@ function _frame_floor_mask(struc, group_ids, catalog, objective_of)
     out = Vector{Vector{Int}}(undef, length(group_ids))
     for (i, gid) in enumerate(group_ids)
         fl = get(floors, gid, nothing)
-        if fl === nothing
-            out[i] = collect(eachindex(catalog))
-            continue
-        end
-        o_floor = objective_of(fl)
-        same = [j for j in eachindex(catalog) if _sections_identical(catalog[j], fl)]
-        if isempty(same)
-            _refuse_frame_floors(struc, [gid],
-                "this sizing catalog (the row F floor is not in it)")
-        end
-        out[i] = sort!(union(same, [j for j in eachindex(catalog)
-                                    if obj[j] > o_floor * (1 + 1e-9)]))
+        out[i] = fl === nothing ? collect(eachindex(catalog)) :
+            _floor_or_heavier(struc, gid, fl, catalog, obj, objective_of)
     end
     return out
 end
 
-"""Refuse a sizing path that cannot keep the row F section floors of `group_ids`."""
-function _refuse_frame_floors(struc, group_ids, path::AbstractString)
-    for gid in group_ids
-        haskey(struc.frame_section_floors, gid) || continue
-        throw(ArgumentError(
-            "member group $gid has a row F section floor, and $path cannot keep it. " *
-            "Use :discrete sizing with a single-material catalog and n_max_sections = 0."))
+"""
+Catalog indices of floor `fl` and every section whose objective is strictly
+greater. Refuses when the floor is not in `catalog`.
+"""
+function _floor_or_heavier(struc, gid, fl, catalog, obj, objective_of)
+    o_floor = objective_of(fl)
+    same = [j for j in eachindex(catalog) if _sections_identical(catalog[j], fl)]
+    if isempty(same)
+        _refuse_frame_floors(struc, [gid],
+            "this sizing catalog (the row F floor is not in it)")
     end
-    return nothing
+    return sort!(union(same, [j for j in eachindex(catalog)
+                              if obj[j] > o_floor * (1 + 1e-9)]))
 end
 
 _composite_lock_rejected(::Any) = false
@@ -1227,6 +1242,87 @@ function _field_identical(x, y, depth::Int = 0)
     # (Engineering-scope guard — no code citation.)
     typeof(x) === typeof(y) && x isa Number && (x == y) === true && return true
     return false
+end
+
+"""
+    _frame_floor_mask(struc, kind, group_ids, catalog, frame) -> Union{Nothing, Vector{Vector{Int}}}
+
+`struc.frame_section_floors` as a per-group catalog mask. A floored group
+keeps every catalog section that passes the stored row F rows of each of its
+members (`struc.frame_floor_demands`), checked with `frame` (see
+[`_frame_checkers`](@ref)). A section lighter than the floor that passes those
+rows stays in. The optimizer still checks each one against the group's own
+demands. `nothing` when no group in `group_ids` has a floor.
+
+A floor with no stored rows of type `kind` (e.g. one set by
+`_floor_overstressed_frame_columns!`) has nothing to relax against, so it
+keeps the floor or a strictly heavier section, ranked by `objective_of`.
+Such a floor throws when `objective_of` is not given.
+"""
+function _frame_floor_mask(struc, kind::Symbol, group_ids, catalog, frame;
+                           objective_of = nothing)
+    floors = struc.frame_section_floors
+    any(gid -> haskey(floors, gid), group_ids) || return nothing
+    out = Vector{Vector{Int}}(undef, length(group_ids))
+    obj = nothing
+    for (i, gid) in enumerate(group_ids)
+        fl = get(floors, gid, nothing)
+        if fl === nothing
+            out[i] = collect(eachindex(catalog))
+            continue
+        end
+        rows = _floor_rows_by_member(struc, kind, gid)
+        if isempty(rows)
+            objective_of === nothing && throw(ArgumentError(
+                "member group $gid has a section floor with no stored row F rows, " *
+                "and a floor mask without `objective_of` cannot keep it"))
+            obj === nothing && (obj = [objective_of(s) for s in catalog])
+            out[i] = _floor_or_heavier(struc, gid, fl, catalog, obj, objective_of)
+            continue
+        end
+        out[i] = [j for j in eachindex(catalog)
+                  if _passes_floor_rows(struc, kind, rows, catalog[j], frame)]
+        any(j -> _sections_identical(catalog[j], fl), out[i]) ||
+            _refuse_frame_floors(struc, [gid],
+                "this sizing catalog (the row F floor is not in it, or fails its stored rows)")
+    end
+    return out
+end
+
+"""
+    _floor_rows_by_member(struc, kind, gid) -> Vector{Pair{Int, Vector{Tuple{String, Any}}}}
+
+Stored row F rows of group `gid`, split by the member they were computed for.
+`kind` picks the demand type: `RCColumnDemand` for `:column`, `RCBeamDemand`
+for `:beam`.
+"""
+function _floor_rows_by_member(struc, kind::Symbol, gid)
+    T = kind === :column ? StructuralSizer.RCColumnDemand : StructuralSizer.RCBeamDemand
+    by = Dict{Int, Vector{Tuple{String, Any}}}()
+    for (label, demand) in get(struc.frame_floor_demands, gid, Tuple{String, Any}[])
+        demand isa T || continue
+        push!(get!(Vector{Tuple{String, Any}}, by, demand.member_idx), (label, demand))
+    end
+    return sort!(collect(by); by = first)
+end
+
+"""Whether `section` passes `rows` (from [`_floor_rows_by_member`](@ref)) for every member. Vacuously true for no rows."""
+function _passes_floor_rows(struc, kind::Symbol, rows, section, frame)
+    members = kind === :column ? struc.columns : struc.beams
+    return all(rows) do (j, member_rows)
+        first(_member_resists(kind, members[j], section, member_rows, frame))
+    end
+end
+
+"""Refuse a sizing path that cannot keep the row F section floors of `group_ids`."""
+function _refuse_frame_floors(struc, group_ids, path::AbstractString)
+    for gid in group_ids
+        haskey(struc.frame_section_floors, gid) || continue
+        throw(ArgumentError(
+            "member group $gid has a row F section floor, and $path cannot keep it. " *
+            "Use :discrete sizing with a single-material catalog and n_max_sections = 0."))
+    end
+    return nothing
 end
 
 function _sections_identical(a, b)
@@ -1527,9 +1623,13 @@ function _size_beams_impl!(
 
     _add_gravity_loads!(struc, edge_ids_in_group, gravity_factor)
 
-    # Extract demands from analysis (MemberDemand in SI: N, N·m, m)
+    # Extract demands from analysis (MemberDemand in SI: N, N·m, m).
+    # `beam_shear` is one row per pattern per member. The envelope `Nu` is the
+    # fallback when a group recorded no station row.
+    beam_shear = Vector{Vector{BeamShearCase}}()
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
-        _beam_group_demands(struc, group_filter; resolution, shell_demands)
+        _beam_group_demands(struc, group_filter; resolution, shell_demands,
+                            beam_shear_cases=beam_shear)
 
     isempty(group_ids) && return struc
 
@@ -1537,17 +1637,16 @@ function _size_beams_impl!(
     grouped_spans = _group_shell_spans(struc, group_ids, shell_spans,
                                        StructuralSizer.RCShellSpan)
 
-    # Build demand vectors with Unitful SI units.
-    # Mu = sagging (Mux_pos); Mu_neg = hogging. Nu is signed: tension
-    # (Pu_t > 0) is negative so ACI 318-11 §11.2.2.3 Eq. (11-8) reduces Vc;
-    # otherwise compression Pu_c uses §11.2.1.2 Eq. (11-4).
-    # ENGINEERING JUDGMENT: compression/shear concurrency is not tracked —
-    # the group envelope Pu is applied to the group envelope Vu.
+    # Mu = sagging (Mux_pos); Mu_neg = hogging. Shear uses the station rows.
+    # The fallback Nu is envelope tension (Eq. 11-8) and no compression:
+    # Eq. (11-4) would raise Vc if that compression is not the shear's case.
     Mu = [d.Mux_pos * u"N*m"  for d in demands]
     Mu_neg = [d.Mux_neg * u"N*m" for d in demands]
     _store_hogging_envelopes!(struc, group_ids, demands)
     Vu = [d.Vu_strong * u"N"   for d in demands]
-    Nu = [d.Pu_t > 0 ? -d.Pu_t * u"N" : d.Pu_c * u"N" for d in demands]
+    Nu = [d.Pu_t > 0 ? -d.Pu_t * u"N" : 0.0u"N" for d in demands]
+    shear_arg = [_nlp_shear_arg(rows) for rows in beam_shear]
+    shear_kw = any(!isnothing, shear_arg) ? shear_arg : nothing
 
     # Build geometries (L_totals are Float64 in meters)
     geoms = [StructuralSizer.ConcreteMemberGeometry(L) for L in L_totals]
@@ -1616,6 +1715,7 @@ function _size_beams_impl!(
                     sustained_live_fraction = opts.sustained_live_fraction,
                     shell_spans      = spans,
                     stirrup_shear    = stirrup_shear,
+                    shear_cases      = shear_kw === nothing ? nothing : shear_kw[idxs],
                 )
                 _apply_beam_results!(struc, result, group_ids[idxs], member_array,
                                      edge_ids_in_group, opts.material; I_factor=I_factor,
@@ -1644,7 +1744,8 @@ function _size_beams_impl!(
                 spans = grouped_spans === nothing ? nothing : grouped_spans[missing]
                 result = StructuralSizer.size_beams(
                     Mu[missing], Vu[missing], geoms[missing], opts;
-                    Mu_neg = Mu_neg[missing], Nu = Nu[missing], shell_spans = spans)
+                    Mu_neg = Mu_neg[missing], Nu = Nu[missing], shell_spans = spans,
+                    shear_cases = shear_kw === nothing ? nothing : shear_kw[missing])
                 _apply_beam_results!(struc, result, group_ids[missing], member_array,
                                      edge_ids_in_group, opts.material; I_factor=I_factor,
                                      rebar=opts.rebar_material)
@@ -1664,7 +1765,7 @@ function _size_beams_impl!(
 
     # ── Rectangular beam path (default) ──
     result = _rectangular_rc_beam_result(struc, opts, group_ids, Mu, Vu, Mu_neg, Nu,
-                                         geoms, grouped_spans, section_floor)
+                                         geoms, grouped_spans, section_floor, shear_kw)
 
     _apply_beam_results!(struc, result, group_ids, member_array,
                          edge_ids_in_group, opts.material; I_factor=I_factor,
@@ -1679,6 +1780,112 @@ function _size_beams_impl!(
     @info "Sized $(length(group_ids)) RC beam groups via MIP" fc_psi=fc_psi
 
     return struc
+end
+
+"""Raise the flexure envelope to the stored row F moments and append those shear rows.
+
+Stored `RCBeamDemand` values are kip and kip·ft (`Tu` is kip·in). The shear
+vectors stay in newtons and newton-metres, matching `BeamShearCase`.
+"""
+function _merge_beam_floor_demands!(struc, group_ids, Mu, Mu_neg, shear_cases)
+    for (i, gid) in enumerate(group_ids)
+        rows = get(struc.frame_floor_demands, gid, nothing)
+        rows === nothing && continue
+        for (_, demand) in rows
+            demand isa StructuralSizer.RCBeamDemand || continue
+            Mu[i] = max(Mu[i], demand.Mu * Asap.kip * u"ft")
+            Mu_neg[i] = max(Mu_neg[i], demand.Mu_neg * Asap.kip * u"ft")
+            push!(shear_cases[i], BeamShearCase(
+                ustrip(u"N", demand.Vu * Asap.kip),
+                ustrip(u"N", demand.Nu * Asap.kip),
+                ustrip(u"N*m", demand.Tu * Asap.kip * u"inch"),
+                ustrip(u"N*m", demand.Mu * Asap.kip * u"ft"),
+                ustrip(u"N*m", demand.Mu_neg * Asap.kip * u"ft"),
+            ))
+        end
+    end
+    return nothing
+end
+
+"""Quantity triples for the sizer, or `nothing` when the group has no station row."""
+function _nlp_shear_arg(cases)
+    isempty(cases) && return nothing
+    return [(c.Vu * u"N", c.Nu * u"N", c.Tu * u"N*m") for c in cases]
+end
+
+"""Sagging moments for the beam NLP, one per station row, or `nothing` when there is no row."""
+function _nlp_flexure_arg(cases)
+    isempty(cases) && return nothing
+    return [c.Mu_pos * u"N*m" for c in cases]
+end
+
+"""
+NLP section to install for group `gid` of `kind` (`:column` or `:beam`).
+
+The NLP section is kept when it passes the group's stored row F rows, as
+discrete sizing keeps any catalog section that does (see
+[`_frame_floor_mask`](@ref)). A section that fails them, or a failed solve,
+is replaced by the floor.
+"""
+function _nlp_section_or_floor(struc, kind::Symbol, gid, section, opts)
+    fl = get(struc.frame_section_floors, gid, nothing)
+    fl === nothing && return section
+    section === nothing && return fl
+    typeof(section) === typeof(fl) || throw(ArgumentError(
+        "row F section floor for member group $gid is a $(typeof(fl)), " *
+        "and NLP returned a $(typeof(section))"))
+    frame = kind === :column ? (column = _column_checker_bundle(nothing, opts),) :
+                               _beam_floor_frame(opts)
+    rows = _floor_rows_by_member(struc, kind, gid)
+    return _passes_floor_rows(struc, kind, rows, section, frame) ? section : fl
+end
+
+"""Row F checker bundle of beam options `opts`, in the shape [`_member_resists`](@ref) takes."""
+function _beam_floor_frame(opts)
+    bundle = _beam_checker_bundle(nothing, opts)
+    return (beam = bundle, beam_for = _ -> bundle)
+end
+
+"""
+Keep an NLP beam section. A group with stored row F rows throws instead of
+skipping when the solve is infeasible or the rounded section fails those rows.
+"""
+function _keep_beam_nlp_section!(struc, gid, result, opts)
+    rows = get(struc.frame_floor_demands, gid, nothing)
+    floored = rows !== nothing &&
+        any(d -> d isa StructuralSizer.RCBeamDemand, (d for (_, d) in rows))
+    ok = result.status in (:optimal, :feasible)
+    section = _nlp_section_or_floor(struc, :beam, gid, ok ? result.section : nothing, opts)
+    if section === nothing
+        floored && throw(ArgumentError(
+            "row F section floor: beam group $gid NLP status is $(result.status)"))
+        return nothing
+    end
+    floored && _assert_beam_floor_section!(struc, gid, section, opts, rows)
+    return section
+end
+
+function _assert_beam_floor_section!(struc, gid, section, opts, rows)
+    bundle = _beam_checker_bundle(nothing, opts)
+    frame = (beam = bundle, beam_for = _ -> bundle)
+    checked = 0
+    for (j, member) in enumerate(struc.beams)
+        group_id(member) == gid || continue
+        member_rows = Tuple{String, Any}[]
+        for (label, demand) in rows
+            demand isa StructuralSizer.RCBeamDemand || continue
+            demand.member_idx == j || continue
+            push!(member_rows, (label, demand))
+        end
+        isempty(member_rows) && continue
+        checked += 1
+        ok, detail = _member_resists(:beam, member, section, member_rows, frame)
+        ok || throw(ArgumentError(
+            "row F section floor: beam group $gid does not pass its stored demand rows ($detail)"))
+    end
+    checked == 0 && throw(ArgumentError(
+        "row F section floor: beam group $gid stored rows do not match a beam"))
+    return nothing
 end
 
 # --- Concrete beams (NLP) ---
@@ -1727,9 +1934,14 @@ function _size_beams_impl!(
 
     _add_gravity_loads!(struc, edge_ids_in_group, gravity_factor)
 
-    # Extract demands from analysis (MemberDemand in SI: N, N·m, m)
+    # Extract demands from analysis (MemberDemand in SI: N, N·m, m).
+    # `beam_shear` is one row per pattern per member: Vu with the axial at
+    # that station. The envelope `Nu` below is only the fallback when a group
+    # recorded no station row.
+    beam_shear = Vector{Vector{BeamShearCase}}()
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
-        _beam_group_demands(struc, group_filter; resolution, shell_demands)
+        _beam_group_demands(struc, group_filter; resolution, shell_demands,
+                            beam_shear_cases=beam_shear)
 
     isempty(group_ids) && return struc
     _refuse_frame_floors(struc, group_ids, "concrete beam NLP sizing")
@@ -1737,14 +1949,19 @@ function _size_beams_impl!(
     member_array = struc.beams
 
     # Sagging / hogging faces. NLP post-checks Mu_neg (top steel is not a DV)
-    # and may return :infeasible instead of deepening. Nu is signed: tension
-    # (Pu_t > 0) is negative so ACI 318-11 §11.2.2.3 Eq. (11-8) reduces Vc;
-    # otherwise compression Pu_c uses §11.2.1.2 Eq. (11-4).
+    # and may return :infeasible instead of deepening. Sagging flexure and
+    # shear each use one row per pattern case. The fallback `Nu` takes the
+    # envelope tension (Eq. 11-8)
+    # and no compression: pairing the largest compression with the largest
+    # shear raises Vc (ACI 318-11 Eq. 11-4) and is unconservative.
     Mu = [d.Mux_pos * u"N*m"  for d in demands]
     Mu_neg = [d.Mux_neg * u"N*m" for d in demands]
     _store_hogging_envelopes!(struc, group_ids, demands)
     Vu = [d.Vu_strong * u"N" for d in demands]
-    Nu = [d.Pu_t > 0 ? -d.Pu_t * u"N" : d.Pu_c * u"N" for d in demands]
+    Nu = [d.Pu_t > 0 ? -d.Pu_t * u"N" : 0.0u"N" for d in demands]
+    _merge_beam_floor_demands!(struc, group_ids, Mu, Mu_neg, beam_shear)
+    shear_cases = [_nlp_shear_arg(rows) for rows in beam_shear]
+    flexure_cases = [_nlp_flexure_arg(rows) for rows in beam_shear]
 
     # Map ConcreteBeamOptions → NLPBeamOptions (shared material fields)
     stirrup_int = parse(Int, replace(string(opts.transverse_bar_size), "no" => ""))
@@ -1764,6 +1981,8 @@ function _size_beams_impl!(
             "include_flange=true but no slabs found. Size slabs first.")
 
         specs = _compute_flange_params(struc, group_ids)
+        # §8.13.8's Vc increase is inside the T-beam NLP. A rib that misses
+        # §8.13.2 or §8.13.3 is checked as a beam.
         # The flange widens with the web, so the narrowest web the NLP may pick
         # gives a flange no candidate exceeds (ACI 318-11 §8.12.2).
         bf_vec = [s === nothing ? nothing :
@@ -1803,15 +2022,18 @@ function _size_beams_impl!(
             t_results = StructuralSizer.size_rc_tbeams_nlp(Mu_t, Vu_t, bf_t, hf_t, nlp_opts;
                                                           Mu_neg=Mu_neg[tbeam_idx],
                                                           Nu=Nu[tbeam_idx],
-                                                          joist_spacing=spacing_t)
+                                                          shear_cases=shear_cases[tbeam_idx],
+                                                          flexure_cases=flexure_cases[tbeam_idx],
+                                                          joist_spacing=spacing_t,
+                                                          sustained_live_fraction=opts.sustained_live_fraction)
 
             for (k, g_idx) in enumerate(tbeam_idx)
                 r = t_results[k]
-                r.status in (:optimal, :feasible) || continue
+                chosen = _keep_beam_nlp_section!(struc, group_ids[g_idx], r, opts)
+                chosen === nothing && continue
                 n_feasible += 1
 
                 gid = group_ids[g_idx]
-                chosen = r.section
                 mg = struc.member_groups[gid]
                 mg.section = chosen
                 asap_sec = StructuralSizer.to_asap_section(chosen, mat; I_factor=I_factor)  # ACI 318-11 §10.10.4.1
@@ -1842,15 +2064,17 @@ function _size_beams_impl!(
             Vu_r = Vu[rect_idx]
             r_results = StructuralSizer.size_rc_beams_nlp(Mu_r, Vu_r, nlp_opts;
                                                          Mu_neg=Mu_neg[rect_idx],
-                                                         Nu=Nu[rect_idx])
+                                                         Nu=Nu[rect_idx],
+                                                         shear_cases=shear_cases[rect_idx],
+                                                         flexure_cases=flexure_cases[rect_idx])
 
             for (k, g_idx) in enumerate(rect_idx)
                 r = r_results[k]
-                r.status in (:optimal, :feasible) || continue
+                chosen = _keep_beam_nlp_section!(struc, group_ids[g_idx], r, opts)
+                chosen === nothing && continue
                 n_feasible += 1
 
                 gid = group_ids[g_idx]
-                chosen = r.section
                 mg = struc.member_groups[gid]
                 mg.section = chosen
                 asap_sec = StructuralSizer.to_asap_section(chosen, mat; I_factor=I_factor)  # ACI 318-11 §10.10.4.1
@@ -1884,16 +2108,17 @@ function _size_beams_impl!(
     end
 
     # ── Rectangular NLP path (default) ──
-    results = StructuralSizer.size_rc_beams_nlp(Mu, Vu, nlp_opts; Mu_neg=Mu_neg, Nu=Nu)
+    results = StructuralSizer.size_rc_beams_nlp(Mu, Vu, nlp_opts; Mu_neg=Mu_neg, Nu=Nu,
+                                                shear_cases=shear_cases,
+                                                flexure_cases=flexure_cases)
 
     mat = opts.material
     n_feasible = 0
     for (g_idx, gid) in enumerate(group_ids)
         r = results[g_idx]
-        r.status in (:optimal, :feasible) || continue
+        chosen = _keep_beam_nlp_section!(struc, gid, r, opts)
+        chosen === nothing && continue
         n_feasible += 1
-
-        chosen = r.section
 
         mg = struc.member_groups[gid]
         mg.section = chosen

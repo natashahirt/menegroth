@@ -169,7 +169,8 @@ export strength_1_4D, strength_1_2D_1_6L, strength_1_2D_1_6Lr
 export strength_1_2D_1_0W, strength_1_2D_1_0E
 export strength_0_9D_1_0W, strength_0_9D_1_0E
 export ASD, service, default_combo
-export asce7_strength_combinations, gravity_combinations
+export asce7_strength_combinations, asce7_asd_foundation_combinations, gravity_combinations
+export FootingAction, combine_foundation_action, foundation_combination_actions
 
 # --- Gravity loads ---
 export GravityLoads, load_map
@@ -509,6 +510,8 @@ export wall_two_flange_pm_at_c_si, wall_two_flange_c_at_axial_si
 # --- Structural walls: ACI out-of-plane / slender wall §11.8 (S1) ---
 export oop_slender_wall_strength_si, oop_service_deflection_si
 export oop_slender_wall_gates, check_wall_out_of_plane_slender
+# Nonsway weak-axis magnification, ACI 318-19 §6.6.4.5 (not the §11.8 method).
+export wall_modulus_si, nonsway_slenderness_moment, check_wall_out_of_plane_axial_flexure
 
 # --- Structural walls: ACI simplified / empirical bearing wall §11.5.3 (S1) ---
 export wall_empirical_k, wall_empirical_axial_capacity_si, wall_min_thickness_si

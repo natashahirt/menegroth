@@ -92,9 +92,7 @@ function _one_bay_building(; Lx = 6.0, Ly = 4.0, z = 3.0)
     cell = Cell(fidx, Lx * Ly * u"m^2", spans, 2.0u"kN/m^2", 3.0u"kN/m^2")
     cell.floor_type = :one_way
     push!(struc.cells, cell)
-    push!(struc.slabs, Slab{Float64}([1], CIPSlabResult(0.2, 0.2, 5.0), :one_way, spans,
-                                     :interior, nothing, MaterialVolumes(), nothing, nothing,
-                                     FramingLevel{Float64}[]))
+    push!(struc.slabs, Slab([1], CIPSlabResult(0.2, 0.2, 5.0), spans; floor_type = :one_way))
     for e in sort(collect(skel.groups_edges[:beams]))
         L = ustrip(u"m", skel.geometry.edge_lengths[e])
         push!(struc.segments, StructuralSynthesizer.Segment(e, L))
@@ -243,6 +241,20 @@ const _STUD_OPTS = (composite = true,
         light = Dict(g => (section = W("W12X26"), exact = true) for g in gids)
         @test_throws ArgumentError SY.size_beams!(struc, opts; shell_demands = big_d,
                                                   section_floor = light)
+        SY.size_beams!(struc, opts; shell_demands = out.demands, shell_spans = out.spans)
+
+        # A continuing call starts upward-only from its floor and keeps it.
+        # With `trim_continuing`, the trim brings a lighter design back.
+        cont = (levels = [0], shells = out.shells, shell_demands = out.demands,
+                shell_spans = out.spans, shell_regions = out.regions,
+                shell_kwargs = (target_edge = 1.0u"m", support_points = corners),
+                section_floor = heavy)
+        kept = size_beams_with_story_shell!(struc, opts; cont...)
+        @test kept.converged
+        @test all(b -> section(b).name == "W21X55", struc.beams)
+        trimmed = size_beams_with_story_shell!(struc, opts; cont..., trim_continuing = true)
+        @test trimmed.converged
+        @test any(b -> section(b).name != "W21X55", struc.beams)
         SY.size_beams!(struc, opts; shell_demands = out.demands, shell_spans = out.spans)
 
         # The shell raises a demand. It never lowers one.

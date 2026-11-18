@@ -20,6 +20,12 @@ TRACE_REGISTRY[(:size_members, :sizing)] =
                        [:enter, :exit, :decision, :failure], nothing,
                        @__FILE__, @__LINE__)
 
+"""Concrete plus longitudinal and transverse rebar, so discrete objectives count both."""
+function _sizing_material(concrete, rebar, transverse = rebar)
+    concrete isa ReinforcedConcreteMaterial && return concrete
+    return ReinforcedConcreteMaterial(concrete, rebar, transverse)
+end
+
 """Create zero vector matching the units of the input vector."""
 function zeros_like(v::Vector)
     if !isempty(v) && v[1] isa Unitful.Quantity
@@ -147,6 +153,47 @@ function size_columns end
 # Steel Implementation
 # ==============================================================================
 
+"""Throw unless an optional end-moment vector matches the member count."""
+function _check_moment_vector(name::Symbol, vec, n::Int)
+    vec === nothing && return
+    length(vec) == n || throw(ArgumentError("$name must have one entry per member"))
+    return
+end
+
+_moment_vector_nm(::Nothing) = nothing
+_moment_vector_nm(vec) = [to_newton_meters(m) for m in vec]
+
+"""True when the caller supplied curvature or a span load for Appendix 8."""
+function _steel_b1_requested(M1x, M2x, M1y, M2y, transverse_load)
+    (M1x !== nothing || M2x !== nothing || M1y !== nothing || M2y !== nothing) &&
+        return true
+    transverse_load isa Bool && return transverse_load
+    transverse_load isa AbstractVector && return any(transverse_load)
+    return false
+end
+
+"""One steel `MemberDemand` from the array API, in newtons and newton-metres."""
+function _steel_array_demand(i, Pu_N, Pu_t_N, Mux_Nm, Mux_pos_Nm, Mux_neg_Nm,
+                             Muy_Nm, Vus_N, δ_m, δ_tot, Ir_m4,
+                             M1x_Nm, M2x_Nm, M1y_Nm, M2y_Nm, transverse_load, composite)
+    tl = transverse_load === nothing ? false :
+         transverse_load isa Bool ? transverse_load : Bool(transverse_load[i])
+    return MemberDemand(i; Pu_c=Pu_N[i], Pu_t=Pu_t_N[i], Mux=Mux_Nm[i],
+                        Mux_pos=Mux_pos_Nm[i], Mux_neg=Mux_neg_Nm[i],
+                        Muy=Muy_Nm[i],
+                        M1x=M1x_Nm === nothing ? nothing : M1x_Nm[i],
+                        M2x=M2x_Nm === nothing ? nothing : M2x_Nm[i],
+                        M1y=M1y_Nm === nothing ? nothing : M1y_Nm[i],
+                        M2y=M2y_Nm === nothing ? nothing : M2y_Nm[i],
+                        Vu_strong=Vus_N[i],
+                        δ_max_LL=δ_m[i], δ_max_total=δ_tot[i],
+                        I_ref=Ir_m4[i],
+                        transverse_load=tl,
+                        composite=composite)
+end
+
+
+
 function size_columns(
     Pu::Vector,
     Mux::Vector,
@@ -171,6 +218,14 @@ function size_columns(
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
     tc::Union{Nothing, TraceCollector} = nothing,
+    # AISC 360-16 App. 8 §8.2.1 (corpus: aisc-360-16, PDF page 306).
+    # Omitted end moments keep M1 = 0. `transverse_load` selects Cm = 1.0
+    # for a member with load between its supports (§8.2.1(b)).
+    M1x::Union{Nothing, Vector} = nothing,
+    M2x::Union{Nothing, Vector} = nothing,
+    M1y::Union{Nothing, Vector} = nothing,
+    M2y::Union{Nothing, Vector} = nothing,
+    transverse_load::Union{Nothing, Bool, AbstractVector} = nothing,
 )
     n = length(Pu)
     n == length(Mux) || throw(ArgumentError("Pu and Mux must have same length"))
@@ -180,6 +235,14 @@ function size_columns(
     n == length(Pu_t) || throw(ArgumentError("Pu and Pu_t must have same length"))
     strategy = _require_sizing_strategy(
         opts, (:discrete, :nlp); api="steel column/beam sizing")
+    _check_moment_vector(:M1x, M1x, n)
+    _check_moment_vector(:M2x, M2x, n)
+    _check_moment_vector(:M1y, M1y, n)
+    _check_moment_vector(:M2y, M2y, n)
+    if transverse_load isa AbstractVector
+        length(transverse_load) == n || throw(ArgumentError(
+            "transverse_load must have one entry per member"))
+    end
 
     emit!(tc, :sizing, "size_columns", "", :enter;
           material="steel",
@@ -205,6 +268,17 @@ function size_columns(
             "steel NLP sizing does not support tensile axial demand Pu_t; use sizing_strategy=:discrete"))
         (shell_spans === nothing || all(isempty, shell_spans)) || throw(ArgumentError(
             "steel NLP sizing does not check story-shell spans; use sizing_strategy=:discrete"))
+        # The continuous H1 constraint uses the first-order moment. Appendix 8
+        # B1 depends on the section stiffness, which that constraint does not
+        # carry. A compressed member with end moments or span load stays on
+        # the discrete checker, where B1 is applied.
+        if _steel_b1_requested(M1x, M2x, M1y, M2y, transverse_load) &&
+                any(!iszero, Pu)
+            throw(ArgumentError(
+                "steel NLP does not apply Appendix 8 B1. Use sizing_strategy=:discrete " *
+                "when a compressed member has end moments or transverse load. " *
+                "AISC 360-16 App. 8 §8.2.1 (corpus: aisc-360-16, PDF page 306)."))
+        end
         emit!(tc, :sizing, "size_columns", "", :decision; path="nlp")
         return _size_steel_columns_nlp(Pu, Mux, steel_geoms, opts;
                                        Muy=Muy, Mux_neg=Mux_neg, composite=composite)
@@ -238,13 +312,14 @@ function size_columns(
     # flexure + tension, with Pc = φt·Pn per Section D2 (page 134),
     # on the sagging face and on the hogging face. Tension Mr is first-order.
     Pu_t_N = [to_newtons(p) for p in Pu_t]
-    demands = [MemberDemand(i; Pu_c=Pu_N[i], Pu_t=Pu_t_N[i], Mux=Mux_Nm[i],
-                               Mux_pos=Mux_pos_Nm[i], Mux_neg=Mux_neg_Nm[i],
-                               Muy=Muy_Nm[i],
-                               Vu_strong=Vus_N[i],
-                               δ_max_LL=δ_m[i], δ_max_total=δ_tot[i],
-                               I_ref=Ir_m4[i],
-                               composite=_resolve_demand_composite(opts, composite, i))
+    M1x_Nm = _moment_vector_nm(M1x)
+    M2x_Nm = _moment_vector_nm(M2x)
+    M1y_Nm = _moment_vector_nm(M1y)
+    M2y_Nm = _moment_vector_nm(M2y)
+    demands = [_steel_array_demand(i, Pu_N, Pu_t_N, Mux_Nm, Mux_pos_Nm, Mux_neg_Nm,
+                                   Muy_Nm, Vus_N, δ_m, δ_tot, Ir_m4,
+                                   M1x_Nm, M2x_Nm, M1y_Nm, M2y_Nm, transverse_load,
+                                   _resolve_demand_composite(opts, composite, i))
                for i in 1:n]
     
     checker = AISCChecker(; max_depth = opts.max_depth,
@@ -455,9 +530,12 @@ function size_columns(
     # catalog, or a feasibility mask is used as given.
     tier = (opts.catalog_constraint === :soft && isnothing(catalog) &&
             isnothing(opts.custom_catalog) && feasible === nothing) ? opts.catalog : nothing
+    # Longitudinal and transverse rebar enter the discrete objective.
+    transverse = get_transverse_rebar(opts)
     run(sections) = isnothing(opts.materials) ?
         optimize_discrete(
-            checker, demands, conc_geoms, sections, opts.material;
+            checker, demands, conc_geoms, sections,
+            _sizing_material(opts.material, opts.rebar_material, transverse);
             objective = opts.objective,
             n_max_sections = opts.n_max_sections,
             optimizer = opts.solver,
@@ -469,7 +547,8 @@ function size_columns(
             tc = tc,
         ) :
         optimize_discrete(
-            checker, demands, conc_geoms, sections, opts.materials;
+            checker, demands, conc_geoms, sections,
+            [_sizing_material(m, opts.rebar_material, transverse) for m in opts.materials];
             objective = opts.objective,
             n_max_sections = opts.n_max_sections,
             optimizer = opts.solver,
@@ -477,6 +556,7 @@ function size_columns(
             output_flag = output_flag,
             time_limit_sec = opts.time_limit_sec,
             tc = tc,
+            feasible = feasible,
         )
     result = nothing
     while true
@@ -645,8 +725,12 @@ function _rc_nlp_export_result(
     end
     obj_val = if ok && n > 0
         concrete = opts.material isa ReinforcedConcreteMaterial ? opts.material.concrete : opts.material
+        rebar = opts.material isa ReinforcedConcreteMaterial ? opts.material.rebar : opts.rebar_material
+        transverse = opts.material isa ReinforcedConcreteMaterial ? opts.material.transverse :
+                     get_transverse_rebar(opts)
         ustrip(sum(
-            objective_value(opts.objective, r.section, concrete, conc_geoms[i].L)
+            objective_value(opts.objective, r.section, concrete, conc_geoms[i].L;
+                            rebar=rebar, transverse=transverse)
             for (i, r) in enumerate(nlp_results)
         ))
     else

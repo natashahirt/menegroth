@@ -40,7 +40,9 @@ Worst `(Δ / L) / limit` over the spans of demand `i`, with `section` in place
 of the solved one. Zero when there is no limit or no span.
 
 Each span's deflection scales by `I_solved / I_candidate`. The solved section
-itself is checked at ratio one, whatever `I_candidate` evaluates to.
+itself is checked at ratio one, whatever `I_candidate` evaluates to. The
+caller passes the inertia the shell recorded: `Ix` for bare steel, and the
+same service inertia the frame deflection check already uses for composite.
 
 # ENGINEERING JUDGMENT
 The ratio holds the span's share of load fixed. A stiffer candidate draws more

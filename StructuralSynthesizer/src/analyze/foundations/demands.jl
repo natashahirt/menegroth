@@ -32,6 +32,9 @@ function _unfactored_DL_loads(struc::BuildingStructure)
         end
         append!(loads, unfactored_fire_coating_loads(model))
         append!(loads, unfactored_drop_panel_loads(struc))
+        # Curtain wall is dead load. The model copies are factored, so the service
+        # case rebuilds them at wall_SDL.
+        append!(loads, unfactored_cladding_loads(struc, els))
     end
     _append_service_wall_weight!(loads, model)
     return loads
@@ -84,6 +87,33 @@ function _foundation_demand_from_signed(i::Int, Fz, Fz_s, Fx, Fy, Mx, My;
     return StructuralSizer.FoundationDemand(i;
         Pu=Fz, Mux=Mx, Muy=My, Vux=Fx, Vuy=Fy, Ps=Fz_s,
         c1=c1, c2=c2, shape=shape, uplift=uplift)
+end
+
+"""
+One strength combination's `(Pu, Mux, Muy)` and the heaviest allowable
+vertical force as `Ps`, for a strip or mat that still takes one demand.
+
+The pair `(Pu, Mux, Muy)` is one strength combination: the compressive
+one with the largest moment. `Ps` is the largest compressive allowable-stress
+vertical force. Spread footings do not use this. They check every combination.
+
+No stored lateral cases returns `demand` unchanged.
+"""
+function _lateral_column_demand(struc::BuildingStructure, demand)
+    actions = foundation_actions_at(struc, demand.group_idx)
+    actions === nothing && return demand
+    strength = [a for a in actions.strength if a.P > 0]
+    isempty(strength) && return demand
+    gov = strength[argmax(hypot(a.Mx, a.My) for a in strength)]
+    service = [a for a in actions.service if a.P > 0]
+    Ps = isempty(service) ? demand.Ps :
+         uconvert(unit(demand.Ps), maximum(a.P for a in service) * u"N")
+    return StructuralSizer.FoundationDemand(demand.group_idx;
+        Pu=uconvert(unit(demand.Pu), gov.P * u"N"),
+        Mux=uconvert(unit(demand.Mux), gov.Mx * u"N*m"),
+        Muy=uconvert(unit(demand.Muy), gov.My * u"N*m"),
+        Vux=demand.Vux, Vuy=demand.Vuy, Ps=Ps,
+        c1=demand.c1, c2=demand.c2, shape=demand.shape, uplift=false)
 end
 
 """True when every support in `idxs` has factored uplift."""

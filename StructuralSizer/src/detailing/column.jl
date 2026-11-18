@@ -774,6 +774,37 @@ function _add_crossties!(md, sec::RCColumnSection, xs, tie_bar, cov, dt; mark_ba
 end
 
 """
+Spiral from ACI 318-19 Eq. (25.7.3.3) before any shear pitch.
+
+Returns `(bar_size, pitch, wire_per_turn, ρs)` in metres, or `nothing` when
+no No. 3 to No. 5 bar keeps the clear spacing of §25.7.3 between 1 in. and
+3 in. The 1.5 extra turns at each end are not in `wire_per_turn`.
+"""
+function _spiral_confinement(D::Length, cover::Length, fc, fyt)
+    Dm = ustrip(u"m", D)
+    cov = ustrip(u"m", cover)
+    Dc = Dm - 2cov
+    (Dc > 0) || return nothing
+    Ag = π * Dm^2 / 4
+    Ach = π * Dc^2 / 4
+    (Ach > 0) || return nothing
+    ρs = 0.45 * (Ag / Ach - 1) * ustrip(u"psi", fc) / ustrip(u"psi", fyt)
+    (ρs > 0) || return nothing
+    clear_min, clear_max = ustrip(u"m", 1.0u"inch"), ustrip(u"m", 3.0u"inch")
+    for bsp in 3:5
+        dsp = ustrip(u"m", bar_diameter(bsp))
+        Asp = ustrip(u"m^2", bar_area(bsp))
+        s = min(4 * Asp / (Dc * ρs), clear_max + dsp)
+        if s - dsp >= clear_min - 1e-9
+            Dsp = Dc - dsp
+            per_turn = sqrt((π * Dsp)^2 + s^2)
+            return (bar_size = bsp, pitch = s, wire_per_turn = per_turn, ρs = ρs)
+        end
+    end
+    return nothing
+end
+
+"""
 One continuous spiral from the floor to the lowest slab bars above.
 
 `within` is the §18.14.3.2(b) column: the pitch is at most the lesser of
@@ -848,4 +879,54 @@ function _add_spiral!(md, sec::RCCircularSection, H, top_limit, fc, fyt; cover, 
                               x_positions = collect(0.0:s:top_limit),
                               note = "pitch $(round(s / 0.0254; digits = 2)) in., ρs ≥ $(round(ρs; digits = 4)) " *
                                      "($(ρ_note)), 1.5 extra turns each end$(cap_note)$(shear_note)"))
+end
+
+"""
+    transverse_steel_per_length(sec, concrete, rebar) -> Area
+
+Volume of tie, crosstie, or spiral steel per unit length of the member,
+at the spacing the detailing uses when shear does not close it up.
+
+Rectangular and circular ties use ACI 318-19 §25.7.2.1(b) and the §25.7.2.3
+crossties. A spiral uses Eq. (25.7.3.3); the extra turns at the ends are
+not in this per-length quantity. Shear can only place the steel closer.
+"""
+function transverse_steel_per_length(sec::RCCircularSection, concrete, rebar)
+    if sec.tie_type == :spiral
+        chosen = _spiral_confinement(sec.D, sec.cover, concrete.fc′, rebar.Fy)
+        chosen === nothing && return zero(sec.Ag)
+        return bar_area(chosen.bar_size) * (chosen.wire_per_turn * u"m") / (chosen.pitch * u"m")
+    end
+    return _tie_steel_per_length(sec, rebar)
+end
+
+function transverse_steel_per_length(sec::RCColumnSection, concrete, rebar)
+    return _tie_steel_per_length(sec, rebar)
+end
+
+function _tie_steel_per_length(sec, rebar)
+    bs = _column_bar_size(sec)
+    circular = sec isa RCCircularSection
+    tie_bar = circular ? (bs >= 11 ? 4 : 3) : sec.tie_bar_size
+    least = circular ? sec.D : min(sec.b, sec.h)
+    s = column_tie_spacing(bs, tie_bar, least)
+    cov = sec.cover
+    dt = bar_diameter(tie_bar)
+    hook = hook_centerline_length(tie_bar; angle = 135, role = :stirrup)
+    if circular
+        dcl = sec.D - 2cov - dt
+        dcl > zero(dcl) || return zero(sec.Ag)
+        len = π * dcl + 2 * hook
+        return bar_area(tie_bar) * len / s
+    end
+    w_cl = sec.b - 2cov - dt
+    h_cl = sec.h - 2cov - dt
+    (w_cl > zero(w_cl) && h_cl > zero(h_cl)) || return zero(sec.Ag)
+    len = _closed_loop_length(ustrip(u"m", w_cl), ustrip(u"m", h_cl), tie_bar) * u"m"
+    legs = column_tie_legs(sec)
+    extra = zero(len)
+    n_v, n_h = legs.y - 2, legs.x - 2
+    n_v > 0 && (extra += n_v * (h_cl + 2 * hook))
+    n_h > 0 && (extra += n_h * (w_cl + 2 * hook))
+    return bar_area(tie_bar) * (len + extra) / s
 end

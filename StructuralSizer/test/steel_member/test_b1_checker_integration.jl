@@ -28,7 +28,7 @@ println("Testing B1 Moment Amplification in AISCChecker...")
         demand_low_P = MemberDemand(1;
             Pu_c = 50.0u"kN",  # Low compression
             Mux = 50.0u"kN*m",
-            M1x = 0.0u"kN*m",   # Conservative single curvature
+            M1x = 0.0u"kN*m",   # Eq. A-8-4 at M1/M2 = 0 gives Cm = 0.6
             M2x = 50.0u"kN*m",
         )
         
@@ -115,6 +115,59 @@ println("Testing B1 Moment Amplification in AISCChecker...")
         feasible = StructuralSizer.is_feasible(checker, cache, 1, section, material, demand_defaults, geometry)
         @test (feasible || !feasible)  # Completes without error
         println("  Defaults case feasible: $feasible")
+    end
+
+    @testset "Array sizing keeps the curvature the checker uses" begin
+        # AISC 360-16 App. 8 §8.2.1 (corpus: aisc-360-16, PDF page 306).
+        z = [0.0]
+        bare = StructuralSizer._steel_array_demand(
+            1, [1.0e5], z, [2.0e4], [2.0e4], [2.0e4], z, z, z, z, [1.0],
+            nothing, nothing, nothing, nothing, nothing, nothing)
+        @test bare.M1x == 0.0
+        @test bare.M2x == 2.0e4
+        @test bare.transverse_load == false
+        @test compute_Cm(bare.M1x, bare.M2x) == 0.6
+
+        curved = StructuralSizer._steel_array_demand(
+            1, [1.0e5], z, [2.0e4], [2.0e4], [2.0e4], z, z, z, z, [1.0],
+            [-2.0e4], [2.0e4], nothing, nothing, false, nothing)
+        @test curved.M1x == -2.0e4
+        @test curved.M2x == 2.0e4
+        @test compute_Cm(curved.M1x, curved.M2x) == 1.0
+
+        spanned = StructuralSizer._steel_array_demand(
+            1, [1.0e5], z, [2.0e4], [2.0e4], [2.0e4], z, z, z, z, [1.0],
+            [1.5e4], [2.0e4], nothing, nothing, true, nothing)
+        @test spanned.transverse_load
+        @test compute_Cm(spanned.M1x, spanned.M2x; transverse_loading=true) == 1.0
+
+        # Single curvature (Cm = 1.0) amplifies more than M1/M2 = 0 (Cm = 0.6).
+        # W14X22 is weak-axis slender at 12 ft, so Pe1 about the y-axis is near
+        # the compressive strength and B1 can leave the 1.0 floor. Strong-axis
+        # Pe1 is several times φPn, so the same sweep on Mux never crosses.
+        # AISC 360-16 App. 8 §8.2.1(a), Eq. A-8-4 (corpus: aisc-360-16, PDF page 306).
+        n_flip = 0
+        n_reverse = 0
+        for pu in (100.0, 140.0, 180.0, 220.0, 260.0)
+            for muy in (2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 15.0, 18.0, 22.0, 28.0)
+                demand_zero = MemberDemand(1; Pu_c=pu * u"kN", Muy=muy * u"kN*m",
+                                           M1y=0.0u"kN*m", M2y=muy * u"kN*m")
+                demand_single = MemberDemand(1; Pu_c=pu * u"kN", Muy=muy * u"kN*m",
+                                             M1y=-muy * u"kN*m", M2y=muy * u"kN*m")
+                ok_zero = StructuralSizer.is_feasible(checker, cache, 1, section, material,
+                                                      demand_zero, geometry)
+                ok_single = StructuralSizer.is_feasible(checker, cache, 1, section, material,
+                                                        demand_single, geometry)
+                if ok_zero && !ok_single
+                    n_flip += 1
+                elseif !ok_zero && ok_single
+                    n_reverse += 1
+                end
+            end
+        end
+        println("  weak-axis curvature: flip=$n_flip reverse=$n_reverse")
+        @test n_flip > 0
+        @test n_reverse == 0
     end
 end
 

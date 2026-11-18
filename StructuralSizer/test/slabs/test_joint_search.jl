@@ -76,7 +76,7 @@ const SS = StructuralSizer
         @test o.objective isa MinCarbon
         @test o.joint_studs
         @test o.stud_weight == 1.0
-        @test o.punching_strategy === :grow_columns
+        @test o.punching_strategy === :joint_search
         j = FlatPlateOptions(punching_strategy = :joint_search, joint_studs = false,
                              stud_weight = 3.0, objective = MinVolume())
         @test j.punching_strategy === :joint_search

@@ -556,9 +556,10 @@ end
 @testset "FlatPlateOptions — New Strategy Fields" begin
     # ─── Default values ───
     opts = StructuralSizer.FlatPlateOptions()
-    @test opts.punching_strategy === :grow_columns
+    @test opts.punching_strategy === :joint_search
     @test opts.punching_reinforcement === :headed_studs_generic
-    @test opts.shear_studs === :never  # backward compat virtual property
+    @test opts.objective isa StructuralSizer.MinCarbon
+    @test opts.shear_studs === :if_needed
 
     # ─── Explicit new-style construction ───
     opts = StructuralSizer.FlatPlateOptions(

@@ -531,11 +531,12 @@ struct WallLineDemand{L, F}
 end
 
 """
-    WallLineDemand(idx, p1, p2, tw, hw, samples) → WallLineDemand
+    WallLineDemand(idx, p1, p2, tw, hw, samples; solid_length=nothing) → WallLineDemand
 
 `p1` and `p2` are `(x, y)` plan coordinates. Lengths are stored in metres
 and forces in newtons, so a wall in feet and a thickness in inches are
-the same demand.
+the same demand. `solid_length` is the concrete at the base; omitted, it
+is the distance from `p1` to `p2`.
 """
 function WallLineDemand(idx::Int, p1, p2, tw, hw, samples; solid_length=nothing)
     isempty(samples) && throw(ArgumentError(

@@ -467,6 +467,9 @@ function _size_flat_plate!(
                 sw_estimate = slab_sw(h)
                 Pu = slab_column_axial_loads(struc, slab, columns, slab_cell_indices, sw_estimate,
                     drop_panel, γ_concrete)
+                # A new thickness restarts the columns. Sizes chosen at the
+                # previous h are not a floor for the new punching perimeter.
+                _reseed_columns_for_thickness!(columns, Pu, ln_max, opts, column_opts)
                 _prev_h = h
             end
             

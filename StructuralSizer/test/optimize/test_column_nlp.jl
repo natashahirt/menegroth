@@ -553,8 +553,8 @@ end
     end
 
     @testset "Placeable-steel constraint and bar cap" begin
-        # The constraint is ρ·b·h / (N_MAX·A_bar), dimensionless, last row,
-        # with b, h in inches and A_bar in in².
+        # The constraint is ρ·b·h / (n_fit·A_bar). n_fit is the bars that
+        # fit the faces, capped at N_MAX, not N_MAX itself.
         geometry = ConcreteMemberGeometry(4.0; k=1.0, braced=true)
         @test N_MAX_BARS == 32
         for (bar_size, Muy) in ((8, 0.0), (6, 0.0), (10, 150.0))
@@ -611,10 +611,9 @@ end
     end
 
     @testset "Regression: 20×20 #8 high-ρ case is checked as built" begin
-        # Bounds force Ipopt toward ρ ≈ 0.08 at 20×20. The bar cap places only
-        # 32 #8 (ρg = 0.0632), so the continuous-ρ check used to accept a
-        # section with less steel than the solver assumed. Any acceptable
-        # result must now pass the real checker as built.
+        # Bounds force Ipopt toward ρ ≈ 0.08 at 20×20. The faces hold 24 #8
+        # (ρg ≈ 0.0474), less steel than that ratio. Any acceptable result
+        # must pass the real checker as built.
         geometry = ConcreteMemberGeometry(4.0; k=1.0, braced=true)
         opts = NLPColumnOptions(max_dim=20.0u"inch", ρ_max=0.08, bar_size=8)
         result = size_rc_column_nlp(600.0kip, 500.0kip * u"ft", geometry, opts)

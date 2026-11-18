@@ -253,6 +253,49 @@ end
         # Floor: large tension zeros Vc (Eq. 11-8, Vc ≥ 0) so φVn = φ Vs,max.
         p_floor = RCBeamNLPProblem(1.0kip * u"ft", Vu_mid * kip, opts; Nu=-200.0kip)
         @test constraint_fns(p_floor, x)[2] ≈ Vu_mid / φVs_max rtol=1e-6
+        @test n_constraints(p0) == 4
+        @test constraint_names(p0)[2] == "shear adequacy"
+
+        # Two load cases stay separate rows. The same Vu with tension is a
+        # higher utilization than that Vu with compression. Pairing the
+        # compression onto the tension case's shear would hide it.
+        both = RCBeamNLPProblem(1.0kip * u"ft", Vu_mid * kip, opts;
+                                shear_cases=[(Vu_mid * kip, 50.0kip, 0.0),
+                                             (Vu_mid * kip, -120.0kip, 0.0)])
+        cb = constraint_fns(both, x)
+        @test n_constraints(both) == 5
+        @test cb[2] < 1.0
+        @test cb[3] > 1.0
+        @test cb[3] > cb[2]
+
+        # Two sagging moments stay separate rows. The larger case binds even
+        # when the scalar envelope is the smaller moment. Same Whitney φMn
+        # (ACI 318-11 §10.2).
+        split_m = RCBeamNLPProblem(1.0kip * u"ft", 1.0kip, opts;
+                                   flexure_cases=[1.0kip * u"ft", 400.0kip * u"ft"])
+        cm = constraint_fns(split_m, x)
+        @test n_constraints(split_m) == 5
+        @test constraint_names(split_m)[1] == "flexure utilization (case 1)"
+        @test cm[1] * 400.0 ≈ cm[2] rtol=1e-6
+        @test cm[2] > 1.0
+        @test cm[1] < 1.0
+
+        # Rectangular deflection matches design_beam_deflection (ACI 318-11 §9.5.2).
+        pd = RCBeamNLPProblem(50.0kip * u"ft", 10.0kip, opts;
+                              w_dead=1.2kip / u"ft", w_live=0.8kip / u"ft",
+                              L_span=25.0u"ft")
+        @test n_constraints(pd) == n_constraints(p0) + 2
+        @test constraint_names(pd)[end-1] == "deflection LL (L/360)"
+        xd = [12.0, 24.0, 0.010]
+        dd = 24.0 - pd.cover_offset_in
+        Asd = 0.010 * 12.0 * dd
+        cd = constraint_fns(pd, xd)
+        oracle = design_beam_deflection(
+            12.0u"inch", 24.0u"inch", dd * u"inch", Asd * u"inch^2",
+            pd.fc_psi * u"psi", pd.fy_psi * u"psi", pd.Es_ksi * ksi,
+            25.0u"ft", 1.2kip / u"ft", 0.8kip / u"ft")
+        @test cd[end - 1] ≈ oracle.checks[:immediate_ll].ratio rtol=1e-4
+        @test cd[end] ≈ oracle.checks[:total].ratio rtol=1e-4
 
         # Batch API accepts signed Nu; public default Mu_neg = Mu is unchanged.
         rs = size_rc_beams_nlp([1.0kip * u"ft"], [1.0kip], opts;
@@ -275,5 +318,63 @@ end
                                  Mu_neg=[0.0], Nu=[-20.0kip])
         @test length(trs) == 1
         @test trs[1].status in (:optimal, :feasible, :infeasible)
+
+        # §8.13.8: a rib that meets §8.13.2 and §8.13.3 gets 1.10 Vc.
+        # bw = 6 in, stem 16 − 5 = 11 ≤ 3.5×6, clear spacing 20−6 = 14 ≤ 30 in.
+        rib = [6.0, 16.0, 0.012]
+        plain_rib = RCTBeamNLPProblem(1.0kip * u"ft", Vu_mid * kip, bf, hf, opts)
+        joist_rib = RCTBeamNLPProblem(1.0kip * u"ft", Vu_mid * kip, bf, hf, opts;
+                                     joist_spacing=20.0u"inch")
+        @test constraint_fns(joist_rib, rib)[2] < constraint_fns(plain_rib, rib)[2]
+    end
+
+    @testset "Joist Vc and per-case discrete shear" begin
+        # §8.13.2–§8.13.3 gate the §8.13.8 permission. The depth limit is on
+        # the stem h − hf; clear spacing is center-to-center minus bw.
+        rib_of(bw_in, h_in) = RCTBeamSection(bw=bw_in * u"inch", h=h_in * u"inch",
+                                             bf=30u"inch", hf=3u"inch",
+                                             bar_size=5, n_bars=1, cover=0.75u"inch")
+        vcf(sec, s_in) = StructuralSizer._checker_vc_factor(
+            ACIBeamChecker(; joist_spacing_in=s_in), sec)
+        @test vcf(rib_of(6.0, 18.0), 30.0) == 1.10
+        @test vcf(rib_of(6.0, 24.0), 30.0) == 1.10   # stem 21 = 3.5×6
+        @test vcf(rib_of(6.0, 24.1), 30.0) == 1.0    # stem 21.1
+        @test vcf(rib_of(6.0, 18.0), 36.1) == 1.0    # clear 30.1 in
+        @test vcf(rib_of(3.5, 10.0), 20.0) == 1.0    # bw < 4 in
+        @test vcf(rib_of(6.0, 18.0), 0.0) == 1.0     # not joist construction
+
+        sec = RCTBeamSection(bw=12u"inch", h=20u"inch", bf=48u"inch", hf=5u"inch",
+                             bar_size=8, n_bars=3)
+        plain = ACIBeamChecker(; fy_ksi=60.0, fyt_ksi=60.0)
+        # Clear spacing = 32 − 12 = 20 in, within 30. Depth 20 ≤ 3.5×12.
+        joist = ACIBeamChecker(; fy_ksi=60.0, fyt_ksi=60.0, joist_spacing_in=32.0)
+        cache_p = create_cache(plain, 1)
+        cache_j = create_cache(joist, 1)
+        precompute_capacities!(plain, cache_p, [sec], NWC_4000, MinVolume())
+        precompute_capacities!(joist, cache_j, [sec], NWC_4000, MinVolume())
+        # Vc is 2λ√f'c bwd and Vs,max is 8√f'c bwd, so φ(1.10 Vc + Vs) / φ(Vc + Vs) = 1.02.
+        @test cache_j.φVn_max[1] ≈ 1.02 * cache_p.φVn_max[1] rtol=1e-9
+
+        geom = ConcreteMemberGeometry(20.0u"ft")
+        demand = RCBeamDemand(1; Mu=1.0, Mu_neg=1.0, Vu=1.0)
+        @test is_feasible(plain, cache_p, 1, sec, NWC_4000, demand, geom)
+        over = ACIBeamChecker(; fy_ksi=60.0, fyt_ksi=60.0, shear_cases=[[
+            StructuralSizer.RCBeamShearCase(1.0, 0.0, 0.0),
+            StructuralSizer.RCBeamShearCase(cache_p.φVn_max[1] * 1.01, 0.0, 0.0),
+        ]])
+        @test !is_feasible(over, cache_p, 1, sec, NWC_4000, demand, geom)
+        under = ACIBeamChecker(; fy_ksi=60.0, fyt_ksi=60.0, shear_cases=[[
+            StructuralSizer.RCBeamShearCase(cache_p.φVn_max[1] * 0.5, -50.0, 0.0),
+            StructuralSizer.RCBeamShearCase(cache_p.φVn_max[1] * 0.5, 0.0, 0.0),
+        ]])
+        # The tension row uses Eq. (11-8), so half of the no-axial φVn can still fail it.
+        # A small Vu on that row, and a large Vu only on the Nu = 0 row, both pass
+        # when each stays under its own φVn. The envelope would pair them.
+        split = ACIBeamChecker(; fy_ksi=60.0, fyt_ksi=60.0, shear_cases=[[
+            StructuralSizer.RCBeamShearCase(1.0, -80.0, 0.0),
+            StructuralSizer.RCBeamShearCase(cache_p.φVn_max[1] * 0.99, 0.0, 0.0),
+        ]])
+        @test is_feasible(split, cache_p, 1, sec, NWC_4000, demand, geom)
+        @test is_feasible(under, cache_p, 1, sec, NWC_4000, demand, geom)
     end
 end

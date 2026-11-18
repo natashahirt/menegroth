@@ -420,6 +420,15 @@ function _generate_pattern_cases(struc::BuildingStructure)
                 push!(extras, ld)
             end
         end
+        # Façade line loads are already multiplied by the dead factor. They
+        # stay with dead in every pattern case. They are not a live load.
+        clad = Asap.AbstractLoad[ld for ld in model.loads
+                                 if ld isa Asap.LineLoad && ld.id === :cladding]
+        if !isempty(clad)
+            case_full = Asap.AbstractLoad[case_full; clad]
+            case_a = Asap.AbstractLoad[case_a; clad]
+            case_b = Asap.AbstractLoad[case_b; clad]
+        end
     end
 
     cases = Vector{Asap.AbstractLoad}[]

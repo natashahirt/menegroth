@@ -76,6 +76,7 @@ function required_reinforcement(Mu::Moment, b::Length, d::Length, fc::Pressure, 
         c_over_d = (ω / 0.85) / beta1(fc)
         εt = 0.003 * (1 - c_over_d) / c_over_d
         # Tolerance so a demand exactly at the εt_min capacity is not rejected by roundoff.
+        # Default εt_min is ACI 318-11 §10.3.4 (corpus: aci-318-11, page 142).
         εt < εt_min - 1e-12 && return Inf * u"m^2"
     end
 

@@ -38,7 +38,8 @@ middle third of the thickness, §11.5.3.1). `Moop` is the slab's factored
 moment about the wall's weak axis. `e = Moop / N`. Inside the middle third
 the empirical method is the axial check. Outside it, that method does not
 apply and the pier is checked for the magnified out-of-plane moment
-(§6.6.4.5 and §22.2). A tensile axial force makes the bearing method
+(§6.6.4.5 and §22.2). The unsupported length of that magnifier is
+this story's height. A tensile axial force makes the bearing method
 inapplicable; that result is recorded as a failure.
 
 `ρt_strength`, when passed, is the transverse ratio required for shear
@@ -194,14 +195,16 @@ end
 
 """
 Magnified weak-axis strength. Instability of §6.6.4.5.2 is a failure.
-Ig is the pier bent through its thickness.
+`Ig` is the pier bent through its thickness, `lw · t³ / 12`. `Ec` comes from
+the concrete's density (ACI 318-19 §19.2.2.1(a)), so lightweight concrete
+is not given normalweight stiffness.
 """
 function _out_of_plane_strength(section::WallSection, material, N, Moop, lu)
     lw = ustrip(u"m", section.lw)
     t = ustrip(u"m", section.t)
     Ig = lw * t^3 / 12
     fc = ustrip(u"Pa", material.concrete.fc′)
-    Ec = StructuralSizer.wall_modulus_si(fc)
+    Ec = StructuralSizer.wall_modulus_si(fc, ustrip(u"kg/m^3", material.concrete.ρ))
     Pu = N isa Unitful.Quantity ? ustrip(u"N", N) : Float64(N)
     M = ustrip(u"N*m", Moop)
     mag = StructuralSizer.nonsway_slenderness_moment(Pu, M, Ec, Ig, ustrip(u"m", lu))
@@ -421,6 +424,11 @@ length is used.
 first value that passes every action. Returns the transverse ratio
 required for shear strength, or `nothing` when the shear is above the
 §11.5.4.2 cap.
+
+`Moop` is the factored slab moment about the weak axis. Inside the middle
+third the search uses the in-plane checks. Outside it, `ρl` also has to
+pass the magnified weak-axis strength (ACI 318-19 §6.6.4.5). The
+unsupported length of that magnifier is `hw`.
 
 The ratios already on the wall are not a floor. A demand the grid cannot
 cover leaves the wall at the top of the grid.

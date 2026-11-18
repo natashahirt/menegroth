@@ -142,12 +142,34 @@ function _straight_extremes(plan, coeff, loads)
         push!(xs, x)
     end
     _unique_stations!(xs)
+    # Moment peaks where shear crosses zero, between the point loads.
+    # V(x) = α x + β x²/2 − Σ P is quadratic on each open interval.
+    for i in 1:(length(xs) - 1)
+        xL, xR = xs[i], xs[i + 1]
+        xR - xL <= 1e-9 && continue
+        Pleft = 0.0
+        for (xc, P) in loads
+            xc < xL + 1e-9 && (Pleft += P)
+        end
+        # (β/2) x² + α x − Pleft = 0.
+        if abs(β) < 1e-12
+            abs(α) < 1e-12 && continue
+            root = Pleft / α
+            xL < root < xR && push!(xs, root)
+        else
+            disc = α^2 + 2 * β * Pleft
+            disc < 0 && continue
+            s = sqrt(disc)
+            for root in ((-α + s) / β, (-α - s) / β)
+                xL < root < xR && push!(xs, root)
+            end
+        end
+    end
+    _unique_stations!(xs)
     Mbot = Mtop = Vmax = 0.0
     for x in xs
-        Vsoil = α * x + β * x^2 / 2
-        Msoil = α * x^2 / 2 + β * x^3 / 6
-        V = Vsoil
-        M = Msoil
+        V = α * x + β * x^2 / 2
+        M = α * x^2 / 2 + β * x^3 / 6
         for (xc, P) in loads
             xc < x - 1e-9 || continue
             V -= P

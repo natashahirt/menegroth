@@ -50,10 +50,10 @@ function run_all_methods(demands, positions, soil; min_depth=24.0u"inch")
             cover=3.0u"inch", min_depth=min_depth,
             depth_increment=1.0u"inch")
 
-    # The comparison wants the rigid strip numbers even when §6.1.2 Step 3
-    # would send the public method to Winkler.
+    # The strip itself. design_footing(::RigidMat) applies Eq. (5-1) and
+    # §6.1.2 Step 3, and these grids are not rigid.
     r_rigid  = StructuralSizer._design_mat_rigid(demands, positions, soil;
-        opts=MatParams(; base...))
+        opts=MatParams(; base..., analysis_method=RigidMat()))
 
     r_shukla = design_footing(MatFoundation(), demands, positions, soil;
         opts=MatParams(; base..., analysis_method=ShuklaAFM()))

@@ -303,6 +303,27 @@ using Asap: kip, ksi
         @test all(s -> s isa RCTBeamSection, cat)
         @test all(s -> ustrip(u"inch", s.bf) ≈ 48.0, cat)
         @test all(s -> ustrip(u"inch", s.hf) ≈ 5.0, cat)
+
+        # The building caller passes bf as a function of the candidate web.
+        per_web = standard_rc_tbeams(
+            flange_width = bw -> 4 * bw,
+            flange_thickness = 5u"inch",
+            web_widths = [12, 16],
+            depths = [20],
+            bar_sizes = [8],
+            n_bars_range = 2:2,
+        )
+        @test length(per_web) > 0
+        @test all(s -> ustrip(u"inch", s.bf) ≈ 4 * ustrip(u"inch", s.bw), per_web)
+        wider_than_flange = standard_rc_tbeams(
+            flange_width = _ -> 10u"inch",
+            flange_thickness = 5u"inch",
+            web_widths = [12],
+            depths = [20],
+            bar_sizes = [8],
+            n_bars_range = 2:2,
+        )
+        @test isempty(wider_than_flange)
     end
 
     # =================================================================

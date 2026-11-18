@@ -39,8 +39,20 @@ function size_rc_beam_nlp(Mu, Vu, opts::NLPBeamOptions;
                           Tu = 0.0,
                           Nu = 0.0,
                           Mu_neg = nothing,
+                          shear_cases = nothing,
+                          flexure_cases = nothing,
+                          w_dead = nothing,
+                          w_live = nothing,
+                          L_span = nothing,
+                          defl_support::Symbol = :simply_supported,
+                          defl_ξ::Float64 = 2.0,
+                          sustained_live_fraction::Real = 0.0,
                           x0::Union{Nothing,Vector{Float64}} = nothing)
-    problem = RCBeamNLPProblem(Mu, Vu, opts; Tu=Tu, Nu=Nu)
+    problem = RCBeamNLPProblem(Mu, Vu, opts; Tu=Tu, Nu=Nu, shear_cases=shear_cases,
+                               flexure_cases=flexure_cases,
+                               w_dead=w_dead, w_live=w_live, L_span=L_span,
+                               support=defl_support, ξ=defl_ξ,
+                               sustained_live_fraction=sustained_live_fraction)
 
     opt_result = optimize_continuous(
         problem;
@@ -57,7 +69,33 @@ function size_rc_beam_nlp(Mu, Vu, opts::NLPBeamOptions;
     # gate; a miss drops a bar, then deepens, then widens, inside the bounds.
     # Public default Mu_neg = Mu (unsigned envelope) is unchanged.
     Mu_neg_kipft = to_kipft(isnothing(Mu_neg) ? Mu : Mu_neg)
-    return _rc_beam_nlp_verify(result, problem, opts, Mu_neg_kipft)
+    verified = _rc_beam_nlp_verify(result, problem, opts, Mu_neg_kipft)
+    return _rc_beam_nlp_deflection_gate(verified, problem)
+end
+
+"""
+The installed section, after bar rounding and any repair, still has to pass
+the same deflection check the discrete beam uses (ACI 318-11 §9.5.2).
+`w_dead_kiplf == 0` means no service loads were given, so no check.
+"""
+function _rc_beam_nlp_deflection_gate(result::RCBeamNLPResult, problem::RCBeamNLPProblem)
+    problem.w_dead_kiplf > 0 || return result
+    _rc_column_nlp_acceptable(result.status) || return result
+    sec = result.section
+    defl = design_beam_deflection(
+        sec.b, sec.h, sec.d, sec.As,
+        problem.fc_psi * u"psi", problem.fy_psi * u"psi", problem.Es_ksi * ksi,
+        problem.L_in * u"inch",
+        problem.w_dead_kiplf * kip / u"ft",
+        problem.w_live_kiplf * kip / u"ft";
+        support = problem.defl_support,
+        ξ = problem.defl_ξ,
+        sustained_live_fraction = problem.defl_sustained_live,
+    )
+    defl.ok && return result
+    return RCBeamNLPResult(result.section, result.b_opt, result.h_opt, result.ρ_opt,
+                           result.b_final, result.h_final, result.area,
+                           :infeasible, result.iterations)
 end
 
 """Accept the snapped beam, or the repaired section, or `:infeasible`."""
@@ -68,9 +106,13 @@ function _rc_beam_nlp_verify(
     Mu_neg_kipft::Float64,
 )
     _rc_column_nlp_acceptable(result.status) || return result
+    # Every NLP sagging and shear row reaches the gate: the largest sagging
+    # case, and one checker shear row per case with its own Nu and Tu.
     demand = (
-        Mu_kipft = problem.Mu_kipft, Mu_neg_kipft = Mu_neg_kipft,
+        Mu_kipft = maximum(problem.flexure_cases), Mu_neg_kipft = Mu_neg_kipft,
         Vu_kip = problem.Vu_kip, Nu_kip = problem.Nu_kip, Tu_kipin = problem.Tu_kipin,
+        shear_cases = [RCBeamShearCase(c.Vu_kip, c.Nu_kip, c.Tu_kipin)
+                       for c in problem.shear_cases],
     )
     _beam_nlp_passes_checker(result.section, opts; demand...) && return result
     found = _beam_nlp_repair(
@@ -107,6 +149,7 @@ function _beam_nlp_passes_checker(
     Tu_kipin::Float64,
     joist_spacing::Union{Nothing, Length} = nothing,
     joist_direction::Symbol = :one_way,
+    shear_cases::Vector{RCBeamShearCase} = RCBeamShearCase[],
 )
     fy = fy_ksi(opts.rebar_material)
     checker = ACIBeamChecker(;
@@ -117,6 +160,7 @@ function _beam_nlp_passes_checker(
         max_depth = opts.max_depth,
         joist_spacing = joist_spacing,
         joist_direction = joist_direction,
+        shear_cases = isempty(shear_cases) ? Vector{RCBeamShearCase}[] : [shear_cases],
     )
     cache = create_cache(checker, 1)
     precompute_capacities!(checker, cache, [section], opts.material, MinVolume())
@@ -239,15 +283,40 @@ Size multiple RC beams using continuous (NLP) optimization.
 """
 function size_rc_beams_nlp(Mu::Vector, Vu::Vector, opts::NLPBeamOptions;
                            Mu_neg::Vector = Mu,
-                           Nu::Vector = zeros_like(Vu))
+                           Nu::Vector = zeros_like(Vu),
+                           shear_cases = nothing,
+                           flexure_cases = nothing,
+                           w_dead = nothing,
+                           w_live = nothing,
+                           L_span = nothing,
+                           defl_support::Symbol = :simply_supported,
+                           defl_ξ::Float64 = 2.0,
+                           sustained_live_fraction::Real = 0.0)
     n = length(Mu)
     n == length(Vu) || throw(ArgumentError("Mu and Vu must have same length"))
     n == length(Mu_neg) || throw(ArgumentError("Mu_neg must have same length as Mu"))
     n == length(Nu) || throw(ArgumentError("Nu must have same length as Vu"))
+    if shear_cases !== nothing
+        length(shear_cases) == n ||
+            throw(ArgumentError("shear_cases must have same length as Mu"))
+    end
+    if flexure_cases !== nothing
+        length(flexure_cases) == n ||
+            throw(ArgumentError("flexure_cases must have same length as Mu"))
+    end
 
     results = Vector{RCBeamNLPResult}(undef, n)
     for i in 1:n
-        results[i] = size_rc_beam_nlp(Mu[i], Vu[i], opts; Mu_neg=Mu_neg[i], Nu=Nu[i])
+        sc = shear_cases === nothing ? nothing : shear_cases[i]
+        fc = flexure_cases === nothing ? nothing : flexure_cases[i]
+        wd = w_dead isa AbstractVector ? w_dead[i] : w_dead
+        wl = w_live isa AbstractVector ? w_live[i] : w_live
+        Ls = L_span isa AbstractVector ? L_span[i] : L_span
+        results[i] = size_rc_beam_nlp(Mu[i], Vu[i], opts; Mu_neg=Mu_neg[i], Nu=Nu[i],
+                                      shear_cases=sc, flexure_cases=fc,
+                                      w_dead=wd, w_live=wl, L_span=Ls,
+                                      defl_support=defl_support, defl_ξ=defl_ξ,
+                                      sustained_live_fraction=sustained_live_fraction)
     end
     return results
 end

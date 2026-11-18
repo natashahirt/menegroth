@@ -261,6 +261,9 @@ Base.@kwdef mutable struct DesignParameters
     # Pier thickness for skeleton `:walls` edges. Required when that group is
     # non-empty. There is no default thickness.
     wall_thickness::Union{Nothing, typeof(1.0u"m")} = nothing
+    # Columns and beams that lie inside a wall move to `:absent`, and the wall
+    # is the support there. `false` keeps them as members.
+    park_wall_overlaps::Bool = true
     # After a failed ordinary-wall check, jump to a thicker inch predicted
     # from this analysis and confirm. `:all` moves every wall together, so
     # one analysis can predict the next inch. A finer grouping re-solves,

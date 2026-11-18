@@ -45,6 +45,7 @@ const PARAM_ANCHOR = Dict{Symbol, String}(
     :lateral => "wall",
     :wall_inputs => "wall",
     :wall_thickness => "wall",
+    :park_wall_overlaps => "wall",
     :jump_wall_thickness => "wall",
     :wall_thickness_grouping => "wall",
     :wall_catalog_constraint => "wall",

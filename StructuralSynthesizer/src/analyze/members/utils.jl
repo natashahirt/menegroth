@@ -1,5 +1,6 @@
 include("members/initialize.jl")
 include("members/wall_stacks.jl")
+include("members/wall_overlaps.jl")
 include("members/geometry_classification.jl")
 include("members/slab_edge.jl")
 include("members/releases.jl")

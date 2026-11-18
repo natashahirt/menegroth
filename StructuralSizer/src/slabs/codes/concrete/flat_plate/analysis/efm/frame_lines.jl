@@ -641,7 +641,7 @@ function _solve_efm_line(method::EFM, spans, columns, joint_positions, struc,
     use_pattern = method.pattern_loading && requires_pattern_loading(qD, qL) && n_spans >= 2
     env = _efm_demands_with_pattern(
         span_moments, struc, columns, qu, qD, qL, l2, ln_avg;
-        use_pattern, solve_once=_solve_once, drop_shears,
+        use_pattern, solve_once=_solve_once, drop_shears, drop_loads,
     )
     return env, use_pattern
 end
@@ -676,6 +676,7 @@ function _analyze_equivalent_frames(method::EFM, struc, columns, h, fc, Ecs, γ_
     M_neg_ext = M_neg_int = M_pos = M_wall_ext = M_wall_int = nothing
     M_neg_ext_face = M_neg_int_face = nothing
     wall_lists = Any[]
+    face_lists = Any[]
     use_pattern = false
     one_line = length(lines) == 1
     for (k, line) in enumerate(lines)
@@ -688,6 +689,7 @@ function _analyze_equivalent_frames(method::EFM, struc, columns, h, fc, Ecs, γ_
         )
         use_pattern |= res.pattern_loading
         res.wall_transfer === nothing || push!(wall_lists, res.wall_transfer)
+        push!(face_lists, res.wall_faces)
         M_neg_ext = isnothing(M_neg_ext) ? res.M_neg_ext : _raise_abs(M_neg_ext, res.M_neg_ext)
         M_neg_int = isnothing(M_neg_int) ? res.M_neg_int : _raise_abs(M_neg_int, res.M_neg_int)
         M_pos = isnothing(M_pos) ? res.M_pos : _raise_abs(M_pos, res.M_pos)
@@ -752,6 +754,7 @@ function _analyze_equivalent_frames(method::EFM, struc, columns, h, fc, Ecs, γ_
         M_neg_ext_face = uconvert(kip * u"ft", M_neg_ext_face),
         M_neg_int_face = uconvert(kip * u"ft", M_neg_int_face),
         wall_transfer = _sum_wall_transfer(wall_lists),
+        wall_faces = _sum_wall_faces(face_lists),
     )
 end
 

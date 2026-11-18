@@ -25,6 +25,7 @@ function _efm_moments_at_face(r::MomentAnalysisResult)
         stub_moments_below = r.stub_moments_below,
         stub_moments_above = r.stub_moments_above,
         wall_transfer = r.wall_transfer,
+        wall_faces = r.wall_faces,
     )
 end
 
@@ -411,22 +412,32 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
     )
 end
 
+"""Wall-face parts stored on a moment result. Empty when that result has none."""
+function _stored_wall_faces(results)
+    results === nothing && return SlabWallFaceMoment[]
+    hasproperty(results, :wall_faces) || return SlabWallFaceMoment[]
+    return results.wall_faces
+end
+
 """
     _final_wall_face_parts(method, cache, struc, slab, columns, h, γ_concrete,
                            moment_results, secondary_results) -> (primary, secondary)
 
-Dead and live wall-face parts in each span direction, from the shell
-analysis at the converged thickness. Both are empty for DDM and EFM, and
-for a shell that has no wall face or no D/L split.
+Dead and live wall-face parts in each span direction.
+
+A shell analysis reads them from the cache at the converged thickness. Direct
+design and the equivalent frame read the parts stored on the moment result.
+Both are empty when that direction has no wall or no dead/live split.
 """
 function _final_wall_face_parts(method, cache, struc, slab, columns, h, γ_concrete,
                                 moment_results, secondary_results)
-    none = NTuple{2,Float64}[]
-    (method isa FEA && cache isa FEAModelCache && cache.initialized) || return none, none
+    if !(method isa FEA && cache isa FEAModelCache && cache.initialized)
+        return _stored_wall_faces(moment_results), _stored_wall_faces(secondary_results)
+    end
     ax = _moment_analysis_setup(struc, slab, columns, h, γ_concrete).span_axis
     primary = _paired_wall_face_parts(cache, struc, slab, ax,
                                       _stored_wall_moment(moment_results))
-    secondary_results === nothing && return primary, none
+    secondary_results === nothing && return primary, SlabWallFaceMoment[]
     sec_ax = _secondary_moment_analysis_setup(struc, slab, columns, h, γ_concrete).span_axis
     secondary = _paired_wall_face_parts(cache, struc, slab, sec_ax,
                                         _stored_wall_moment(secondary_results))

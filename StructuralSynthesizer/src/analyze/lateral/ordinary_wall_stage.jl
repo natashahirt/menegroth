@@ -372,7 +372,7 @@ function _analyze_lateral_walls!(struc::BuildingStructure, params::DesignParamet
             append!(grown, batch.growns)
         end
         lw, Moop, basis, ρt_strength, raised = _select_pier_steel!(
-            struc, wall_index, grown, inputs.material)
+            struc, wall_index, grown, inputs.material; SDS=inputs.SDS)
         raised && (n_raised += 1)
         grown_by_wall[wall_index] = grown
         lw_by_wall[wall_index] = lw
@@ -670,13 +670,13 @@ Returns the clear length, the envelope slab moment, the pressure basis that
 pairs that moment with each combination, the strength `ρt`, and whether
 either ratio moved up.
 """
-function _select_pier_steel!(struc, wall_index::Int, grown, material)
+function _select_pier_steel!(struc, wall_index::Int, grown, material; SDS=nothing)
     wall = struc.walls[wall_index]
     ρl0 = wall.ρl
     ρt0 = wall.ρt
     lw = joined_clear_length(wall, struc.walls, wall_index) * u"m"
     Moop = _slab_moment_into_wall(struc, wall, lw)
-    basis = _governing_slab_basis(struc, wall)
+    basis = _with_sds(_governing_slab_basis(struc, wall), SDS)
     ρt_strength = select_ordinary_wall_reinforcement!(
         wall, grown, material; hw=_stacked_wall_height(wall), lw=lw, Moop=Moop,
         slab_basis=basis)
@@ -1091,9 +1091,13 @@ Factored slab moment delivered into this pier, about its weak axis.
 The panel stores the envelope at a wall support in each span direction.
 A wall perpendicular to the primary span takes the primary envelope.
 A wall parallel to it takes the secondary envelope. A wall between those
-takes the larger. The pier's share is its clear length over the wall
-centerline, so a short joined leg does not receive the whole wall's moment.
-Slabs that are not at this pier's bottom or top do not load it.
+takes the larger. When those directions store a dead and live part for
+each wall, this pier takes the gravity envelope of the faces on its own
+wall. Faces of another wall do not load it. With no per-wall parts, the
+pier takes the panel envelope. The pier's share is its clear length over
+the wall centerline, so a short joined leg does not receive the whole
+wall's moment. Slabs that are not at this pier's bottom or top do not
+load it.
 """
 function _slab_moment_into_wall(struc, wall, lw)
     hasproperty(struc, :slabs) || return 0.0u"N*m"
@@ -1104,7 +1108,7 @@ function _slab_moment_into_wall(struc, wall, lw)
     share = min(max(clear, 0.0) / L, 1.0)
     height = hasproperty(wall, :base) ? ustrip(u"m", wall.base.L) : nothing
     z0, z1 = _story_range_m(struc, wall.story, height)
-    moment = 0.0u"N*m"
+    moment = 0.0
     for slab in struc.slabs
         result = slab.result
         result isa StructuralSizer.FlatPlatePanelResult || continue
@@ -1113,9 +1117,10 @@ function _slab_moment_into_wall(struc, wall, lw)
         at_joint = (z0 !== nothing && abs(z - z0) <= 0.05) ||
                    (z1 !== nothing && abs(z - z1) <= 0.05)
         at_joint || continue
-        moment = max(moment, _directed_wall_moment(result, slab, ux, uy))
+        m, _ = _pier_directed_moment(result, slab, wall, ux, uy)
+        moment = max(moment, m)
     end
-    return moment * share
+    return moment * u"N*m" * share
 end
 
 """
@@ -1124,11 +1129,11 @@ How the slab moment into this pier pairs with each load combination.
 `qD` and `qL` are the dead and live pressures, in pascals, of the slab that
 delivers the largest wall moment. `roof` is true when that slab is a roof,
 so its live case is roof live rather than floor live. `faces` holds
-`(D, L, roof)` in N·m for every wall face of every slab at the pier's
-joints, from the panels' `wall_face_parts` in the direction
-[`_directed_wall_moment`](@ref) picks. `faces` is `nothing` when a slab
-that loads the pier has no parts, and the pressures pair the moment
-instead. `nothing` when no flat-plate panel meets the pier.
+`(D, L, roof)` in N·m for the faces on this wall, from the panels'
+`wall_face_parts` in the directions [`_directed_wall_moment`](@ref) picks.
+`faces` is `nothing` when a slab that loads the pier has no per-wall parts,
+and the pressures pair the moment instead. `nothing` when no flat-plate
+panel meets the pier.
 """
 function _governing_slab_basis(struc, wall)
     hasproperty(struc, :slabs) || return nothing
@@ -1149,13 +1154,13 @@ function _governing_slab_basis(struc, wall)
         at_joint = (z0 !== nothing && abs(z - z0) <= 0.05) ||
                    (z1 !== nothing && abs(z - z1) <= 0.05)
         at_joint || continue
-        m = ustrip(u"N*m", _directed_wall_moment(result, slab, ux, uy))
+        m, mine = _pier_directed_moment(result, slab, wall, ux, uy)
         roof = hasproperty(slab, :floor_type) && slab.floor_type === :roof
-        if m > 0
-            parts = _directed_wall_face_parts(result, slab, ux, uy)
-            paired &= !isempty(parts)
-            for (D, Lp) in parts
-                push!(faces, (D = D, L = Lp, roof = roof))
+        if mine === nothing
+            m > 0 && (paired = false)
+        else
+            for face in mine
+                push!(faces, (D = face.D, L = face.L, roof = roof))
             end
         end
         m > best || continue
@@ -1166,6 +1171,13 @@ function _governing_slab_basis(struc, wall)
     end
     basis === nothing && return nothing
     return (basis..., faces = paired ? faces : nothing)
+end
+
+"""Attach `SDS` to a slab basis. A missing value is zero, so `Ev` adds nothing."""
+function _with_sds(basis, SDS)
+    basis === nothing && return nothing
+    s = SDS === nothing ? 0.0 : Float64(SDS)
+    return (basis..., SDS = s)
 end
 
 "Largest cell dead and live pressures on one slab, in pascals."
@@ -1200,19 +1212,52 @@ function _directed_wall_moment(result, slab, ux, uy)
     return uconvert(u"N*m", chosen)
 end
 
-"""`wall_face_parts` in the directions [`_directed_wall_moment`](@ref) reads."""
+"""
+`wall_face_parts` in the directions [`_directed_wall_moment`](@ref) reads.
+
+Empty when a read direction has a wall moment and no per-wall parts. The
+caller then uses the panel envelope.
+"""
 function _directed_wall_face_parts(result, slab, ux, uy)
     dirs = _wall_span_directions(slab, ux, uy)
-    parts = NTuple{2,Float64}[]
-    if dirs.primary && abs(result.M_wall) > zero(result.M_wall)
-        isempty(result.wall_face_parts) && return NTuple{2,Float64}[]
-        append!(parts, result.wall_face_parts)
+    parts = StructuralSizer.SlabWallFaceMoment[]
+    function take(on, M, stored)
+        on || return true
+        if isempty(stored)
+            return abs(M) <= zero(M)
+        end
+        append!(parts, stored)
+        return true
     end
-    if dirs.secondary && abs(result.M_wall_secondary) > zero(result.M_wall_secondary)
-        isempty(result.wall_face_parts_secondary) && return NTuple{2,Float64}[]
-        append!(parts, result.wall_face_parts_secondary)
-    end
+    take(dirs.primary, result.M_wall, result.wall_face_parts) ||
+        return StructuralSizer.SlabWallFaceMoment[]
+    take(dirs.secondary, result.M_wall_secondary, result.wall_face_parts_secondary) ||
+        return StructuralSizer.SlabWallFaceMoment[]
     return parts
+end
+
+"""
+Gravity envelope into this wall, and the faces that produce it.
+
+The envelope is `max(1.4D, 1.2D + 1.6L, 0)` over the faces on this wall,
+in N·m. `nothing` for the faces means the panel envelope applies instead.
+"""
+function _pier_directed_moment(result, slab, wall, ux, uy)
+    parts = _directed_wall_face_parts(result, slab, ux, uy)
+    if isempty(parts)
+        return ustrip(u"N*m", _directed_wall_moment(result, slab, ux, uy)), nothing
+    end
+    mine = [face for face in parts if _face_on_wall(face, wall)]
+    isempty(mine) && return 0.0, StructuralSizer.SlabWallFaceMoment[]
+    env(face) = max(1.4 * face.D, 1.2 * face.D + 1.6 * face.L, 0.0)
+    return maximum(env, mine), mine
+end
+
+"True when a stored face lies on this wall's plan line."
+function _face_on_wall(face, wall)
+    StructuralSizer._segment_key(((face.x1, face.y1), (face.x2, face.y2))) ==
+        StructuralSizer._segment_key(((Float64(wall.x1), Float64(wall.y1)),
+                                      (Float64(wall.x2), Float64(wall.y2))))
 end
 
 function _each_second_order(records, wall, first_actions, second_actions;

@@ -310,6 +310,23 @@ struct StripReinforcement{L<:Asap.Length, A<:Asap.Area, M<:Asap.Moment}
 end
 
 """
+Unfactored dead and live moment at one wall face.
+
+`D` and `L` are N·m, top tension positive. `(x1, y1)`–`(x2, y2)` is the
+wall's plan line in metres. Two faces of one wall stay separate, so a load
+combination can be governed by either face. Frame strips of one wall are
+already added into `D` and `L`.
+"""
+struct SlabWallFaceMoment
+    D::Float64
+    L::Float64
+    x1::Float64
+    y1::Float64
+    x2::Float64
+    y2::Float64
+end
+
+"""
     FlatPlatePanelResult
 
 Panel design result for flat plate per ACI 318 DDM/EFM.
@@ -384,10 +401,10 @@ struct FlatPlatePanelResult{L<:Asap.Length, F<:Asap.Pressure, M<:Asap.Moment} <:
     M_wall_secondary::M
 
     # Unfactored (dead, largest live) moment at each wall face behind
-    # `M_wall` and `M_wall_secondary`, N·m, top tension positive. Empty when
-    # the analysis did not separate dead and live (DDM, EFM, single solve).
-    wall_face_parts::Vector{NTuple{2,Float64}}
-    wall_face_parts_secondary::Vector{NTuple{2,Float64}}
+    # `M_wall` and `M_wall_secondary`, with the wall's plan line. Empty when
+    # the analysis did not separate dead and live.
+    wall_face_parts::Vector{SlabWallFaceMoment}
+    wall_face_parts_secondary::Vector{SlabWallFaceMoment}
 end
 
 # Convenience constructor from h-based inputs.
@@ -405,8 +422,8 @@ function FlatPlatePanelResult(
     sec_ms_reinf::Vector{<:StripReinforcement} = StripReinforcement[],
     M_wall::Asap.Moment = 0.0u"kN*m",
     M_wall_secondary::Asap.Moment = 0.0u"kN*m",
-    wall_face_parts::Vector{NTuple{2,Float64}} = NTuple{2,Float64}[],
-    wall_face_parts_secondary::Vector{NTuple{2,Float64}} = NTuple{2,Float64}[],
+    wall_face_parts::Vector{SlabWallFaceMoment} = SlabWallFaceMoment[],
+    wall_face_parts_secondary::Vector{SlabWallFaceMoment} = SlabWallFaceMoment[],
 ) where {M<:Asap.Moment}
     L = typeof(1.0u"m")
     

@@ -58,7 +58,7 @@ using StructuralSizer
         parts = StructuralSizer._paired_wall_face_parts(cache, struc, slab, ax, M)
         M > 0u"N*m" || continue
         @test !isempty(parts)
-        env = maximum(p -> max(1.4 * p[1], 1.2 * p[1] + 1.6 * p[2], 0.0), parts)
+        env = maximum(p -> max(1.4 * p.D, 1.2 * p.D + 1.6 * p.L, 0.0), parts)
         @test env ≈ ustrip(u"N*m", M) rtol=1e-6
     end
 
@@ -77,8 +77,52 @@ using StructuralSizer
             cache, struc, slab, sec.span_axis, result.secondary.M_wall_ext))
     slab.result = panel
     wall = only(struc.walls)
+    key = StructuralSizer._segment_key(((wall.x1, wall.y1), (wall.x2, wall.y2)))
+    stored = vcat(panel.wall_face_parts, panel.wall_face_parts_secondary)
+    @test any(p -> StructuralSizer._segment_key(((p.x1, p.y1), (p.x2, p.y2))) == key, stored)
     basis = StructuralSynthesizer._governing_slab_basis(struc, wall)
     @test basis !== nothing
     @test basis.faces !== nothing
     @test !isempty(basis.faces)
+
+    # The equivalent frame stores dead and live per wall, and the final
+    # design hands them to the panel the wall stage reads. A column at the
+    # wall's end would be the frame joint, so the columns on the wall are
+    # parked, as the shear-wall office does at pier ends.
+    on_wall(col) = begin
+        x, y = StructuralSizer._eq137_structural_xy(struc, col)
+        dx, dy = wall.x2 - wall.x1, wall.y2 - wall.y1
+        abs(dx * (y - wall.y1) - dy * (x - wall.x1)) / hypot(dx, dy) < 0.25
+    end
+    frame_columns = [col for col in columns if !on_wall(col)]
+    @test length(frame_columns) == 2
+    efm = EFM(solver=:hardy_cross)
+    primary = StructuralSizer.run_moment_analysis(
+        efm, struc, slab, frame_columns, 0.20u"m", fc, Ecs, γ; ν_concrete=RC_4000_60.concrete.ν)
+    secondary = StructuralSizer.run_secondary_moment_analysis(
+        efm, struc, slab, frame_columns, 0.20u"m", fc, Ecs, γ; ν_concrete=RC_4000_60.concrete.ν)
+    efm_faces = vcat(primary.wall_faces, secondary.wall_faces)
+    @test !isempty(efm_faces)
+    @test all(p -> StructuralSizer._segment_key(((p.x1, p.y1), (p.x2, p.y2))) == key, efm_faces)
+    @test all(p -> p.D > 0, efm_faces)
+    handed = StructuralSizer._final_wall_face_parts(
+        efm, nothing, struc, slab, frame_columns, 0.20u"m", γ, primary, secondary)
+    @test handed[1] == primary.wall_faces
+    @test handed[2] == secondary.wall_faces
+    efm_panel = FlatPlatePanelResult(
+        6.0u"m", 6.0u"m", 0.20u"m", primary.M0, primary.qu,
+        3.0u"m", none, 3.0u"m", none,
+        (ok = true, max_ratio = 0.1, details = Dict{Int,NamedTuple}()),
+        (ok = true, Δ_check = 0.01u"m", Δ_total = 0.01u"m", Δ_limit = 0.02u"m");
+        M_wall = primary.M_wall_ext,
+        M_wall_secondary = secondary.M_wall_ext,
+        wall_face_parts = handed[1],
+        wall_face_parts_secondary = handed[2])
+    slab.result = efm_panel
+    efm_basis = StructuralSynthesizer._governing_slab_basis(struc, wall)
+    @test efm_basis !== nothing
+    @test efm_basis.faces !== nothing
+    @test !isempty(efm_basis.faces)
+    lw = StructuralSynthesizer.wall_length(wall) * u"m"
+    @test StructuralSynthesizer._slab_moment_into_wall(struc, wall, lw) > 0u"N*m"
 end

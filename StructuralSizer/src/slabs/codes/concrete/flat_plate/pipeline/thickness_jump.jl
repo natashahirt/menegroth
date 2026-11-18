@@ -112,6 +112,8 @@ function scale_moment_result(result::MomentAnalysisResult, r, dscale, qD, qu)
         stub_moments_above = scaled(result.stub_moments_above),
         wall_transfer = result.wall_transfer === nothing ? nothing :
             [(seg = w.seg, M = w.M * r) for w in result.wall_transfer],
+        wall_faces = [SlabWallFaceMoment(f.D * r, f.L * r, f.x1, f.y1, f.x2, f.y2)
+                      for f in result.wall_faces],
     )
 end
 

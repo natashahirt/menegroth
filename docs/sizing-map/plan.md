@@ -226,14 +226,48 @@ Builds on: trace infrastructure (`TraceCollector`), the Design Harness /
 
 ### Phase 7 — Speed (parallel track from Phase 1)
 
+Evidence: `audit-2026-11-18/speed.md`. Every column-size step rebuilds the
+whole fine slab mesh (column c1/c2 are in the FEA cache key): 27–36 s per
+rebuild against 4–6 s per value update, 536 s against 297 s on one A/B pair.
+Approved directions (user, 2026-11-18): items 7.7–7.12. Analysis machinery
+(substructuring, rigid rings, low-rank updates) lives in Asap per
+`architecture-contracts.mdc`.
+
 | WP | Work |
 |---|---|
 | 7.1 | Hoist P-M capacity caches out of loops; key the MIP memo on catalog value |
 | 7.2 | Wall thickness changes update shell thickness in place instead of rebuilding |
 | 7.3 | Beam ⇄ column loop: warm start, per-group demand tolerance (cycle detection moves to 2.3) |
-| 7.4 | FEA flat plate: fixed mesh with column patch stiffness |
+| 7.4 | Superseded by 7.8 |
 | 7.5 | Bisection for Winkler mats |
 | 7.6 | Per element type: compare demand-model predictions with the next analysis; use models where they save rounds |
+| 7.7 | **Merge the Ipopt constraint cache** from `row-f-nlp` (one column sizing 1249 s → 8 s); exact |
+| 7.8 | **Rigid column rings on a fixed mesh.** Mesh once per slab geometry with node rings at every candidate column size around each column; the chosen size makes its ring rigid. Column changes never remesh. Accept against full remeshing on B1/B2: demands at the critical sections within a stated tolerance |
+| 7.9 | **Woodbury / low-rank updates.** When a column ring or a few members change, update the existing factorization instead of refactoring; symbolic factorization reused whenever the sparsity is unchanged. Exact to round-off |
+| 7.10 | **Slab superelements.** Condense each slab region to its boundary and connection DOFs once per geometry. A uniform-thickness region's stiffness, and so its condensed matrix, scales by (h/h₀)³ for bending, so any thickness costs a tiny solve; interior results recovered by back-substitution from the stored factorization. **Varying thickness:** split the slab into regions of uniform thickness (field, drop panels, solid heads, smeared rib zones), each its own superelement with its own scale factor, assembled on shared boundaries. Exact for thin-plate bending in each region; where shear deformation (stiffness ∝ h), membrane–bending coupling (eccentric drops) or rib depth break the single scale factor, precompute at two or three thicknesses and interpolate, and measure the error |
+| 7.11 | **Coarse-to-fine FEA.** Size on a coarse mesh (or the superelement), refine only for final verification and the punching integrations near columns |
+| 7.12 | **Aggressive caching** (design below) |
+| 7.13 | **Parallelism, opt-in.** Threads within a round (stories, slabs, per-element owners) and processes across benchmarks and sweeps. Results must be identical for any thread or worker count (deterministic reductions, no order-dependent state), so O2 is unaffected. Built and tested at small scale here; production runs on a cluster |
+
+**Caching design (7.12).** Caching shares computation; grouping forces
+identical sizes. They are different things: groups save time but cost
+material through envelopes. Cache aggressively and group only where a
+policy asks for it.
+
+- **Content-addressed keys.** Canonical fingerprints of what actually
+  determines the result: geometry in local coordinates (normalised for
+  translation, and for rotation and mirroring where the result transforms
+  back exactly), supports, loads, materials, code options. The design graph
+  fingerprints are the starting point.
+- **Levels:** mesh and superelement per slab region geometry; unit-case
+  analysis results per geometry (superposition makes them reusable across
+  thicknesses and load levels); P-M diagrams and section capacities per
+  section and material; element designs per (element type, exact demand
+  set); typical bays and repeated floors as cache hits, not as groups.
+- **Persistent across runs**, on disk, with the code version (hash of the
+  relevant source files) in every key, so a code change invalidates stale
+  entries. Never reuse a design across a code change: safety-critical.
+- **Measured:** hit rates per level reported by the Phase 1 probe.
 
 Acceptance for every 7.x: identical sizes on B1–B7 (or differences explained
 and verified) and a measured runtime or analysis-count drop.

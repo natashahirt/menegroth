@@ -154,6 +154,11 @@ tier for irregular geometry is coarse FEA, made cheap by:
   and cached.
 - **Smeared models.** Waffles and ribbed slabs as equivalent orthotropic
   plates in the fast tier; explicit ribs and solid heads in the full tier.
+- **Superelements.** Each uniform-thickness slab region is condensed once
+  per geometry to its boundary and connection DOFs; its condensed stiffness
+  scales by (h/h₀)³, so a thickness candidate is a tiny solve. Columns are
+  rigid rings on a fixed mesh, and changes update the factorization by
+  low-rank (Woodbury) updates instead of refactoring. See `plan.md` 7.8–7.10.
 
 Fidelity ladder (to confirm in the code audit):
 

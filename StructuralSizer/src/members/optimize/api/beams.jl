@@ -220,7 +220,7 @@ function size_beams(
         end
     end
     emit!(tc, :sizing, "size_beams", "", :exit; status=string(result.status))
-    return result
+    return _caller_materials(result, opts)
 end
 
 "Next larger named RC beam catalog. `:xlarge` is the top."

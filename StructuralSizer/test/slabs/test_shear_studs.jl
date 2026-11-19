@@ -202,7 +202,9 @@ end
     # Default options
     opts = StructuralSizer.FlatPlateOptions()
     
-    @test opts.shear_studs == :never
+    # The default joint search may place studs, so the legacy field reads :if_needed.
+    @test opts.punching_strategy == :joint_search
+    @test opts.shear_studs == :if_needed
     @test opts.max_column_size ≈ 30.0u"inch" atol=0.1u"inch"
     @test opts.stud_material === StructuralSizer.Stud_51
     @test opts.stud_diameter ≈ 0.5u"inch" atol=0.01u"inch"

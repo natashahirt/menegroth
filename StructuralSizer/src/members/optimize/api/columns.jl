@@ -26,6 +26,15 @@ function _sizing_material(concrete, rebar, transverse = rebar)
     return ReinforcedConcreteMaterial(concrete, rebar, transverse)
 end
 
+"""
+Report each group's material from the caller's `opts.materials`, not the
+rebar-carrying wrapper that `_sizing_material` built for the objective.
+"""
+function _caller_materials(result, opts)
+    (isnothing(opts.materials) || !haskey(result, :material_indices)) && return result
+    return merge(result, (materials_chosen = opts.materials[result.material_indices],))
+end
+
 """Create zero vector matching the units of the input vector."""
 function zeros_like(v::Vector)
     if !isempty(v) && v[1] isa Unitful.Quantity
@@ -578,7 +587,7 @@ function size_columns(
         end
     end
     emit!(tc, :sizing, "size_columns", "", :exit; status=string(result.status))
-    return result
+    return _caller_materials(result, opts)
 end
 
 "Next named RC column catalog. `:all` is the top and is absent."

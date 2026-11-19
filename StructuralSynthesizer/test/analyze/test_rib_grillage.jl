@@ -686,13 +686,11 @@ end
     rects = SY.solid_head_rectangles_m(struc)
     @test !isempty(rects)
     @test all(r -> r[1] > 0 && isapprox(r[2], 0.3; atol = 1e-9), values(rects))
+    # Punching is read only from the solved building, and none was solved.
     result = SlabDesignResult(thickness = 0.2u"m", self_weight = 5.0u"kPa")
-    SY.record_solid_head_punching!(result, struc, slab, DesignParameters())
-    @test result.punching_max_ratio > 0
-    @test result.punching_vu_max_psi > 0
-    @test occursin("released-corner", result.analysis_status)
-    @test result.qu !== nothing
-    # The ratio is this panel. An open grid does not invent one.
+    @test_throws ArgumentError SY.record_solid_head_punching!(result, struc, slab,
+                                                              DesignParameters())
+    # An open grid has no head to check.
     level.pattern = IsoparametricPattern(4, 4, 0.0)
     open = SlabDesignResult(thickness = 0.2u"m", self_weight = 5.0u"kPa")
     SY.record_solid_head_punching!(open, struc, slab, DesignParameters())
@@ -702,13 +700,16 @@ end
 
 @testset "the building casts solid heads from the rib bays and grows them" begin
     struc, vs = _grillage_bay()
+    struc.skeleton.groups_vertices[:support] = copy(vs)
     initialize_segments!(struc)
     initialize_members!(struc)
     slab = only(struc.slabs)
     concrete = StructuralSizer.NWC_4000
     level = SY.FramingLevel{Float64}(slab_idx = 1, level = 1,
                                      pattern = IsoparametricPattern(4, 4, 0.25),
-                                     material = concrete, analysis = :grillage)
+                                     material = concrete, analysis = :grillage,
+                                     beam_options = StructuralSizer.ConcreteBeamOptions(
+                                         material = concrete))
     push!(slab.framing_levels, level)
     joists = SY.materialize_level!(struc, slab, level)
     # Narrow ribs under a heavy live load. The corner fraction is one bay;
@@ -727,6 +728,11 @@ end
     end
     seeded = [length(h.bays) for h in SY._initial_solid_heads(
         struc, slab, level, SY.grillage_bays(struc, slab, level)[1])]
+    # Without a solved building the heads are cast and not checked.
+    SY.grow_building_solid_heads!(struc, DesignParameters())
+    @test level.solid_head_report === nothing
+    # The checks read the solved building model.
+    to_asap!(struc; diaphragms = :none)
     changed = SY.grow_building_solid_heads!(struc, DesignParameters())
     report = level.solid_head_report
     println("building heads: changed=", changed, " steps=", report.steps,
@@ -734,6 +740,9 @@ end
             " stop=", report.stop,
             " ratio=", [round(r; digits = 2) for r in report.ratios])
     @test report !== nothing
+    # Pieces a cast head cuts are sized inside the head loop.
+    @test report.stop !== :unsized
+    @test isempty(SY._unsized_rib_groups(struc, level))
     @test length(level.solid_heads) == 4
     @test seeded == [1, 1, 1, 1]
     @test all(length(h.bays) >= 1 for h in level.solid_heads)

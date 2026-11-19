@@ -55,10 +55,8 @@ function core_office_skeleton()
     # geometry, not a code minimum.
     _core_doors!(skel)
     # The grid puts a column on every intersection, including the four corners
-    # where the core walls meet. Those stacks move to :absent: the edges stay,
-    # so a later pass can put them back in :columns, and this design's walls
-    # are the supports there. Another design may still size a column on a wall.
-    _park_core_corner_columns!(skel)
+    # where the core walls meet. `initialize!` parks those stacks in :absent
+    # (`park_wall_overlaps`), and the walls are the supports there.
     return skel
 end
 
@@ -85,42 +83,6 @@ function _grade_core_grid!(skel)
         cycle = [at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1)]
         StructuralSynthesizer.add_face!(skel, Meshes.Ngon(skel.vertices[cycle]...);
                                         group=:grade, level_idx=0, v_indices=cycle)
-    end
-    return skel
-end
-
-"""
-Move the four core-corner column stacks from `:columns` into `:absent`.
-
-The edges and their indices stay. `to_asap!` gives an `:absent` edge a zero
-frame section, and member initialization does not build a column from it.
-Moving the same indices back to `:columns` restores them.
-"""
-function _park_core_corner_columns!(skel)
-    corners = ((CORE_BAY, CORE_BAY), (2 * CORE_BAY, CORE_BAY),
-               (2 * CORE_BAY, 2 * CORE_BAY), (CORE_BAY, 2 * CORE_BAY))
-    park = Int[]
-    keep = Int[]
-    for eidx in get(skel.groups_edges, :columns, Int[])
-        v1, v2 = skel.edge_indices[eidx]
-        c1 = Meshes.coords(skel.vertices[v1])
-        c2 = Meshes.coords(skel.vertices[v2])
-        x1, y1 = ustrip(u"m", c1.x), ustrip(u"m", c1.y)
-        x2, y2 = ustrip(u"m", c2.x), ustrip(u"m", c2.y)
-        on_corner = hypot(x1 - x2, y1 - y2) <= 1e-6 &&
-            any(p -> hypot(x1 - p[1], y1 - p[2]) <= 1e-3, corners)
-        if on_corner
-            push!(park, eidx)
-        else
-            push!(keep, eidx)
-        end
-    end
-    length(park) == 4 * CORE_STORIES ||
-        error("core: parking $(length(park)) corner columns, expected $(4 * CORE_STORIES)")
-    skel.groups_edges[:columns] = keep
-    absent = get!(skel.groups_edges, :absent, Int[])
-    for eidx in park
-        eidx in absent || push!(absent, eidx)
     end
     return skel
 end

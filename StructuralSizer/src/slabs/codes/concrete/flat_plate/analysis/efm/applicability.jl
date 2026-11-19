@@ -262,6 +262,7 @@ function run_moment_analysis(
         M_neg_ext_face = uconvert(kip * u"ft", env.M_neg_ext_face),
         M_neg_int_face = uconvert(kip * u"ft", env.M_neg_int_face),
         wall_transfer = _efm_wall_transfer(columns, env.unbalanced_moments),
+        wall_faces = env.wall_faces,
     )
 end
 

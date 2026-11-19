@@ -399,7 +399,10 @@ function to_asap!(struc::BuildingStructure{T, A, P};
         0.5e-6u"m^4",     # J
         frame_ρ
     )
-    inert_edges = _inert_frame_edges(skel)
+    # Flat-plate floors carried as loaded shells: the cell edges between
+    # their panels are slab, not frame.
+    fp_cells = _flat_plate_building_cells(struc, params, diaphragm_mode)
+    inert_edges = union(_inert_frame_edges(skel), _flat_plate_inert_edges(struc, fp_cells))
     inert_section = isempty(inert_edges) ? nothing : _zero_wall_frame_section(frame_E, frame_G)
     # Per-beam end releases resolved from segment fields + (role, material) dispatch.
     # Non-beam edges (columns/struts/walls) and unmodeled edges default to
@@ -412,8 +415,10 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     # that is where the steel-joist-on-girder seat offset is actually applied.
     edge_eccentricity = _build_edge_eccentricity_map(struc, params)
     frame_elements = map(enumerate(skel.edge_indices)) do (edge_idx, (v1, v2))
-        release = get(edge_release, edge_idx, :fixedfixed)
-        section = edge_idx in inert_edges ? inert_section : default_section
+        inert = edge_idx in inert_edges
+        # A zero section has no stiffness to condense; a released end would be singular.
+        release = inert ? :fixedfixed : get(edge_release, edge_idx, :fixedfixed)
+        section = inert ? inert_section : default_section
         return Asap.Element(nodes[v1], nodes[v2], section; release=release)
     end
     _roll_columns_to_section_axes!(frame_elements, struc)
@@ -492,6 +497,9 @@ function to_asap!(struc::BuildingStructure{T, A, P};
 
     struc.asap_rigid_links = rigid_links
     struc.diaphragm_layout = semirigid
+
+    # After the walls, so each wall node on a floor is a slab node.
+    fp_layout, fp_shells = _mesh_flat_plate_floors(struc, params, nodes, wall_shells, fp_cells)
     
     # 4. Compute tributaries if not done
     isempty(struc.cell_groups) && build_cell_groups!(struc)
@@ -514,6 +522,7 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     # model here; they are not a second diaphragm and they are not a line load.
     # Their weight is a separate area load on the triangles, added below.
     append!(shell_elements, wall_shells)
+    append!(shell_elements, fp_shells)
     semirigid === nothing || append!(shell_elements, semirigid_shells(semirigid))
     # A vertex no element uses still has free translations. Fix it so it is
     # not a mechanism. Coincident rib landings that were not drawn as an
@@ -550,6 +559,8 @@ function to_asap!(struc::BuildingStructure{T, A, P};
 
             # Already routed onto joists + girders above.
             cell_idx in handled_cells && continue
+            # The shell carries it; only its edge strip goes to the frame.
+            haskey(fp_cells, cell_idx) && continue
             push!(per_cell, cell_idx)
 
             if use_patterns
@@ -572,6 +583,8 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     _append_unrouted_edge_strip_loads!(loads, frame_elements, struc, edge_strips, per_cell, params;
                                        use_patterns=use_patterns && routing !== :shell_area,
                                        combo=combo)
+    _add_flat_plate_loads!(loads, fp_layout, struc, params;
+                           use_patterns=use_patterns, combo=combo)
     
     # 6. Add structural effects (e.g., vault thrust)
     for slab in struc.slabs
@@ -608,6 +621,7 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     # Cracked-wall E before the first process, so later load-only syncs keep it.
     _apply_stated_cracked_wall_stiffness!(wall_shells, params)
     struc.asap_model = Asap.Model(nodes, frame_elements, shell_elements, loads)
+    isempty(fp_cells) || (_FLAT_PLATE_SHELLS[struc.asap_model] = fp_layout)
 
     @debug "Converted to Asap.Model" nodes=length(nodes) frame_elements=length(frame_elements) shell_elements=length(shell_elements) loads=length(loads) rigid_links=length(rigid_links)
 

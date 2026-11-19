@@ -39,69 +39,66 @@ _rf_same_plan(skel, eidx, x1, y1, x2, y2) = begin
         (hypot(ax - x2, ay - y2) <= 1e-6 && hypot(bx - x1, by - y1) <= 1e-6)
 end
 
-"""
-Story 0 is the support level and has no beam grid. Copy the story-1 beam
-plan down to the column bases so a ground wall has an edge to claim.
-"""
-function _rf_grade_beams!(skel)
+"""The story-1 beam on the plan segment, claimed as the wall."""
+function _rf_claim_wall!(skel, x1, y1, x2, y2)
     beams = Set(get(skel.groups_edges, :beams, Int[]))
-    any(e -> e in beams && _rf_horizontal(skel, e), skel.stories[0].edges) && return skel
+    edges = [e for e in skel.stories[1].edges
+             if e in beams && _rf_horizontal(skel, e) &&
+                _rf_same_plan(skel, e, x1, y1, x2, y2)]
+    length(edges) == 1 || error("row F fixture: $(length(edges)) edges on the wall line")
+    eidx = only(edges)
+    filter!(!=(eidx), skel.groups_edges[:beams])
+    walls = get!(skel.groups_edges, :walls, Int[])
+    eidx in walls || push!(walls, eidx)
+    return eidx
+end
+
+"""
+Grade faces over the column grid, so the base sits at grade.
+
+The seismic weight is counted above the base. Without a floor at grade the
+base is the first floor, and the columns running down to grade have their
+weight below it.
+"""
+function _rf_grade_faces!(skel)
     z0 = skel.stories_z[1]
-    for e in skel.stories[1].edges
-        (e in beams && _rf_horizontal(skel, e)) || continue
-        v1, v2 = skel.edge_indices[e]
-        x1, y1 = _rf_xy(skel, v1)
-        x2, y2 = _rf_xy(skel, v2)
-        _RF.add_element!(skel, Meshes.Segment(
-            Meshes.Point(x1 * u"m", y1 * u"m", z0),
-            Meshes.Point(x2 * u"m", y2 * u"m", z0));
-            group=:beams, level_idx=0)
-    end
-    grade_of = Dict{NTuple{2, Float64}, Int}()
+    at = Dict{NTuple{2, Float64}, Int}()
     for (k, v) in enumerate(skel.vertices)
         c = Meshes.coords(v)
         abs(ustrip(u"m", c.z) - ustrip(u"m", z0)) <= 1e-6 || continue
-        grade_of[(round(ustrip(u"m", c.x); digits=6), round(ustrip(u"m", c.y); digits=6))] = k
+        at[(round(ustrip(u"m", c.x); digits=6), round(ustrip(u"m", c.y); digits=6))] = k
     end
     for face in skel.stories[1].faces
         cycle = Int[]
         for v in skel.face_vertex_indices[face]
             x, y = _rf_xy(skel, v)
             key = (round(x; digits=6), round(y; digits=6))
-            haskey(grade_of, key) || error("row F fixture: no grade vertex at $key")
-            push!(cycle, grade_of[key])
+            haskey(at, key) || error("row F fixture: no grade vertex at $key")
+            push!(cycle, at[key])
         end
-        _RF.add_face!(skel, Meshes.Ngon(skel.vertices[cycle]...);
-                      group=:grade, level_idx=0, v_indices=cycle)
+        StructuralSynthesizer.add_face!(skel, Meshes.Ngon(skel.vertices[cycle]...);
+                                        group=:grade, level_idx=0, v_indices=cycle)
     end
     return skel
 end
 
-function _rf_claim_wall!(skel, beams, x1, y1, x2, y2)
-    edges = [e for e in skel.stories[0].edges
-             if e in beams && _rf_horizontal(skel, e) &&
-                _rf_same_plan(skel, e, x1, y1, x2, y2)]
-    length(edges) == 1 || error("row F fixture: $(length(edges)) edges on the wall line")
-    eidx = only(edges)
-    filter!(!=(eidx), skel.groups_edges[:beams])
-    delete!(beams, eidx)
-    walls = get!(skel.groups_edges, :walls, Int[])
-    eidx in walls || push!(walls, eidx)
-    return eidx
-end
-
 function _rf_office()
-    skel = _rf_grade_beams!(gen_medium_office(12.0u"m", 12.0u"m", 3.0u"m", 2, 2, 1))
-    beams = Set(get(skel.groups_edges, :beams, Int[]))
+    # Two stories, so the wall on the first floor has a story above it. The
+    # pier height is this floor to the next one with faces.
+    skel = gen_medium_office(12.0u"m", 12.0u"m", 3.0u"m", 2, 2, 2)
+    _rf_grade_faces!(skel)
     for (x1, y1, x2, y2) in _RF_SEGMENTS
-        _rf_claim_wall!(skel, beams, x1, y1, x2, y2)
+        _rf_claim_wall!(skel, x1, y1, x2, y2)
     end
     struc = BuildingStructure(skel)
+    # The frame this test resizes stands at the wall ends, so its columns stay
+    # instead of being parked.
     initialize!(struc;
         floor_type=:vault,
         material=NWC_4000,
         floor_opts=VaultOptions(rise=1.0u"m", thickness=0.05u"m"),
-        wall_thickness=0.3u"m")
+        wall_thickness=0.3u"m",
+        park_wall_overlaps=false)
     for wall in struc.walls
         wall.concrete = RC_4000_60.concrete
     end
@@ -134,7 +131,7 @@ end
 function _rf_inputs(sds)
     return OrdinaryWallInputs(;
         directions=((1.0, 0.0), (0.0, 1.0)),
-        qz=[1.0],
+        qz=[1.0, 1.0],
         qh=2.0,
         Kd=1.0,
         G=0.85,

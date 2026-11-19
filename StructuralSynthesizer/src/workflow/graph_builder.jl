@@ -264,19 +264,19 @@ function _floor_options_for_slab(
         opts = _scoped_override_floor_opts(ov)
         opts === nothing && continue
         concrete = something(ov.concrete, _primary_material(global_opts))
-        chosen = _apply_col_I_factor(
+        chosen = _apply_flat_plate_analysis(_apply_col_I_factor(
             _with_concrete_material(opts, concrete),
             params.column_I_factor,
-        )
+        ), params)
     end
     chosen === nothing || return chosen
     StructuralSizer.floor_symbol(global_opts) == slab.floor_type && return global_opts
     # A beamless :two_way panel was redesigned as a flat plate. The request
     # options are still TwoWayOptions; the flat-plate kernel needs its own.
     if slab.floor_type === :flat_plate && global_opts isa StructuralSizer.TwoWayOptions
-        return _apply_col_I_factor(
+        return _apply_flat_plate_analysis(_apply_col_I_factor(
             _flat_plate_options_from(_options_covering_slab(struc, slab, params, global_opts)),
-            params.column_I_factor)
+            params.column_I_factor), params)
     end
     throw(ArgumentError(
         "slab $slab_idx is a $(slab.floor_type) floor, which $(typeof(global_opts)) " *
@@ -397,7 +397,7 @@ function _design_flat_plate_members!(struc::BuildingStructure, params::DesignPar
         union!(redesigned, stale)
         _apply_support_envelope!(struc, outcomes)
         _raise_column_floors!(floors, before, struc)
-        sync_asap!(struc; params)
+        refresh_flat_plate_analysis!(struc, params)
         _reconcile_columns!(struc, params; tc, floors)
         _harmonize_columns!(struc, params)
         return true

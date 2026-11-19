@@ -261,6 +261,9 @@ Base.@kwdef mutable struct DesignParameters
     # Pier thickness for skeleton `:walls` edges. Required when that group is
     # non-empty. There is no default thickness.
     wall_thickness::Union{Nothing, typeof(1.0u"m")} = nothing
+    # Columns and beams that lie inside a wall move to `:absent`, and the wall
+    # is the support there. `false` keeps them as members.
+    park_wall_overlaps::Bool = true
     # After a failed ordinary-wall check, jump to a thicker inch predicted
     # from this analysis and confirm. `:all` moves every wall together, so
     # one analysis can predict the next inch. A finer grouping re-solves,
@@ -284,16 +287,24 @@ Base.@kwdef mutable struct DesignParameters
     default_frame_G::typeof(1.0u"Pa") = _DEFAULT_FRAME_G
     default_frame_ρ::typeof(1.0u"kg/m^3") = _DEFAULT_FRAME_ρ
     
+    # ─── Flat-plate analysis model ───
+    # `:building` analyses flat-plate and flat-slab floors as loaded shells of
+    # the building model (`FEA(source = :building)`) in place of the floor
+    # options' method. `:options` keeps the method the floor options name.
+    flat_plate_analysis::Symbol = :building
+
     # ─── ACI Cracking Factors ───
     column_I_factor::Float64 = 0.70
     beam_I_factor::Float64 = 0.35
     
     # ─── Iteration Control ───
     max_iterations::Int = 20
-    # ENGINEERING JUDGMENT. A rib piece that frames into a solid head is sized
-    # for Vu ≤ φVc. ACI 318-11 §11.1.1 permits stirrups to carry the rest;
-    # `true` credits them and lets the head grow instead.
-    rib_head_stirrups::Bool = false
+    # ENGINEERING JUDGMENT. `true`: a rib piece that frames into a solid head
+    # carries its shear with stirrups, designed by its own beam check (ACI
+    # 318-11 §11.1.1, Vn = Vc + Vs; §8.13.8 keeps the joist Vc increase), and
+    # the head grows only for punching and hogging. `false`: the piece is
+    # sized for Vu ≤ φVc on concrete alone and the head grows for rib shear.
+    rib_head_stirrups::Bool = true
     # ENGINEERING JUDGMENT. Largest soffit step, in length, between rib pieces
     # that share a node. ACI 318-11 §12.10.6 requires anchorage where a bar is
     # not parallel to the compression face and gives no length for a step, so

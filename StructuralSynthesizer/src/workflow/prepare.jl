@@ -117,7 +117,8 @@ function prepare!(struc::BuildingStructure, params::DesignParameters;
                 wall_thickness=params.wall_thickness,
                 topping_span=topping_span,
                 rib_bays=rib_bays,
-                joists_planned=joists_planned)
+                joists_planned=joists_planned,
+                park_wall_overlaps=params.park_wall_overlaps)
 
     # A composite deck spans between beams. When the bay is longer than the
     # profile's published single-span unshored length, the girders are too

@@ -667,7 +667,13 @@ function _expand_solid_to_heads!(struc, slab, level, arr, owners, heads)
             if flags[first(run)]
                 _claim_solid_beam!(struc, level, new_i)
                 moved += 1
-            elseif _level_rib(level, piece)
+                continue
+            end
+            # A piece left outside the head keeps the section it was sized
+            # with; its frame elements still carry that section.
+            host_sec = section(beam)
+            host_sec === nothing || set_section!(piece, host_sec)
+            if _level_rib(level, piece)
                 _claim_rib_piece!(struc, level, new_i)
             elseif host_group !== nothing
                 set_group_id!(piece, host_group)
@@ -706,7 +712,7 @@ building is solved again. `true` when a head grew or a beam moved. A level
 whose ribs are not sized yet, or a building not yet solved, is left alone.
 A second call with the same sections returns the same heads.
 """
-function grow_building_solid_heads!(struc, params)
+function grow_building_solid_heads!(struc, params; fallback = params.beams)
     changed = false
     for slab in struc.slabs
         level = _grillage_level(slab)
@@ -749,10 +755,16 @@ function grow_building_solid_heads!(struc, params)
         model = struc.asap_model
         (model === nothing || isempty(model.frame_elements) || !model.processed) && continue
         _ensure_frame_demands!(struc)
+        opts = _level_concrete_options(level, fallback)
+        size_pieces = opts === nothing ? nothing : ids -> size_beams!(struc, opts;
+            reanalyze = false, I_factor = params.beam_I_factor,
+            gravity_factor = member_self_weight_acceleration(params),
+            stirrup_shear = params.rib_head_stirrups, group_filter = g -> g in ids)
         resolved = resolve_building_heads!(struc, slab, level, arr, owners, start, params;
             concrete = concrete, d_head = d_head,
             fy = _beam_materials(params)[2].Fy, topping = topping,
-            free_loops = free_loops, max_solid_fraction = cap)
+            free_loops = free_loops, max_solid_fraction = cap,
+            rib_stirrups = params.rib_head_stirrups, size_pieces = size_pieces)
         level.solid_heads = resolved.heads
         grown = length(before) != length(resolved.heads) ||
                 any(zip(before, resolved.heads)) do (was, now)
@@ -769,12 +781,14 @@ function grow_building_solid_heads!(struc, params)
             seeded_bays = seeded,
             closed_bays = closed,
             column_ratios = [c.column.ratio for c in resolved.checks],
-            one_way_ratios = [isempty(c.ribs) ? 0.0 : maximum(r.ratio for r in c.ribs)
+            # Concrete-only rib shear; with stirrups it is reported, not governing.
+            one_way_ratios = [isempty(c.rib_shear) ? 0.0 : maximum(r.ratio for r in c.rib_shear)
                               for c in resolved.checks],
+            rib_stirrups = params.rib_head_stirrups,
             hogging_ratios = [isempty(c.hogging) ? 0.0 : maximum(r.ratio for r in c.hogging)
                               for c in resolved.checks],
-            rib_bw_in = [_governing_rib_in(c.ribs, :bw) for c in resolved.checks],
-            rib_d_in = [_governing_rib_in(c.ribs, :d) for c in resolved.checks],
+            rib_bw_in = [_governing_rib_in(c.rib_shear, :bw) for c in resolved.checks],
+            rib_d_in = [_governing_rib_in(c.rib_shear, :d) for c in resolved.checks],
             head_d_in = ustrip(u"inch", d_head),
         )
         (grown || moved > 0) && (changed = true)

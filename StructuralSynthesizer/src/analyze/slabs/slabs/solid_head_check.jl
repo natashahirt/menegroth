@@ -476,65 +476,6 @@ function _head_punching_stress_psi(chk)
     return psi
 end
 
-"""
-    solid_head_panel_punching(struc, slab, params) -> Union{Nothing, NamedTuple}
-
-The released-corner check of one solid-head panel, at the size already cut
-into the frame.
-
-`nothing` when the slab has no solid head, or the ribs are not sized yet.
-The four supports are the corners of this panel alone: rotation is released,
-so the unbalanced moment is zero, and a column shared with the next panel is
-not given that panel's load. The head is not grown. The ratio is the worst
-of the four corners. `vu_psi` is the larger punching stress on that corner;
-one-way shear stays in the ratio and is not written as a stress.
-"""
-function solid_head_panel_punching(struc, slab, params)
-    level = _grillage_level(slab)
-    level === nothing && return nothing
-    pat = level.pattern
-    (pat isa IsoparametricPattern && pat.solid_head > 0) || return nothing
-    panel = _solid_head_panel(struc, slab)
-    panel === nothing && throw(ArgumentError(
-        "a solid head is checked on a quadrilateral panel, and this slab is not one"))
-    Lx, Ly = _rectangle_sides_m(panel)
-    depth = _sized_rib_depth(struc, level)
-    depth === nothing && return nothing
-    web = _sized_rib_web(struc, level)
-    web === nothing && throw(ArgumentError(
-        "slab $(level.slab_idx) has a sized rib depth and no rib section"))
-    bw, d_rib, h_rib = web
-    concrete = _solid_head_concrete(level)
-    concrete === nothing && throw(ArgumentError(
-        "slab $(level.slab_idx) has a solid head, and the framing level has no concrete"))
-    floor = slab.result
-    floor isa StructuralSizer.CIPSlabResult || throw(ArgumentError(
-        "a solid head's topping is the CIP slab, and slab $(level.slab_idx) " *
-        "sized a $(typeof(floor))"))
-    topping = _as_metres(StructuralSizer.total_depth(floor))
-    column_x, column_y = _panel_column_size(struc, panel)
-    qu = _panel_factored_pressure(struc, slab, params)
-    s = pat.solid_head
-    solved = analyze_rectangle_grillage(Lx, Ly, pat.n_xi, pat.n_eta, ustrip(u"Pa", qu);
-                                        solid_head = s, depth = depth, concrete = concrete)
-    heads = check_rectangle_grillage_heads(solved;
-        Lx = Lx, Ly = Ly, nξ = pat.n_xi, nη = pat.n_eta, solid_head = s,
-        column_x = column_x, column_y = column_y,
-        d_head = d_rib, h_head = depth,
-        bw = bw, d_rib = d_rib, h_rib = h_rib,
-        concrete = concrete, qu = qu, topping = topping,
-        fy = _beam_materials(params)[2].Fy)
-    i = argmax([h.check.ratio for h in heads])
-    worst = heads[i]
-    return (
-        ok = all(h.check.ok for h in heads),
-        ratio = worst.check.ratio,
-        governing = worst.check.governing,
-        vu_psi = _head_punching_stress_psi(worst.check),
-        qu = qu,
-    )
-end
-
 """The resolver's report, or `nothing` when this level has no solid head."""
 function _stored_solid_head_report(level)
     level.solid_head_report === nothing && return nothing
@@ -551,10 +492,10 @@ Write the solid-head check onto `result` when this slab has one.
 A level [`grow_building_solid_heads!`](@ref) has already resolved uses that
 report. Otherwise `frame` is [`solid_head_frame_punching`](@ref) for the
 whole building. When it covers this slab, the ratio is the worst column at
-the slab's corners, with the frame's shear and unbalanced moments. Otherwise
-the check is this panel's released-corner rectangle, which gives each column
-one panel's reaction and no moment; the analysis note says which was used.
-A slab that already carries a punching ratio keeps the worse of the two.
+the slab's corners, with the frame's shear and unbalanced moments. A slab
+with a solid head on sized ribs and neither check is an error: punching is
+read only from the building model. A slab that already carries a punching
+ratio keeps the worse of the two.
 """
 function record_solid_head_punching!(result::SlabDesignResult, struc, slab, params;
                                      frame = nothing)
@@ -593,21 +534,15 @@ function record_solid_head_punching!(result::SlabDesignResult, struc, slab, para
         end
         return result
     end
-    summary = solid_head_panel_punching(struc, slab, params)
-    summary === nothing && return result
-    result.punching_max_ratio = max(result.punching_max_ratio, summary.ratio)
-    result.punching_ok = result.punching_ok && summary.ok
-    result.punching_vu_max_psi = max(result.punching_vu_max_psi, summary.vu_psi)
-    if result.qu === nothing
-        result.qu = uconvert(u"kPa", summary.qu)
-    end
-    note = "Solid-head punching is this panel's released-corner rectangle " *
-           "(unbalanced moment is zero; the building frame was not solved); " *
-           "governing $(summary.governing)."
-    result.analysis_status = isempty(result.analysis_status) ? note :
-        result.analysis_status * " " * note
-    if !summary.ok && isempty(result.failing_check)
-        result.failing_check = "punching_shear_slab"
-    end
-    return result
+    # Punching is read only from the solved building model. A head with ribs
+    # sized and neither a resolver report nor a frame check was never checked.
+    level === nothing && return result
+    pat = level.pattern
+    has_head = !isempty(level.solid_heads) ||
+               (pat isa IsoparametricPattern && pat.solid_head > 0)
+    has_head || return result
+    _sized_rib_depth(struc, level) === nothing && return result
+    throw(ArgumentError(
+        "slab $slab_idx has a solid head with sized ribs and no punching check from the " *
+        "building model: the building frame was not solved, or no head check covered it"))
 end

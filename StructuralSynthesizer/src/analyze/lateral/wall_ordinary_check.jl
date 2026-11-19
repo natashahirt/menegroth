@@ -144,14 +144,20 @@ Slab moment that belongs with this action.
 
 `Moop` is the envelope the slab stored, over `1.4D` and `1.2D + 1.6L`.
 `basis` comes from [`_governing_slab_basis`](@ref). The scale is this
-combination's slab moment over that envelope, and it is not allowed to
-exceed 1.
+combination's slab moment over that envelope. Vertical seismic can push
+the scale above 1.
 
 With `basis.faces`, each wall face's moment is `max(αD·D + αL·L, 0)` from
 its own dead and live parts, and the combination's slab moment is the
 largest over the faces. Otherwise the scale is this combination's gravity
 pressure on the governing slab over the larger of `1.4 qD` and
-`1.2 qD + 1.6 qL`.
+`1.2 qD + 1.6 qL`. A negative pressure scales the moment to zero.
+
+`αD` is the combination's dead factor plus `Ev`. ASCE 7-22 Eq. 12.4-4a
+(corpus: asce-7-22, PDF page 183) defines `Ev = 0.2 SDS D`, and `D` is the
+effect of dead load, so the factor lands on the dead part of the slab
+moment. `basis.SDS` supplies `SDS`. A missing or zero `SDS` adds nothing.
+The `0.2` comes from [`vertical_seismic_load_effect`](@ref).
 
 A floor's live factor is the combination's `L`, and the `:W` reading of
 combination 3 drops floor live. A roof's live factor is the combination's
@@ -170,18 +176,35 @@ function _action_slab_moment(Moop, action, basis)
     combo === nothing && return Moop
     # Combination 3's :W reading keeps the roof live and drops floor live.
     live_factor(roof) = roof ? combo.Lr : (action.alternative === :W ? 0.0 : combo.L)
+    αD = _slab_dead_factor(combo, basis)
     faces = hasproperty(basis, :faces) ? basis.faces : nothing
     if faces !== nothing && !isempty(faces)
-        face_moment(f, αD, αL) = max(αD * f.D + αL * f.L, 0.0)
+        face_moment(f, αd, αL) = max(αd * f.D + αL * f.L, 0.0)
         env = maximum(f -> max(face_moment(f, 1.4, 0.0), face_moment(f, 1.2, 1.6)), faces)
         env > 0 || return Moop
-        m = maximum(f -> face_moment(f, combo.D, live_factor(f.roof)), faces)
-        return Moop * min(m / env, 1.0)
+        m = maximum(f -> face_moment(f, αD, live_factor(f.roof)), faces)
+        return Moop * m / env
     end
-    q = combo.D * basis.qD + live_factor(basis.roof) * basis.qL
+    q = αD * basis.qD + live_factor(basis.roof) * basis.qL
     q_gov = max(1.4 * basis.qD, 1.2 * basis.qD + 1.6 * basis.qL)
     q_gov > 1.0 || return Moop
-    return Moop * min(q / q_gov, 1.0)
+    return Moop * max(q, 0.0) / q_gov
+end
+
+"""
+Dead-load factor on the slab moment, including vertical seismic.
+
+ASCE 7-22 Eq. 12.4-4a (corpus: asce-7-22, PDF page 183): `Ev = 0.2 SDS D`.
+`combo.Ev` is +1 when the combination adds `Ev` and −1 when it subtracts it.
+A missing or zero `SDS` leaves the dead factor unchanged.
+"""
+function _slab_dead_factor(combo, basis)
+    αD = combo.D
+    SDS = hasproperty(basis, :SDS) ? Float64(basis.SDS) : 0.0
+    if combo.Ev != 0 && SDS != 0
+        αD += combo.Ev * StructuralSizer.vertical_seismic_load_effect(SDS, 1.0)
+    end
+    return αD
 end
 
 """e = M/N. No moment is concentric. Moment with no compression is outside the wall."""

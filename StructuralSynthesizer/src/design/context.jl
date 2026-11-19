@@ -93,8 +93,35 @@ function resolve_floor_options(params::DesignParameters)
     # FEA path (which reads `opts.col_I_factor`) uses the param rather than the field
     # default. At the default `column_I_factor = 0.70` this matches the field default
     # → byte-exact no-op.
-    return _apply_col_I_factor(cascaded, params.column_I_factor)
+    return _apply_flat_plate_analysis(
+        _apply_col_I_factor(cascaded, params.column_I_factor), params)
 end
+
+"""
+    _apply_flat_plate_analysis(opts, params) -> opts
+
+Under `params.flat_plate_analysis = :building`, a flat plate or flat slab is
+analysed on the building model: `FEA(source = :building)`, keeping the other
+settings of an `FEA` method the options already name. `:options` returns
+`opts` unchanged.
+"""
+function _apply_flat_plate_analysis(opts::StructuralSizer.FlatPlateOptions,
+                                    params::DesignParameters)
+    mode = params.flat_plate_analysis
+    mode in (:building, :options) || throw(ArgumentError(
+        "flat_plate_analysis must be :building or :options (got :$mode)"))
+    mode === :options && return opts
+    m = opts.method
+    @set opts.method = m isa StructuralSizer.FEA ?
+        StructuralSizer.with_fea_source(m, :building) : StructuralSizer.FEA(source = :building)
+end
+
+function _apply_flat_plate_analysis(opts::StructuralSizer.FlatSlabOptions,
+                                    params::DesignParameters)
+    @set opts.base = _apply_flat_plate_analysis(opts.base, params)
+end
+
+_apply_flat_plate_analysis(opts::StructuralSizer.AbstractFloorOptions, ::DesignParameters) = opts
 
 # --- Material cascade into floor options (using Accessors @set) ---
 

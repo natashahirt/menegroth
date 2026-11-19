@@ -505,20 +505,24 @@ The actions of `batches`, in order, are the pier's action list.
 """
 function special_shear_records(wall, wall_index, direction, terms::SpecialShearTerms,
                                batches, material)
-    _require_case_count(terms, collect(Iterators.flatten(b.growns for b in batches)))
+    # A pierced segment passes `(case, nothing, actions, nothing)` tuples. The
+    # actions are the third element, where a strength batch keeps `.growns`.
+    case_of(b) = b isa Tuple ? b[1] : b.case
+    actions_of(b) = b isa Tuple ? b[3] : b.growns
+    _require_case_count(terms, collect(Iterators.flatten(actions_of(b) for b in batches)))
     Vn = _special_vn(terms, wall, wall.ρt, material)
     φ = special_shear_phi(terms, Vn)
     φVn = φ * Vn
     records = WallCheckRecord[]
     k = 0
     for batch in batches
-        for a in batch.growns
+        for a in actions_of(batch)
             k += 1
             demand = special_shear_demand(terms, a, k)
             clause = "ACI 318-19 18.10.3.1 (Ωv = $(round(_action_Ωv(terms, k); digits = 3)), " *
                      "ωv = $(round(terms.ωv; digits = 3))), 18.10.4.1, 21.2.4.1 (φ = $φ)"
             push!(records, WallCheckRecord(
-                wall_index, wall.story, direction, batch.case, a.combination, a.alternative,
+                wall_index, wall.story, direction, case_of(batch), a.combination, a.alternative,
                 SPECIAL_WALL_SHEAR_CHECK, demand <= φVn * (1 + 1e-9),
                 demand / max(φVn, 1e-9), demand, φVn, clause))
         end

@@ -264,6 +264,58 @@ end
     @test env_face.M_wall_int == 580.0u"kip*ft"
 end
 
+@testset "Wall faces keep dead and live apart" begin
+    seg = ((0.0, 0.0), (6.0, 0.0))
+    wall = (wall_fixed = true, wall_seg = seg)
+    column = (position = :interior,)
+    # The constant 5 is the drop, factored by 1.2: 1.2·2 + 1.6·3 sets qu.
+    # Live drops it. Dead keeps its unfactored part, 5 / 1.2.
+    function solve_once(q)
+        M = (5.0 + ustrip(u"Pa", q[1])) * u"N*m"
+        return [(span_idx = 1, M_neg_left = M, M_pos = M, M_neg_right = M)]
+    end
+    faces = SS._efm_wall_faces(solve_once, [wall, column], 2.0u"Pa", 3.0u"Pa", 1, false)
+    @test length(faces) == 1
+    @test faces[1].D ≈ 2.0 + 5.0 / 1.2
+    @test faces[1].L ≈ 3.0
+    @test faces[1].x1 == 0.0 && faces[1].x2 == 6.0
+    @test isempty(SS._efm_wall_faces(solve_once, [column, column], 2.0u"Pa", 3.0u"Pa", 1, false))
+
+    # Without a drop the zero solve is skipped.
+    bare_solve(q) = [(span_idx = 1, M_neg_left = ustrip(u"Pa", q[1]) * u"N*m",
+                      M_pos = 0.0u"N*m", M_neg_right = 0.0u"N*m")]
+    no_drop = SS._efm_wall_faces(bare_solve, [wall, column], 2.0u"Pa", 3.0u"Pa", 1, false;
+                                 has_drop = false)
+    @test only(no_drop).D ≈ 2.0
+    @test only(no_drop).L ≈ 3.0
+
+    # Two spans meet the wall. The larger side is kept: D = 14 − 10 + 10/1.2, L = 6.
+    function solve_two(q)
+        M = (5.0 + ustrip(u"Pa", q[1])) * u"N*m"
+        return [(span_idx = 1, M_neg_left = M, M_pos = M, M_neg_right = 2 * M),
+                (span_idx = 2, M_neg_left = M, M_pos = M, M_neg_right = M)]
+    end
+    interior = SS._efm_wall_faces(solve_two, [column, wall, column], 2.0u"Pa", 3.0u"Pa", 2, false)
+    @test length(interior) == 1
+    @test interior[1].D ≈ 4.0 + 10.0 / 1.2
+    @test interior[1].L ≈ 6.0
+
+    # Direct design splits the factored support moment by qD/qu and qL/qu.
+    spans = [(span_idx = 1, M_neg_left = 10.0u"N*m", M_pos = 4.0u"N*m",
+              M_neg_right = 10.0u"N*m")]
+    split = SS._factored_wall_faces(spans, [wall, column], 5.0u"Pa", 2.0u"Pa", 3.0u"Pa")
+    @test length(split) == 1
+    @test split[1].D ≈ 4.0
+    @test split[1].L ≈ 6.0
+
+    # Frame lines add. Reversed endpoints are the same wall.
+    other = SS.SlabWallFaceMoment(1.0, 1.0, 6.0, 0.0, 0.0, 0.0)
+    summed = SS._sum_wall_faces([[faces[1]], [other]])
+    @test length(summed) == 1
+    @test summed[1].D ≈ faces[1].D + 1.0
+    @test summed[1].L ≈ 4.0
+end
+
 @testset "Top bars at a wall develop by embedment or a hook" begin
     # ACI 318-11 §12.2.2 other cases and §12.5.2 (corpus: aci-318-11,
     # pages 214 and 217). Grade 60, f'c = 4000 psi, λ = 1, ψt = 1.3, #4.

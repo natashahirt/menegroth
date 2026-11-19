@@ -21,8 +21,9 @@ Build FlatPlatePanelResult from design outputs.
 - `punching_results`: Dict of per-column punching check results
 - `γ_concrete`: Weight density of concrete (force/volume); defaults to NWC_4000
 - `secondary_rebar_design`: Optional secondary direction strip reinforcement
-- `wall_face_parts`, `wall_face_parts_secondary`: `(D, L)` per wall face from
-  `_paired_wall_face_parts`; empty when dead and live were not separated
+- `wall_face_parts`, `wall_face_parts_secondary`: dead and live moment at
+  each wall face, with that wall's plan line; empty when dead and live
+  were not separated
 
 # Returns
 `FlatPlatePanelResult` with all design data
@@ -36,8 +37,8 @@ function build_slab_result(h, sw, moment_results, rebar_design, deflection_resul
                            γ_concrete = NWC_4000.ρ * GRAVITY,
                            secondary_rebar_design = nothing,
                            secondary_results = nothing,
-                           wall_face_parts = NTuple{2,Float64}[],
-                           wall_face_parts_secondary = NTuple{2,Float64}[])
+                           wall_face_parts = SlabWallFaceMoment[],
+                           wall_face_parts_secondary = SlabWallFaceMoment[])
     # Aggregate punching results
     punching_check = (
         ok = all(pr.ok for pr in values(punching_results)),

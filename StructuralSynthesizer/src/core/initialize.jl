@@ -31,6 +31,9 @@ Initialize all structural components of a BuildingStructure.
   story that has walls. A wall center must lie on that story's floor faces.
   The axis-aligned plate box is still what drift uses; it is not this check.
   `Wall.story` is 0-based; [`to_wall_line`](@ref) sets `WallLine.story = Wall.story + 1`.
+- `park_wall_overlaps`: when `true` (default), columns and beams that lie inside
+  a wall move to `:absent` before members are built
+  ([`park_wall_overlaps!`](@ref)). `false` keeps them as members.
 """
 function initialize!(struc::BuildingStructure; 
                      loads::GravityLoads=GravityLoads(),
@@ -47,7 +50,8 @@ function initialize!(struc::BuildingStructure;
                      wall_thickness=nothing,
                      topping_span=nothing,
                      rib_bays=nothing,
-                     joists_planned::Bool=false)
+                     joists_planned::Bool=false,
+                     park_wall_overlaps::Bool=true)
     skel = struc.skeleton
     
     find_faces!(skel)
@@ -57,6 +61,9 @@ function initialize!(struc::BuildingStructure;
     frame_slab_openings!(skel; floor_type=floor_type, plan_axis=plan_axis,
                          tributary_axis=tributary_axis, joists_planned=joists_planned)
     rebuild_geometry_cache!(skel)
+    # A column or beam inside a wall is the wall's. It leaves its group for
+    # :absent before cells, tributaries, and members are built.
+    park_wall_overlaps && park_wall_overlaps!(skel)
     
     # Slabs: cells → slabs
     initialize_cells!(struc; loads=loads, plan_axis=plan_axis)

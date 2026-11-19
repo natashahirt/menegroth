@@ -9,11 +9,33 @@
 # restored before this returns, so slab bars and strength demands stay on it.
 
 """
+The straight run a steel shell beam is checked on.
+
+`xy` is the whole run in plan, metres. `supports` are stations (m) held by a
+column, a wall, a `:support`, or a line of a lower framing level.
+`s0` and `s1` are this member's range on that run. `ids` are the shell ids of
+every piece of the run, so the sag can be sampled on all of them. `total` is
+the run length (m).
+"""
+struct ShellLineSpan
+    xy::Vector{NTuple{2, Float64}}
+    supports::Vector{Float64}
+    s0::Float64
+    s1::Float64
+    ids::Vector{Symbol}
+    total::Float64
+end
+
+"""
 A beam the cracked service shell knows how to soften.
 
 `I_service` (m⁴) is set for a steel or composite beam: the inertia of its
 solved section under the checker's definition (see
 [`StructuralSizer.SteelShellSpan`](@ref)). Zero for reinforced concrete.
+
+`line` is set for steel and composite. Their live-load span is that run, not
+the member polyline. Reinforced concrete leaves it `nothing` and keeps the
+column spans, which also set the flange width.
 """
 struct ShellServiceBeam
     id::Symbol
@@ -26,16 +48,18 @@ struct ShellServiceBeam
     mu_neg::Float64
     hogging_strip::Bool
     I_service::Float64
+    line::Union{Nothing, ShellLineSpan}
 end
 
 function ShellServiceBeam(id::Symbol, xy, section, support_xy;
                           half_width = _zero_width, flange_width = _zero_width,
                           hf::Real = 0.0, mu_neg::Real = 0.0,
-                          hogging_strip::Bool = false, I_service::Real = 0.0)
+                          hogging_strip::Bool = false, I_service::Real = 0.0,
+                          line::Union{Nothing, ShellLineSpan} = nothing)
     return ShellServiceBeam(id, collect(NTuple{2, Float64}, xy), section,
                             collect(NTuple{2, Float64}, support_xy),
                             half_width, flange_width, Float64(hf), Float64(mu_neg),
-                            hogging_strip, Float64(I_service))
+                            hogging_strip, Float64(I_service), line)
 end
 
 _zero_width(::Real) = 0.0
@@ -241,6 +265,109 @@ function _reading(sp, total, Ma_pos, Ma_neg, Δ, bf, hf, Ig, Ie)
 end
 
 """
+Where each shell beam sits on its framing line.
+
+A steel span is this line, from support to support. The supports are the
+columns, walls, and `:support` vertices on the line, and any crossing with a
+line of a lower framing level. A crossing of the same level is not a support.
+Reinforced concrete does not use this table.
+"""
+function _shell_line_lookup(struc::BuildingStructure)
+    assign_framing_levels!(struc)
+    lines = _frame_lines(struc)
+    fixed = beam_support_lookup(struc).fixed
+    at = Dict{Int, Vector{Int}}()
+    level_of = Int[]
+    for (i, ln) in enumerate(lines)
+        push!(level_of, struc.beams[ln.beams[1]].level)
+        for v in ln.verts
+            push!(get!(at, v, Int[]), i)
+        end
+    end
+    table = Dict{Symbol, ShellLineSpan}()
+    for (i, ln) in enumerate(lines)
+        cum, xyz = _line_stations(struc.skeleton, ln.verts)
+        xy = NTuple{2, Float64}[(p[1], p[2]) for p in xyz]
+        supports = _line_support_stations(ln, i, lines, at, fixed, cum, level_of)
+        ids = Symbol[Symbol("beam_", bi) for bi in ln.beams]
+        station = Dict(v => cum[k] for (k, v) in enumerate(ln.verts))
+        for bi in ln.beams
+            chain = _beam_vertex_chain(struc, struc.beams[bi])
+            chain === nothing && continue
+            s0, s1 = Inf, -Inf
+            for v in chain
+                haskey(station, v) || continue
+                s0 = min(s0, station[v])
+                s1 = max(s1, station[v])
+            end
+            isfinite(s0) || continue
+            table[Symbol("beam_", bi)] = ShellLineSpan(xy, supports, s0, s1, ids, cum[end])
+        end
+    end
+    return table
+end
+
+"""Stations (m) and upward displacement of one frame element, on `xy`."""
+function _profile_line_samples(el, u, loads, xy)
+    prof = Asap.element_deflection_profile(el, u, loads; resolution = 21)
+    x0 = ustrip(u"m", el.nodeStart.position[1])
+    y0 = ustrip(u"m", el.nodeStart.position[2])
+    x1 = ustrip(u"m", el.nodeEnd.position[1])
+    y1 = ustrip(u"m", el.nodeEnd.position[2])
+    _, s0 = StructuralSizer._station_on_polyline(x0, y0, xy)
+    _, s1 = StructuralSizer._station_on_polyline(x1, y1, xy)
+    n = length(prof)
+    out = Tuple{Float64, Float64}[]
+    for i in 1:n
+        t = n == 1 ? 0.0 : (i - 1) / (n - 1)
+        push!(out, (s0 + t * (s1 - s0), prof[i]))
+    end
+    return out
+end
+
+"""
+Live-load readings of one steel piece, measured on its framing line.
+
+The offset is taken from the element shape, not from the nodes alone. A span
+that is a single element still has its bow. `L` is the support-to-support
+length, or twice the cantilever length (IBC 2021 Table 1604.3 footnote i,
+corpus: ibc-2021, PDF p. 418). `loads_of` is one load vector per frame element.
+"""
+function _steel_line_readings(frames, u, loads_of, beam, cache)
+    line = beam.line
+    key = line.ids[1]
+    samples = get!(cache, key) do
+        wanted = Set(line.ids)
+        out = Tuple{Float64, Float64}[]
+        for el in frames
+            el.id in wanted || continue
+            raw = 1 <= el.elementID <= length(loads_of) ? loads_of[el.elementID] : Asap.AbstractLoad[]
+            mine = Asap.AbstractLoad[ld for ld in raw if ld.element === el]
+            append!(out, _profile_line_samples(el, u, mine, line.xy))
+        end
+        sort!(out; by = first)
+        out
+    end
+    spans = _deflection_spans(line.supports, line.total)
+    mine = Tuple{Float64, Float64}[(s, uz) for (s, uz) in samples
+                                   if line.s0 - 1e-4 <= s <= line.s1 + 1e-4]
+    readings = NamedTuple[]
+    for (a, b, kind) in spans
+        min(line.s1, b) - max(line.s0, a) > 1e-4 || continue
+        sel = Tuple{Float64, Float64}[(s, uz) for (s, uz) in mine
+                                      if a - 1e-4 <= s <= b + 1e-4]
+        δ, L = _span_offset(kind, a, b, sel, samples)
+        L > 1e-8 || continue
+        push!(readings, (
+            s0 = a, s1 = b, cantilever = kind !== :chord,
+            L = L, bf = 0.0, hf = beam.hf,
+            Ma_pos = 0.0, Ma_neg = Float64[], Δ = δ, Ig = 0.0, Ie = 0.0,
+        ))
+    end
+    return readings
+end
+
+"""
 Moment, deflection, and the next `Ie/Ig` from the solution now on `model`.
 
 `shell_k` and `frame_k` are the scales the next solve should use. A plate
@@ -263,16 +390,30 @@ function _service_reading(model, built, beams, materials, as_top, depth_at)
     frame_k = ones(n_f)
     moments = StructuralSizer._story_moment_field(model)
     elemental = Asap.get_elemental_loads(model)
+    # The profile's particular solution must be this solve's loads. The cached
+    # map can still be the factored case.
+    loads_of = Asap.get_elemental_loads(model.loads, length(frames))
     u = model.u
     frame_of = IdDict{Any, Int}(el => i for (i, el) in enumerate(frames))
     per_beam = Dict{Symbol, Vector{NamedTuple}}()
     mat = materials
+    # One profile per framing line, shared by every piece of that line.
+    line_cache = Dict{Symbol, Vector{Tuple{Float64, Float64}}}()
 
     for beam in beams
         total = StructuralSizer.polyline_length(beam.xy)
         pieces = [el for el in frames if el.id == beam.id]
         sort!(pieces; by = el -> _mid_station(el, beam.xy, total))
         samples = _sagging_samples(pieces, beam.xy, u, elemental, total)
+        # Steel is measured on the framing line. The column spans stay for
+        # reinforced concrete, where they also set the flange and the cracked
+        # inertia.
+        if !_service_rc(beam.section) && beam.line !== nothing
+            per_beam[beam.id] = _steel_line_readings(frames, u, loads_of, beam, line_cache)
+            beam.hogging_strip && _soften_hogging!(
+                shell_k, shells, moments, samples, beam, as_top, depth_at, mat)
+            continue
+        end
         nodes = _nodal_uz(pieces, beam.xy, u, total)
         spans = StructuralSizer.shell_service_spans(beam.xy, beam.support_xy)
         readings = NamedTuple[]
@@ -635,6 +776,7 @@ function service_beams(struc, shell_beams, beam_index, beam_demands,
                        support_points, thickness_of_face)
     specs = ShellServiceBeam[]
     ctx = _flange_context(struc)
+    lines_of = _shell_line_lookup(struc)
     for shell_beam in shell_beams
         i = get(beam_index, shell_beam.id, nothing)
         i === nothing && continue
@@ -671,7 +813,7 @@ function service_beams(struc, shell_beams, beam_index, beam_demands,
                     _steel_strong_inertia(sec)
             push!(specs, ShellServiceBeam(shell_beam.id, xy, sec, support_points;
                 half_width = half, hf = hf, mu_neg = mu_neg, hogging_strip = true,
-                I_service = I_svc))
+                I_service = I_svc, line = get(lines_of, shell_beam.id, nothing)))
         end
     end
     return specs

@@ -217,7 +217,8 @@ quantity. Enveloping the two end moments first and then subtracting them
 would hide the checkerboard transfer.
 """
 function _efm_demands_with_pattern(span_moments, struc, columns, qu, qD, qL, l2, ln;
-                                   use_pattern::Bool, solve_once, drop_shears=nothing)
+                                   use_pattern::Bool, solve_once, drop_shears=nothing,
+                                   drop_loads=nothing)
     env = _envelope_support_moments(span_moments, columns)
     M_neg_ext = env.M_neg_ext
     M_neg_int = env.M_neg_int
@@ -262,7 +263,120 @@ function _efm_demands_with_pattern(span_moments, struc, columns, qu, qD, qL, l2,
         column_moments = column_moments,
         column_shears = column_shears,
         unbalanced_moments = unbalanced_moments,
+        wall_faces = _efm_wall_faces(solve_once, columns, qD, qL, length(span_moments),
+                                     use_pattern; has_drop = drop_loads !== nothing),
     )
+end
+
+"""
+Signed moment at each side of each wall support.
+
+A support without `wall_seg` is skipped. Two spans meeting at one wall are
+two entries, in span order, so a later solve can be subtracted term by term.
+"""
+function _wall_sides(span_moments, columns)
+    out = NamedTuple[]
+    for (s, sm) in enumerate(span_moments)
+        for (idx, M) in ((s, sm.M_neg_left), (s + 1, sm.M_neg_right))
+            col = columns[idx]
+            _is_wall_support(col) || continue
+            seg = hasproperty(col, :wall_seg) ? col.wall_seg : nothing
+            seg === nothing && continue
+            push!(out, (key = _segment_key(seg), seg = seg, M = M))
+        end
+    end
+    return out
+end
+
+"""
+    _efm_wall_faces(solve_once, columns, qD, qL, n_spans, use_pattern; has_drop=true)
+
+Dead and live moment at each wall on this frame line.
+
+The frame adds the drop's line load to every solve, already multiplied by
+the dead factor `γ` of the combination that sets `qu`
+([`governing_dead_factor`](@ref)). A zero-pressure solve carries that drop
+and nothing else. The live moment is the `qL` solve minus the zero solve.
+The dead moment is the `qD` solve minus the zero solve, plus the zero solve
+over `γ`, which is the drop's own unfactored weight. A line without a drop
+has zero moment at zero pressure, so that solve is skipped. With pattern
+loading the live moment is the largest of those differences. The two sides
+of one wall keep the side with the larger `1.4D` / `1.2D+1.6L` hogging.
+Several frame lines add their strips later.
+"""
+function _efm_wall_faces(solve_once, columns, qD, qL, n_spans, use_pattern;
+                         has_drop::Bool = true)
+    γ_drop = governing_dead_factor(qD, qL)
+    any(_is_wall_support, columns) || return SlabWallFaceMoment[]
+    dead = _wall_sides(solve_once(fill(qD, n_spans)), columns)
+    isempty(dead) && return SlabWallFaceMoment[]
+    base = has_drop ? _wall_sides(solve_once(fill(zero(qD), n_spans)), columns) :
+                      [(side..., M = zero(side.M)) for side in dead]
+    lives = Any[_wall_sides(solve_once(fill(qL, n_spans)), columns)]
+    if use_pattern
+        for pattern in generate_load_patterns(n_spans)
+            all(==(:dead_plus_live), pattern) && continue
+            q = [s === :dead_plus_live ? qL : zero(qL) for s in pattern]
+            push!(lives, _wall_sides(solve_once(q), columns))
+        end
+    end
+    (length(dead) == length(base) && all(c -> length(c) == length(base), lives)) ||
+        return SlabWallFaceMoment[]
+    best = Dict{NTuple{4,Int}, SlabWallFaceMoment}()
+    env(D, L) = max(1.4 * D, 1.2 * D + 1.6 * L, 0.0)
+    for i in eachindex(base)
+        M0 = ustrip(u"N*m", base[i].M)
+        D = ustrip(u"N*m", dead[i].M) - M0 + M0 / γ_drop
+        L = maximum(c -> ustrip(u"N*m", c[i].M - base[i].M), lives)
+        seg = base[i].seg
+        face = SlabWallFaceMoment(D, L, seg[1][1], seg[1][2], seg[2][1], seg[2][2])
+        key = base[i].key
+        (!haskey(best, key) || env(D, L) > env(best[key].D, best[key].L)) &&
+            (best[key] = face)
+    end
+    return collect(values(best))
+end
+
+"""
+    _factored_wall_faces(span_moments, columns, qu, qD, qL)
+
+Dead and live parts of a direct-design wall moment.
+
+The coefficients apply to one factored pressure, so the support moment
+splits by `qD / qu` and `qL / qu`. Each wall keeps its own support, the
+larger side where two spans meet.
+"""
+function _factored_wall_faces(span_moments, columns, qu, qD, qL)
+    qun = ustrip(u"Pa", qu)
+    qun > 0 || return SlabWallFaceMoment[]
+    dshare = ustrip(u"Pa", qD) / qun
+    lshare = ustrip(u"Pa", qL) / qun
+    best = Dict{NTuple{4,Int}, SlabWallFaceMoment}()
+    for side in _wall_sides(span_moments, columns)
+        M = ustrip(u"N*m", abs(side.M))
+        face = SlabWallFaceMoment(M * dshare, M * lshare,
+                                  side.seg[1][1], side.seg[1][2],
+                                  side.seg[2][1], side.seg[2][2])
+        key = side.key
+        (!haskey(best, key) || M > best[key].D + best[key].L) && (best[key] = face)
+    end
+    return collect(values(best))
+end
+
+"""Add the strip moments of several frame lines that land on one wall."""
+function _sum_wall_faces(lists)
+    acc = Dict{NTuple{4,Int}, SlabWallFaceMoment}()
+    for list in lists, face in list
+        key = _segment_key(((face.x1, face.y1), (face.x2, face.y2)))
+        if haskey(acc, key)
+            old = acc[key]
+            acc[key] = SlabWallFaceMoment(old.D + face.D, old.L + face.L,
+                                          old.x1, old.y1, old.x2, old.y2)
+        else
+            acc[key] = face
+        end
+    end
+    return collect(values(acc))
 end
 
 # _compute_column_shear is defined in common.jl (shared between DDM and EFM)

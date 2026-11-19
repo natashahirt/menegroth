@@ -33,9 +33,49 @@ function _wind_plan_length(skel, eidx)
     return hypot(x2 - x1, y2 - y1)
 end
 
+"""
+Story 0 is the support level and has no beam grid. Copy the story-1 beam
+plan down to the column bases so a ground wall has an edge to claim.
+"""
+function _wind_grade_beams!(skel)
+    beams = Set(get(skel.groups_edges, :beams, Int[]))
+    any(e -> e in beams && _wind_horizontal(skel, e), skel.stories[0].edges) && return skel
+    z0 = skel.stories_z[1]
+    for e in skel.stories[1].edges
+        (e in beams && _wind_horizontal(skel, e)) || continue
+        v1, v2 = skel.edge_indices[e]
+        x1, y1 = _wind_xy(skel, v1)
+        x2, y2 = _wind_xy(skel, v2)
+        StructuralSynthesizer.add_element!(skel, Meshes.Segment(
+            Meshes.Point(x1 * u"m", y1 * u"m", z0),
+            Meshes.Point(x2 * u"m", y2 * u"m", z0));
+            group=:beams, level_idx=0)
+    end
+    # find_faces! has already run, so the grade faces are added here.
+    at = Dict{NTuple{2, Float64}, Int}()
+    for (k, v) in enumerate(skel.vertices)
+        c = Meshes.coords(v)
+        abs(ustrip(u"m", c.z) - ustrip(u"m", z0)) <= 1e-6 || continue
+        at[(round(ustrip(u"m", c.x); digits=6), round(ustrip(u"m", c.y); digits=6))] = k
+    end
+    for face in skel.stories[1].faces
+        cycle = Int[]
+        for v in skel.face_vertex_indices[face]
+            x, y = _wind_xy(skel, v)
+            key = (round(x; digits=6), round(y; digits=6))
+            haskey(at, key) || error("wind fixture: no grade vertex at $key")
+            push!(cycle, at[key])
+        end
+        StructuralSynthesizer.add_face!(skel, Meshes.Ngon(skel.vertices[cycle]...);
+                                        group=:grade, level_idx=0, v_indices=cycle)
+    end
+    return skel
+end
+
 """1×1 office, two stories, one wall on story 0, rigid diaphragm."""
 function _wind_building()
     skel = gen_medium_office(10.0u"m", 6.0u"m", 4.0u"m", 1, 1, 2)
+    _wind_grade_beams!(skel)
     beams = Set(get(skel.groups_edges, :beams, Int[]))
     edges = [e for e in skel.stories[0].edges if e in beams && _wind_horizontal(skel, e)]
     @assert !isempty(edges)
@@ -255,6 +295,7 @@ end
 """1×1 office, one story, a wall on every side, flexible diaphragm."""
 function _wind_flexible_box()
     skel = gen_medium_office(10.0u"m", 6.0u"m", 4.0u"m", 1, 1, 1)
+    _wind_grade_beams!(skel)
     beams = Set(get(skel.groups_edges, :beams, Int[]))
     edges = [e for e in skel.stories[0].edges if e in beams && _wind_horizontal(skel, e)]
     @assert length(edges) >= 4

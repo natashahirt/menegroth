@@ -378,7 +378,7 @@ function _iterate_beams_columns!(struc, params, beam_opts, column_opts, beam_kwa
         conform_rib_lines!(struc, params, beam_opts; I_factor = params.beam_I_factor)
         # The solid head is the bays around each column. A failing check grows
         # those bays, which adds beams, so the next pass sizes against them.
-        grow_building_solid_heads!(struc, params)
+        grow_building_solid_heads!(struc, params; fallback = beam_opts)
         _sync_fire_coating_loads!(struc, params)
         update_analysis!(struc, :stiffness; tc)
         size_columns!(struc, column_opts; reanalyze=false, tc=tc,

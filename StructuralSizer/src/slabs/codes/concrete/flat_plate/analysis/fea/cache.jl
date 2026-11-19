@@ -19,6 +19,21 @@ struct ElementMoments
     Mxy::Float64
 end
 
+"""
+    FEASlabView(shell_elements, nodes, u)
+
+One slab's triangles in a larger solved model. `shell_elements[k]` is the
+triangle of `element_data[k]`. `nodes` is the whole model's node list, so a
+triangle's `nodeID` indexes it, and `u` is the displacement those triangles
+are read at. Readers that only need the slab's own shells (nodal smoothing,
+element precompute) take this in place of an `Asap.Model`.
+"""
+struct FEASlabView
+    shell_elements::Vector{Asap.ShellTri3}
+    nodes::Vector{Asap.Node}
+    u::Vector{Float64}
+end
+
 """Column stub half: `(element, base_node, slab_node)` for one side of a column."""
 const ColStubHalf = NamedTuple{(:element, :base_node, :slab_node)}
 
@@ -54,8 +69,9 @@ This enables:
 mutable struct FEAModelCache
     initialized::Bool
 
-    # Asap model + column stubs (persistent across iterations)
-    model::Union{Nothing, Asap.Model}
+    # Asap model + column stubs (persistent across iterations). A slab read
+    # from the building model holds an `FEASlabView` of its own triangles.
+    model::Union{Nothing, Asap.Model, FEASlabView}
     col_stubs::Dict{Int, ColStubData}   # i => (below=..., above=...)
     shells::Union{Nothing, Vector{<:Asap.ShellElement}}  # shell elements from mesher
 

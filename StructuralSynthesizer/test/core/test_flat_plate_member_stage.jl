@@ -30,6 +30,8 @@ function _fp_member_building(; uniform = :off, method = DDM())
         floor = FlatPlateOptions(method = method),
         materials = MaterialOptions(concrete = NWC_4000, rebar = Rebar_60),
         uniform_column_sizing = uniform,
+        # A non-FEA method is the method under test, not the building model.
+        flat_plate_analysis = method isa FEA ? :building : :options,
         max_iterations = 5,
         skip_visualization = true,
     )

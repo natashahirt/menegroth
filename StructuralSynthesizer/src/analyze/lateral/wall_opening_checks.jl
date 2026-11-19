@@ -64,7 +64,7 @@ function _design_pierced_segments!(checks, struc, basic, second;
         material = material_of(wall, owner_i)
         lw = joined_clear_length(wall, walls, owner_i) * u"m"
         Moop = _slab_moment_into_wall(struc, wall, lw)
-        basis = _governing_slab_basis(struc, wall)
+        basis = _with_sds(_governing_slab_basis(struc, wall), SDS)
         batches = _segment_strength_batches(
             j, roof, gravity_reports, wind_reports, qe_reports, prepared, wind, effects;
             rho, SDS,

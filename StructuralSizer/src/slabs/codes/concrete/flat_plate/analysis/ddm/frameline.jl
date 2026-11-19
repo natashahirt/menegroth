@@ -364,6 +364,7 @@ function run_moment_analysis(
         Vu_max;
         M_wall_ext = uconvert(kip*u"ft", env.M_wall_ext),
         M_wall_int = uconvert(kip*u"ft", env.M_wall_int),
+        wall_faces = _factored_wall_faces(span_moments, sorted_columns, qu, qD, qL),
     )
 end
 

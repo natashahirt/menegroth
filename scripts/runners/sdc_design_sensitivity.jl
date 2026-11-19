@@ -93,39 +93,6 @@ function _piers(bay)
             (0.0, b, 0.0, 2b))
 end
 
-"""
-Park the column stack at each pier end.
-
-The eight ends are distinct. Every story of each stack leaves `:columns`
-for `:absent`. The center column is not on a pier and stays.
-"""
-function _park_pier_columns!(skel, bay, n)
-    ends = NTuple{2, Float64}[]
-    for (x1, y1, x2, y2) in _piers(bay)
-        push!(ends, (x1, y1), (x2, y2))
-    end
-    park = Int[]
-    keep = Int[]
-    for eidx in get(skel.groups_edges, :columns, Int[])
-        v1, v2 = skel.edge_indices[eidx]
-        c1 = Meshes.coords(skel.vertices[v1])
-        c2 = Meshes.coords(skel.vertices[v2])
-        x1, y1 = ustrip(u"m", c1.x), ustrip(u"m", c1.y)
-        x2, y2 = ustrip(u"m", c2.x), ustrip(u"m", c2.y)
-        on_end = hypot(x1 - x2, y1 - y2) <= 1e-6 &&
-            any(p -> hypot(x1 - p[1], y1 - p[2]) <= 1e-3, ends)
-        on_end ? push!(park, eidx) : push!(keep, eidx)
-    end
-    length(park) == 8 * n ||
-        error("piers: parking $(length(park)) end columns, expected $(8 * n)")
-    skel.groups_edges[:columns] = keep
-    absent = get!(skel.groups_edges, :absent, Int[])
-    for eidx in park
-        eidx in absent || push!(absent, eidx)
-    end
-    return skel
-end
-
 function office(; n::Int, bay=9.0u"m", story=4.0u"m", fc=4000.0u"psi")
     side = 2 * bay
     skel = gen_medium_office(side, side, story, 2, 2, n)
@@ -136,9 +103,8 @@ function office(; n::Int, bay=9.0u"m", story=4.0u"m", fc=4000.0u"psi")
             _claim_wall!(skel, beams, story_i, x1, y1, x2, y2)
         end
     end
-    # A column whose plan point is a pier end is inside the wall. The wall is
-    # the support there. The edges stay in :absent so they can be restored.
-    _park_pier_columns!(skel, bay, n)
+    # `initialize!` parks the column stacks at the pier ends in :absent
+    # (`park_wall_overlaps`). The center column is not on a pier and stays.
     conc = fc == 3000.0u"psi" ? NWC_3000 : NWC_4000
     struc = BuildingStructure(skel)
     for wall in struc.walls

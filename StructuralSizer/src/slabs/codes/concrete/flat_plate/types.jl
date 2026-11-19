@@ -134,6 +134,10 @@ struct MomentAnalysisResult{M<:Moment, P<:Pressure, F<:Force}
     # Moment transferred to each wall (see docstring), or `nothing`.
     wall_transfer::Union{Nothing, Vector{Any}}
 
+    # Unfactored dead and live moment at each wall this direction loads.
+    # Empty when the analysis did not separate them.
+    wall_faces::Vector{SlabWallFaceMoment}
+
     function MomentAnalysisResult(
         M0::M, M_neg_ext::M, M_neg_int::M, M_pos::M,
         qu::P, qD::P, qL::P,
@@ -152,6 +156,7 @@ struct MomentAnalysisResult{M<:Moment, P<:Pressure, F<:Force}
         stub_moments_below::Union{Nothing, Vector{M}} = nothing,
         stub_moments_above::Union{Nothing, Vector{M}} = nothing,
         wall_transfer::Union{Nothing, AbstractVector} = nothing,
+        wall_faces::Vector{SlabWallFaceMoment} = SlabWallFaceMoment[],
     ) where {M<:Moment, P<:Pressure, F<:Force}
         (stub_moments_below === nothing) == (stub_moments_above === nothing) ||
             throw(ArgumentError("stub_moments_below and stub_moments_above are set together"))
@@ -165,6 +170,7 @@ struct MomentAnalysisResult{M<:Moment, P<:Pressure, F<:Force}
             secondary, fea_Δ_panel,
             pattern_loading, stub_moments_below, stub_moments_above,
             wall_transfer === nothing ? nothing : Vector{Any}(wall_transfer),
+            wall_faces,
         )
     end
 end

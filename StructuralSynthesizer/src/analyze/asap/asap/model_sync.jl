@@ -129,6 +129,9 @@ function sync_asap!(struc::BuildingStructure;
     end
     
     use_patterns = _pattern_dead_split(struc, params)
+    # A new slab thickness changes the shell stiffness, so the cached factor
+    # cannot be reused even when the caller saw no change.
+    _sync_flat_plate_shells!(struc, params) && (loads_only = false)
     
     # 2. Update tributary load pressures
     combo = governing_combo(params)
@@ -247,7 +250,8 @@ function _sync_shell_area_pressures!(struc::BuildingStructure, params::DesignPar
     model = struc.asap_model
     isnothing(model) && return
     area_loads = Asap.AreaLoad[ld for ld in model.loads
-                               if ld isa Asap.AreaLoad && ld.id !== :wall_self_weight]
+                               if ld isa Asap.AreaLoad && ld.id !== :wall_self_weight &&
+                                  !(ld.id in _FP_LOAD_IDS)]
     isempty(area_loads) && return
 
     eligible = [slab for slab in struc.slabs

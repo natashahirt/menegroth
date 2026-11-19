@@ -204,7 +204,8 @@ const _STAGE_THREE_BAY = (
 
 """Office with isolated piers. Defaults are the 12 m square, stiff in both axes."""
 function _stage_office(; x=12.0u"m", y=12.0u"m", x_bays=2, y_bays=2,
-                       segments=_STAGE_BOTH_AXES, thickness=0.3u"m")
+                       segments=_STAGE_BOTH_AXES, thickness=0.3u"m",
+                       park_wall_overlaps::Bool=true)
     skel = gen_medium_office(x, y, 4.0u"m", x_bays, y_bays, 3)
     _stage_grade_beams!(skel)
     beams = Set(get(skel.groups_edges, :beams, Int[]))
@@ -214,7 +215,8 @@ function _stage_office(; x=12.0u"m", y=12.0u"m", x_bays=2, y_bays=2,
         floor_type=:vault,
         material=NWC_4000,
         floor_opts=_STAGE_VAULT,
-        wall_thickness=thickness)
+        wall_thickness=thickness,
+        park_wall_overlaps=park_wall_overlaps)
     for wall in struc.walls
         wall.concrete = RC_4000_60.concrete
     end
@@ -227,8 +229,9 @@ end
 Used where 0.10 < θ ≤ θmax. `to_asap!` applies the stated 0.35 cracked-wall
 factor. Then call [`_stage_soften_y_piers!`](@ref) with `0.001`.
 """
-function _stage_office_pdelta()
+function _stage_office_pdelta(; park_wall_overlaps::Bool=true)
     return _stage_office(;
+        park_wall_overlaps=park_wall_overlaps,
         x=10.0u"m", y=6.0u"m", x_bays=2, y_bays=1,
         segments=((0.0, 0.0, 5.0, 0.0),
                   (0.0, 6.0, 5.0, 6.0),
@@ -236,7 +239,7 @@ function _stage_office_pdelta()
 end
 
 """10×6 m, three stories, one wall line along X. Y has no wall."""
-function _stage_office_unstable()
+function _stage_office_unstable(; park_wall_overlaps::Bool=true)
     skel = gen_medium_office(10.0u"m", 6.0u"m", 4.0u"m", 1, 2, 3)
     _stage_grade_beams!(skel)
     beams = Set(get(skel.groups_edges, :beams, Int[]))
@@ -258,7 +261,8 @@ function _stage_office_unstable()
         floor_type=:vault,
         material=NWC_4000,
         floor_opts=_STAGE_VAULT,
-        wall_thickness=0.3u"m")
+        wall_thickness=0.3u"m",
+        park_wall_overlaps=park_wall_overlaps)
     for wall in struc.walls
         wall.concrete = RC_4000_60.concrete
     end
@@ -606,7 +610,9 @@ end
 end
 
 @testset "Ordinary wall stage includes P-delta" begin
-    struc = _stage_office_pdelta()
+    # The Y frame is what this test weakens. Its columns stand at the pier
+    # ends, so they stay instead of being parked.
+    struc = _stage_office_pdelta(; park_wall_overlaps=false)
     @test length(struc.walls) == 9
     @test sort([w.story for w in struc.walls]) == [0, 0, 0, 1, 1, 1, 2, 2, 2]
     @test all(a -> !a.joined, wall_assemblies(struc.walls))
@@ -713,7 +719,9 @@ end
 end
 
 @testset "Y-weak office exceeds θmax" begin
-    struc = _stage_office_unstable()
+    # The frame's weak axis is what pushes θ past θmax. Its columns stand at
+    # the wall ends, so they stay instead of being parked.
+    struc = _stage_office_unstable(; park_wall_overlaps=false)
     @test length(struc.walls) == 3
     lateral = DesignParameters(
         lateral=LateralDesign(; system=WallsSeismicSystem(:A3), assignment=BuildingUnit()),
@@ -1165,7 +1173,9 @@ end
 end
 
 @testset "Interactive system, row F" begin
-    struc = _stage_office()
+    # The frame beside the walls is what drifts past θmax. Its columns stand
+    # at the pier ends, so they stay instead of being parked.
+    struc = _stage_office(; park_wall_overlaps=false)
     params = DesignParameters(
         lateral=LateralDesign(; system=InteractiveShearWallFrameSystem(),
                                assignment=BuildingUnit()),

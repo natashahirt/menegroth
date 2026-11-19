@@ -501,20 +501,13 @@ function _relative_service_deflection(struc::BuildingStructure, idxs;
         end
     end
     # A beam the line walk did not place still reports the sag of its own
-    # elements. A loaded beam with neither is a bug: a zero would skip the check.
+    # elements. A loaded beam with no measured element is a bug: a zero would
+    # skip the check. A measured zero is a piece bent only in hogging, such
+    # as a short rib at a solid-head face.
     for (bi, beam) in enumerate(struc.beams)
         rL, rT = ratios[bi]
         (rL > 0 || rT > 0) && continue
-        for si in segment_indices(beam)
-            e = struc.segments[si].edge_idx
-            for i in get(edge_elements, e, Int[])
-                haskey(profL, i) || continue
-                Lm = _element_length_m(model.frame_elements[i])
-                Lm > 1e-8 || continue
-                rL = max(rL, _profile_sag(profL[i]) / Lm)
-                rT = max(rT, _profile_sag(profT[i]) / Lm)
-            end
-        end
+        measured = false
         loaded = false
         for si in segment_indices(beam)
             e = struc.segments[si].edge_idx
@@ -522,12 +515,18 @@ function _relative_service_deflection(struc::BuildingStructure, idxs;
                 if !isempty(byL[i]) || !isempty(byS[i])
                     loaded = true
                 end
+                haskey(profL, i) || continue
+                Lm = _element_length_m(model.frame_elements[i])
+                Lm > 1e-8 || continue
+                measured = true
+                rL = max(rL, _profile_sag(profL[i]) / Lm)
+                rT = max(rT, _profile_sag(profT[i]) / Lm)
             end
         end
-        if loaded && rL == 0 && rT == 0
+        if loaded && !measured
             throw(ArgumentError(
                 "beam $bi ($(beam.role), level $(beam.level)) carries service load " *
-                "but has no chord deflection"))
+                "but none of its elements has a deflection profile"))
         end
         ratios[bi] = (rL, rT)
     end

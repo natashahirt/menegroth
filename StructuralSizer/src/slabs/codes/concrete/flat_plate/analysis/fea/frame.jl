@@ -194,11 +194,11 @@ function _wall_face_cuts(cache, struc, slab, span_axis)
 end
 
 """
-    _fea_wall_face_parts(cache, struc, slab, span_axis) -> Vector{NTuple{2,Float64}}
+    _fea_wall_face_parts(cache, struc, slab, span_axis) -> Vector{SlabWallFaceMoment}
 
 Dead and live parts of the moment at every wall face
-[`_fea_wall_face_moments`](@ref) cuts, as `(D, L)` in N·m, top tension
-positive.
+[`_fea_wall_face_moments`](@ref) cuts. `D` and `L` are N·m, top tension
+positive, and the coordinates are the wall's plan line.
 
 `D` is the band integral of the unfactored dead tensor. `L` is the largest
 band integral of the unfactored live tensor over the live arrangements
@@ -209,7 +209,7 @@ combination with factors `αD` and `αL ≥ 0` gives that face
 largest of these is the stored wall moment. Empty without a D/L split.
 """
 function _fea_wall_face_parts(cache, struc, slab, span_axis)
-    out = NTuple{2,Float64}[]
+    out = SlabWallFaceMoment[]
     (isempty(cache.element_data_D) || isempty(cache.element_data_L)) && return out
     δ = _WALL_FACE_BAND_M
     cells = _pattern_cell_order(cache)
@@ -232,14 +232,15 @@ function _fea_wall_face_parts(cache, struc, slab, span_axis)
                                     if s === :dead_plus_live); init = 0.0))
                 end
             end
-            push!(out, (D, L))
+            seg = cut.seg
+            push!(out, SlabWallFaceMoment(D, L, seg[1][1], seg[1][2], seg[2][1], seg[2][2]))
         end
     end
     return out
 end
 
 """
-    _paired_wall_face_parts(cache, struc, slab, span_axis, M_wall) -> Vector{NTuple{2,Float64}}
+    _paired_wall_face_parts(cache, struc, slab, span_axis, M_wall) -> Vector{SlabWallFaceMoment}
 
 [`_fea_wall_face_parts`](@ref) when they reproduce `M_wall` over
 `_LOAD_COMBOS`, otherwise empty. A mismatch means the cache no longer holds
@@ -248,11 +249,11 @@ the analysis `M_wall` came from, and a reader then pairs by pressure.
 function _paired_wall_face_parts(cache, struc, slab, span_axis, M_wall)
     parts = _fea_wall_face_parts(cache, struc, slab, span_axis)
     isempty(parts) && return parts
-    env = maximum(p -> maximum(c -> max(c[1] * p[1] + c[2] * p[2], 0.0), _LOAD_COMBOS), parts)
+    env = maximum(p -> maximum(c -> max(c[1] * p.D + c[2] * p.L, 0.0), _LOAD_COMBOS), parts)
     target = ustrip(u"N*m", abs(M_wall))
     isapprox(env, target; rtol = 1e-6, atol = 1e-6) && return parts
     @debug "Wall-face D/L parts do not reproduce the stored wall moment" env target
-    return NTuple{2,Float64}[]
+    return SlabWallFaceMoment[]
 end
 
 """Largest wall-face hogging perpendicular to `span_axis`, in the units of `sample`."""

@@ -3,6 +3,7 @@
 using Test
 using Unitful
 using StructuralSynthesizer
+using StructuralSizer
 
 function _pier(; length=10.0, height=3.0, thickness=0.40, story=0, along=:X)
     if along === :X
@@ -175,22 +176,60 @@ end
     # Without faces the pressures pair the moment: 0.9·5 / 14 of it.
     unpaired = (qD = 5000.0, qL = 5000.0, roof = false, faces = nothing)
     @test slab_moment(Moop, act(:strength_0_9D_1_0W), unpaired) ≈ Moop * 4.5 / 14
+
+    # ASCE 7-22 Eq. 12.4-4a: Ev = 0.2 SDS D on the dead part.
+    # SDS = 1, 1.2D + Ev + L: dead factor 1.4. Face A is 66, face B is 54.
+    seismic = (basis..., SDS = 1.0)
+    @test slab_moment(Moop, act(:strength_1_2D_1_0E), seismic) ≈ 66e3u"N*m"
+    # 0.9D − Ev: dead factor 0.7. Face A is 28.
+    @test slab_moment(Moop, act(:strength_0_9D_1_0E), seismic) ≈ 28e3u"N*m"
+    # SDS = 3 pushes 1.2D + Ev + L to 82, above the 76 gravity envelope.
+    @test slab_moment(Moop, act(:strength_1_2D_1_0E), (basis..., SDS = 3.0)) ≈ 82e3u"N*m"
+    # Pressures, no faces. SDS = 1: 12/14. SDS = 4: 15/14, past the envelope.
+    @test slab_moment(Moop, act(:strength_1_2D_1_0E), (unpaired..., SDS = 1.0)) ≈ Moop * 12 / 14
+    @test slab_moment(Moop, act(:strength_1_2D_1_0E), (unpaired..., SDS = 4.0)) ≈ Moop * 15 / 14
+    # 0.9D − Ev with SDS = 5 is a negative pressure. The moment is zero.
+    @test slab_moment(Moop, act(:strength_0_9D_1_0E), (unpaired..., SDS = 5.0)) == 0.0u"N*m"
 end
 
 @testset "a wall reads the face parts of its span direction" begin
     parts = StructuralSynthesizer._directed_wall_face_parts
+    Face = StructuralSizer.SlabWallFaceMoment
     slab = (spans = (primary = 8.0u"m", secondary = 8.0u"m", axis = (1.0, 0.0)),)
+    primary = Face(30e3, 10e3, 0.0, 0.0, 0.0, 8.0)
+    secondary = Face(20e3, 5e3, 0.0, 0.0, 8.0, 0.0)
     result = (M_wall = 50.0u"kN*m", M_wall_secondary = 30.0u"kN*m",
-              wall_face_parts = [(30e3, 10e3)],
-              wall_face_parts_secondary = [(20e3, 5e3)])
+              wall_face_parts = [primary],
+              wall_face_parts_secondary = [secondary])
     # Along y the wall is across the primary span; along x, the secondary.
-    @test parts(result, slab, 0.0, 1.0) == [(30e3, 10e3)]
-    @test parts(result, slab, 1.0, 0.0) == [(20e3, 5e3)]
-    @test parts(result, slab, sqrt(0.5), sqrt(0.5)) == [(30e3, 10e3), (20e3, 5e3)]
+    @test parts(result, slab, 0.0, 1.0) == [primary]
+    @test parts(result, slab, 1.0, 0.0) == [secondary]
+    @test parts(result, slab, sqrt(0.5), sqrt(0.5)) == [primary, secondary]
     # A direction with a moment but no parts leaves nothing to pair.
-    bare = (result..., wall_face_parts_secondary = Tuple{Float64,Float64}[])
+    bare = (result..., wall_face_parts_secondary = Face[])
     @test isempty(parts(bare, slab, sqrt(0.5), sqrt(0.5)))
     # A direction without a wall moment is not read.
     quiet = (bare..., M_wall_secondary = 0.0u"kN*m")
-    @test parts(quiet, slab, sqrt(0.5), sqrt(0.5)) == [(30e3, 10e3)]
+    @test parts(quiet, slab, sqrt(0.5), sqrt(0.5)) == [primary]
+end
+
+@testset "a pier takes the moment of its own wall" begin
+    Face = StructuralSizer.SlabWallFaceMoment
+    # Along y, so the wall reads the primary parts. Its line is x = 0.
+    wall = _pier(; length = 6.0, along = :Y)
+    mine = Face(10e3, 5e3, 0.0, 6.0, 0.0, 0.0)
+    other = Face(80e3, 50e3, 0.0, 0.0, 6.0, 0.0)
+    result = (M_wall = 160.0u"kN*m", M_wall_secondary = 0.0u"kN*m",
+              wall_face_parts = [other, mine],
+              wall_face_parts_secondary = Face[])
+    slab = (spans = (axis = (1.0, 0.0),),)
+    moment, faces = StructuralSynthesizer._pier_directed_moment(result, slab, wall, 0.0, 1.0)
+    # max(1.4·10, 1.2·10 + 1.6·5) = 20 kN·m. The other wall's 162 stays out.
+    @test moment ≈ 20e3
+    @test faces == [mine]
+    miss = Wall([1], 3.0u"m"; thickness = 0.30u"m",
+                x1 = 2.0, y1 = 2.0, x2 = 2.0, y2 = 8.0, story = 0)
+    missed, none = StructuralSynthesizer._pier_directed_moment(result, slab, miss, 0.0, 1.0)
+    @test missed == 0.0
+    @test isempty(none)
 end

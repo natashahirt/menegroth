@@ -202,11 +202,59 @@ end
     @test with_bars.shear_at_Mn_N != tall.shear_at_Mn_N
 end
 
+_ss_xy(skel, v) = (c = Meshes.coords(skel.vertices[v]);
+                    (ustrip(u"m", c.x), ustrip(u"m", c.y), ustrip(u"m", c.z)))
+
+_ss_level(skel, e) = begin
+    v1, v2 = skel.edge_indices[e]
+    a, b = _ss_xy(skel, v1), _ss_xy(skel, v2)
+    abs(a[3] - b[3]) <= 1e-6
+end
+
+"""
+Story 0 is the support level and has no beam grid. Copy the story-1 beam
+plan down to the column bases so a ground wall has an edge to claim.
+"""
+function _ss_grade_beams!(skel)
+    beams = Set(get(skel.groups_edges, :beams, Int[]))
+    any(e -> e in beams && _ss_level(skel, e), skel.stories[0].edges) && return skel
+    z0 = skel.stories_z[1]
+    for e in skel.stories[1].edges
+        (e in beams && _ss_level(skel, e)) || continue
+        v1, v2 = skel.edge_indices[e]
+        a, b = _ss_xy(skel, v1), _ss_xy(skel, v2)
+        StructuralSynthesizer.add_element!(skel, Meshes.Segment(
+            Meshes.Point(a[1] * u"m", a[2] * u"m", z0),
+            Meshes.Point(b[1] * u"m", b[2] * u"m", z0));
+            group=:beams, level_idx=0)
+    end
+    # find_faces! has already run, so the grade faces are added here.
+    at = Dict{NTuple{2, Float64}, Int}()
+    for (k, v) in enumerate(skel.vertices)
+        a = _ss_xy(skel, k)
+        abs(a[3] - ustrip(u"m", z0)) <= 1e-6 || continue
+        at[(round(a[1]; digits=6), round(a[2]; digits=6))] = k
+    end
+    for face in skel.stories[1].faces
+        cycle = Int[]
+        for v in skel.face_vertex_indices[face]
+            a = _ss_xy(skel, v)
+            key = (round(a[1]; digits=6), round(a[2]; digits=6))
+            haskey(at, key) || error("special-shear fixture: no grade vertex at $key")
+            push!(cycle, at[key])
+        end
+        StructuralSynthesizer.add_face!(skel, Meshes.Ngon(skel.vertices[cycle]...);
+                                        group=:grade, level_idx=0, v_indices=cycle)
+    end
+    return skel
+end
+
 """Three stories, 5×6 m, a stacked wall on each 5 m line: hw/ℓw = 2.4."""
 function _ss_slender_office()
     skel = gen_medium_office(5.0u"m", 6.0u"m", 4.0u"m", 1, 2, 3)
+    _ss_grade_beams!(skel)
     beams = Set(get(skel.groups_edges, :beams, Int[]))
-    xy(v) = (c = Meshes.coords(skel.vertices[v]); (ustrip(u"m", c.x), ustrip(u"m", c.y), ustrip(u"m", c.z)))
+    xy(v) = _ss_xy(skel, v)
     function plan(e)
         v1, v2 = skel.edge_indices[e]
         a, b = xy(v1), xy(v2)
@@ -324,9 +372,9 @@ return.
 """
 function _ss_flanged_office(; pierced::Bool=false)
     skel = gen_medium_office(5.0u"m", 6.0u"m", 4.0u"m", 1, 2, 3)
+    _ss_grade_beams!(skel)
     beams = Set(get(skel.groups_edges, :beams, Int[]))
-    xy(v) = (c = Meshes.coords(skel.vertices[v]);
-             (ustrip(u"m", c.x), ustrip(u"m", c.y), ustrip(u"m", c.z)))
+    xy(v) = _ss_xy(skel, v)
     function plan(e)
         v1, v2 = skel.edge_indices[e]
         return xy(v1), xy(v2), v1, v2

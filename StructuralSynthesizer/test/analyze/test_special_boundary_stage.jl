@@ -231,8 +231,53 @@ end
     @test two.σ_Pa < one.σ_Pa
 end
 
+"""
+Story 0 is the support level and has no beam grid. Copy the story-1 beam
+plan down to the column bases so a ground wall has an edge to claim.
+"""
+function _boundary_grade_beams!(skel)
+    beams = Set(get(skel.groups_edges, :beams, Int[]))
+    level(e) = begin
+        v1, v2 = skel.edge_indices[e]
+        c1 = Meshes.coords(skel.vertices[v1])
+        c2 = Meshes.coords(skel.vertices[v2])
+        abs(ustrip(u"m", c1.z) - ustrip(u"m", c2.z)) <= 1e-6
+    end
+    any(e -> e in beams && level(e), skel.stories[0].edges) && return skel
+    z0 = skel.stories_z[1]
+    for e in skel.stories[1].edges
+        (e in beams && level(e)) || continue
+        v1, v2 = skel.edge_indices[e]
+        c1 = Meshes.coords(skel.vertices[v1])
+        c2 = Meshes.coords(skel.vertices[v2])
+        StructuralSynthesizer.add_element!(skel, Meshes.Segment(
+            Meshes.Point(c1.x, c1.y, z0), Meshes.Point(c2.x, c2.y, z0));
+            group=:beams, level_idx=0)
+    end
+    # find_faces! has already run, so the grade faces are added here.
+    at = Dict{NTuple{2, Float64}, Int}()
+    for (k, v) in enumerate(skel.vertices)
+        c = Meshes.coords(v)
+        abs(ustrip(u"m", c.z) - ustrip(u"m", z0)) <= 1e-6 || continue
+        at[(round(ustrip(u"m", c.x); digits=6), round(ustrip(u"m", c.y); digits=6))] = k
+    end
+    for face in skel.stories[1].faces
+        cycle = Int[]
+        for v in skel.face_vertex_indices[face]
+            c = Meshes.coords(skel.vertices[v])
+            key = (round(ustrip(u"m", c.x); digits=6), round(ustrip(u"m", c.y); digits=6))
+            haskey(at, key) || error("boundary fixture: no grade vertex at $key")
+            push!(cycle, at[key])
+        end
+        StructuralSynthesizer.add_face!(skel, Meshes.Ngon(skel.vertices[cycle]...);
+                                        group=:grade, level_idx=0, v_indices=cycle)
+    end
+    return skel
+end
+
 function _boundary_office()
     skel = gen_medium_office(10.0u"m", 6.0u"m", 4.0u"m", 1, 2, 1)
+    _boundary_grade_beams!(skel)
     beams = Set(get(skel.groups_edges, :beams, Int[]))
     ground = [e for e in skel.stories[0].edges if e in beams]
     longest = maximum(begin

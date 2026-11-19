@@ -539,7 +539,7 @@ function _rc_column_nlp_key(d::RCColumnDemand, g::ConcreteMemberGeometry, opts::
         Float64(to_kip(d.Pu)), Float64(to_kipft(d.Mux)), Float64(to_kipft(d.Muy)),
         Float64(to_kipft(d.M1x)), Float64(to_kipft(d.M2x)),
         Float64(to_kipft(d.M1y)), Float64(to_kipft(d.M2y)),
-        d.βdns, d.transverse_load,
+        d.βdns, d.transverse_load, d.magnify,
         Float64(ustrip(u"m", g.L)), Float64(ustrip(u"m", g.Lu)),
         g.kx, g.ky, g.braced, opts,
     )

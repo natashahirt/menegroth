@@ -293,6 +293,10 @@ function size_foundations_grouped!(
             end
 
             any_compression = false
+            service_actions = StructuralSizer.FootingAction[]
+            strength_actions = StructuralSizer.FootingAction[]
+            n_with_actions = 0
+            n_without_actions = 0
             for f_idx in f_indices
                 fnd = struc.foundations[f_idx]
                 _all_uplift(demands, fnd.support_indices) && continue
@@ -304,33 +308,55 @@ function size_foundations_grouped!(
                 gov_Muy = max(gov_Muy, abs(d.Muy))
                 gov_Vux = max(gov_Vux, abs(d.Vux))
                 gov_Vuy = max(gov_Vuy, abs(d.Vuy))
+                for si in fnd.support_indices
+                    actions = foundation_actions_at(struc, si)
+                    if actions === nothing
+                        n_without_actions += 1
+                    else
+                        n_with_actions += 1
+                        append!(service_actions, actions.service)
+                        append!(strength_actions, actions.strength)
+                    end
+                end
             end
 
             if !any_compression
                 @warn "Foundation group $gid in factored uplift — skipping compression footing (ACI 318-11 §15.8.1.2)"
                 return
             end
-            # Use the largest column dimensions in the group (conservative for punching)
-            gov_c1 = 18.0u"inch"
-            gov_c2 = 18.0u"inch"
+            if n_with_actions > 0 && n_without_actions > 0
+                error("Foundation group $gid mixes supports that have concurrent " *
+                      "load cases with supports that do not. Each case keeps its " *
+                      "own axial force and moment (ASCE 7-22 §2.3 and §2.4).")
+            end
+            # Punching is checked at the smallest column in the group. A larger
+            # column would raise the concrete shear strength.
+            gov_c1 = nothing
+            gov_c2 = nothing
             gov_shape = :rectangular
             for f_idx in f_indices
                 fnd = struc.foundations[f_idx]
                 for si in fnd.support_indices
                     d = demands[si]
-                    gov_c1 = max(gov_c1, d.c1)
-                    gov_c2 = max(gov_c2, d.c2)
+                    gov_c1 = gov_c1 === nothing ? d.c1 : min(gov_c1, d.c1)
+                    gov_c2 = gov_c2 === nothing ? d.c2 : min(gov_c2, d.c2)
                     d.shape == :circular && (gov_shape = :circular)
                 end
             end
+            gov_c1 = something(gov_c1, 18.0u"inch")
+            gov_c2 = something(gov_c2, 18.0u"inch")
             gov_demand = StructuralSizer.FoundationDemand(1;
                 Pu=gov_Pu, Mux=gov_Mux, Muy=gov_Muy,
                 Vux=gov_Vux, Vuy=gov_Vuy, Ps=gov_Ps,
                 c1=gov_c1, c2=gov_c2, shape=gov_shape)
 
             if opts.code == :aci
-                group_results_vec[k] = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), 
-                    gov_demand, soil; opts=opts.spread_params, tc=tc)
+                # Each support's cases stay intact. The component-wise max of
+                # P and M is used only when the wall stage stored no cases.
+                group_results_vec[k] = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(),
+                    gov_demand, soil; opts=opts.spread_params, tc=tc,
+                    service_actions = service_actions,
+                    strength_actions = strength_actions)
             else
                 group_results_vec[k] = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), 
                     gov_demand, soil, concrete, rebar;

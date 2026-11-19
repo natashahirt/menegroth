@@ -40,8 +40,11 @@ Unified demand for framing members (beams, columns, beam-columns).
 - Used by both `Cm = 0.6 − 0.4·(M1/M2)` and the slenderness limit
   `34 + 12·(M1/M2)` (capped at 40); see `calc_Cm` and
   `should_consider_slenderness` in `slenderness.jl`.
-- If `M1`/`M2` are not provided, defaults to `M1 = 0`, `M2 = Mux`/`Muy`
-  (conservative single-curvature stand-in: `Cm = 0.6`).
+- If `M1`/`M2` are not provided, defaults to `M1 = 0`, `M2 = Mux`/`Muy`.
+  Eq. A-8-4 then gives `Cm = 0.6`. That is not single curvature. Single
+  curvature is `M1 = −M2` and `Cm = 1.0`. A member loaded between its
+  supports sets `transverse_load` so `Cm = 1.0` (AISC 360-16 App. 8
+  §8.2.1(b), corpus: aisc-360-16, PDF page 306).
 """
 struct MemberDemand{T, C} <: AbstractDemand
     member_idx::Int
@@ -75,7 +78,9 @@ end
 Keyword constructor with defaults for [`MemberDemand`](@ref).
 
 When `M1x`/`M2x` (or `M1y`/`M2y`) are `nothing`, defaults to `M1=0`, `M2=Mux`
-(conservative single-curvature assumption, Cm = 0.6 per AISC 360-16 Appendix 8).
+(Eq. A-8-4 at a zero ratio, Cm = 0.6). Single curvature is `M1 = −M2`
+(Cm = 1.0). Span load uses `transverse_load` (Cm = 1.0, AISC 360-16
+App. 8 §8.2.1(b), corpus: aisc-360-16, PDF page 306).
 When `Mux_pos` / `Mux_neg` are omitted, both default to `Mux` so a caller that
 only has an unsigned envelope still checks both faces at full magnitude
 (hogging Chapter F at `Lb=L`, `Cb=1.0` — AISC 360-16 §F2.2, page 103).
@@ -177,12 +182,15 @@ struct RCColumnDemand{T} <: AbstractDemand
     M2y::T                 # Larger signed end moment about y-axis
     βdns::Float64          # Sustained load ratio (slenderness)
     transverse_load::Bool  # ACI 318-19 §6.6.4.5.3 — forces Cm = 1.0
+    # `false` skips the §6.6 moment magnifier. Row F forces already include
+    # story P-delta (ACI 318-19 §6.7); magnifying them again double-counts.
+    magnify::Bool
 end
 
 """
     RCColumnDemand(idx; Pu=0.0, Mux=nothing, Muy=nothing,
                    M1x=0.0, M2x=nothing, M1y=0.0, M2y=nothing,
-                   βdns=0.6, transverse_load=false) -> RCColumnDemand
+                   βdns=0.6, transverse_load=false, magnify=true) -> RCColumnDemand
 
 Keyword constructor with defaults for [`RCColumnDemand`](@ref).
 
@@ -192,6 +200,8 @@ When `M2x`/`M2y` are `nothing`, they default to `Mux`/`Muy`.
 ACI 318-19 §6.6.4.4.4 / historically ACI 318-11 §10.10.6.2).
 `transverse_load` defaults to `false`; set `true` for columns with
 transverse loads between supports so `calc_Cm` returns 1.0.
+`magnify` defaults to `true`. Set `false` when the moments already come
+from a second-order analysis (ACI 318-19 §6.7) so §6.6 is not applied again.
 """
 function RCColumnDemand(idx::Int;
     Pu = 0.0,
@@ -203,6 +213,7 @@ function RCColumnDemand(idx::Int;
     M2y = nothing,
     βdns = 0.6,
     transverse_load::Bool = false,
+    magnify::Bool = true,
 )
     if isnothing(Mux)
         if isnothing(M2x)
@@ -230,7 +241,7 @@ function RCColumnDemand(idx::Int;
                      typeof(M1x), typeof(M2x), typeof(M1y), typeof(M2y))
     RCColumnDemand{T}(idx, T(Pu), T(Mux), T(Muy),
                       T(M1x), T(M2x), T(M1y), T(M2y),
-                      Float64(βdns), transverse_load)
+                      Float64(βdns), transverse_load, magnify)
 end
 
 """

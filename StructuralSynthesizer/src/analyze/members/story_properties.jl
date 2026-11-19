@@ -367,11 +367,11 @@ end
 #   F_PΔ = ΣPu × Δ / lc   at each story level
 #
 # The iteration continues until lateral drifts converge (< tolerance) or the
-# ACI 318-11 §10.10.2.1 limit is exceeded (secondary moments > 1.4 × primary).
+# ACI 318-19 §6.2.5.3 limit is exceeded (second-order moment > 1.4 × first-order).
 #
 # Reference:
-#   ACI 318-11 §10.10.4 — Elastic second-order analysis
-#   ACI 318-11 §10.10.2.1 — Total moment ≤ 1.4 × first-order moment
+#   ACI 318-19 §6.7 — Elastic second-order analysis
+#   ACI 318-19 §6.2.5.3 — Total moment ≤ 1.4 × first-order moment
 # =============================================================================
 
 """
@@ -385,7 +385,7 @@ After the first-order solve (which must already be done), this function:
 3. Adds them as `NodeForce` loads on story-level column top nodes
 4. Re-solves the model
 5. Checks convergence (max drift change < `tol`)
-6. Checks the ACI §6.6.4.6.2 limit (drift ratio ≤ 1.4×)
+6. Checks the ACI 318-19 §6.2.5.3 limit (drift ratio ≤ 1.4×)
 
 # Keyword Arguments
 - `max_iter::Int=10`: Maximum P-Δ iterations
@@ -545,14 +545,18 @@ function p_delta_iterate!(struc;
             @info "P-Δ iteration $iter" max_change=round(max_change, digits=4) max_drift_ratio=round(max_drift_ratio, digits=3)
         end
 
-        # ACI 318-11 §10.10.2.1: total moment ≤ 1.4 × first-order
-        # Using drift as a proxy (moments scale with drift in elastic analysis)
+        # ACI 318-19 §6.2.5.3 (corpus: aci-318-19, PDF page 72): the total
+        # moment including second-order effects shall not exceed 1.4 times
+        # the first-order moment. Drift stands in for that ratio because the
+        # added story force is linear in the drift. Above the limit the
+        # iteration stops instead of feeding that solution onward.
         if max_drift_ratio > 1.4
             attention = [s for (s, _) in columns_by_story
                          if get(curr_drifts, s, 0.0) / max(get(first_order_drifts, s, 1e-10), 1e-10) > 1.4]
             if verbose
-                @warn "P-Δ drift ratio $(round(max_drift_ratio, digits=2)) > 1.4 (ACI §6.6.4.6.2 limit)" stories=attention
+                @warn "P-Δ drift ratio $(round(max_drift_ratio, digits=2)) > 1.4 (ACI 318-19 §6.2.5.3)" stories=attention
             end
+            break
         end
 
         prev_drifts = curr_drifts
@@ -563,7 +567,16 @@ function p_delta_iterate!(struc;
         end
     end
 
-    # Update story properties with converged values
+    # The forces from a ratio above 1.4 are outside the §6.2.5.3 limit.
+    # Remove the added story forces and solve the first-order
+    # model again so later sizing does not read them.
+    if max_drift_ratio > 1.4 && length(model.loads) > n_original_loads
+        resize!(model.loads, n_original_loads)
+        Asap.update!(model)
+        Asap.solve!(model)
+    end
+
+    # Update story properties with the solution that remains
     compute_story_properties!(struc; concrete=concrete, verbose=false)
 
     if verbose

@@ -605,6 +605,10 @@ function to_asap!(struc::BuildingStructure{T, A, P};
             factor=_self_weight_dead_factor(params; patterned=use_patterns)))
     end
 
+    # Curtain wall on the perimeter beams. The pressure stored on the
+    # structure is unfactored; these line loads carry the dead factor.
+    append_cladding_loads!(loads, frame_elements, struc, params; patterned=use_patterns)
+
     # 7. Build unified Asap.Model (Phase 9a — diaphragm shells now contribute
     # to the assembled stiffness). The 4-argument constructor merges shell
     # mesh nodes into the node list via _merge_shell_nodes (which reuses the

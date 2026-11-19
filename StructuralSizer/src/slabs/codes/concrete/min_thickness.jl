@@ -104,6 +104,37 @@ function alpha_fm(alphas)
     return sum(alphas) / length(alphas)
 end
 
+"""
+    beam_slab_alpha_f(Ecb, Ib, Ecs, Is) -> Float64
+
+αf = Ecb Ib / Ecs Is. ACI 318-11 Eq. (13-3) (corpus: aci-318-11, PDF page 253).
+
+`Ib` is the gross moment of inertia of the beam stem. The sentence that
+puts a slab flange into the beam section did not survive the text layer,
+so the slab is not added to `Ib`. `Is` is the gross inertia of the slab
+width bounded by the centerlines of the adjacent panels (notation, page 29):
+`ls · h³ / 12`.
+"""
+function beam_slab_alpha_f(Ecb, Ib, Ecs, Is)
+    Is_m4 = ustrip(u"m^4", Is)
+    Is_m4 > 0 || throw(ArgumentError(
+        "Is must be positive. ACI 318-11 Eq. (13-3) (corpus: aci-318-11, PDF page 253)."))
+    Ecs_Pa = ustrip(u"Pa", Ecs)
+    Ecs_Pa > 0 || throw(ArgumentError("Ecs must be positive (Eq. 13-3)."))
+    return ustrip(u"Pa", Ecb) * ustrip(u"m^4", Ib) / (Ecs_Pa * Is_m4)
+end
+
+"""Gross inertia of a slab strip, `ls · h³ / 12`."""
+slab_strip_inertia(ls::Length, h::Length) = ls * h^3 / 12
+
+"""Average αf on the edges of one panel. ACI 318-11 notation, page 29."""
+function panel_alpha_fm(alphas::AbstractVector{<:Real})
+    isempty(alphas) && throw(ArgumentError(
+        "αfm is the average αf of the beams on the edges of a panel."))
+    any(a -> a < 0, alphas) && throw(ArgumentError("αf cannot be negative."))
+    return sum(alphas) / length(alphas)
+end
+
 # ACI 318-11 Table 9.5(c) (corpus: aci-318-11, page 134). Divisors of ln by
 # fy: exterior without edge beams, and interior (the exterior-with-edge-beams
 # column equals interior), without and with drop panels.
@@ -173,17 +204,36 @@ of Table 9.5(c), or Eq. (9-12) at αfm = 0.2 increased by 10 percent, and not
 less than 5 in. Eq. (9-12) decreases as αfm grows, and (c) is thinner still,
 so no stiffer beam can require more. This is not a code case. It stands in
 until the beams are sized.
+
+# Table 9.5(c) span ratio
+Cases (a) and the unknown-beam bound use Table 9.5(c), which §9.5.3.2
+(corpus: aci-318-11, page 134) limits to a long-to-short ratio not greater
+than 2. A larger `beta` throws there; R9.5.3.3 sends such panels to the
+one-way rules of §9.5.2.
+
+`αfm` and `β` are accepted as spellings of `alpha_fm` and `beta`.
 """
 function min_thickness(::TwoWay, ln::Length;
                        fy::Pressure = 60000u"psi",
-                       beta::Real = 1.0,
+                       beta::Union{Nothing, Real} = nothing,
                        alpha_fm::Union{Nothing, Real} = nothing,
                        discontinuous_edge::Bool = true,
                        edge_beam_alpha_f::Union{Nothing, Real} = nothing,
                        wall_supported::Bool = false,
-                       missing_edge_beam::Bool = false)
+                       missing_edge_beam::Bool = false,
+                       β::Union{Nothing, Real} = nothing,
+                       αfm::Union{Nothing, Real} = nothing)
+    (beta !== nothing && β !== nothing) &&
+        throw(ArgumentError("pass `beta` or `β`, not both"))
+    (alpha_fm !== nothing && αfm !== nothing) &&
+        throw(ArgumentError("pass `alpha_fm` or `αfm`, not both"))
+    beta = something(beta, β, 1.0)
+    alpha_fm = something(alpha_fm, αfm, Some(nothing))
     ln > zero(ln) || throw(ArgumentError("ln must be positive"))
     beta >= 1.0 || throw(ArgumentError("β is long over short and cannot be below 1; got $beta"))
+    table_ratio_ok() = beta <= 2 || throw(ArgumentError(
+        "Table 9.5(c) applies when the long-to-short span ratio is not greater " *
+        "than 2 (got β = $(beta)). ACI 318-11 §9.5.3.2 (corpus: aci-318-11, page 134)."))
     wall_supported && missing_edge_beam && throw(ArgumentError(
         "a panel bounded by walls on every side has no missing edge beam"))
     # ACI 318-11 §9.5.3.3(b)/(c), page 134: common numerator.
@@ -197,6 +247,7 @@ function min_thickness(::TwoWay, ln::Length;
 
     if alpha_fm === nothing
         # ENGINEERING JUDGMENT: bound over (a)–(d); see docstring.
+        table_ratio_ok()
         h_table = _table_9_5c(ln, fy; exterior = true)
         h_eq = 1.1 * numer / 36
         return max(h_table, h_eq, 5.0u"inch")
@@ -206,6 +257,7 @@ function min_thickness(::TwoWay, ln::Length;
     if alpha_fm <= 0.2
         # ACI 318-11 §9.5.3.3(a) → §9.5.3.2 and Table 9.5(c), page 134.
         # The edge-beam column needs edge αf ≥ 0.8 (footnote §).
+        table_ratio_ok()
         edge_ok = edge_beam_alpha_f !== nothing && edge_beam_alpha_f >= 0.8
         exterior = discontinuous_edge && !edge_ok
         return max(_table_9_5c(ln, fy; exterior = exterior), 5.0u"inch")

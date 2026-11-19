@@ -463,6 +463,8 @@ both ends at one elevation, so this places its whole weight on that floor.
 The share that lands on the base elevation is not above the base.
 A wall's half lies along its plan length, the segment whose centroid is the
 plan midpoint; the wall's mass does not move in plan over the story.
+
+Curtain-wall weight uses the same split. See [`_deposit_cladding!`](@ref).
 """
 function _elf_weight_items(struc, elevs)
     _require_wall_shells_accounted(struc)
@@ -530,13 +532,15 @@ function _elf_self_weight(struc, elevs, allowed)
         _elf_deposit!(acc, key, w, 0.5 * (a[1] + b[1]), 0.5 * (a[2] + b[2]), allowed)
     end
 
+    total += _deposit_cladding!(acc, struc, elevs, allowed)
+
     lumped = 0.0
     for (w, _, _) in values(acc)
         lumped += w
     end
     abs(lumped - total) <= 1e-6 || throw(ArgumentError(
         "elf_story_analysis: lumped self-weight $(lumped) kN does not match " *
-        "the wall and frame sources $(total) kN."))
+        "the wall, frame, and cladding sources $(total) kN."))
     return acc, total
 end
 

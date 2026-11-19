@@ -122,7 +122,7 @@ function _rc_nlp_case_key(d::RCColumnDemand)
         Float64(to_kip(d.Pu)), Float64(to_kipft(d.Mux)), Float64(to_kipft(d.Muy)),
         Float64(to_kipft(d.M1x)), Float64(to_kipft(d.M2x)),
         Float64(to_kipft(d.M1y)), Float64(to_kipft(d.M2y)),
-        Float64(d.βdns), d.transverse_load,
+        Float64(d.βdns), d.transverse_load, d.magnify,
     )
 end
 
@@ -393,38 +393,54 @@ smooth maximum: below the balance point a lower axial load can govern.
 """
 function constraint_fns(p::RCColumnNLPProblem, x::Vector{Float64})
     b, h, ρ = x
+    # Cover, bar area, Ec, and ℓu are the same for every case at this section.
+    shared = _rc_rect_nlp_shared(p)
     rows = Float64[]
     for d in p.cases
-        append!(rows, _rc_rect_nlp_case_rows(p, b, h, ρ, d))
+        append!(rows, _rc_rect_nlp_case_rows(p, b, h, ρ, d; shared))
     end
     push!(rows, _rc_column_placeable_steel_util(b, h, ρ, p.opts))
     return rows
 end
 
+"""Section constants shared by every load case: cover, bar area, Ec, ℓu."""
+function _rc_rect_nlp_shared(p::RCColumnNLPProblem)
+    bar = rebar(p.opts.bar_size)
+    db = ustrip(u"inch", bar.diameter)
+    return (
+        cover = ustrip(u"inch", p.opts.cover) +
+                ustrip(u"inch", rebar(RC_COLUMN_NLP_TIE_BAR).diameter) + db / 2.0,
+        As_bar = ustrip(u"inch^2", bar.A),
+        Ec_ksi = 57.0 * sqrt(p.mat.fc * 1000.0),
+        Lu_in = ustrip(u"inch", p.geometry.Lu),
+    )
+end
+
 """P-M rows for one case. The placeable-steel row is added once, by [`constraint_fns`](@ref)."""
-function _rc_rect_nlp_case_rows(p::RCColumnNLPProblem, b, h, ρ, demand::RCColumnDemand)
+function _rc_rect_nlp_case_rows(p::RCColumnNLPProblem, b, h, ρ, demand::RCColumnDemand;
+                               shared=nothing)
     Pu_kip = Float64(to_kip(demand.Pu))
     Mux_kipft = Float64(to_kipft(demand.Mux))
     Muy_kipft = Float64(to_kipft(demand.Muy))
 
     # Face to bar centroid (inches), the same edge distance the built section uses.
-    bar = rebar(p.opts.bar_size)
-    db = ustrip(u"inch", bar.diameter)
-    As_bar = ustrip(u"inch^2", bar.A)
-    cover = ustrip(u"inch", p.opts.cover) +
-            ustrip(u"inch", rebar(RC_COLUMN_NLP_TIE_BAR).diameter) + db / 2.0
+    shared = something(shared, _rc_rect_nlp_shared(p))
+    cover = shared.cover
+    As_bar = shared.As_bar
 
     # Slenderness. Both axes are magnified with the simplified stiffness of
     # ACI 318-19 §6.6.4.4.4(a) (corpus: aci-318-19, printed page 79) so this
     # row stays differentiable. The as-built checker applies the §6.2.5.1
     # neglect test and the §6.2.5.3 cap (δns ≤ 1.4) with the section's real EI.
+    # `demand.magnify == false` is a case whose moments already include
+    # second-order effects (ACI 318-19 §6.7), so §6.6 is not applied again.
     Mux_design = Mux_kipft
     Muy_design = Muy_kipft
     stab = 0.0
     δ_ratio = 0.0
-    if p.opts.include_slenderness
-        Ec_ksi = 57.0 * sqrt(p.mat.fc * 1000.0)
-        Lu_in = ustrip(u"inch", p.geometry.Lu)
+    if p.opts.include_slenderness && demand.magnify
+        Ec_ksi = shared.Ec_ksi
+        Lu_in = shared.Lu_in
         transverse = demand.transverse_load
         # (Ig, k, end moments). Strong axis first (bending about x).
         axes = (

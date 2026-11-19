@@ -26,7 +26,9 @@ then factored by `LoadCombination`s when building the Asap model.
 - `grade_LL`:  Grade / ground floor live load
 - `floor_SDL`: Superimposed dead load — floor finish, MEP, partitions
 - `roof_SDL`:  Superimposed dead load — roofing, insulation, MEP
-- `wall_SDL`:  Cladding / curtain wall dead load (per unit area of wall)
+- `wall_SDL`:  Cladding / curtain wall dead load (per unit area of wall).
+  Applied to perimeter beams by `to_asap!` (`:cladding` line loads) and included
+  in seismic weight. Zero leaves the façade off.
 
 # Presets
 | Preset              | floor_LL | floor_SDL | Notes                           |

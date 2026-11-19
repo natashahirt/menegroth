@@ -908,8 +908,8 @@ the shear and unbalanced moments of the slab analysis already stored. That
 analysis was run at the installed size. Its moment is kept for the trial: a
 smaller column takes less of the unbalanced moment, so the stored moment is
 the heavier demand. A column with no stored punching analysis is not made
-smaller. `floors` holds a plan size a later slab analysis had to grow the
-column back to; the search does not go under it.
+smaller. `floors` holds a plan size the slab commit or an earlier section
+search grew the column to; the search does not go under it.
 
 `changed` lists columns whose section was replaced. `unresolved` lists
 columns no section within the cap passes; they keep their section.

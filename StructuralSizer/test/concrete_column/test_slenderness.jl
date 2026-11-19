@@ -765,6 +765,11 @@ end
     # Stiffer far end (smaller ψ) shortens k. A more flexible far end lengthens it.
     @test k(1.0, 1.0; sway=true) < k(1.0, 5.0; sway=true)
     @test k(1.0, 1.0; sway=false) < k(5.0, 5.0; sway=false)
+    # Sway root is exactly k = 2 at ψA = ψB = 12/π; the chart has a root on both sides.
+    @test k(12 / π, 12 / π; sway=true) ≈ 2.0 atol=1e-6
+    @test k(3.8240731317668653, 3.8240731317668653; sway=true) > 2.0
+    @test k(3.81, 3.81; sway=true) < 2.0
+    @test 0.5 < k(2.0, 2.0; sway=false) < 1.0
     story_ns = SwayStoryProperties(1000.0, 0.0, 100.0, 0.4, 120.0) # Q = 0.033
     story_sw = SwayStoryProperties(1000.0, 0.0, 100.0, 1.0, 120.0) # Q = 0.083
     @test !is_sway_frame(story_ns)

@@ -72,7 +72,10 @@ function standard_rc_tbeams(;
     for bw_val in web_widths
         bw_in = Float64(bw_val)
         bw = bw_in * u"inch"
+        # A function returns the flange width of one web. The caller applies
+        # ACI 318-11 §8.12.2 (corpus: aci-318-11, PDF p. 119) to that web.
         bf = flange_width isa Function ? flange_width(bw) : flange_width
+        bf isa Length || throw(ArgumentError("T-beam flange width must be a length"))
         bf_in = ustrip(u"inch", bf)
         # Same ulp allowance as RCTBeamSection: a flange that is the web can
         # convert a few ulps under bw. A genuinely narrower flange is skipped.

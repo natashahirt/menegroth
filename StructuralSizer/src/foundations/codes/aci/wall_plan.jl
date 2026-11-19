@@ -340,33 +340,6 @@ function _wall_projection_shear(qu::Pressure, B::Length, tw::Length, d::Length)
     return qu * lip
 end
 
-"""
-Kr of Eq. (5-1), page 8 of ACI 336.2R. The footing contributes `h^3/12` per
-unit width. Eq. (5-2) adds each wall as `t_w h_w^3/12`; that term is the
-whole wall, and the sentence calls the sum "per unit width", so each wall
-is divided by the footing width `B`. Rigid at Kr ≥ 0.5 (§5.2, page 9).
-"""
-function wall_footing_kr(Ec::Pressure, Es::Pressure, B::Length, h::Length,
-                          legs::Vector{<:WallLineDemand})
-    I_ftg = h^3 / 12
-    I_walls = zero(I_ftg)
-    for leg in legs
-        I_walls += (leg.tw * leg.hw^3 / 12) / B
-    end
-    return uconvert(Unitful.NoUnits, Ec * (I_ftg + I_walls) / (Es * B^3))
-end
-
-"""
-λ of ACI 336.2R Eq. (5-3), page 9.
-
-`K_s = k_s B` and `I = B h^3/12`. The guide's notation list does not define
-`K_s` or this `I`; both are the ruling recorded for this design.
-"""
-function footing_lambda(ks, Ec::Pressure, B::Length, h::Length)
-    I = B * h^3 / 12
-    return uconvert(u"m^-1", (ks * B / (4 * Ec * I))^0.25)
-end
-
 function _ceil_step(x_m, step_m)
     step_m <= 0 && return x_m
     n = ceil(x_m / step_m - 1e-9)

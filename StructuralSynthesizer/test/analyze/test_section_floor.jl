@@ -109,7 +109,18 @@ end
     SY.update_analysis!(struc, :stiffness)
     size_columns!(struc, opts; reanalyze = false, section_floor = floors)
     for g in col_gids
-        @test SY._sections_identical(struc.member_groups[g].section, floors[g].section)
+        installed = struc.member_groups[g].section
+        fl = floors[g].section
+        # The invariant under test is that the floor is RESPECTED: the group is
+        # never sized below it. The floor here is strictly heavier than the free
+        # pick, so the group lands exactly on the floor shape. Compare by shape
+        # (name) plus objective rather than `_sections_identical`: catalog floor
+        # templates carry `material = nothing` while an installed/sized section
+        # carries the resolved `StructuralSteel`, so an all-field identity check
+        # would mismatch on `material` even for the identical W-shape.
+        @test installed.name == fl.name
+        @test SY._section_objective(opts, installed) >=
+              SY._section_objective(opts, fl) * (1 - 1e-9)
     end
 
     @test_throws ArgumentError size_columns!(

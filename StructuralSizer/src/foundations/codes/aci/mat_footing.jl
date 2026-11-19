@@ -3,7 +3,8 @@
 # =============================================================================
 #
 # Public entry point `design_footing(::MatFoundation, ...)` dispatches on `opts.analysis_method`:
-#   - RigidMat   → rigid body analysis (ACI 336.2R-88 §4.2, strip statics)
+#   - RigidMat   → rigid strip. ACI 336.2R-88 §5.2 gates Kr. Moments are
+#                  Bowles 5th ed. §9-2 and §10-6 (combined-footing statics).
 #   - ShuklaAFM  → analytical method: Shukla (1984) + rigid envelope
 #                  (ACI 336.2R §6.1.2 Steps 3–4)
 #   - WinklerFEA → FEA plate on Winkler springs (ACI 336.2R §6.4/§6.7)
@@ -376,6 +377,8 @@ function design_footing(::MatFoundation,
     opts::MatParams = MatParams(),
     tc::Union{Nothing, TraceCollector} = nothing,
     walls::Vector{<:WallLineDemand} = WallLineDemand[],
+    framed_I_B = 0.0u"m^4",
+    framed_I_L = 0.0u"m^4",
 )
     N = length(demands)
     length(positions) == N ||
@@ -389,7 +392,8 @@ function design_footing(::MatFoundation,
     if method isa RigidMat
         _check_on_inapplicable(opts.on_inapplicable)
         result = _design_mat_rigid(demands, positions, soil; opts = opts, walls = walls, tc = tc)
-        reason = _rigid_mat_inapplicable(result, demands, positions, soil, walls, opts)
+        reason = _rigid_mat_inapplicable(result, demands, positions, soil, walls, opts;
+                                         framed_I_B = framed_I_B, framed_I_L = framed_I_L)
         if reason !== nothing
             opts.on_inapplicable == :error && throw(ArgumentError(reason))
             soil.ks === nothing && throw(ArgumentError(
@@ -434,52 +438,79 @@ function design_footing(::MatFoundation,
 end
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Rigid Mat Method — ACI 336.2R-88 §4.2 (Kramrisch strip statics)
+# Rigid Mat Method — combined-footing statics on each strip
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
-Governing moment for a strip of the mat in one direction.
+Column and wall point loads in mat coordinates measured from the plan origin.
 
-Treats column-line strips as continuous beams using ACI approximate
-moment coefficients: negative ≈ wL²/10 (interior), wL²/10 (first
-interior), wL²/11 (positive at end span), wL²/12 (positive at
-interior span); cantilever single span uses wL²/2.
-
-The argument `trib_width` is the section width over which the
-returned moment acts. For the "uniform mat reinforcement at the
-worst per-unit-width intensity" convention used by `_design_mat_rigid`
-and the rigid envelope component of `_design_mat_shukla`, callers
-pass the full mat width perpendicular to the strip span (Lm for
-x-strips, B for y-strips) so the result is a total moment that
-matches the per-unit-length × full-width convention used by the
-Shukla and FEA paths. The previous convention of passing the
-average tributary width undercounted reinforcement when flexure
-governed (corpus: aci-336-combined-footings-mats §6.1.2 Step 3).
-
-Returns `(M_pos, M_neg)` both as positive Unitful Torques.
+`xs` runs from the left edge, `ys` from the bottom edge. A wall sample is
+placed at distance `s` from `p1` toward `p2`.
 """
-function _rigid_mat_strip_moments(qu::Pressure, trib_width::Length,
-                                   spans::Vector{<:Length})
-    w = qu * trib_width  # force per length
-
-    M_neg = zero(w * spans[1]^2)
-    M_pos = zero(w * spans[1]^2)
-
-    n = length(spans)
-    for (i, Ls) in enumerate(spans)
-        wL2 = w * Ls^2
-        if n == 1
-            M_neg = max(M_neg, wL2 / 2)
-        elseif i == 1 || i == n
-            M_neg = max(M_neg, wL2 / 10)
-            M_pos = max(M_pos, wL2 / 11)
-        else
-            M_neg = max(M_neg, wL2 / 10)
-            M_pos = max(M_pos, wL2 / 12)
+function _mat_line_loads(plan, demands, walls)
+    xs = Length[]
+    ys = Length[]
+    Ps = Force[]
+    length(demands) == length(plan.xs_loc) || throw(ArgumentError(
+        "mat strip: $(length(demands)) column loads and $(length(plan.xs_loc)) " *
+        "column stations."))
+    for (i, d) in enumerate(demands)
+        push!(xs, plan.xs_loc[i])
+        push!(ys, plan.ys_loc[i])
+        push!(Ps, d.Pu)
+    end
+    for leg in walls
+        dx = leg.p2[1] - leg.p1[1]
+        dy = leg.p2[2] - leg.p1[2]
+        span = hypot(ustrip(u"m", dx), ustrip(u"m", dy))
+        for smp in leg.samples
+            t = span <= 1e-9 ? 0.0 : ustrip(u"m", smp.s) / span
+            push!(xs, leg.p1[1] + t * dx - plan.x_left)
+            push!(ys, leg.p1[2] + t * dy - plan.y_bot)
+            push!(Ps, smp.Pu)
         end
     end
+    return xs, ys, Ps
+end
 
-    return (M_pos = M_pos, M_neg = M_neg)
+"""
+    _rigid_mat_strip_moments(qu, length_along, width_across, stations, loads)
+        -> (M_pos, M_neg)
+
+Moments of one rigid strip, both returned as positive torques.
+
+The strip is a combined footing. Soil pressure `qu` is uniform over
+`width_across`. Each entry of `loads` is a downward point load at the
+matching `stations` coordinate, measured from the strip end along
+`length_along`. The shear and moment diagrams are
+
+    V(x) = ∫ qu·width dx − Σ P
+    M(x) = ∫ V dx
+
+`M_pos` is the largest positive moment: bottom steel, in the column
+regions. `M_neg` is the magnitude of the largest negative moment: top
+steel, between the columns.
+
+# Citations
+Bowles, Foundation Analysis and Design, 5th ed., §9-2 (corpus:
+textbook-bowles-foundation-analysis-design-5e, PDF pages 502–504).
+Column loads are point loads. §10-6 item 1 (PDF page 576) analyzes a
+mat strip as that combined footing.
+"""
+function _rigid_mat_strip_moments(qu::Pressure, length_along::Length,
+                                  width_across::Length,
+                                  stations::Vector{<:Length},
+                                  loads::Vector{<:Force})
+    z = 0.0 * kip * u"ft"
+    length(stations) == length(loads) || throw(ArgumentError(
+        "mat strip: $(length(stations)) stations and $(length(loads)) loads."))
+    isempty(loads) && return (M_pos = z, M_neg = z)
+    diag = _strip_VM_diagram(length_along, width_across, qu, stations, loads;
+                             include_stations=true)
+    return (
+        M_pos = max(maximum(diag.M_kipft), 0.0) * kip * u"ft",
+        M_neg = max(-minimum(diag.M_kipft), 0.0) * kip * u"ft",
+    )
 end
 
 """
@@ -559,23 +590,6 @@ function _mat_wall_cantilever_util(walls, plan, qu, d_eff, fc, λ, ϕv)
     return util
 end
 
-"""Bottom-tension moment of a clear cantilever, `qu · lip² / 2` over the mat width."""
-function _mat_cantilever_moments(walls, plan, qu)
-    Mx = zero(qu * plan.B^2 * plan.Lm)
-    My = Mx
-    for (dir, lip) in _mat_clear_lips(walls, plan)
-        lip <= 0 && continue
-        width = dir == :x ? plan.Lm : plan.B
-        M = qu * (lip * u"m")^2 / 2 * width
-        if dir == :x
-            Mx = max(Mx, M)
-        else
-            My = max(My, M)
-        end
-    end
-    return Mx, My
-end
-
 """
 Nothing when the rigid strip method may be used.
 
@@ -584,12 +598,16 @@ both plan widths and governed by the smaller. §6.1.2 Step 3 (page 11):
 column spans stay under `1.75/λ` and column loads and adjacent spans vary
 by at most 20%. A mat with no columns is gated on Kr alone.
 """
-function _rigid_mat_inapplicable(result, demands, positions, soil, walls, opts)
+function _rigid_mat_inapplicable(result, demands, positions, soil, walls, opts;
+                                 framed_I_B = 0.0u"m^4", framed_I_L = 0.0u"m^4")
     fc = opts.material.concrete.fc′
     Ec_c = Ec(fc)
     h, B, Lm = result.D, result.B, result.L_ftg
-    Kr = min(ustrip(wall_footing_kr(Ec_c, soil.Es, B, h, walls)),
-             ustrip(wall_footing_kr(Ec_c, soil.Es, Lm, h, walls)))
+    # ACI 336.2R Eq. (5-2): Σ E' I_b of the concrete members framing into the
+    # mat, divided by the width of the check. `framed_I_B` bends about the
+    # axis of the strip whose width is B.
+    Kr = min(ustrip(wall_footing_kr(Ec_c, soil.Es, B, h, walls; framed_I = framed_I_B)),
+             ustrip(wall_footing_kr(Ec_c, soil.Es, Lm, h, walls; framed_I = framed_I_L)))
     if Kr < 0.5
         return "Kr = $(round(Kr, sigdigits = 3)) < 0.5 (ACI 336.2R Eq. 5-1 and §5.2, pages 8–9)"
     end
@@ -789,20 +807,11 @@ function _design_mat_rigid(
         h = opts.min_depth
 
         # Step 4 strip moments do not depend on h; the depth search also requires
-        # every flexural section to be tension-controlled.
-        x_spans = plan.x_spans
-        y_spans = plan.y_spans
-        if !isempty(walls)
-            isempty(x_spans) && (x_spans = [B])
-            isempty(y_spans) && (y_spans = [Lm])
-        end
-        mom_x = _rigid_mat_strip_moments(qu, Lm, x_spans)
-        mom_y = _rigid_mat_strip_moments(qu, B,  y_spans)
-        if !isempty(walls)
-            Mx, My = _mat_cantilever_moments(walls, plan, qu)
-            mom_x = (M_pos = max(mom_x.M_pos, Mx), M_neg = mom_x.M_neg)
-            mom_y = (M_pos = max(mom_y.M_pos, My), M_neg = mom_y.M_neg)
-        end
+        # every flexural section to be tension-controlled. The edge cantilever is
+        # already in the diagram: the strip runs the full plan length.
+        x_sta, y_sta, P_sta = _mat_line_loads(plan, demands, walls)
+        mom_x = _rigid_mat_strip_moments(qu, B, Lm, x_sta, P_sta)
+        mom_y = _rigid_mat_strip_moments(qu, Lm, B, y_sta, P_sta)
         flex_pairs = ((mom_x.M_pos, Lm), (mom_x.M_neg, Lm), (mom_y.M_pos, B), (mom_y.M_neg, B))
 
         for iter in 1:60
@@ -824,15 +833,12 @@ function _design_mat_rigid(
         d_eff = h - cover - db_eff
 
         # ── Step 4: Flexural Reinforcement via Strip Statics ──
-        # ACI 336.2R-88 §6.1.2 Step 3 (Kramrisch strip method, corpus:
-        # aci-336-combined-footings-mats Chapter 6). Pass the full mat
-        # width perpendicular to the strip span so the returned moment is
-        # the total mat moment under the worst per-unit-width intensity
-        # (qu × Ls²/coeff). This matches the convention used by the Shukla
-        # and Winkler-FEA paths (per-unit-length moment × full mat width)
-        # and is what `_mat_build_result` expects when it converts As to
-        # bar count distributed across the full mat width. `mom_x` / `mom_y`
-        # are computed before the depth search above.
+        # Bowles 5th ed. §9-2 and §10-6 (corpus:
+        # textbook-bowles-foundation-analysis-design-5e, PDF pages 502–504
+        # and 576). Each direction is one combined footing across the full
+        # mat width. Bottom steel is the positive moment; top steel is the
+        # negative moment. `mom_x` and `mom_y` are computed before the
+        # depth search above.
 
         As_x_bot = max(_flexural_steel_footing(mom_x.M_pos, Lm, d_eff, fc, fy, ϕf),
                        _min_steel_footing(Lm, h, fy))

@@ -565,6 +565,36 @@ const has_drop_panels_fn = SS.has_drop_panels
         @test ustrip(u"inch", auto_size_drop_depth(30u"inch")) ≈ 8.0   # 30/4 = 7.5 → 8.0
     end
 
+    # ACI 318-11 §9.5.3.3 (corpus: aci-318-11, PDF pages 134–135).
+    @testset "21. Two-way thickness follows αfm" begin
+        ln = 30u"ft"
+        fy = 60000u"psi"
+        # αfm at most 0.2: Table 9.5(c) exterior, no edge beam.
+        # 360 in / 30 = 12 in.
+        @test min_thickness(TwoWay(), ln; fy, αfm=0.2) ≈ 12.0u"inch"
+        # αfm unknown: the larger of that and Eq. (9-12) at αfm = 0.2 plus
+        # 10 percent, 1.1 · 360 · 1.1 / 36 = 12.1 in.
+        @test min_thickness(TwoWay(), ln; fy) ≈ 12.1u"inch"
+        # Eq. (9-12): αfm = 1, β = 1. Denominator 36 + 5·0.8 = 40.
+        # 360 · 1.1 / 40 = 9.9 in.
+        @test min_thickness(TwoWay(), ln; fy, αfm=1.0, β=1.0,
+                            discontinuous_edge=false) ≈ 9.9u"inch"
+        # β defaults to 1, the thickest Eq. (9-12) result.
+        @test min_thickness(TwoWay(), ln; fy, αfm=1.0,
+                            discontinuous_edge=false) ≈ 9.9u"inch"
+        # Eq. (9-13): αfm = 3, β = 1. Denominator 36 + 9 = 45.
+        # 360 · 1.1 / 45 = 8.8 in.
+        @test min_thickness(TwoWay(), ln; fy, αfm=3.0, β=1.0,
+                            discontinuous_edge=false) ≈ 8.8u"inch"
+        @test min_thickness(TwoWay(), ln; fy, αfm=3.0, β=1.0,
+                            discontinuous_edge=true) ≈ 9.68u"inch"
+        @test_throws ArgumentError min_thickness(TwoWay(), ln; fy, αfm=1.0, β=0.5)
+        @test_throws ArgumentError min_thickness(TwoWay(), ln; fy=80000u"psi")
+        # §9.5.3.2 limits Table 9.5(c) to a long-to-short ratio of 2.
+        @test min_thickness(TwoWay(), ln; fy, β=2.0) ≈ 12.1u"inch"
+        @test_throws ArgumentError min_thickness(TwoWay(), ln; fy, β=2.5)
+    end
+
 end  # top-level testset
 
 println("\n✓ All flat slab tests complete.")

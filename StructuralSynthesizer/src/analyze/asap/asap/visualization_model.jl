@@ -167,6 +167,7 @@ visualize(design, mode=:deflected)
 - A `:walls` or `:absent` edge that this filter still copies gets the same
   zero frame section as `to_asap!`. Which groups are included does not change.
 """
+
 function build_analysis_model!(design::BuildingDesign;
                                load_combination::LoadCombination=service,
                                mesh_density::Int=2,

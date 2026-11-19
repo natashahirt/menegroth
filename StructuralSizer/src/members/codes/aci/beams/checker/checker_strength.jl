@@ -261,7 +261,9 @@ function precompute_capacities!(
     cache::ACIBeamCapacityCache,
     catalog::AbstractVector{<:AbstractSection},
     material::Concrete,
-    objective::AbstractObjective,
+    objective::AbstractObjective;
+    rebar=nothing,
+    transverse=nothing,
 )
     n = length(catalog)
 
@@ -274,7 +276,8 @@ function precompute_capacities!(
     fy_psi = checker.fy_ksi * 1000.0
 
     # Determine target unit for objective
-    ref_obj = objective_value(objective, catalog[1], material, 1.0u"m")
+    ref_obj = objective_value(objective, catalog[1], material, 1.0u"m";
+                              rebar=rebar, transverse=transverse)
     ref_unit = unit(ref_obj)
 
     # Thread-safe: each iteration writes to distinct cache indices
@@ -297,9 +300,22 @@ function precompute_capacities!(
         cache.depths[j] = ustrip(u"m", section.h)
 
         # Objective coefficient (value per meter of beam)
-        val = objective_value(objective, section, material, 1.0u"m")
+        val = objective_value(objective, section, material, 1.0u"m";
+                              rebar=rebar, transverse=transverse)
         cache.obj_coeffs[j] = ref_unit != Unitful.NoUnits ? ustrip(ref_unit, val) : Float64(val)
     end
+end
+
+"""Longitudinal steel is weighed, costed, and counted in carbon. Flexural fy stays on the checker."""
+function precompute_capacities!(
+    checker::ACIBeamChecker,
+    cache::ACIBeamCapacityCache,
+    catalog::AbstractVector{<:AbstractSection},
+    material::ReinforcedConcreteMaterial,
+    objective::AbstractObjective,
+)
+    precompute_capacities!(checker, cache, catalog, material.concrete, objective;
+                           rebar=material.rebar, transverse=material.transverse)
 end
 
 # ==============================================================================
@@ -313,10 +329,12 @@ Check if an RC beam section satisfies ACI 318 requirements:
 1. Depth constraint: h ≤ max_depth
 2. Flexure (sagging): Mu ≤ φMn
 3. Flexure (hogging adequacy): Mu_neg ≤ φMn_neg
-4. Shear adequacy: Vu ≤ φ(Vc + Vs,max), with signed-Nu modifier
+4. Shear adequacy: Vu ≤ φ(Vc + Vs,max), with signed-Nu modifier, and torsion
+   section adequacy (ACI 318-11 §11.5.3.1) when Tu > 0, on each concurrent row
 5. Net tensile strain: εt ≥ 0.004 (ACI 318-11 §10.3.5)
 6. Minimum reinforcement: As ≥ As,min (ACI 318-11 §10.5.1)
-7. Torsion section adequacy (ACI 318-11 §11.5.3.1) — when Tu > 0
+7. Service deflection (ACI 318-11 §9.5.2) when `w_dead_kplf > 0`, and the
+   story-shell spans when given
 """
 function is_feasible(
     checker::ACIBeamChecker,
@@ -329,7 +347,6 @@ function is_feasible(
 )::Bool
     Mu = to_kipft(demand.Mu)
     Mu_neg = to_kipft(demand.Mu_neg)
-    Vu = to_kip(demand.Vu)
 
     # 1. Depth check
     cache.depths[j] ≤ checker.max_depth || return false
@@ -340,22 +357,13 @@ function is_feasible(
     # 3. Hogging section adequacy — φMn_neg ≥ Mu_neg
     cache.φMn_neg[j] ≥ Mu_neg || return false
 
-    # 4. Shear adequacy — section large enough for the shear.
-    #    Signed Nu: compression (Nu>0) uses Eq. (11-4); tension (Nu<0) uses
-    #    Eq. (11-8). Nu = 0 uses the cached no-axial φVn_max.
-    Nu_kip = _get_Nu_kip(demand)
-    if Nu_kip != 0
-        fc_psi_s = cache.fc_ksi * 1000.0
-        b_in_s   = ustrip(u"inch", section.b)
-        d_in_s   = ustrip(u"inch", section.d)
-        h_in_s   = ustrip(u"inch", section.h)
-        Ag_in2   = b_in_s * h_in_s
-        φVn_kip = _φVn_with_axial(b_in_s, d_in_s, Ag_in2, Ag_in2, fc_psi_s, checker.λ, Nu_kip;
-                                  vs_factor = _checker_vs_factor(checker))
-        φVn_kip ≥ Vu || return false
-    else
-        cache.φVn_max[j] ≥ Vu || return false
-    end
+    # 4. Shear and torsion section adequacy, one row per concurrent case. The
+    #    demand envelope is that row when the checker was given no case list.
+    #    Tension uses Eq. (11-8); compression uses Eq. (11-4) only with the Vu
+    #    of the same case. Torsion (§11.5.3.1) is checked on each row above
+    #    the threshold.
+    _rectangular_shear_failure(checker, cache, j, section, demand) === nothing ||
+        return false
 
     # 4. Net tensile strain (ACI 318-11 §10.3.5) — εt ≥ 0.004 for beams
     cache.εt[j] ≥ 0.004 || return false
@@ -370,27 +378,38 @@ function is_feasible(
     As_req = _rect_as_required_in2(to_kipft(demand.Mu), section.b, section.d, fc_psi, fy_psi)
     _min_steel_check(As_in, As_min, As_req).passed || return false
 
-    # 6. Torsion section adequacy (§11.5.3.1) — only when Tu > 0
-    Tu_val = _get_Tu_kipin(demand)
-    if Tu_val > 0.0
-        h_in = ustrip(u"inch", section.h)
-        d_stir = ustrip(u"inch", rebar(section.stirrup_size).diameter)
-        cov_in = ustrip(u"inch", section.cover)
-        c_ctr  = cov_in + d_stir / 2
-
-        props = torsion_section_properties(section.b, section.h, c_ctr * u"inch")
-        Tth = threshold_torsion(props.Acp, props.pcp, fc_psi; λ=checker.λ)
-        if Tu_val > Tth
-            torsion_section_adequate(Vu, Tu_val, b_in, d_in,
-                                     props.Aoh, props.ph, fc_psi;
-                                     λ=checker.λ) || return false
-        end
+    # 6. Service deflection (ACI 318-11 §9.5.2). w_dead_kplf = 0 skips it.
+    if checker.w_dead_kplf > 0
+        defl = design_beam_deflection(
+            section.b, section.h, section.d, section.As,
+            fc_psi * u"psi", fy_psi * u"psi", checker.Es_ksi * ksi,
+            geometry.L,
+            checker.w_dead_kplf * kip / u"ft",
+            checker.w_live_kplf * kip / u"ft";
+            support = checker.defl_support,
+            ξ = checker.defl_ξ,
+            sustained_live_fraction = checker.defl_sustained_live,
+        )
+        defl.ok || return false
     end
 
     # 7. Story-shell deflection (ACI 318-11 §9.5.2) — when the shell gave spans
     _shell_deflection_ratio(checker, demand.member_idx, section) <= 1 || return false
 
     return true
+end
+
+"""Strength checks use the concrete. The rebar on a reinforced-concrete material is for the objective."""
+function is_feasible(
+    checker::ACIBeamChecker,
+    cache::ACIBeamCapacityCache,
+    j::Int,
+    section::RCBeamSection,
+    material::ReinforcedConcreteMaterial,
+    demand::RCBeamDemand,
+    geometry::ConcreteMemberGeometry,
+)
+    is_feasible(checker, cache, j, section, material.concrete, demand, geometry)
 end
 
 """Extract factored torsion Tu from demand as kip·in (backward-compatible)."""
@@ -452,5 +471,48 @@ function _φVn_with_axial(bw_in::Float64, d_in::Float64,
     end
     # ACI 318-11 §8.13.8: joist Vc is permitted 10 percent above Chapter 11.
     return 0.75 * (vc_factor * Vc_lb + Vs_max_lb) / 1000.0
+end
+
+"""φVn (kip) of one rectangular section at one signed axial force."""
+function _section_φVn(checker::ACIBeamChecker, cache::ACIBeamCapacityCache,
+                      j::Int, section::RCBeamSection, Nu_kip::Float64)
+    Nu_kip == 0 && return cache.φVn_max[j]
+    fc_psi = cache.fc_ksi * 1000.0
+    b_in = ustrip(u"inch", section.b)
+    d_in = ustrip(u"inch", section.d)
+    Ag = b_in * ustrip(u"inch", section.h)
+    return _φVn_with_axial(b_in, d_in, Ag, Ag, fc_psi, checker.λ, Nu_kip;
+                           vc_factor = _checker_vc_factor(checker, section),
+                           vs_factor = _checker_vs_factor(checker))
+end
+
+"""`nothing` when every concurrent shear row passes. Otherwise the failing row and `kind` (`:shear` or `:torsion`)."""
+function _rectangular_shear_failure(checker::ACIBeamChecker, cache::ACIBeamCapacityCache,
+                                   j::Int, section::RCBeamSection, demand::RCBeamDemand)
+    b_in = ustrip(u"inch", section.b)
+    d_in = ustrip(u"inch", section.d)
+    fc_psi = cache.fc_ksi * 1000.0
+    props = nothing
+    for row in _demand_shear_rows(checker, demand)
+        φVn = _section_φVn(checker, cache, j, section, row.Nu_kip)
+        if φVn < row.Vu_kip
+            return (; row, kind=:shear)
+        end
+        row.Tu_kipin > 0 || continue
+        if props === nothing
+            d_stir = ustrip(u"inch", rebar(section.stirrup_size).diameter)
+            cov_in = ustrip(u"inch", section.cover)
+            props = torsion_section_properties(section.b, section.h,
+                                               (cov_in + d_stir / 2) * u"inch")
+        end
+        # ACI 318-11 §11.5.3.1
+        Tth = threshold_torsion(props.Acp, props.pcp, fc_psi; λ=checker.λ)
+        if row.Tu_kipin > Tth && !torsion_section_adequate(
+                row.Vu_kip, row.Tu_kipin, b_in, d_in, props.Aoh, props.ph, fc_psi;
+                λ=checker.λ)
+            return (; row, kind=:torsion)
+        end
+    end
+    return nothing
 end
 

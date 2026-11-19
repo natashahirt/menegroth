@@ -199,8 +199,10 @@ end
 function _analyze_lateral_walls!(struc::BuildingStructure, params::DesignParameters;
                                  tc::Union{Nothing, StructuralSizer.TraceCollector}=nothing)
     StructuralSizer.emit!(tc, :pipeline, "design_ordinary_walls!", "stage_ordinary_walls", :enter)
-    # A throw below must not leave a previous run's checks in place.
+    # A throw below must not leave a previous run's checks or support
+    # reactions in place.
     struc.ordinary_wall_result = nothing
+    struc.foundation_lateral = nothing
 
     inputs = params.wall_inputs
     inputs isa OrdinaryWallInputs || throw(ArgumentError(
@@ -497,6 +499,14 @@ function _analyze_lateral_walls!(struc::BuildingStructure, params::DesignParamet
             inputs.material, inputs.boundary, assembly,
             get(shear_terms, wall_index, nothing); slab_basis=slab.basis))
     end
+    # Support reactions for §2.3 and §2.4. The foundation stage runs after
+    # this one and reads them. A gravity-only building leaves the field empty.
+    struc.foundation_lateral = if isempty(struc.asap_rigid_links)
+        nothing
+    else
+        foundation_lateral_cases(struc, basic, wind, elf, effects;
+                                 roof=inputs.roof, rho=inputs.rho, SDS=inputs.SDS)
+    end
     StructuralSizer.emit!(tc, :pipeline, "design_ordinary_walls!", "stage_ordinary_walls", :exit;
                           n_walls=length(checks), n_drift=length(drift))
     return (result = result, trials = trials, SDS = inputs.SDS)
@@ -532,10 +542,12 @@ function _analyze_gravity_walls!(struc::BuildingStructure, params::DesignParamet
                                  tc::Union{Nothing, StructuralSizer.TraceCollector}=nothing)
     if isempty(struc.walls)
         struc.ordinary_wall_result = nothing
+        struc.foundation_lateral = nothing
         return nothing
     end
     StructuralSizer.emit!(tc, :pipeline, "design_ordinary_walls!", "stage_ordinary_walls", :enter)
     struc.ordinary_wall_result = nothing
+    struc.foundation_lateral = nothing
     # No lateral system is declared, so no wall lines are tied. A semirigid
     # membrane belongs to the model and stays.
     struc.diaphragm_layout isa SemirigidDiaphragmLayout || (struc.diaphragm_layout = nothing)
@@ -599,6 +611,7 @@ function _analyze_gravity_walls!(struc::BuildingStructure, params::DesignParamet
         Dict{Int, BoundaryEndReinforcement}(),
         GravityInducedCheck[])
     struc.ordinary_wall_result = result
+    struc.foundation_lateral = nothing
     StructuralSizer.emit!(tc, :pipeline, "design_ordinary_walls!", "stage_ordinary_walls", :exit;
                           n_walls=length(checks), n_drift=0)
     return (result = result, trials = trials, SDS = 0.0)
@@ -1386,4 +1399,3 @@ function _capture_ordinary_walls!(design::BuildingDesign, struc::BuildingStructu
     design.seismic_story_drift = Vector{Any}(result.drift)
     return nothing
 end
-

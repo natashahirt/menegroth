@@ -1,6 +1,7 @@
 # Row F frame resizing. A failing frame group walks its catalog to the lightest
-# section that passes its row F rows, and concrete discrete sizing keeps that
-# section or a heavier one.
+# section that passes its row F rows, and concrete discrete sizing keeps any
+# section that passes those rows. A floor with no stored rows (an overstressed
+# column floored on the wall solution) keeps that section or a heavier one.
 
 using StructuralSynthesizer
 using StructuralSizer
@@ -46,12 +47,19 @@ end
     out = _FF._raise_frame_floors!(checks, struc, rows, (columns = nothing, beams = nothing),
                                    frame())
     @test isempty(struc.frame_section_floors)
+    @test isempty(struc.frame_floor_demands)
     @test occursin("not resized", out[1].detail)
     @test !out[1].passed
 
     out = _FF._raise_frame_floors!(checks, struc, rows, member_opts, frame())
     @test collect(keys(struc.frame_section_floors)) == [UInt64(1)]
     floor = struc.frame_section_floors[UInt64(1)]
+    # Group 1's stored rows are the union of its two members.
+    demands = struc.frame_floor_demands[UInt64(1)]
+    @test length(demands) == length(heavy) + length(small)
+    @test any(row -> row[2].Mux == 148.0, demands)
+    @test any(row -> row[2].Mux == 1.0, demands)
+    @test !haskey(struc.frame_floor_demands, UInt64(2))
     @test occursin("floor", out[1].detail)
     @test !out[1].passed
     @test out[2] == checks[2]
@@ -63,12 +71,24 @@ end
         @test !(resists(1, s, heavy) && resists(2, s, small))
     end
 
-    # The sizing mask keeps the floor and heavier sections for group 1 only.
-    mask = _FF._frame_floor_mask(struc, [UInt64(1), UInt64(2)], cat, obj)
+    # The sizing mask keeps, for group 1 only, exactly the sections that pass
+    # the stored rows of both members. The floor is the lightest of them.
+    mask = _FF._frame_floor_mask(struc, :column, [UInt64(1), UInt64(2)], cat, frame())
     @test mask[2] == collect(eachindex(cat))
     @test any(j -> _FF._sections_identical(cat[j], floor), mask[1])
-    @test all(j -> _FF._sections_identical(cat[j], floor) || obj(cat[j]) > obj(floor), mask[1])
-    @test _FF._frame_floor_mask(struc, [UInt64(3)], cat, obj) === nothing
+    @test all(j -> obj(cat[j]) >= obj(floor) * (1 - 1e-9), mask[1])
+    @test all(j -> (j in mask[1]) == (resists(1, cat[j], heavy) && resists(2, cat[j], small)),
+              eachindex(cat))
+    @test _FF._frame_floor_mask(struc, :column, [UInt64(3)], cat, frame()) === nothing
+
+    # A floor left heavy by an earlier round does not keep out a lighter
+    # section that passes the stored rows.
+    heaviest = cat[argmax(obj.(cat))]
+    struc.frame_section_floors[UInt64(1)] = heaviest
+    relaxed = _FF._frame_floor_mask(struc, :column, [UInt64(1)], cat, frame())
+    @test any(j -> _FF._sections_identical(cat[j], floor), relaxed[1])
+    @test any(j -> obj(cat[j]) < obj(heaviest), relaxed[1])
+    struc.frame_section_floors[UInt64(1)] = floor
 
     # The sizer honors the mask: a tiny demand picks a lighter section without it.
     geoms = [_FZ.ConcreteMemberGeometry(3.0u"m")]
@@ -78,15 +98,39 @@ end
     @test obj(only(free.sections)) < obj(floor)
     @test obj(only(held.sections)) >= obj(floor) * (1 - 1e-9)
 
+    # NLP keeps its own section when it passes the stored rows, even below the
+    # floor, and falls back to the floor when it fails them or the solve
+    # failed. A group with no floor is unchanged.
+    struc.frame_section_floors[UInt64(1)] = heaviest
+    @test _FF._sections_identical(
+        _FF._nlp_section_or_floor(struc, :column, UInt64(1), light, opts), heaviest)
+    @test _FF._sections_identical(
+        _FF._nlp_section_or_floor(struc, :column, UInt64(1), floor, opts), floor)
+    @test _FF._sections_identical(
+        _FF._nlp_section_or_floor(struc, :column, UInt64(1), nothing, opts), heaviest)
+    @test _FF._nlp_section_or_floor(struc, :column, UInt64(2), light, opts) === light
+    struc.frame_section_floors[UInt64(1)] = floor
+
+    # Rows accumulate: a later round with only the small row keeps the heavy
+    # row stored, so the floor does not fall.
+    later = Dict((:column, i) => small for i in eachindex(struc.columns))
+    _FF._raise_frame_floors!(checks, struc, later, member_opts, frame())
+    @test any(row -> row[2].Mux == 148.0, struc.frame_floor_demands[UInt64(1)])
+    @test obj(struc.frame_section_floors[UInt64(1)]) >= obj(floor) * (1 - 1e-9)
+
     # A path that cannot keep the floor refuses it instead of dropping it.
     @test_throws ArgumentError _FF._refuse_frame_floors(struc, [UInt64(1)], "test sizing")
     @test _FF._refuse_frame_floors(struc, [UInt64(2)], "test sizing") === nothing
 
-    # Floors are design state: snapshots carry them.
+    # Floors are design state: snapshots carry the section and its demand rows.
     _FF.snapshot!(struc, :with_floor)
     empty!(struc.frame_section_floors)
+    empty!(struc.frame_floor_demands)
     _FF.restore!(struc, :with_floor)
     @test _FF._sections_identical(struc.frame_section_floors[UInt64(1)], floor)
+    restored = struc.frame_floor_demands[UInt64(1)]
+    @test length(restored) == length(heavy) + length(small)
+    @test any(row -> row[2].Mux == 148.0, restored)
 end
 
 @testset "Row F frame members are checked with their own materials" begin
@@ -205,7 +249,8 @@ end
     other = BuildingStructure(gen_medium_office(6.0u"m", 6.0u"m", 3.0u"m", 1, 1, 1))
     other.frame_section_floors[UInt64(9)] = heavy
     err = try
-        _FF._frame_floor_mask(other, [UInt64(9)], [light], s -> obj(s))
+        _FF._frame_floor_mask(other, :beam, [UInt64(9)], [light],
+                              _FF._beam_floor_frame(building))
         nothing
     catch e
         e
@@ -261,6 +306,7 @@ end
 
     function raise_column(Pu, Mu; Muy = 0.0, uniform = :off, installed = light)
         empty!(struc.frame_section_floors)
+        empty!(struc.frame_floor_demands)
         struc.columns[1].base.section = installed
         demand = [("E", RCColumnDemand(1; Pu = Pu, Mux = Mu, Muy = Muy))]
         tiny = [("E", RCColumnDemand(2; Pu = 2.0, Mux = 1.0, Muy = 0.0))]
@@ -327,8 +373,11 @@ end
     out_lo = raise_column(Pu_lo, Mu; installed = sec)
     @test !out_lo[1].passed
     @test haskey(struc.frame_section_floors, UInt64(1))
-    @test resists(struc.frame_section_floors[UInt64(1)], Pu_lo, Mu)
-    @test obj(struc.frame_section_floors[UInt64(1)]) >= obj(sec)
+    lo_floor = struc.frame_section_floors[UInt64(1)]
+    @test resists(lo_floor, Pu_lo, Mu)
+    # The floor is the lightest passing section, which can sit below the
+    # installed one.
+    @test !any(s -> obj(s) < obj(lo_floor) * (1 - 1e-9) && resists(s, Pu_lo, Mu), cat)
 
     # The orthogonal moment is not easier than the uniaxial case.
     if !resists(sec, Pu_lo, Mu; Muy = Mu) && resists(heaviest, Pu_lo, Mu; Muy = Mu)
@@ -369,6 +418,34 @@ end
     @test !_FF._floor_overstressed_frame_columns!(struc, steel)
 end
 
+@testset "A floor with no stored rows keeps the floor or heavier" begin
+    struc = _floor_frame()
+    opts = ConcreteColumnOptions(material = RC_4000_60.concrete, rebar_material = Rebar_60)
+    cat = _FZ.rc_column_catalog(opts.section_shape, opts.catalog)
+    obj = s -> _FZ.objective_value(opts.objective, s, opts.material, 1.0u"m")
+    frame = (column = _FF._column_checker_bundle(nothing, opts),)
+    order = sortperm(obj.(cat))
+    mid = cat[order[cld(length(order), 2)]]
+    struc.frame_section_floors[UInt64(1)] = mid
+    @test isempty(struc.frame_floor_demands)
+
+    mask = _FF._frame_floor_mask(struc, :column, [UInt64(1), UInt64(2)], cat, frame;
+                                 objective_of = obj)
+    @test mask[2] == collect(eachindex(cat))
+    @test any(j -> _FF._sections_identical(cat[j], mid), mask[1])
+    @test all(j -> _FF._sections_identical(cat[j], mid) || obj(cat[j]) > obj(mid), mask[1])
+    @test mask[1] == _FF._frame_floor_mask(struc, [UInt64(1)], cat, obj)[1]
+
+    err = try
+        _FF._frame_floor_mask(struc, :column, [UInt64(1)], cat, frame)
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    @test occursin("cannot keep", sprint(showerror, err))
+end
+
 @testset "Frame station loads stay on their element" begin
     a = (elementID = 1,)
     b = (elementID = 2,)
@@ -376,4 +453,25 @@ end
     on = _FF._loads_on_element(loads, a)
     @test length(on) == 1
     @test on[1].tag === :on_a
+end
+
+@testset "Beam NLP shear rows pair Vu with its own axial" begin
+    # Asap P is tension-positive; the row's Nu is compression-positive.
+    vu, nu = _FF._concurrent_strong_shear([-5.0, -50.0, 20.0], [10.0, -3.0, -40.0])
+    @test vu == 40.0
+    @test nu == -20.0
+    @test _FF._concurrent_strong_shear(Float64[], Float64[]) == (0.0, 0.0)
+
+    S = _FF.BeamShearCase
+    rows = [S(100.0, 10.0, 0.0),   # covered by the next row: same Vu, less compression there
+            S(100.0, 0.0, 0.0),
+            S(80.0, -5.0, 0.0),    # less shear but more tension (lower Vc): kept
+            S(120.0, 50.0, 0.0),   # most shear, with compression: kept
+            S(100.0, 0.0, 0.0),    # duplicate: one copy kept
+            S(60.0, -30.0, 0.0),   # covered by the next row: same tension, less shear
+            S(70.0, -30.0, 0.0),   # most tension: kept
+            S(90.0, 0.0, 5.0)]     # torsion row is never pruned against Tu = 0
+    kept = _FF._prune_covered_shear(rows)
+    @test kept == [S(100.0, 0.0, 0.0), S(80.0, -5.0, 0.0), S(120.0, 50.0, 0.0),
+                   S(70.0, -30.0, 0.0), S(90.0, 0.0, 5.0)]
 end

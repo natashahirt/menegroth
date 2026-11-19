@@ -73,6 +73,7 @@ function size_tbeams(
     sustained_live_fraction::Real = opts.sustained_live_fraction,
     shell_spans::Union{Nothing, AbstractVector} = nothing,
     stirrup_shear::Bool = true,
+    shear_cases = nothing,
 )
     n = length(Mu)
     n == length(Vu)          || throw(ArgumentError("Mu and Vu must have same length"))
@@ -119,10 +120,12 @@ function size_tbeams(
     checker, demands = _tbeam_checker_and_demands(
         Mu, Vu, opts; Mu_neg, Nu, Tu, w_dead, w_live, defl_support, defl_ξ,
         sustained_live_fraction, shell_spans, joist_spacing, joist_direction,
-        stirrup_shear)
+        stirrup_shear, shear_cases)
 
+    # Longitudinal and transverse rebar enter the discrete objective.
     return optimize_discrete(
-        checker, demands, conc_geoms, cat, opts.material;
+        checker, demands, conc_geoms, cat,
+        _sizing_material(opts.material, opts.rebar_material, get_transverse_rebar(opts));
         objective      = opts.objective,
         n_max_sections = opts.n_max_sections,
         optimizer      = opts.solver,
@@ -144,6 +147,7 @@ function _tbeam_checker_and_demands(
     sustained_live_fraction::Real, shell_spans,
     joist_spacing, joist_direction::Symbol,
     stirrup_shear::Bool = true,
+    shear_cases = nothing,
 )
     n = length(Mu)
     Mu_kipft = [to_kipft(m) for m in Mu]
@@ -193,6 +197,7 @@ function _tbeam_checker_and_demands(
         joist_spacing = joist_spacing,
         joist_direction = joist_direction,
         stirrup_shear = stirrup_shear,
+        shear_cases = _checker_shear_cases(shear_cases, n),
     )
     return checker, demands
 end
@@ -285,6 +290,8 @@ function size_rc_tbeam_nlp(
     Tu = 0.0,
     Nu = 0.0,
     Mu_neg = nothing,
+    shear_cases = nothing,
+    flexure_cases = nothing,
     x0::Union{Nothing,Vector{Float64}} = nothing,
     w_dead = nothing,
     w_live = nothing,
@@ -299,7 +306,8 @@ function size_rc_tbeam_nlp(
                                 w_dead=w_dead, w_live=w_live, L_span=L_span,
                                 support=defl_support, ξ=defl_ξ,
                                 sustained_live_fraction=sustained_live_fraction,
-                                Tu=Tu, Nu=Nu,
+                                Tu=Tu, Nu=Nu, shear_cases=shear_cases,
+                                flexure_cases=flexure_cases,
                                 joist_spacing=joist_spacing,
                                 joist_direction=joist_direction)
 
@@ -344,9 +352,13 @@ function _rc_tbeam_nlp_verify(
     Mu_neg_kipft::Float64,
 )
     _rc_column_nlp_acceptable(result.status) || return result
+    # Every NLP sagging and shear row reaches the gate: the largest sagging
+    # case, and one checker shear row per case with its own Nu and Tu.
     demand = (
-        Mu_kipft = problem.Mu_kipft, Mu_neg_kipft = Mu_neg_kipft,
+        Mu_kipft = maximum(problem.flexure_cases), Mu_neg_kipft = Mu_neg_kipft,
         Vu_kip = problem.Vu_kip, Nu_kip = problem.Nu_kip, Tu_kipin = problem.Tu_kipin,
+        shear_cases = [RCBeamShearCase(c.Vu_kip, c.Nu_kip, c.Tu_kipin)
+                       for c in problem.shear_cases],
     )
     spacing = problem.joist_spacing_in > 0 ? problem.joist_spacing_in * u"inch" : nothing
     # The snapped rib has to meet §8.13.2 and §8.13.3. The checker then
@@ -414,6 +426,8 @@ function size_rc_tbeams_nlp(
     opts::NLPBeamOptions;
     Mu_neg::Vector = Mu,
     Nu::Vector = zeros_like(Vu),
+    shear_cases = nothing,
+    flexure_cases = nothing,
     w_dead = nothing,
     w_live = nothing,
     L_span = nothing,
@@ -427,6 +441,14 @@ function size_rc_tbeams_nlp(
     n == length(Vu) || throw(ArgumentError("Mu and Vu must have same length"))
     n == length(Mu_neg) || throw(ArgumentError("Mu_neg must have same length as Mu"))
     n == length(Nu) || throw(ArgumentError("Nu must have same length as Vu"))
+    if shear_cases !== nothing
+        length(shear_cases) == n ||
+            throw(ArgumentError("shear_cases must have same length as Mu"))
+    end
+    if flexure_cases !== nothing
+        length(flexure_cases) == n ||
+            throw(ArgumentError("flexure_cases must have same length as Mu"))
+    end
 
     # Allow scalar or vector bf/hf
     bf_vec = bf isa AbstractVector ? bf : fill(bf, n)
@@ -450,8 +472,11 @@ function size_rc_tbeams_nlp(
 
     results = Vector{RCTBeamNLPResult}(undef, n)
     for i in 1:n
+        sc = shear_cases === nothing ? nothing : shear_cases[i]
+        fc = flexure_cases === nothing ? nothing : flexure_cases[i]
         results[i] = size_rc_tbeam_nlp(Mu[i], Vu[i], bf_vec[i], hf_vec[i], opts;
-                                        Mu_neg=Mu_neg[i], Nu=Nu[i],
+                                        Mu_neg=Mu_neg[i], Nu=Nu[i], shear_cases=sc,
+                                        flexure_cases=fc,
                                         w_dead=wd_vec[i], w_live=wl_vec[i],
                                         L_span=Ls_vec[i],
                                         defl_support=defl_support, defl_ξ=defl_ξ,

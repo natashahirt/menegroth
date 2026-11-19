@@ -198,7 +198,7 @@ const PIPELINE_PROVENANCE = Dict{NodeKey, @NamedTuple{
                               :floor, :column_I_factor, :scoped_floor_overrides,
                               :uniform_column_sizing],
         reads        = Symbol[:columns, :beams, :slabs, :cells, :asap_model,
-                              :frame_section_floors],
+                              :frame_section_floors, :frame_floor_demands],
         # v2: flat-plate columns are checked under the full building load and
         # grown, and slabs checked against a column that grew are redesigned.
         # v3: uniform column sizing runs here; member self-weight carries the
@@ -213,7 +213,10 @@ const PIPELINE_PROVENANCE = Dict{NodeKey, @NamedTuple{
                               :stage_diagnostics],
         # v6: a soft concrete column or beam catalog grows one named tier when
         # nothing in the current catalog passes. `:hard` keeps the throw.
-        code_version = :members_v6,
+        # v7: perimeter curtain-wall dead load is on the analysis model, so
+        # member forces change at an unchanged GravityLoads; row F demand rows
+        # (`:frame_floor_demands`) constrain concrete sizing.
+        code_version = :members_v7,
     ),
     NODE_FOUNDATIONS => (
         param_slice  = Symbol[:foundation_options],
@@ -250,13 +253,16 @@ const PIPELINE_PROVENANCE = Dict{NodeKey, @NamedTuple{
                               :beam_I_factor, :floor, :column_I_factor,
                               :scoped_floor_overrides, :uniform_column_sizing],
         reads        = Symbol[:walls, :wall_mesh, :asap_model, :asap_rigid_links,
-                              :columns, :beams, :slabs, :cells, :frame_section_floors],
+                              :columns, :beams, :slabs, :cells, :frame_section_floors,
+                              :frame_floor_demands],
         writes       = Symbol[:ordinary_wall_result, :diaphragm_layout, :walls,
                               :stage_diagnostics, :columns, :beams, :slabs, :cells,
-                              :asap_model, :frame_section_floors],
+                              :asap_model, :frame_section_floors, :frame_floor_demands],
         # v13: Seismic Design Categories D, E, and F calculate the gravity-frame
         # forces from δDE and detail to §18.14.3.2 or §18.14.3.3 from that.
-        code_version = :ordinary_walls_v13,
+        # v14: seismic weight includes the curtain-wall dead load; row F demand
+        # rows are stored with each section floor.
+        code_version = :ordinary_walls_v14,
     ),
 )
 

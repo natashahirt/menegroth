@@ -75,6 +75,30 @@ function objective_value(::MinCarbon, s::AbstractSection, mat::AbstractMaterial,
 end
 
 """
+Concrete, longitudinal steel, and ties or stirrups of one RC section.
+
+`As` is the longitudinal area. Ties and stirrups come from
+[`transverse_steel_per_length`](@ref) on `section` and replace concrete as
+well. Weight is kilograms for every RC section. `MinCost` stays the gross
+volume and does not come through here.
+"""
+function _rc_objective(obj::AbstractObjective, Ag, As, concrete, rebar, transverse, L, section)
+    As_tr = transverse_steel_per_length(section, concrete, transverse)
+    Ac = Ag - As - As_tr
+    Ac < zero(Ac) && (Ac = zero(Ac))
+    mc = uconvert(u"kg", Ac * L * concrete.ρ)
+    ml = uconvert(u"kg", As * L * rebar.ρ)
+    mt = uconvert(u"kg", As_tr * L * transverse.ρ)
+    if obj isa MinWeight
+        return mc + ml + mt
+    elseif obj isa MinCarbon
+        return uconvert(u"kgCO2e", mc * concrete.ecc + ml * rebar.ecc + mt * transverse.ecc)
+    else
+        error("$(typeof(obj)) has no rebar split")
+    end
+end
+
+"""
     total_objective(obj, sections, materials, lengths) -> Unitful.Quantity
 
 Sum of [`objective_value`](@ref) over all member groups (one material per

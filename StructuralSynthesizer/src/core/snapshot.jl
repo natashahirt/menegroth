@@ -40,6 +40,8 @@ function snapshot!(struc::BuildingStructure{T, A, P}, key::Symbol = :prepare) wh
         slab_snaps,
         copy(struc.stage_diagnostics),
         copy(struc.frame_section_floors),
+        Dict{UInt64, Vector{Tuple{String, Any}}}(
+            gid => copy(rows) for (gid, rows) in struc.frame_floor_demands),
     )
     return struc
 end
@@ -99,6 +101,10 @@ function restore!(struc::BuildingStructure, key::Symbol = :prepare;
     merge!(struc.stage_diagnostics, snap.stage_diagnostics)
     empty!(struc.frame_section_floors)
     merge!(struc.frame_section_floors, snap.frame_section_floors)
+    empty!(struc.frame_floor_demands)
+    for (gid, rows) in snap.frame_floor_demands
+        struc.frame_floor_demands[gid] = copy(rows)
+    end
 
     # Recompute structural offsets for restored column dimensions
     !isnothing(struc.skeleton.geometry) && update_structural_offsets!(struc; input_is_centerline=geometry_is_centerline)

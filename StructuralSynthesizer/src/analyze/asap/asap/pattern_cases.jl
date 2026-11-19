@@ -377,8 +377,8 @@ Generate pattern loading cases from the dead/live tributary load dicts.
 3. Beam and one-way arrangements at full live, ACI 318-19 §6.4.2:
    the span and alternate spans, and each pair of adjacent spans
 
-Dead load, member self-weight, wall weight, fire coating, drop panels, and
-vault thrust are on every case. Vault thrust is the factored line load
+Dead load, member self-weight, wall weight, fire coating, drop panels,
+curtain-wall cladding, and vault thrust are on every case. Vault thrust is the factored line load
 `:vault_thrust`; it is not a cell tributary and used to be dropped.
 """
 function _generate_pattern_cases(struc::BuildingStructure)
@@ -432,6 +432,11 @@ function _generate_pattern_cases(struc::BuildingStructure)
                    (ld isa Asap.LineLoad && ld.id === :vault_thrust)
                 push!(extras, ld)
             end
+        end
+        # Façade line loads are already multiplied by the dead factor. They
+        # stay with dead in every pattern case. They are not a live load.
+        for ld in model.loads
+            ld isa Asap.LineLoad && ld.id === :cladding && push!(extras, ld)
         end
     end
 

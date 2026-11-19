@@ -79,12 +79,26 @@ mutable struct BuildingStructure{T, A, P} <: AbstractBuildingStructure
     # Stage outcomes that leave a design unverified without failing a member
     # check, keyed by stage (e.g. `:members` when the beam/column loop hit
     # `max_iterations`). `capture_design` copies them into the design
-    # diagnostics and marks the design not converged.
+    # diagnostics and marks the design not converged. Cleared when a design
+    # is prepared.
     stage_diagnostics::Dict{Symbol, String}
-    # Member group id → the lightest section the row F frame check accepts.
-    # Concrete discrete member sizing keeps that section or a heavier one
-    # (see `_frame_floor_mask`). Cleared when a design is prepared.
+    # Member group id → the lightest catalog section that passes the group's
+    # row F rows. Marks the group as floored; concrete discrete sizing keeps
+    # any section that passes those rows (see `_frame_floor_mask`). Cleared
+    # when a design is prepared.
     frame_section_floors::Dict{UInt64, Any}
+    # Member group id → the row F demand rows the group has to pass, from
+    # every round. Each entry is `(label, RCColumnDemand or RCBeamDemand)`,
+    # the union of that group's members. Discrete masks and NLP read these.
+    frame_floor_demands::Dict{UInt64, Vector{Tuple{String, Any}}}
+    # Unfactored curtain-wall pressure (`GravityLoads.wall_SDL`). Zero until
+    # `to_asap!`. ELF and the unfactored dead case read this. The line loads
+    # on the model are the factored copy.
+    cladding_SDL::P
+    # Unfactored support reactions for D, L, wind, and QE. `nothing` until
+    # the ordinary-wall stage stores them. Foundation sizing reads this.
+    # Not a snapshot: the lateral stage rebuilds it.
+    foundation_lateral::Any
 
     # ─── Design Snapshots (for parametric studies) ───
     _snapshots::Dict{Symbol, DesignSnapshot{T, P}}
@@ -120,6 +134,9 @@ function BuildingStructure(skel::BuildingSkeleton{T}) where T
         nothing,
         Dict{Symbol, String}(),
         Dict{UInt64, Any}(),
+        Dict{UInt64, Vector{Tuple{String, Any}}}(),
+        zero(P),
+        nothing,
         Dict{Symbol, DesignSnapshot{T, P}}(),
     )
 end
@@ -148,6 +165,9 @@ function BuildingStructure{T, A, P}(skel::BuildingSkeleton{T}) where {T, A, P}
         nothing,
         Dict{Symbol, String}(),
         Dict{UInt64, Any}(),
+        Dict{UInt64, Vector{Tuple{String, Any}}}(),
+        zero(P),
+        nothing,
         Dict{Symbol, DesignSnapshot{T, P}}(),
     )
 end

@@ -154,7 +154,8 @@ Run the ordinary-wall stage. When it jumps a wall thickness, the members were
 checked on a model that no longer exists, so they are sized again on the new
 one (followed by `sync_asap!` when `sync_after_members`, as the member stage
 gets in the pipeline). When the row F frame check sets a new section floor
-(`struc.frame_section_floors`), the members are sized again the same way.
+(`struc.frame_section_floors`) or stores new rows for NLP sizing
+(`struc.frame_floor_demands`), the members are sized again the same way.
 A frame column that fails its P–M check on the wall solution is floored at
 its current section and sized again too: the member stage ran before the
 walls were in the model, and a wall that does not change thickness still
@@ -175,9 +176,10 @@ function _walls_with_member_recheck!(struc::BuildingStructure, params::DesignPar
     member_sections() = vcat(Any[_story_beam_section(struc, b) for b in struc.beams],
                              Any[section(c) for c in struc.columns])
     thicknesses() = [w.thickness for w in struc.walls]
-    floors() = copy(struc.frame_section_floors)
-    floors_same(a, b) = keys(a) == keys(b) &&
-                        all(_sections_identical(a[k], b[k]) for k in keys(a))
+    floors() = (copy(struc.frame_section_floors),
+                Dict(gid => copy(r) for (gid, r) in struc.frame_floor_demands))
+    floors_same((fa, ra), (fb, rb)) = ra == rb && keys(fa) == keys(fb) &&
+                                      all(_sections_identical(fa[k], fb[k]) for k in keys(fa))
     for round in 1:max_rounds
         t_before = thicknesses()
         f_before = floors()

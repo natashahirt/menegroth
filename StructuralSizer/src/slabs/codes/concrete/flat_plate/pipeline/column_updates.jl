@@ -73,6 +73,35 @@ function _initialize_unsized_columns!(columns, Pu, ln_max, opts, column_opts)
 end
 
 """
+    _reseed_columns_for_thickness!(columns, Pu, ln_max, opts, column_opts)
+
+Drop the sizes chosen at the previous slab thickness and start again.
+Punching and the §13.6.9.2 moment split both depend on `h`. A column
+continuing from the story above keeps that story's size as a floor, then
+the same start as [`_initialize_unsized_columns!`](@ref) is applied.
+"""
+function _reseed_columns_for_thickness!(columns, Pu, ln_max, opts, column_opts)
+    floors = map(columns) do col
+        above = hasproperty(col, :column_above) ? col.column_above : nothing
+        if above === nothing || isnothing(above.c1) || above.c1 <= 0u"inch"
+            (0.0u"inch", 0.0u"inch")
+        else
+            (above.c1, something(above.c2, above.c1))
+        end
+    end
+    for col in columns
+        col.c1 = 0.0u"inch"
+        col.c2 = 0.0u"inch"
+    end
+    _initialize_unsized_columns!(columns, Pu, ln_max, opts, column_opts)
+    for (col, (a1, a2)) in zip(columns, floors)
+        col.c1 = max(col.c1, a1)
+        col.c2 = max(col.c2, a2)
+    end
+    return columns
+end
+
+"""
     _update_column_sizes!(columns, column_result, Pu, Mu, c_span_min, column_opts, column_tol;
                           Muy, verbose)
 

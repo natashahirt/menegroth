@@ -55,6 +55,46 @@ result = size_beams(Mu, Vu, geoms, ConcreteBeamOptions(); Tu=Tu)
 """
 function size_beams end
 
+"""One span list per demand, or none. `nothing` and an empty list both skip the check."""
+function _beam_shell_spans(shell_spans, n::Int)
+    shell_spans === nothing && return Vector{RCShellSpan}[]
+    length(shell_spans) == n ||
+        throw(ArgumentError("shell_spans must have one list per demand"))
+    return shell_spans
+end
+
+"""Shear rows in kip. `nothing` keeps each demand's envelope Vu, Nu, and Tu."""
+function _checker_shear_cases(shear_cases, n::Int)
+    shear_cases === nothing && return Vector{RCBeamShearCase}[]
+    length(shear_cases) == n ||
+        throw(ArgumentError("shear_cases must have one list per demand"))
+    out = Vector{Vector{RCBeamShearCase}}(undef, n)
+    for i in 1:n
+        rows = shear_cases[i]
+        if rows === nothing
+            out[i] = RCBeamShearCase[]
+            continue
+        end
+        built = RCBeamShearCase[]
+        for c in rows
+            if c isa RCBeamShearCase
+                push!(built, c)
+            elseif c isa RCBeamNLPShearCase
+                push!(built, RCBeamShearCase(c.Vu_kip, c.Nu_kip, c.Tu_kipin))
+            else
+                Vu, Nu, Tu = c
+                push!(built, RCBeamShearCase(
+                    Vu isa Unitful.Quantity ? to_kip(Vu) : Float64(Vu),
+                    Nu isa Unitful.Quantity ? to_kip(Nu) : Float64(Nu),
+                    Tu isa Unitful.Quantity ? abs(ustrip(kip * u"inch", Tu)) : abs(Float64(Tu)),
+                ))
+            end
+        end
+        out[i] = built
+    end
+    return out
+end
+
 function size_beams(
     Mu::Vector,
     Vu::Vector,
@@ -69,6 +109,7 @@ function size_beams(
     output_flag::Integer = 0,
     tc::Union{Nothing, TraceCollector} = nothing,
     shell_spans::Union{Nothing, AbstractVector} = nothing,
+    shear_cases = nothing,
 )
     n = length(Mu)
     n == length(Vu)          || throw(ArgumentError("Mu and Vu must have same length"))
@@ -111,6 +152,7 @@ function size_beams(
     demands = [RCBeamDemand(i; Mu=Mu_kipft[i], Mu_neg=Mu_neg_kipft[i],
                             Vu=Vu_kip[i], Nu=Nu_kip[i], Tu=Tu_kipin[i]) for i in 1:n]
 
+    spans = _beam_shell_spans(shell_spans, n)
     # Create checker
     checker = ACIBeamChecker(;
         fy_ksi  = ustrip(ksi, opts.rebar_material.Fy),
@@ -118,15 +160,19 @@ function size_beams(
         Es_ksi  = ustrip(ksi, opts.rebar_material.E),
         λ       = opts.material.λ,       # Lightweight factor from Concrete type
         max_depth = opts.max_depth,
-        shell_spans = shell_spans === nothing ? Vector{RCShellSpan}[] : shell_spans,
+        shell_spans = spans,
+        shear_cases = _checker_shear_cases(shear_cases, n),
     )
 
     # Optimize — multi-material if grades vector is provided
     !isnothing(opts.materials) && feasible !== nothing && throw(ArgumentError(
         "a feasible mask indexes one catalog; it is not supported with several materials"))
+    # Longitudinal and transverse rebar enter the discrete objective.
+    transverse = get_transverse_rebar(opts)
     run(cat) = isnothing(opts.materials) ?
         optimize_discrete(
-            checker, demands, conc_geoms, cat, opts.material;
+            checker, demands, conc_geoms, cat,
+            _sizing_material(opts.material, opts.rebar_material, transverse);
             objective      = opts.objective,
             n_max_sections = opts.n_max_sections,
             optimizer      = opts.solver,
@@ -137,7 +183,8 @@ function size_beams(
             tc             = tc,
         ) :
         optimize_discrete(
-            checker, demands, conc_geoms, cat, opts.materials;
+            checker, demands, conc_geoms, cat,
+            [_sizing_material(m, opts.rebar_material, transverse) for m in opts.materials];
             objective      = opts.objective,
             n_max_sections = opts.n_max_sections,
             optimizer      = opts.solver,
@@ -145,6 +192,7 @@ function size_beams(
             output_flag    = output_flag,
             time_limit_sec = opts.time_limit_sec,
             tc             = tc,
+            feasible       = feasible,
         )
     # A named catalog grows one tier at a time when a group has no section
     # and `catalog_constraint` is `:soft`. `:hard`, an explicit or custom
@@ -172,7 +220,7 @@ function size_beams(
         end
     end
     emit!(tc, :sizing, "size_beams", "", :exit; status=string(result.status))
-    return result
+    return _caller_materials(result, opts)
 end
 
 "Next larger named RC beam catalog. `:xlarge` is the top."
@@ -306,11 +354,18 @@ function size_beams(
     mip_gap::Real = 1e-4,
     output_flag::Integer = 0,
     tc::Union{Nothing, TraceCollector} = nothing,
+    M1x::Union{Nothing, Vector} = nothing,
+    M2x::Union{Nothing, Vector} = nothing,
+    M1y::Union{Nothing, Vector} = nothing,
+    M2y::Union{Nothing, Vector} = nothing,
+    transverse_load::Union{Nothing, Bool, AbstractVector} = nothing,
 )
     length(Pu) == length(Mu) || throw(ArgumentError("Pu and Mu must have same length"))
     length(Pu_t) == length(Mu) || throw(ArgumentError("Pu_t and Mu must have same length"))
     # AISC 360-16 §H1.1 (compression, page 133) and §H1.2 (tension, page 134)
     # — corpus: aisc-360-16. `Pu` is Pu_c; `Pu_t` is the tension magnitude.
+    # App. 8 §8.2.1 (PDF page 306): end moments for Eq. A-8-4, or
+    # `transverse_load` for Cm = 1.0 on a member loaded between supports.
     return size_columns(Pu, Mu, geometries, opts;
                         Pu_t=Pu_t,
                         Mux_pos=Mux_pos, Mux_neg=Mux_neg,
@@ -324,7 +379,9 @@ function size_beams(
                         composite=composite,
                         shell_spans=shell_spans,
                         mip_gap=mip_gap, output_flag=output_flag,
-                        tc=tc)
+                        tc=tc,
+                        M1x=M1x, M2x=M2x, M1y=M1y, M2y=M2y,
+                        transverse_load=transverse_load)
 end
 
 # ==============================================================================

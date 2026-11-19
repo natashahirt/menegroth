@@ -222,7 +222,9 @@ end
     _as_sustained_live_fraction(ψ) -> Float64
 
 Share of service live load counted with dead load as the sustained load of
-ACI 318-11 R9.5.2.5 (corpus: aci-318-11, PDF p. 132). `0` is dead load alone.
+ACI 318-11 §9.5.2.5 (corpus: aci-318-11, PDF p. 132). The clause multiplies
+the immediate deflection from "the sustained load considered" by λΔ and
+leaves that split to the design. `0` is dead load alone.
 """
 function _as_sustained_live_fraction(ψ::Real)
     0 <= ψ <= 1 || throw(ArgumentError(

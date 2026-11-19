@@ -169,6 +169,7 @@ function sync_asap!(struc::BuildingStructure;
     _sync_drop_panel_loads!(struc, params)
     _sync_member_self_weight!(struc, params)
     _sync_fire_coating_loads!(struc, params)
+    _sync_cladding_line_loads!(struc, params)
     _sync_vault_thrust_line_loads!(struc, params)
     _sync_slab_edge_strip_widths!(struc)
 

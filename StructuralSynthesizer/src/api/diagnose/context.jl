@@ -403,7 +403,8 @@ function _diagnose_design_context(params::DesignParameters, du::DisplayUnits;
             "grow_columns"   => "Columns are sized up to satisfy punching directly. No shear reinforcement.",
             "reinforce_first" => "Shear studs are added first; columns are sized for P-M interaction only.",
             "reinforce_last" => "Columns grow until punching headroom falls below a threshold, then studs are added.",
-        )[get(Dict("grow_columns"=>"grow_columns","reinforce_first"=>"reinforce_first","reinforce_last"=>"reinforce_last"), punching_strat, punching_strat)]
+            "joint_search"   => "Slab thickness, column sizes, and shear studs are chosen together by embodied carbon.",
+        )[punching_strat]
     end
     return ctx
 end

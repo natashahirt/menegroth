@@ -462,6 +462,73 @@ end
     @test chk.code_clause == "ACI 318-19 11.5.3.1"
 end
 
+@testset "§6.6.4.5 nonsway magnification for a wall bent out of plane" begin
+    # ACI 318-19 §19.2.2.1(a), PDF page 358: Ec = wc^1.5 · 33 √f'c, wc in
+    # lb/ft³, f'c and Ec in psi. 1 lb/ft³ = 16.018463 kg/m³.
+    fc_psi = 4000.0
+    pcf = 16.018463
+    Ec = wall_modulus_si(fc_psi * _PSI, 145.0 * pcf)
+    # The wall module's psi factor and Asap's differ past the 8th digit, so
+    # this is the code formula, not an exact round trip.
+    @test isapprox(Ec / _PSI, 145.0^1.5 * 33.0 * sqrt(fc_psi); rtol=1e-6)
+    # Lightweight concrete is softer than 57000 √f'c (the normalweight form).
+    light_Ec = wall_modulus_si(fc_psi * _PSI, 110.0 * pcf)
+    @test isapprox(light_Ec / _PSI, 110.0^1.5 * 33.0 * sqrt(fc_psi); rtol=1e-6)
+    @test light_Ec / _PSI < 0.7 * 57000.0 * sqrt(fc_psi)
+    @test_throws ArgumentError wall_modulus_si(fc_psi * _PSI, 80.0 * pcf)
+
+    # A 12 in by 8 in strip, ℓu = 10 ft. Ig = b·t³/12 bends through the thickness.
+    b = 12 * _IN
+    t = 8 * _IN
+    lu = 10 * _FT
+    Ig = b * t^3 / 12
+    # Eq. (6.6.4.4.4a) with βdns = 0.6. Written as 0.4/(1+βdns), not 0.25,
+    # so Pc matches the function at the Pu = 0.75 Pc boundary.
+    EI = 0.4 * Ec * Ig / 1.6
+    Pc = π^2 * EI / lu^2
+    M = 1.0e4
+
+    # Pu = 0.5 Pc ⇒ Pu/(0.75 Pc) = 2/3 ⇒ δ = 0.6 / (1/3) = 1.8. Cm = 0.6 at M1/M2 = 0.
+    mag = nonsway_slenderness_moment(0.5 * Pc, M, Ec, Ig, lu)
+    @test mag.stable
+    @test isapprox(mag.Cm, 0.6; rtol=1e-12)
+    @test isapprox(mag.Pc, Pc; rtol=1e-9)
+    @test isapprox(mag.δ, 1.8; rtol=1e-9)
+    @test isapprox(mag.Mc, 1.8 * M; rtol=1e-9)
+
+    # A small axial load keeps δ at the §6.6.4.5.2 floor of 1, so Mc = |M2|.
+    light = nonsway_slenderness_moment(0.01 * Pc, M, Ec, Ig, lu)
+    @test light.stable && light.δ == 1.0
+    @test isapprox(light.Mc, M; rtol=1e-12)
+
+    # Tension is not magnified.
+    ten = nonsway_slenderness_moment(-1000.0, -M, Ec, Ig, lu)
+    @test ten.stable && ten.δ == 1.0 && ten.Mc == M && ten.Cm == 1.0
+
+    # Pu ≥ 0.75 Pc is unstable.
+    bad = nonsway_slenderness_moment(0.75 * Pc, M, Ec, Ig, lu)
+    @test !bad.stable && bad.δ == Inf && bad.Mc == Inf
+
+    # Single curvature M1/M2 = −1 ⇒ Cm = 1.0. At Pu = 0.5 Pc, δ = 1 / (1/3) = 3.
+    single = nonsway_slenderness_moment(0.5 * Pc, M, Ec, Ig, lu; M1_over_M2=-1.0)
+    @test single.stable
+    @test isapprox(single.Cm, 1.0; rtol=1e-12)
+    @test isapprox(single.δ, 3.0; rtol=1e-9)
+    @test isapprox(single.Mc, 3.0 * M; rtol=1e-9)
+
+    # The smeared out-of-plane check is the in-plane check with the axes swapped.
+    ws = WallSection(b * u"m", t * u"m"; ρl=0.01, ρt=0.0025)
+    Nu = 10 * _KIP
+    oop = check_wall_out_of_plane_axial_flexure(ws, RC_4000_60, Nu * u"N", mag.Mc * u"N*m")
+    swapped = WallSection(t * u"m", b * u"m"; ρl=0.01, ρt=0.0025)
+    inn = check_wall_inplane_flexure(swapped, RC_4000_60, Nu * u"N", mag.Mc * u"N*m")
+    @test oop.passed == inn.passed
+    @test oop.ratio == inn.ratio
+    @test oop.code_clause == inn.code_clause
+    @test occursin("out-of-plane", oop.name)
+    @test !occursin("in-plane", oop.name)
+end
+
 @testset "§11.5.3 empirical bearing wall — Asap FEA cross-check" begin
     # Beyond the McCormac Ex. 18.1 numeric oracle above, independently cross-check
     # the two physical ingredients of Eq. (11.5.3.1) with an Asap FEA of the panel:

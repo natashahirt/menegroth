@@ -149,7 +149,12 @@ _make_flat_plate(; sdl=20.0u"psf", ll=50.0u"psf") =
                      for ci in keys(struc.cell_dead_loads))
         n_live = sum(length(get(struc.cell_live_loads, ci, Asap.TributaryLoad[]))
                      for ci in keys(struc.cell_live_loads))
-        @test length(cases[1]) == n_dead + n_live
+        # Curtain-wall line loads are dead, so every pattern case carries them.
+        clad = [ld for ld in struc.asap_model.loads
+                if ld isa Asap.LineLoad && ld.id === :cladding]
+        @test !isempty(clad)
+        @test length(cases[1]) == n_dead + n_live + length(clad)
+        @test all(ld -> ld in cases[2] && ld in cases[3], clad)
         @test length(cases[2]) < length(cases[1])  # subset of live
         @test length(cases[3]) < length(cases[1])  # subset of live
     end

@@ -172,6 +172,9 @@ function _field_fingerprint(struc, field::Symbol)
     elseif field === :frame_section_floors
         return Any[(gid, repr(s)) for (gid, s) in sort!(collect(struc.frame_section_floors);
                                                         by = first)]
+    elseif field === :frame_floor_demands
+        return Any[(gid, repr(rows)) for (gid, rows) in sort!(collect(struc.frame_floor_demands);
+                                                              by = first)]
     else
         # Unknown field: fall back to a repr of the whole field. Safe (complete)
         # but coarse; declared writes should use the named fields above.

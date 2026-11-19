@@ -272,6 +272,8 @@ function _size_span_floor(::TwoWay, span::L, sdl::F, live::F;
     end
     # ACI 318-11 §9.5.3.3, page 135: ln is the clear span in the long
     # direction, and β is long over short.
+    min(span, l2_val) > zero(span) || throw(ArgumentError(
+        "A two-way panel span must be positive."))
     ln = max(span, l2_val)
     beta = Float64(uconvert(NoUnits, ln / min(span, l2_val)))
     fp = options isa FlatSlabOptions ? options.base : options

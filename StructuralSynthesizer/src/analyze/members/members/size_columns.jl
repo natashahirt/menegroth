@@ -166,7 +166,6 @@ function _size_columns_impl!(
     Pu_t = [d.Pu_t for d in demands]
     Mux = [d.Mux for d in demands]
     Muy = [d.Muy for d in demands]
-
     floor_kw = (;)
     if section_floor !== nothing && any(gid -> haskey(section_floor, gid), group_ids)
         opts.sizing_strategy == :discrete && opts.n_max_sections == 0 &&
@@ -178,8 +177,14 @@ function _size_columns_impl!(
         cat, feasible = _narrow_to_section_floor(opts, group_ids, cat, nothing, section_floor)
         floor_kw = (; catalog = cat, feasible)
     end
+    # Eq. A-8-4 uses the frame end moments. Dropping them rebuilds each
+    # demand at M1 = 0 (Cm = 0.6). AISC 360-16 App. 8 §8.2.1(a)
+    # (corpus: aisc-360-16, PDF page 306). The section floor (if any) narrows
+    # the catalog via floor_kw; both kwarg groups are accepted together.
     result = StructuralSizer.size_columns(Pu, Mux, geometries, opts; Muy=Muy, Pu_t=Pu_t,
-                                          floor_kw...)
+        M1x=[d.M1x for d in demands], M2x=[d.M2x for d in demands],
+        M1y=[d.M1y for d in demands], M2y=[d.M2y for d in demands],
+        floor_kw...)
     
     # Apply results
     _apply_column_results!(struc, result, group_ids, opts.material, :steel, edge_ids_in_group)
@@ -194,12 +199,22 @@ function _size_columns_impl!(
 end
 
 """
-One `RCColumnDemandSet` per column group.
+    _rc_column_demand_sets(opts, demands, case_rows) -> Vector{RCColumnDemandSet}
 
-The envelope row and every pattern case are both included, each also with the
-two section axes swapped. Below the balance point a case with the same moment
-and less compression can govern, and the model does not record which global
-direction bends the section about its strong axis.
+One [`RCColumnDemandSet`](@ref) per column group, in kip and kip·ft.
+`member_group_demands` gives the SI group demands and, per group, one
+`ColumnCaseRow` for each member and pattern case, with that member's signed
+end moments in ACI 318-19 convention, so the slenderness path computes
+`Cm = 0.6 − 0.4·(M1/M2)` from the frame.
+
+A group's set is its case rows: each row's axial force and moments act
+together. The group envelope (the largest P of any member and case with the
+largest M of any) is not a load state, and below the balance point it is not
+a bound either, since less compression means less moment capacity (ACI 318-19
+§22.4). The envelope is the set only for a group with no case rows.
+
+Every row is also included with the two section axes swapped: the model does
+not record which global direction bends the section about its strong axis.
 """
 function _rc_column_demand_sets(opts, demands, case_rows)
     kipft = Asap.kip * u"ft"
@@ -216,7 +231,10 @@ function _rc_column_demand_sets(opts, demands, case_rows)
         (rc_row(i, d, Pu, Mux, Muy, M1x, M2x, M1y, M2y),
          rc_row(i, d, Pu, Muy, Mux, M1y, M2y, M1x, M2x))
     return map(enumerate(demands)) do (i, d)
-        cases = collect(both(i, d, d.Pu_c, d.Mux, d.Muy, d.M1x, d.M2x, d.M1y, d.M2y))
+        cases = StructuralSizer.RCColumnDemand[]
+        if isempty(case_rows[i])
+            append!(cases, both(i, d, d.Pu_c, d.Mux, d.Muy, d.M1x, d.M2x, d.M1y, d.M2y))
+        end
         for r in case_rows[i]
             append!(cases, both(i, d, r.Pu_c, r.Mux, r.Muy, r.M1x, r.M2x, r.M1y, r.M2y))
         end
@@ -261,50 +279,60 @@ function _size_columns_impl!(
     # the slenderness path can compute `Cm = 0.6 − 0.4·(M1/M2)` instead of
     # the conservative `M1 = 0` stand-in.
     #
-    # Each group is checked against the envelope and against every pattern
-    # case on its own, including the NLP path. Below the balance point, less
-    # compression means less moment capacity, so the envelope (max P with
-    # max M) can pass a section that fails a case with the same moment and
-    # lower axial load.
+    # Each group is checked against every concurrent pattern case on its own,
+    # including the NLP path (see `_rc_column_demand_sets`).
     rc_demands = _rc_column_demand_sets(opts, demands, case_rows)
 
-    has_floor = any(gid -> haskey(struc.frame_section_floors, gid), group_ids)
-    if has_floor
-        # NLP has no catalog, so it cannot keep a section floor.
-        (opts.sizing_strategy !== :nlp && opts.materials === nothing &&
-         opts.n_max_sections == 0) ||
-            _refuse_frame_floors(struc, group_ids, "this concrete column sizing")
-    end
-    # A section floor indexes one catalog, so growth happens here and the
-    # explicit catalog turns off the growth inside `size_columns`. With no
-    # floor, `size_columns` grows a soft named catalog itself.
-    tier = (has_floor && opts.catalog_constraint === :soft &&
-            opts.custom_catalog === nothing) ? opts.catalog : nothing
-    cat = has_floor ?
-        (isnothing(opts.custom_catalog) ?
-            StructuralSizer.rc_column_catalog(opts.section_shape, opts.catalog) :
-            opts.custom_catalog) : nothing
-    obj = s -> StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
-    result = nothing
-    while true
-        floor_kw = has_floor ?
-            (; catalog = cat,
-              feasible = _frame_floor_mask(struc, group_ids, cat, obj)) : (;)
-        try
-            result = StructuralSizer.size_columns(rc_demands, geometries, opts; floor_kw...)
-            break
-        catch e
-            grown = tier isa Symbol ?
-                StructuralSizer.grow_rc_column_catalog(cat, opts.section_shape, tier) :
-                nothing
-            (grown !== nothing && e isa ArgumentError &&
-                startswith(e.msg, "No feasible sections for group")) || rethrow()
-            cat, nxt = grown
-            depth_in = round(Int, maximum(s -> s isa StructuralSizer.RCCircularSection ?
-                ustrip(u"inch", s.D) : ustrip(u"inch", max(s.b, s.h)), cat))
-            @warn "RC column sizing: no section in the :$tier catalog passes the section floor; " *
-                  "retrying with :$nxt added (sizes to $(depth_in) in)." reason = e.msg
-            tier = nxt
+    if opts.sizing_strategy === :nlp
+        # NLP has no catalog: stored row F rows become constraints. They are
+        # already in kip, and magnification stays off on them: the forces
+        # include story P-delta (ACI 318-19 §6.7).
+        rc_demands = _append_frame_floor_column_cases(rc_demands, group_ids,
+                                                      struc.frame_floor_demands)
+        result = StructuralSizer.size_columns(rc_demands, geometries, opts)
+        sections = [_nlp_section_or_floor(struc, :column, gid, result.sections[i], opts)
+                    for (i, gid) in enumerate(group_ids)]
+        result = merge(result, (; sections))
+        _assert_column_nlp_meets_floors!(struc, group_ids, result, opts)
+    else
+        has_floor = any(gid -> haskey(struc.frame_section_floors, gid), group_ids)
+        if has_floor
+            (opts.materials === nothing && opts.n_max_sections == 0) ||
+                _refuse_frame_floors(struc, group_ids, "this concrete column sizing")
+        end
+        # A section floor indexes one catalog, so growth happens here and the
+        # explicit catalog turns off the growth inside `size_columns`. With no
+        # floor, `size_columns` grows a soft named catalog itself.
+        tier = (has_floor && opts.catalog_constraint === :soft &&
+                opts.custom_catalog === nothing) ? opts.catalog : nothing
+        cat = has_floor ?
+            (isnothing(opts.custom_catalog) ?
+                StructuralSizer.rc_column_catalog(opts.section_shape, opts.catalog) :
+                opts.custom_catalog) : nothing
+        obj = s -> StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
+        frame = (column = _column_checker_bundle(nothing, opts),)
+        result = nothing
+        while true
+            floor_kw = has_floor ?
+                (; catalog = cat,
+                  feasible = _frame_floor_mask(struc, :column, group_ids, cat, frame;
+                                               objective_of = obj)) : (;)
+            try
+                result = StructuralSizer.size_columns(rc_demands, geometries, opts; floor_kw...)
+                break
+            catch e
+                grown = tier isa Symbol ?
+                    StructuralSizer.grow_rc_column_catalog(cat, opts.section_shape, tier) :
+                    nothing
+                (grown !== nothing && e isa ArgumentError &&
+                    startswith(e.msg, "No feasible sections for group")) || rethrow()
+                cat, nxt = grown
+                depth_in = round(Int, maximum(s -> s isa StructuralSizer.RCCircularSection ?
+                    ustrip(u"inch", s.D) : ustrip(u"inch", max(s.b, s.h)), cat))
+                @warn "RC column sizing: no section in the :$tier catalog passes the section floor; " *
+                      "retrying with :$nxt added (sizes to $(depth_in) in)." reason = e.msg
+                tier = nxt
+            end
         end
     end
 
@@ -318,6 +346,80 @@ function _size_columns_impl!(
 
     @info "Sized $(length(group_ids)) column groups" material=StructuralSizer.material_name(opts.material)
     return struc
+end
+
+"""Append stored row F column rows onto each group's NLP demand set.
+
+Gravity cases keep `magnify = true`. Stored rows are forced to
+`magnify = false`: those forces already include story P-delta
+(ACI 318-19 §6.7, PDF page 84).
+"""
+function _append_frame_floor_column_cases(demands, group_ids, floors)
+    any(gid -> haskey(floors, gid), group_ids) || return demands
+    out = Vector{StructuralSizer.RCColumnDemandSet}(undef, length(demands))
+    for (i, set) in enumerate(demands)
+        rows = get(floors, group_ids[i], nothing)
+        if rows === nothing
+            out[i] = set
+            continue
+        end
+        cases = StructuralSizer.RCColumnDemand[]
+        append!(cases, set.cases)
+        for (_, demand) in rows
+            demand isa StructuralSizer.RCColumnDemand || continue
+            push!(cases, demand.magnify ? _column_demand_unmagnified(demand) : demand)
+        end
+        out[i] = StructuralSizer.RCColumnDemandSet(set.member_idx, cases)
+    end
+    return out
+end
+
+function _column_demand_unmagnified(d::StructuralSizer.RCColumnDemand)
+    return StructuralSizer.RCColumnDemand(d.member_idx;
+        Pu=d.Pu, Mux=d.Mux, Muy=d.Muy,
+        M1x=d.M1x, M2x=d.M2x, M1y=d.M1y, M2y=d.M2y,
+        βdns=d.βdns, transverse_load=d.transverse_load, magnify=false)
+end
+
+"""
+Throw before install when a floored column group has no installable NLP
+section, or the rounded section fails the stored rows.
+
+The checker bundle has slenderness off, matching the row F check.
+"""
+function _assert_column_nlp_meets_floors!(struc, group_ids, result, opts)
+    demands = any(gid -> haskey(struc.frame_floor_demands, gid), group_ids)
+    floors = any(gid -> haskey(struc.frame_section_floors, gid), group_ids)
+    (demands || floors) || return
+    installed = all(s -> !isnothing(s), result.sections)
+    (StructuralSizer._rc_nlp_result_installable(result) || installed) || throw(ArgumentError(
+        "row F section floor: column NLP did not produce an installable section"))
+    bundle = _column_checker_bundle(nothing, opts)
+    frame = (column = bundle,)
+    for (i, gid) in enumerate(group_ids)
+        rows = get(struc.frame_floor_demands, gid, nothing)
+        rows === nothing && continue
+        section = result.sections[i]
+        checked = 0
+        for (j, member) in enumerate(struc.columns)
+            group_id(member) == gid || continue
+            member_rows = Tuple{String, Any}[]
+            for (label, demand) in rows
+                demand isa StructuralSizer.RCColumnDemand || continue
+                demand.member_idx == j || continue
+                push!(member_rows, (label, demand))
+            end
+            isempty(member_rows) && continue
+            checked += 1
+            ok, detail = _member_resists(:column, member, section, member_rows, frame)
+            ok || throw(ArgumentError(
+                "row F section floor: column group $gid does not pass its stored demand rows ($detail)"))
+        end
+        has_column_row = any(d -> d isa StructuralSizer.RCColumnDemand, (d for (_, d) in rows))
+        has_column_row && checked == 0 && throw(ArgumentError(
+            "row F section floor: column group $gid stored rows do not match a column"))
+    end
+    return nothing
 end
 
 # PixelFrame column implementation
@@ -454,6 +556,21 @@ function _add_gravity_loads!(struc, edge_ids_in_group, gravity_factor)
     end
 end
 
+"""
+A catalog section often has `material = nothing`; the grade is the one
+`size_columns` just used. Capture reads `section.material` for Chapter E,
+so a steel section is copied with that grade. The catalog object is left
+unchanged.
+"""
+function _section_with_grade(section, material)
+    material isa StructuralSizer.StructuralSteel || return section
+    hasproperty(section, :material) || return section
+    isnothing(section.material) || return section
+    installed = deepcopy(section)
+    installed.material = material
+    return installed
+end
+
 # Helper: apply optimization results
 """
     _apply_column_results!(struc, result, group_ids, material, material_type, edge_ids_in_group; I_factor)
@@ -477,9 +594,9 @@ function _apply_column_results!(struc, result, group_ids, material, material_typ
     has_multi_mat = hasproperty(result, :materials_chosen)
     
     for (g_idx, gid) in enumerate(group_ids)
-        chosen = result.sections[g_idx]
         group_mat = has_multi_mat ? result.materials_chosen[g_idx] : material
-        
+        chosen = _section_with_grade(result.sections[g_idx], group_mat)
+
         mg = struc.member_groups[gid]
         mg.section = chosen
         

@@ -346,6 +346,15 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
                                                         column_opts, beam_kwargs,
                                                         shell_levels; tc = tc)
     end
+
+    # ACI 318-11 §9.5.3.3 after the beams exist. At most two further member
+    # sizings: one on the thickness the first αfm allows, and one if those
+    # beams change αfm enough that the slab must move again.
+    for _ in 1:2
+        _recheck_two_way_thickness!(struc, params, beam_opts) || break
+        converged, iters_used = _resize_beams_after_thickness!(
+            struc, params, beam_opts, column_opts, beam_kwargs, shell_levels; tc = tc)
+    end
     _record_member_convergence!(struc, converged)
 
     StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :exit;
@@ -440,6 +449,11 @@ later rounds do not free-pick. [`_reconcile_shell_frame!`](@ref) solves the
 shell on the sections the frame left and resizes only the groups that fail
 it. A passing group keeps its section. Each story is meshed once.
 
+With steel discrete beams, rounds after the first start upward-only from the
+sections before them. When those rounds settle, one more round runs the
+story-shell trim (a lighter design is kept only when it converges lighter),
+with up to `max_rounds` further rounds to settle again.
+
 When the rounds settle, the slab bars on each story come from a shell solve
 with the final beam and column sections. Each slab on those stories records
 `converged` and, when the rounds did not settle, why. Returns
@@ -462,7 +476,12 @@ function _size_with_story_shell!(struc, params, beam_opts, column_opts, beam_kwa
     upward_only = _shell_ratchet_ok(struc, beam_opts, beam_kwargs)
     checkable = _round_checkable(struc, beam_opts, column_opts)
     floor = nothing
-    for round in 1:max_rounds
+    tried_trim = !upward_only
+    trim_now = false
+    round = 0
+    limit = max_rounds
+    while round < limit
+        round += 1
         columns_before = [section(c) for c in struc.columns]
         sb = size_beams_with_story_shell!(struc, beam_opts; levels = levels, shells = shells,
                                           shell_kwargs = shell_kwargs,
@@ -470,7 +489,9 @@ function _size_with_story_shell!(struc, params, beam_opts, column_opts, beam_kwa
                                           shell_spans = seed.spans,
                                           shell_regions = seed.regions,
                                           section_floor = floor,
+                                          trim_continuing = trim_now,
                                           beam_kwargs...)
+        trim_now = false
         beams_after_shell = [_story_beam_section(struc, b) for b in struc.beams]
         converged, n = _iterate_beams_columns!(struc, params, beam_opts, column_opts,
                                                beam_kwargs; tc = tc,
@@ -504,7 +525,15 @@ function _size_with_story_shell!(struc, params, beam_opts, column_opts, beam_kwa
                               round = round, shell_passes = sb.passes,
                               shell_converged = sb.converged, beams_held = beams_held,
                               columns_held = columns_held)
-        held && break
+        if held
+            (tried_trim || floor === nothing) && break
+            # Rounds after the first started upward-only from the round before,
+            # so sections never came down. Try the trim once on the settled
+            # demands, with its own round budget.
+            tried_trim = true
+            trim_now = true
+            limit = round + max_rounds
+        end
         seed = (demands = sb.demands, spans = sb.spans, regions = sb.regions)
         upward_only && (floor = _section_floors(struc))
         # A checkable catalog keeps the sections this round left and tests
@@ -521,7 +550,7 @@ function _size_with_story_shell!(struc, params, beam_opts, column_opts, beam_kwa
         get(ENV, "SS_TRACE_SHELL_PASSES", "") == "1" &&
             println("story-shell reconcile held=$(closed.held)  attempts=$(closed.attempts)")
     end
-    held || @warn "Story-shell sizing did not settle after $max_rounds rounds" levels
+    held || @warn "Story-shell sizing did not settle after $round rounds" levels
     _record_story_shell_wall_axials!(struc, shells)
     _record_story_shell_convergence!(struc, held)
     return (converged && held, iters)
@@ -558,3 +587,144 @@ function _record_story_shell_convergence!(struc, held::Bool)
     end
     return struc
 end
+
+"""
+Size the beams and columns again after a two-way slab thickness change.
+
+The new slab self-weight goes on the model first. Returns `(converged, iterations)`.
+"""
+function _resize_beams_after_thickness!(struc, params, beam_opts, column_opts,
+                                        beam_kwargs, shell_levels; tc = nothing)
+    update_analysis!(struc, :loads; params, tc)
+    isempty(shell_levels) &&
+        return _iterate_beams_columns!(struc, params, beam_opts, column_opts, beam_kwargs;
+                                       tc = tc)
+    return _size_with_story_shell!(struc, params, beam_opts, column_opts, beam_kwargs,
+                                   shell_levels; tc = tc)
+end
+
+function _edge_is_beam(skel, edge)
+    for g in BEAM_GROUP_SYMBOLS
+        edge in get(skel.groups_edges, g, Int[]) && return true
+    end
+    return false
+end
+
+function _beam_on_edge(struc, edge)
+    for beam in struc.beams
+        for seg_idx in beam.base.segment_indices
+            struc.segments[seg_idx].edge_idx == edge && return beam
+        end
+    end
+    return nothing
+end
+
+"""
+`(E, Ib)` of a sized beam. `Ib` is the stem, or the steel `Ix`.
+The slab flange is not included: that sentence was not readable.
+"""
+function _beam_stem_stiffness(beam, beam_opts)
+    sec = section(beam)
+    sec === nothing && return nothing
+    if sec isa StructuralSizer.RCBeamSection
+        hasproperty(beam_opts, :material) || return nothing
+        mat = beam_opts.material
+        E = mat isa StructuralSizer.ReinforcedConcreteMaterial ? mat.concrete.E :
+            mat isa StructuralSizer.Concrete ? mat.E : nothing
+        E === nothing && return nothing
+        return (E, sec.b * sec.h^3 / 12)
+    elseif sec isa StructuralSizer.RCTBeamSection
+        hasproperty(beam_opts, :material) || return nothing
+        mat = beam_opts.material
+        mat isa StructuralSizer.ReinforcedConcreteMaterial || return nothing
+        return (mat.concrete.E, sec.bw * sec.h^3 / 12)
+    elseif hasproperty(sec, :Ix) && hasproperty(beam_opts, :material) &&
+           hasproperty(beam_opts.material, :E)
+        return (beam_opts.material.E, sec.Ix)
+    end
+    return nothing
+end
+
+"""True when the slab does not continue across `edge`."""
+function _edge_discontinuous(struc, edge, face)
+    skel = struc.skeleton
+    for (f, es) in enumerate(skel.face_edge_indices)
+        f == face && continue
+        edge in es || continue
+        ci = findfirst(c -> c.face_idx == f, struc.cells)
+        ci === nothing && return true
+        return struc.cells[ci].floor_type in (:unknown, :grade)
+    end
+    return true
+end
+
+"""
+αfm of one panel when every edge has a sized beam and a tributary width.
+`nothing` when §9.5.3.3 does not apply (a side has no beam).
+"""
+function _panel_alpha(struc, cell, h, Ecs, beam_opts)
+    skel = struc.skeleton
+    face = cell.face_idx
+    edges = skel.face_edge_indices[face]
+    alphas = Float64[]
+    discontinuous = false
+    for edge in edges
+        _edge_is_beam(skel, edge) || return nothing
+        beam = _beam_on_edge(struc, edge)
+        beam === nothing && return nothing
+        stiff = _beam_stem_stiffness(beam, beam_opts)
+        stiff === nothing && return nothing
+        ls = tributary_width_scalar(beam)
+        (ls === nothing || ls <= 0u"m") && return nothing
+        Is = StructuralSizer.slab_strip_inertia(ls, h)
+        α = StructuralSizer.beam_slab_alpha_f(stiff[1], stiff[2], Ecs, Is)
+        push!(alphas, α)
+        if _edge_discontinuous(struc, edge, face) && α < 0.80
+            discontinuous = true
+        end
+    end
+    return (αfm = StructuralSizer.panel_alpha_fm(alphas), discontinuous = discontinuous)
+end
+
+"""
+    _recheck_two_way_thickness!(struc, params, beam_opts) -> Bool
+
+Set each two-way slab to ACI 318-11 §9.5.3.3 with the beams now in place.
+Returns `true` when a thickness changed. A panel without beams on all sides
+leaves the slab on the §9.5.3.3(a) thickness it was given.
+"""
+function _recheck_two_way_thickness!(struc, params, beam_opts)
+    changed = false
+    concrete = resolve_slab_concrete(params.materials)
+    fy = resolve_slab_rebar(params.materials).Fy
+    for slab in struc.slabs
+        slab.floor_type === :two_way || continue
+        slab.result isa StructuralSizer.CIPSlabResult || continue
+        h_now = StructuralSizer.total_depth(slab.result)
+        required = typeof(1.0u"inch")[]
+        for ci in slab.cell_indices
+            cell = struc.cells[ci]
+            info = _panel_alpha(struc, cell, h_now, concrete.E, beam_opts)
+            info === nothing && (required = Length[]; break)
+            ln = max(cell.spans.primary, cell.spans.secondary)
+            short = min(cell.spans.primary, cell.spans.secondary)
+            ustrip(u"m", short) > 0 || (required = Length[]; break)
+            β = ustrip(u"m", ln) / ustrip(u"m", short)
+            push!(required, StructuralSizer.min_thickness(
+                StructuralSizer.TwoWay(), ln; fy = fy, αfm = info.αfm, β = β,
+                discontinuous_edge = info.discontinuous))
+        end
+        isempty(required) && continue
+        h = ceil(ustrip(u"inch", maximum(required)) * 2 - 1e-6) / 2 * u"inch"
+        abs(ustrip(u"inch", h - h_now)) < 0.05 && continue
+        sw = StructuralSizer.slab_self_weight(h, concrete.ρ)
+        h_m = uconvert(u"m", h)
+        slab.result = StructuralSizer.CIPSlabResult(h_m, h_m, uconvert(u"kPa", sw))
+        for ci in slab.cell_indices
+            struc.cells[ci].self_weight = slab.result.self_weight
+        end
+        changed = true
+    end
+    return changed
+end
+

@@ -62,6 +62,12 @@ struct WindStoryAnalysis
     centroids::Vector{NTuple{2,Float64}}
 end
 
+"""
+Two-field analysis for a hand-built case list.
+
+`displacements` and `centroids` are empty. A solved
+[`wind_story_analysis`](@ref) fills both.
+"""
 WindStoryAnalysis(levels, cases) =
     WindStoryAnalysis(levels, cases, Vector{Float64}[], NTuple{2,Float64}[])
 

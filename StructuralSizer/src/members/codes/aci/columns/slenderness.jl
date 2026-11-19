@@ -572,11 +572,14 @@ function alignment_chart_k(ψA::Real, ψB::Real; sway::Bool)
         loψ >= 100.0 && throw(ArgumentError(
             "a sway column with both ends pinned (ψ = $ψA and $ψB) has no " *
             "finite k on Fig. R10.10.1.1 (ACI 318-11, page 150)"))
-        root = _chart_root(k -> _sway_chart_residual(k, a, b), (1.001, 1.999), (2.001, 40.0))
+        # (π/k)·cot(π/k) is continuous through k = 2 (cot(π/2) = 0), so one
+        # bracket covers it. Splitting at k = 2 missed roots at ψA·ψB ≈ (12/π)².
+        root = _chart_root(k -> _sway_chart_residual(k, a, b), (1.001, 40.0))
     else
         hiψ < 1e-4 && return 0.5
         loψ >= 1e5 && return 1.0
-        root = _chart_root(k -> _nonsway_chart_residual(k, a, b), (0.501, 0.666), (0.667, 0.999))
+        # Likewise continuous through k = 2/3 (cot(3π/2) = 0).
+        root = _chart_root(k -> _nonsway_chart_residual(k, a, b), (0.501, 0.999))
     end
     root === nothing && throw(ArgumentError(
         "alignment chart has no root for ψ = ($ψA, $ψB), sway=$sway"))

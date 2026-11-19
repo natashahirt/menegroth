@@ -170,20 +170,32 @@ Concrete beam elements of story `lvl` that take a service inertia:
 stiffness (ENGINEERING JUDGMENT: they are slab, not cracked beams).
 """
 function _story_service_elements(struc, lvl::Int)
-    story_edges = Set(struc.skeleton.stories[lvl].edges)
+    skel = struc.skeleton
+    # A rib or other level beam belongs to a story through its framing level's
+    # slab, not `edge_story`/`story.edges`: an interior grillage rib added after
+    # the last geometry-cache rebuild has no story entry and would read story 0,
+    # and at the pre-loop depth screen only the ribs carry a concrete section.
+    on_story = Set{UInt64}()
     solid = Set{UInt64}()
-    for slab in struc.slabs, fl in slab.framing_levels
-        fl.solid_group_id === nothing || push!(solid, fl.solid_group_id)
+    for slab in struc.slabs
+        slvl = _slab_story(struc, slab)
+        for fl in slab.framing_levels
+            fl.solid_group_id === nothing || push!(solid, fl.solid_group_id)
+            slvl == lvl || continue
+            foreach(g -> push!(on_story, g), level_group_ids(fl))
+        end
     end
     n_el = length(struc.asap_model.frame_elements)
     out = Dict{Int, Tuple{Any, Int}}()
     for (bi, beam) in enumerate(struc.beams)
-        group_id(beam) in solid && continue
+        gid = group_id(beam)
+        gid in solid && continue
         sec = section(beam)
         sec isa Union{StructuralSizer.RCTBeamSection, StructuralSizer.RCBeamSection} || continue
         for si in segment_indices(beam)
             e = struc.segments[si].edge_idx
-            e in story_edges || continue
+            # Level beam: placed by its framing level. Girder (no level): by edge.
+            (gid in on_story || edge_story(skel, e) == lvl) || continue
             for i in _frame_element_indices(struc, e)
                 1 <= i <= n_el && (out[i] = (sec, bi))
             end

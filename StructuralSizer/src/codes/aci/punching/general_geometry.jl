@@ -244,6 +244,21 @@ function punching_stress_general(Vu::Force, Mux::Torque, Muy::Torque,
     M2 = -Mux * s + Muy * c
     γv1, γv2 = gamma_v_general(p.l1, p.l2)
 
+    # A one-sided (straight-line) critical section has zero second moment about
+    # its own axis — the corner-column head whose other faces are free edges is
+    # such a line. ACI 318-11 §11.11.7.1 (corpus: aci-318-11, PDF p. 209):
+    # γv·M is "transferred by eccentricity of shear about the centroid of the
+    # critical section," the remainder γf·M by flexure (§13.5.3). A section with
+    # no depth about an axis offers no eccentric-shear mechanism for the moment
+    # about that axis, so that moment goes fully to flexure (γv → 0 there, as
+    # gamma_v_general already returns). The eccentric-shear term is then 0, not
+    # the 0·M/0 = NaN the general stress sum would otherwise form.
+    l1v = ustrip(u"inch", p.l1)
+    l2v = ustrip(u"inch", p.l2)
+    lmax = max(l1v, l2v)
+    degen1 = l2v <= 1e-6 * lmax   # collinear about principal axis 1 ⇒ J1 ≈ 0
+    degen2 = l1v <= 1e-6 * lmax   # collinear about principal axis 2 ⇒ J2 ≈ 0
+
     v_direct = uconvert(u"psi", Vu / p.Ac)
 
     # vu adds the absolute moment term (the farthest fiber). The face is the
@@ -258,8 +273,10 @@ function punching_stress_general(Vu::Force, Mux::Torque, Muy::Torque,
         y = pt[2] - p.yc
         s1 = x * c + y * s        # coordinate on principal axis 1
         s2 = -x * s + y * c       # coordinate on principal axis 2
-        t1 = uconvert(u"psi", γv1 * M1 * s2 / p.J1)
-        t2 = uconvert(u"psi", γv2 * M2 * s1 / p.J2)
+        # §11.11.7.1: a degenerate axis transfers its moment by flexure, not
+        # eccentric shear, so its stress term is zero (avoids 0/0 = NaN).
+        t1 = degen1 ? 0.0u"psi" : uconvert(u"psi", γv1 * M1 * s2 / p.J1)
+        t2 = degen2 ? 0.0u"psi" : uconvert(u"psi", γv2 * M2 * s1 / p.J2)
         term = t1 + t2
         terms[k] = ustrip(u"psi", term)
         m1_peak = max(m1_peak, abs(ustrip(u"psi", t1)))

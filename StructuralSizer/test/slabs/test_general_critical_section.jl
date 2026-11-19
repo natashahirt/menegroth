@@ -399,4 +399,30 @@ const SS = StructuralSizer
         @test ustrip(u"psi", res.ϕvc) > 0
     end
 
+    @testset "Straight-line section: moment about its axis goes to flexure" begin
+        # A one-sided critical section (the corner-column head whose other faces
+        # are free edges) is a single straight segment. ACI 318-11 §11.11.7.1
+        # (corpus: aci-318-11, PDF p. 209): a moment about an axis with no
+        # eccentric-shear mechanism is carried by flexure, so its stress term is
+        # zero rather than 0/0 = NaN.
+        d = 6.0u"inch"
+        line = [(-30.0u"inch", 0.0u"inch"), (30.0u"inch", 0.0u"inch")]  # along x
+        p = SS.critical_section_properties(line, d; closed = false)
+        @test ustrip(u"inch^4", p.J1) ≈ 0 atol = 1e-9   # no depth about axis 1
+
+        # Mux is about the x-axis (the line's own axis) → J1≈0 direction.
+        r = SS.punching_check_general(40.0kip, 30.0kip * u"ft", 0.0kip * u"ft",
+                                      d, 4000.0u"psi", line; closed = false)
+        @test isfinite(r.utilization)
+        @test isfinite(ustrip(u"psi", r.vu))
+        # Only the direct shear Vu/Ac remains (the eccentric-shear term dropped).
+        @test ustrip(u"psi", r.vu) ≈ ustrip(u"psi", uconvert(u"psi", 40.0kip / p.Ac)) rtol = 1e-9
+
+        # A moment about the perpendicular axis (Muy) still transfers by shear.
+        r2 = SS.punching_check_general(40.0kip, 0.0kip * u"ft", 30.0kip * u"ft",
+                                       d, 4000.0u"psi", line; closed = false)
+        @test isfinite(r2.utilization)
+        @test ustrip(u"psi", r2.vu) > ustrip(u"psi", uconvert(u"psi", 40.0kip / p.Ac))
+    end
+
 end

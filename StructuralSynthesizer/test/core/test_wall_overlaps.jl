@@ -78,6 +78,9 @@ end
     @test inbeam([wall((0.0, 0.0), (3.0, 0.0)), wall((3.0, 0.0), (6.0, 0.0))])
     # Half covered stays a beam.
     @test !inbeam([wall((0.0, 0.0), (3.0, 0.0))])
+    # A wall on the same grid line, past the beam's end, does not cover it.
+    # The wall covers its own segment, not the line beyond its ends.
+    @test !inbeam([wall((6.0, 0.0), (12.0, 0.0))])
     # A parallel wall off the line, and a wall at another height, do not count.
     @test !inbeam([wall((0.0, 0.5), (6.0, 0.5))])
     @test !inbeam([wall((0.0, 0.0), (6.0, 0.0); z0 = 6.0, z1 = 9.0)])

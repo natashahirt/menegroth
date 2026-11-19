@@ -118,14 +118,22 @@ function _beam_in_wall(skel, eidx::Int, vc::Matrix{Float64}, walls)
     L > tol || return false
     u = ((q[1] - p[1]) / L, (q[2] - p[2]) / L)
     # Stations along the beam that collinear walls at this elevation cover.
+    # The wall covers its own segment, not the line past its ends, so a wall
+    # on one half of a grid line leaves the beam on the other half in place.
     spans = Tuple{Float64, Float64}[]
     for w in walls
         w.z0 - tol <= z <= w.z1 + tol || continue
-        _plan_point_line_distance(w.a, p, u) <= tol || continue
-        _plan_point_line_distance(w.b, p, u) <= tol || continue
+        wu = (w.b[1] - w.a[1], w.b[2] - w.a[2])
+        wL = hypot(wu[1], wu[2])
+        wL > tol || continue
+        wu = (wu[1] / wL, wu[2] / wL)
+        # Both beam ends on the wall's line, so the beam is collinear with it.
+        _plan_point_line_distance(p, w.a, wu) <= tol || continue
+        _plan_point_line_distance(q, w.a, wu) <= tol || continue
         s1 = (w.a[1] - p[1]) * u[1] + (w.a[2] - p[2]) * u[2]
         s2 = (w.b[1] - p[1]) * u[1] + (w.b[2] - p[2]) * u[2]
-        push!(spans, minmax(s1, s2))
+        lo, hi = minmax(clamp(s1, 0.0, L), clamp(s2, 0.0, L))
+        hi - lo > tol && push!(spans, (lo, hi))
     end
     isempty(spans) && return false
     sort!(spans)

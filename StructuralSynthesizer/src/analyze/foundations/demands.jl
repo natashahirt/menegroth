@@ -17,8 +17,20 @@ function _unfactored_DL_loads(struc::BuildingStructure)
     if !(isnothing(model) || isempty(model.frame_elements))
         els = model.frame_elements
         edge_strips = slab_edge_strips_by_cell(struc)
+        fp = flat_plate_shell_layout(struc)
         for (cell_idx, cell) in enumerate(struc.cells)
             cell.floor_type == :grade && continue
+            if fp !== nothing && haskey(fp.cell_shells, cell_idx)
+                q_dead = cell.sdl + cell.self_weight
+                append!(loads, _flat_plate_unfactored_cell_loads(
+                    fp, cell_idx, q_dead, cell.live_load))
+                strips = get(edge_strips, cell_idx, NamedTuple[])
+                for q in (q_dead, cell.live_load)
+                    _append_edge_strip_loads!(loads, Asap.TributaryLoad[], els, strips,
+                                              uconvert(u"Pa", q))
+                end
+                continue
+            end
             _create_cell_tributary_loads!(
                 loads, els, struc.skeleton, struc, cell, cell_idx;
                 split_dead_live=true, combo=StructuralSizer.service, edge_strips=edge_strips)

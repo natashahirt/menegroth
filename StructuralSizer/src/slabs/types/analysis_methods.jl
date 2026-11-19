@@ -152,6 +152,13 @@ Dead and live loads are solved separately for proper post-solve combination
 # Mesh
 - `target_edge::Length`: Target mesh edge length (default: adaptive from span).
 
+# Source  (`source`)
+- `:slab` (default) — mesh this slab alone on column stubs.
+- `:building` — read the slab shells of the building model. Every slab and
+  column of the building is in that solve, so a column shared by two slabs
+  carries both. Mesh, patch and pattern settings are the building model's;
+  `pattern_mode` is not used because each pattern is a building re-solve.
+
 # Loading
 - `pattern_loading::Bool`: Enable ACI 318-11 §13.7.6 pattern loading (default: `true`).
 - `pattern_mode::Symbol`: How pattern loading is applied when `pattern_loading=true`:
@@ -273,6 +280,12 @@ struct FEA <: FlatPlateAnalysisMethod
     # Legacy alias — kept for reading in dispatch/options; not a user knob
     strip_design::Symbol
 
+    # Which shell model carries the slab:
+    #   :slab     — a model of this slab alone, on column stubs (default)
+    #   :building — the slab shells of the whole building model, read through
+    #               `building_fea_analysis!`, which the building package defines
+    source::Symbol
+
     function FEA(;
         target_edge::Union{Nothing, Unitful.Length} = nothing,
         pattern_loading::Bool = true,
@@ -290,6 +303,7 @@ struct FEA <: FlatPlateAnalysisMethod
         deflection_Ie_method::Symbol = :aci318_19,
         # Legacy keyword — maps to new knobs when provided alone
         strip_design::Union{Nothing, Symbol} = nothing,
+        source::Symbol = :slab,
     )
         # ── Legacy mapping ──
         if !isnothing(strip_design)
@@ -373,6 +387,8 @@ struct FEA <: FlatPlateAnalysisMethod
             error("FEA averaging_width_factor must be > 0; got $width_factor")
         deflection_Ie_method in (:aci318_19, :branson, :bischoff) ||
             error("FEA deflection_Ie_method must be :aci318_19, :branson, or :bischoff; got :$deflection_Ie_method")
+        source in (:slab, :building) ||
+            error("FEA source must be :slab or :building; got :$source")
 
         te = if target_edge !== nothing
             ustrip(u"m", target_edge) > 0 || error("FEA target_edge must be > 0")
@@ -385,7 +401,7 @@ struct FEA <: FlatPlateAnalysisMethod
             field_smoothing, cut_method, iso_alpha, rebar_direction, sign_treatment,
             concrete_torsion_discount, patch_stiffness_factor, width_factor,
             deflection_Ie_method,
-            _strip_design)
+            _strip_design, source)
     end
 end
 

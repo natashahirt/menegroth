@@ -30,6 +30,7 @@ does not guess where a new choice should appear.
 """
 const PARAM_ANCHOR = Dict{Symbol, String}(
     :floor => "slab",
+    :flat_plate_analysis => "slab",
     :tributary_axis => "slab",
     :scoped_floor_overrides => "slab",
     :pattern_loading => "slab",

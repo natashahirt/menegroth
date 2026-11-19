@@ -94,3 +94,6 @@ include("fea/dispatch.jl")
 
 # ── Main entry point ──
 include("fea/run.jl")
+
+# ── Building-model source (FEA(source = :building)) ──
+include("fea/building.jl")

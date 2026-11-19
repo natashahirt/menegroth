@@ -59,7 +59,23 @@ function solve_gravity_basic_cases(struc::BuildingStructure;
     combo = LoadCombination(name=:unfactored, D=1.0, L=1.0)
     elements = model.frame_elements
     edge_strips = slab_edge_strips_by_cell(struc)
+    fp = flat_plate_shell_layout(struc)
     for (cell_idx, cell) in enumerate(struc.cells)
+        if fp !== nothing && haskey(fp.cell_shells, cell_idx)
+            # The panel's own shells carry it; its edge strip stays on the frame slot.
+            q_dead = cell.sdl + cell.self_weight
+            cell_dead, cell_live = _flat_plate_unfactored_cell_loads(
+                fp, cell_idx, q_dead, cell.live_load)
+            cell_dead, cell_live = Asap.AbstractLoad[cell_dead], Asap.AbstractLoad[cell_live]
+            strips = get(edge_strips, cell_idx, NamedTuple[])
+            _append_edge_strip_loads!(cell_dead, Asap.TributaryLoad[], elements, strips,
+                                      uconvert(u"Pa", q_dead))
+            _append_edge_strip_loads!(cell_live, Asap.TributaryLoad[], elements, strips,
+                                      uconvert(u"Pa", cell.live_load))
+            append!(dead, cell_dead)
+            append!(cell.face_idx in roof_faces ? roof_loads : live, cell_live)
+            continue
+        end
         # Grade and unknown faces are not given a tributary cache. The factored
         # path in to_asap! skips them the same way.
         (cell.floor_type == :grade || cell.floor_type == :unknown) && continue

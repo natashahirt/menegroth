@@ -843,7 +843,7 @@ function _resize_rejected!(run, failing_beams, column_passed, fresh, params, col
                               I_factor = params.beam_I_factor,
                               gravity_factor = member_self_weight_acceleration(params))
         conform_rib_lines!(struc, params, fallback; I_factor = params.beam_I_factor)
-        grow_building_solid_heads!(struc, params)
+        grow_building_solid_heads!(struc, params; fallback = fallback)
         _sync_fire_coating_loads!(struc, params)
         _reanalyze_after_section_change!(struc)
     end

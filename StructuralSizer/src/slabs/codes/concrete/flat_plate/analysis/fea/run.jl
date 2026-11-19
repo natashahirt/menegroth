@@ -101,6 +101,17 @@ function run_moment_analysis(
         0.0
     end
 
+    # The building model carries only the members it has, so a modelled edge
+    # beam, or a slab the building did not mesh, is analysed on its own model.
+    if method.source === :building
+        if eb_βt == 0 && building_fea_available(struc, slab)
+            return _building_moment_analysis(method, struc, slab, supporting_columns, h,
+                                             Ecs, γ_concrete, setup;
+                                             ν_concrete, drop_panel, verbose)
+        end
+        method = with_fea_source(method, :slab)
+    end
+
     # Column concrete modulus (may differ from the slab's)
     Ecc = _column_Ec(supporting_columns, column_concrete, fc, γ_concrete)
 
@@ -307,11 +318,40 @@ function run_moment_analysis(
         end
     end
 
+    return _fea_moment_result(
+        method, struc, slab, supporting_columns, h, γ_concrete, setup, cache, forces;
+        column_moments, M_neg_ext, M_neg_int, M_pos, fea_Δ_panel,
+        pattern_loading = use_pattern, sec_pattern, include_torsion = incl_torsion,
+        n_cells = envelope.n_cells, verbose)
+end
+
+"""
+    _fea_moment_result(method, struc, slab, columns, h, γ_concrete, setup, cache,
+                       forces; column_moments, M_neg_ext, M_neg_int, M_pos,
+                       fea_Δ_panel, pattern_loading, sec_pattern, include_torsion,
+                       n_cells, verbose) -> MomentAnalysisResult
+
+Secondary-direction strips, wall moments and the result, from a filled
+`cache` and the primary demands. Both FEA sources end here. `sec_pattern`
+holds the `:efm_amp` baselines, or `nothing` when the shell already carries
+the patterns.
+"""
+function _fea_moment_result(
+    method::FEA, struc, slab, supporting_columns, h::Length, γ_concrete, setup,
+    cache::FEAModelCache, forces;
+    column_moments, M_neg_ext, M_neg_int, M_pos, fea_Δ_panel,
+    pattern_loading::Bool, sec_pattern, include_torsion::Bool, n_cells::Int,
+    verbose::Bool = false,
+)
+    (; l1, l2, ln, span_axis, c1_avg, qD, qL, qu, M0) = setup
+    n_cols = length(supporting_columns)
+    incl_torsion = include_torsion
+    use_pattern = pattern_loading
     M0_u = uconvert(kip * u"ft", M0)
     Vu_max = uconvert(kip, qu * l2 * ln / 2)
 
     if verbose
-        @debug "FEA RESULT ($(envelope.n_cells) cells)" begin
+        @debug "FEA RESULT ($(n_cells) cells)" begin
             Mne = round(ustrip(kip * u"ft", M_neg_ext), digits=1)
             Mni = round(ustrip(kip * u"ft", M_neg_int), digits=1)
             Mp  = round(ustrip(kip * u"ft", M_pos), digits=1)

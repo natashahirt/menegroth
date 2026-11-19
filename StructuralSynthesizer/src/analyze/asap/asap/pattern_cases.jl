@@ -226,10 +226,12 @@ function _append_factored_wall_self_weight!(loads, shells, params::DesignParamet
 end
 
 """True when the model's slab dead and live tributaries are stored split (pattern solve)."""
-_pattern_dead_split(struc::BuildingStructure, params::DesignParameters) =
-    params.pattern_loading != :none &&
-    !isempty(struc.cell_dead_loads) &&
-    any(!isempty, values(struc.cell_dead_loads))
+function _pattern_dead_split(struc::BuildingStructure, params::DesignParameters)
+    params.pattern_loading != :none || return false
+    any(!isempty, values(struc.cell_dead_loads)) && return true
+    layout = flat_plate_shell_layout(struc)
+    return layout !== nothing && layout.split
+end
 
 """Rewrite `:wall_self_weight` pressures from the shells and the current dead factor."""
 function _sync_wall_self_weight!(struc::BuildingStructure, params::DesignParameters)
@@ -263,6 +265,10 @@ function _pattern_alternate_live(ld::Asap.TributaryLoad)
     Asap.TributaryLoad(ld.element, copy(ld.positions), ld.widths,
                        0.75 * ld.pressure, ld.direction, ld.id)
 end
+
+# Same §13.7.6.3 factor on a flat-plate panel's shell pressure.
+_pattern_alternate_live(ld::Asap.AreaLoad) =
+    Asap.AreaLoad(ld.shells, 0.75 * ld.pressure; direction = ld.direction, id = ld.id)
 
 const _TWO_WAY_PATTERN_FLOORS = (:two_way, :flat_plate, :flat_slab, :waffle)
 
@@ -352,11 +358,13 @@ function _section_642_cell_sets(lines)
     return sets
 end
 
-"Stored tributary live loads of `cells`, at full factored pressure."
+"Stored live loads of `cells` (tributary and flat-plate shell), at full factored pressure."
 function _cells_live(struc::BuildingStructure, cells)
-    loads = Asap.TributaryLoad[]
+    loads = Asap.AbstractLoad[]
+    layout = flat_plate_shell_layout(struc)
     for ci in cells
         append!(loads, get(struc.cell_live_loads, ci, Asap.TributaryLoad[]))
+        layout === nothing || haskey(layout.live, ci) && push!(loads, layout.live[ci])
     end
     return loads
 end
@@ -383,6 +391,11 @@ function _generate_pattern_cases(struc::BuildingStructure)
     end
     for (_, loads) in struc.cell_live_loads
         append!(live_all, loads)
+    end
+    fp = flat_plate_shell_layout(struc)
+    if fp !== nothing && fp.split
+        append!(dead_all, values(fp.dead))
+        append!(live_all, values(fp.live))
     end
     
     # Full loading

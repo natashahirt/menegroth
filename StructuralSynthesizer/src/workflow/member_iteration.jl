@@ -180,6 +180,8 @@ function _reanalyze_after_section_change!(struc::BuildingStructure)
     else
         Asap.process!(struc.asap_model)
     end
+    # `update!` does not re-realize a parametric frame element.
+    isempty(Asap.stale_frame_elements(struc.asap_model)) || Asap.process!(struc.asap_model)
     _solve_struc_model!(struc)
     _refresh_pattern_solve_cache!(struc)
     return struc
@@ -308,6 +310,7 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
     beam_kwargs = (; reanalyze = false, tc = tc, member_group_overrides = mgo,
                    I_factor = params.beam_I_factor,
                    gravity_factor = member_self_weight_acceleration(params),
+                   rib_head_stirrups = params.rib_head_stirrups,
                    composite_concrete = resolve_slab_concrete(params.materials),
                    composite_option_kwargs(beam_opts)...)
 
@@ -320,8 +323,24 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
     shell_levels = setdiff(_story_shell_design_levels(struc), exclusive_grillage_stories(struc))
     if isempty(shell_levels)
         _clear_story_shell_wall_axials!(struc)
-        converged, iters_used = _iterate_beams_columns!(struc, params, beam_opts,
-                                                        column_opts, beam_kwargs; tc = tc)
+        # A ribbed story's stem is screened on the demands of the last member
+        # loop, and the loop runs again until the screen keeps every stem.
+        has_ribs = !isempty(_rib_stories(struc, beam_opts))
+        rib_kwargs = (; I_factor = params.beam_I_factor,
+                      gravity_factor = member_self_weight_acceleration(params),
+                      rib_head_stirrups = params.rib_head_stirrups)
+        converged, iters_used = false, 0
+        for round in 1:(has_ribs ? RIB_SCREEN_ROUNDS : 1)
+            if has_ribs
+                moved = screen_rib_stems!(struc, params; fallback = beam_opts, rib_kwargs...)
+                round > 1 && !moved && break
+                _reanalyze_after_section_change!(struc)
+            end
+            converged, n = _iterate_beams_columns!(struc, params, beam_opts,
+                                                   column_opts, beam_kwargs; tc = tc)
+            iters_used += n
+        end
+        has_ribs && report_rib_deflection!(struc, params; fallback = beam_opts)
     else
         converged, iters_used = _size_with_story_shell!(struc, params, beam_opts,
                                                         column_opts, beam_kwargs,
@@ -360,13 +379,6 @@ function _iterate_beams_columns!(struc, params, beam_opts, column_opts, beam_kwa
                     shell_spans = shell_spans,
                     section_floor = upward_only ? _section_floors(struc) : nothing,
                     beam_kwargs...)
-        # Ribs at the head carry shear on concrete alone, then a line of
-        # pieces shares the §8.13.2 width and a limited soffit step. The head
-        # grows only for what that does not clear.
-        raise_head_face_ribs!(struc, params, beam_opts;
-                              I_factor = params.beam_I_factor,
-                              gravity_factor = member_self_weight_acceleration(params))
-        conform_rib_lines!(struc, params, beam_opts; I_factor = params.beam_I_factor)
         # The solid head is the bays around each column. A failing check grows
         # those bays, which adds beams, so the next pass sizes against them.
         grow_building_solid_heads!(struc, params; fallback = beam_opts)

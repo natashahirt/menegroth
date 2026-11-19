@@ -621,6 +621,9 @@ end
         wall_inputs=_stage_inputs(),
         skip_visualization=true,
         jump_wall_thickness=false,
+        # This fixture is the softened Y frame. The default 10 psf façade
+        # is enough to push θ over θmax. Zero leaves that weight out.
+        loads=GravityLoads(wall_SDL=0.0u"psf"),
     )
     to_asap!(struc; params=lateral, diaphragms=:rigid)
     # Fixture knobs, not ACI factors. The Y pier is taken out, the X piers

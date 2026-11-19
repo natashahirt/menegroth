@@ -995,6 +995,10 @@ end
         @test cb_neg_from_moment_field(sag) === nothing
         rev(s) = s <= 0 ? -100u"N*m" : (s >= 1 ? 200u"N*m" : 50u"N*m")
         @test isapprox(cb_neg_from_moment_field(rev), 5.67; atol=0.005)
+        # A hogging end that is roundoff next to the span moment is not Mo.
+        # Eq. C-F1-5 is not evaluated, so the caller keeps Cb = 1.
+        noise(s) = s <= 0 ? -1e-9u"N*m" : (s >= 1 ? 200u"N*m" : 50u"N*m")
+        @test cb_neg_from_moment_field(noise) === nothing
     end
 
     @testset "Negative reinforcement is capped by the anchors" begin

@@ -17,7 +17,7 @@
 function _stories_bottom_up(skel)
     rows = Tuple{Int, Float64}[]
     for (idx, story) in skel.stories
-        push!(rows, (idx, ustrip(u"m", story.elevation)))
+        push!(rows, (idx, Asap.to_meters(story.elevation)))
     end
     sort!(rows; by=last)
     for i in 2:length(rows)

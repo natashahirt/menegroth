@@ -257,8 +257,8 @@ using the column concrete and rebar rather than the slab's.
 
 Then [`check_flat_plate_columns!`](@ref) gives every column the lightest
 section that passes its full-load strength, its §10.12 joints, and punching.
-`floors` is forwarded there: a plan size the slab analysis had to grow a
-column back to.
+`floors` is forwarded there: a plan size the slab commit or an earlier
+section search grew a column to. The search does not go under it.
 
 Returns the structure, the number of columns either step grew, whether the
 model was re-solved, and the full-load check's summary.

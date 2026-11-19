@@ -540,6 +540,12 @@ may be shorter. Each segment that puts the bottom flange in compression is
 evaluated, and the smallest Cb is returned, because the checker compares one
 hogging envelope against one Cb. A segment whose mid-length is in hogging but
 whose ends are not cannot use Eq. C-F1-5, and `nothing` (Cb = 1) is returned.
+
+A negative end moment that is numerical noise beside the other moments in
+the segment is not bottom-flange compression. It is treated as zero, and
+the same `nothing` (Cb = 1) follows. The gate is `1e-8` of the largest
+absolute moment in the segment. That cutoff is numerical. Eq. C-F1-5 is
+not changed, and it is not capped: the worked example is Cb = 5.67.
 """
 function cb_neg_from_moment_field(M_of_s; L=nothing, L_twist=nothing)
     bounds = _twist_segments(L, L_twist)
@@ -550,6 +556,12 @@ function cb_neg_from_moment_field(M_of_s; L=nothing, L_twist=nothing)
         me = _moment_newton(M_of_s(b))
         mm = _moment_newton(M_of_s((a + b) / 2))
         mo, m1 = ms <= me ? (ms, me) : (me, ms)
+        # ENGINEERING JUDGMENT. Not a code factor. |Mo| below this fraction
+        # of the segment is roundoff, and M1/Mo in Eq. C-F1-5 is meaningless.
+        scale = max(abs(mo), abs(m1), abs(mm))
+        if mo < 0 && scale > 0 && abs(mo) <= 1e-8 * scale
+            mo = 0.0
+        end
         if mo < 0
             cb = cb_gravity_top_flange_restrained(mo * u"N*m", m1 * u"N*m", mm * u"N*m")
             cb_min = cb_min === nothing ? cb : min(cb_min, cb)

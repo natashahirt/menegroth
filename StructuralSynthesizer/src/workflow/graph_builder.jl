@@ -362,9 +362,11 @@ passes its full-load strength and punching, then uniform column sizing
 promotes each group to its largest member when that option is on. A column
 whose plan size changed was not the column the slab was checked at
 ([`_slab_checked_at_installed_columns`](@ref)), so that slab is designed
-again. The new analysis may grow a column. That grown plan size is a floor
-under the next search, so a column the analysis rejected is not selected
-again. Rounds repeat until every slab was checked at its installed columns.
+again. The slab commit may grow a column, and the section search may grow
+one too. Either growth is a floor under the next search
+([`_raise_column_floors!`](@ref)), so a column that failed at a smaller
+plan size is not selected again. Rounds repeat until every slab was checked
+at its installed columns.
 
 Returns `(passes, redesigned)`: the rounds run, including the last one that
 found nothing stale, and the slabs designed again.
@@ -373,11 +375,13 @@ function _design_flat_plate_members!(struc::BuildingStructure, params::DesignPar
                                      tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
     StructuralSizer.emit!(tc, :workflow, "_design_flat_plate_members!", "", :enter;
                           n_slabs = length(struc.slabs))
-    # Plan size a slab reanalysis grew a column back to. The section search
-    # does not go under it.
+    # Plan size a slab commit or the section search grew a column to.
+    # The next search does not go under it.
     floors = Dict{Int, Tuple}()
+    opened_at = _column_plan_sizes(struc)
     _reconcile_columns!(struc, params; tc, floors)
     _harmonize_columns!(struc, params)
+    _raise_column_floors!(floors, opened_at, struc)
     floor_opts = resolve_floor_options(params)
     column_opts = _get_column_opts(params)
     redesigned = Set{Int}()
@@ -385,9 +389,7 @@ function _design_flat_plate_members!(struc::BuildingStructure, params::DesignPar
             budget = StructuralSizer.monotone_budget(params.max_iterations, 48)) do _
         stale = _stale_flat_plate_slabs(struc)
         isempty(stale) && return false
-        before = Dict{Int, Tuple}(
-            i => (col.c1, col.c2)
-            for (i, col) in enumerate(struc.columns) if col.c1 !== nothing)
+        before = _column_plan_sizes(struc)
         outcomes = Any[nothing for _ in eachindex(struc.slabs)]
         for sidx in stale
             opts = _floor_options_for_slab(struc, sidx, params, floor_opts)
@@ -400,6 +402,9 @@ function _design_flat_plate_members!(struc::BuildingStructure, params::DesignPar
         refresh_flat_plate_analysis!(struc, params)
         _reconcile_columns!(struc, params; tc, floors)
         _harmonize_columns!(struc, params)
+        # The search can grow a column the slab commit did not. That size
+        # failed at the smaller plan, so the next round does not go under it.
+        _raise_column_floors!(floors, before, struc)
         return true
     end
     StructuralSizer.emit!(tc, :workflow, "_design_flat_plate_members!", "", :decision;
@@ -414,12 +419,19 @@ function _design_flat_plate_members!(struc::BuildingStructure, params::DesignPar
     return (passes = run.steps, redesigned = sort!(collect(redesigned)))
 end
 
-"""
-Record a plan floor where the slab reanalysis grew a column.
+"""Plan size `(c1, c2)` of each column that already has one."""
+function _column_plan_sizes(struc)
+    return Dict{Int, Tuple}(
+        i => (col.c1, col.c2)
+        for (i, col) in enumerate(struc.columns) if col.c1 !== nothing)
+end
 
-`before` is the plan size at the start of the round. A column that came out
-larger failed at the smaller size, and the section search will not go back
-under the size the analysis accepted.
+"""
+Record a plan floor where a column came out larger than `before`.
+
+`before` is the plan size at the start of the step. The slab commit and the
+section search both call this. A column that came out larger failed at the
+smaller size, and the next section search will not go back under it.
 """
 function _raise_column_floors!(floors, before, struc)
     tol = 0.05u"inch"

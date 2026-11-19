@@ -821,6 +821,8 @@ function _resize_rejected!(run, failing_beams, column_passed, fresh, params, col
         end
     end
     if !_all_passed(column_passed)
+        # The column sizer reads the frame, which still holds the old beam sections.
+        moved && _reanalyze_after_section_change!(struc)
         kept = Dict{UInt64, Any}()
         if params.uniform_column_sizing === :off
             for m in struc.columns
@@ -839,10 +841,6 @@ function _resize_rejected!(run, failing_beams, column_passed, fresh, params, col
     end
     if moved
         fallback = params.beams
-        raise_head_face_ribs!(struc, params, fallback;
-                              I_factor = params.beam_I_factor,
-                              gravity_factor = member_self_weight_acceleration(params))
-        conform_rib_lines!(struc, params, fallback; I_factor = params.beam_I_factor)
         grow_building_solid_heads!(struc, params; fallback = fallback)
         _sync_fire_coating_loads!(struc, params)
         _reanalyze_after_section_change!(struc)

@@ -91,3 +91,29 @@ end
     @test_throws ArgumentError size_beams!(struc, ConcreteBeamOptions(include_flange = true);
                                            section_floor = floors)
 end
+
+@testset "Steel columns keep a section floor" begin
+    struc = BuildingStructure(gen_medium_office(6.0u"m", 6.0u"m", 3.0u"m", 1, 1, 1))
+    initialize!(struc)
+    to_asap!(struc)
+    opts = SteelColumnOptions()
+    size_columns!(struc, opts; reanalyze = false)
+    col_gids = unique(c.base.group_id for c in struc.columns)
+    free = Dict(g => struc.member_groups[g].section for g in col_gids)
+
+    # Floor every column group two catalog steps above its free pick.
+    cat = StructuralSizer.steel_column_catalog(opts.section_type, opts.catalog)
+    obj(s) = SY._section_objective(opts, s)
+    heavier(s) = sort(filter(c -> obj(c) > obj(s) * (1 + 1e-9), cat); by = obj)[2]
+    floors = Dict(g => (section = heavier(free[g]), exact = false) for g in col_gids)
+    SY.update_analysis!(struc, :stiffness)
+    size_columns!(struc, opts; reanalyze = false, section_floor = floors)
+    for g in col_gids
+        @test SY._sections_identical(struc.member_groups[g].section, floors[g].section)
+    end
+
+    @test_throws ArgumentError size_columns!(
+        struc, SteelColumnOptions(n_max_sections = 1); section_floor = floors)
+    @test_throws ArgumentError size_columns!(
+        struc, ConcreteColumnOptions(); section_floor = floors)
+end

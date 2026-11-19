@@ -80,8 +80,9 @@ function diagnose_infeasibility(
     b_in = ustrip(u"inch", sec.b)
     d_in = ustrip(u"inch", sec.d)
     As_in = ustrip(u"inch^2", sec.As)
-    As_min = max(3.0 * sqrt(fc_psi) * b_in * d_in / fy_psi, 200.0 * b_in * d_in / fy_psi)
-    if As_in < As_min
+    As_min = _as_min_aci_1051(b_in, d_in, fc_psi, fy_psi)
+    As_req = _rect_as_required_in2(Mu, sec.b, sec.d, fc_psi, fy_psi)
+    if !_min_steel_check(As_in, As_min, As_req).passed
         return "As_min: As=$(round(As_in, digits=2)) < As_min=$(round(As_min, digits=2)) in²"
     end
     if Tu_val > 0.0
@@ -169,16 +170,17 @@ function explain_feasibility(
     push!(checks, CheckResult("net_tensile_strain", εt >= εt_limit,
           εt_ratio, εt_limit, εt, "ACI 318-11 10.3.5"))
 
-    # --- 5. Minimum Reinforcement — ACI 318-11 §10.5.1 ---
+    # --- 5. Minimum Reinforcement — ACI 318-11 §10.5.1 and §10.5.3 ---
     fc_psi = cache.fc_ksi * 1000.0
     fy_psi = cache.fy_ksi * 1000.0
     b_in   = ustrip(u"inch", section.b)
     d_in   = ustrip(u"inch", section.d)
     As_in  = ustrip(u"inch^2", section.As)
     As_min = _as_min_aci_1051(b_in, d_in, fc_psi, fy_psi)
-    min_reinf_ratio = As_min > 0 ? As_min / max(As_in, 1e-10) : 0.0
-    push!(checks, CheckResult("min_reinforcement", As_in >= As_min,
-          min_reinf_ratio, As_min, As_in, "ACI 318-11 10.5.1"))
+    As_req = _rect_as_required_in2(Mu, section.b, section.d, fc_psi, fy_psi)
+    steel = _min_steel_check(As_in, As_min, As_req)
+    push!(checks, CheckResult("min_reinforcement", steel.passed,
+          steel.ratio, As_min, As_in, steel.clause))
 
     # --- 6. Torsion Section Adequacy — ACI 318-19 §22.7 ---
     Tu_val = _get_Tu_kipin(demand)

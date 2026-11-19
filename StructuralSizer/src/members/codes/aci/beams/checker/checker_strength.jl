@@ -86,6 +86,47 @@ function _as_min_aci_1051(b_in::Float64, d_in::Float64, fc_psi::Float64, fy_psi:
 end
 
 """
+    _rect_as_required_in2(Mu_kipft, b, d, fc_psi, fy_psi) -> Float64
+
+Tension steel (in²) required by analysis for a rectangular section, or `0`
+when `Mu` does not call for it. `Inf` when the section cannot develop `Mu`.
+"""
+function _rect_as_required_in2(Mu_kipft::Real, b::Length, d::Length, fc_psi::Real, fy_psi::Real)
+    Mu_kipft <= 0 && return 0.0
+    As = required_reinforcement(float(Mu_kipft) * Asap.kip * u"ft", b, d,
+                                float(fc_psi) * u"psi", float(fy_psi) * u"psi";
+                                require_tension_controlled = false)
+    return float(ustrip(u"inch^2", As))
+end
+
+"""
+    _min_steel_check(As_in, As_min, As_req) -> NamedTuple
+
+ACI 318-11 §10.5.1 (corpus: aci-318-11, page 144) where analysis requires
+tension steel, and §10.5.3 (page 145): that minimum need not be met when the
+steel provided is at least one-third greater than the steel required by
+analysis. `As_req` is that area in in². A non-positive `As_req` means analysis
+requires no tension steel, so §10.5.1 does not apply.
+"""
+function _min_steel_check(As_in::Float64, As_min::Float64, As_req::Float64)
+    if As_req <= 0
+        return (passed = true, ratio = 0.0, clause = "ACI 318-11 10.5.1")
+    end
+    if As_in + 1e-9 >= As_min
+        return (passed = true, ratio = As_min / max(As_in, 1e-10),
+                clause = "ACI 318-11 10.5.1")
+    end
+    # "at least one-third greater" is (4/3) of the analysis area.
+    floor = (4 / 3) * As_req
+    if isfinite(floor) && As_in + 1e-9 >= floor
+        return (passed = true, ratio = floor / max(As_in, 1e-10),
+                clause = "ACI 318-11 10.5.3")
+    end
+    return (passed = false, ratio = As_min / max(As_in, 1e-10),
+            clause = "ACI 318-11 10.5.1")
+end
+
+"""
 Iterate candidate single-layer top-bar arrangements that satisfy
 ACI 318-11 §10.3.5 (εt ≥ 0.004, page 142) and §10.5.1 (As ≥ As,min, page 144).
 Yields NamedTuples `(bar_size, n_bars, As, φMn, εt, d_top)`.
@@ -319,15 +360,15 @@ function is_feasible(
     # 4. Net tensile strain (ACI 318-11 §10.3.5) — εt ≥ 0.004 for beams
     cache.εt[j] ≥ 0.004 || return false
 
-    # 5. Minimum reinforcement (ACI 318-11 §10.5.1)
+    # 5. Minimum reinforcement (ACI 318-11 §10.5.1, §10.5.3)
     fc_psi = cache.fc_ksi * 1000.0
     fy_psi = cache.fy_ksi * 1000.0
     b_in   = ustrip(u"inch", section.b)
     d_in   = ustrip(u"inch", section.d)
     As_in  = ustrip(u"inch^2", section.As)
-    As_min = max(3.0 * sqrt(fc_psi) * b_in * d_in / fy_psi,
-                 200.0 * b_in * d_in / fy_psi)
-    As_in ≥ As_min || return false
+    As_min = _as_min_aci_1051(b_in, d_in, fc_psi, fy_psi)
+    As_req = _rect_as_required_in2(to_kipft(demand.Mu), section.b, section.d, fc_psi, fy_psi)
+    _min_steel_check(As_in, As_min, As_req).passed || return false
 
     # 6. Torsion section adequacy (§11.5.3.1) — only when Tu > 0
     Tu_val = _get_Tu_kipin(demand)

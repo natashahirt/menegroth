@@ -94,6 +94,9 @@ function size_columns!(
     # Default 0.70 keeps callers that do not pass it byte-identical.
     I_factor::Real = 0.70,
     tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
+    # Group id → `(section, exact)`. Each group keeps that section or a heavier
+    # one (see `_narrow_to_section_floor`). Discrete steel columns only.
+    section_floor = nothing,
 )
     # NOTE: as of this writing `BuildingStructure` has NO `design_parameters` field
     # (see building_types/structure.jl), so `hasproperty(...)` is always false and `dp`
@@ -118,7 +121,11 @@ function size_columns!(
         group_collinear_members!(struc; member_type=:columns)
     end
     
-    result = _size_columns_impl!(struc, effective_opts; resolution, reanalyze, gravity_factor, I_factor)
+    section_floor === nothing || effective_opts isa StructuralSizer.SteelColumnOptions ||
+        throw(ArgumentError("column section_floor applies to steel columns only"))
+    floor_kw = section_floor === nothing ? (;) : (; section_floor)
+    result = _size_columns_impl!(struc, effective_opts; resolution, reanalyze, gravity_factor,
+                                 I_factor, floor_kw...)
     StructuralSizer.emit!(tc, :sizing, "size_columns!", "", :exit)
     return result
 end
@@ -135,6 +142,7 @@ function _size_columns_impl!(
     # steel path (_apply_column_results! is called with material_type=:steel, which never
     # passes I_factor to to_asap_section).
     I_factor::Real = 0.70,
+    section_floor = nothing,
 )
     skel = struc.skeleton
     member_edge_group = :columns
@@ -159,7 +167,19 @@ function _size_columns_impl!(
     Mux = [d.Mux for d in demands]
     Muy = [d.Muy for d in demands]
 
-    result = StructuralSizer.size_columns(Pu, Mux, geometries, opts; Muy=Muy, Pu_t=Pu_t)
+    floor_kw = (;)
+    if section_floor !== nothing && any(gid -> haskey(section_floor, gid), group_ids)
+        opts.sizing_strategy == :discrete && opts.n_max_sections == 0 &&
+            opts.materials === nothing || throw(ArgumentError(
+                "column section_floor needs discrete sizing, one material, and n_max_sections = 0"))
+        cat = isnothing(opts.custom_catalog) ?
+            StructuralSizer.steel_column_catalog(opts.section_type, opts.catalog) :
+            opts.custom_catalog
+        cat, feasible = _narrow_to_section_floor(opts, group_ids, cat, nothing, section_floor)
+        floor_kw = (; catalog = cat, feasible)
+    end
+    result = StructuralSizer.size_columns(Pu, Mux, geometries, opts; Muy=Muy, Pu_t=Pu_t,
+                                          floor_kw...)
     
     # Apply results
     _apply_column_results!(struc, result, group_ids, opts.material, :steel, edge_ids_in_group)

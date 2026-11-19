@@ -506,7 +506,7 @@ end
 """
     design_shear_anchors(section, material, slab, anchor, b_eff, L_beam, Mu;
                          ϕMn_steel, shear_spans=nothing, slip_checked=false,
-                         I_need=nothing, extra_ok=nothing, ϕ=0.9)
+                         I_need=nothing, extra_ok=nothing, ϕ=0.9, fallback=:fewest)
         -> NamedTuple
 
 Smallest stud layout on one side of the maximum moment whose composite
@@ -522,11 +522,18 @@ moment diagram.
 The horizontal shear used in the strength is `min(n Qn, Cf)` (§I3.2d.1,
 Eqs. I3-1a through I3-1c, PDF p. 171). The 16 kip/ft average uses `n Qn`
 without that cap, because the commentary is counting connector capacity.
+
+When no layout passes, `ok` is false and the layout returned is the fewest
+rows the spacing allows (`fallback = :fewest`), or the most rows that still
+meet the ductility harbors (`:most`).
 """
 function design_shear_anchors(section::ISymmSection, material, slab::AbstractSlabOnBeam,
                               anchor::HeadedStudAnchor, b_eff, L_beam, Mu;
                               ϕMn_steel, shear_spans=nothing, slip_checked::Bool=false,
-                              I_need=nothing, extra_ok=nothing, ϕ::Real=0.9)
+                              I_need=nothing, extra_ok=nothing, ϕ::Real=0.9,
+                              fallback::Symbol=:fewest)
+    fallback in (:fewest, :most) || throw(ArgumentError(
+        "fallback must be :fewest or :most, got :$fallback"))
     spans = shear_spans === nothing ?
         (uconvert(u"m", L_beam) / 2, uconvert(u"m", L_beam) / 2) :
         Tuple(uconvert(u"m", L) for L in shear_spans)
@@ -626,7 +633,15 @@ function design_shear_anchors(section::ISymmSection, material, slab::AbstractSla
         return (; lay..., ok=true, reason=:ok)
     end
 
-    probe = n_max >= 1 ? at(min(max(n_max, 1), max(n_min, 1))) : at(0)
+    probe = if n_max < 1
+        at(0)
+    elseif fallback === :most
+        rows = max(n_min, 1):n_max
+        k = isempty(rows) ? nothing : findlast(n -> at(n).ductile, rows)
+        at(k === nothing ? n_max : rows[k])
+    else
+        at(min(n_max, max(n_min, 1)))
+    end
     reason = if !_transverse_studs_fit(section, anchor, slab)
         :transverse
     elseif n_max < max(n_min, 1) && n_max < 1

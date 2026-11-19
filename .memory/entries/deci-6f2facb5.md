@@ -8,12 +8,12 @@ title: 'Fix the three merge-only failures: façade off in the θ fixture, Cb noi
 node_label: three merge-failure fixes
 tags: merge,cladding,cb,flat-plate,column-floor
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-2dcc4614
 created_at: '2026-11-19T18:06:52.185907+00:00'
-updated_at: '2026-11-19T18:06:52.185907+00:00'
+updated_at: '2026-11-19T20:41:12.900700+00:00'
 ---
 Three merge-only failures, confirmed against integration commit abe95f9e.
 

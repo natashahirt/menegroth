@@ -7,12 +7,12 @@ title: row-f-nlp merge verified and fixed; ready to land on main
 node_label: merge ready for main
 tags: merge,row-f-nlp,main,cladding,cb,flat-plate
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-2258f4af
 created_at: '2026-11-19T20:41:12.900700+00:00'
-updated_at: '2026-11-19T20:41:12.900700+00:00'
+updated_at: '2026-11-19T20:52:58.761121+00:00'
 ---
 The three merge-only failures are fixed and verified in the .merge-worktree checkout (branch merge/row-f-nlp, on top of ab165fc3).
 

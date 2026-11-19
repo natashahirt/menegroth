@@ -305,11 +305,18 @@ Base.@kwdef mutable struct DesignParameters
     # the head grows only for punching and hogging. `false`: the piece is
     # sized for Vu ≤ φVc on concrete alone and the head grows for rib shear.
     rib_head_stirrups::Bool = true
-    # ENGINEERING JUDGMENT. Largest soffit step, in length, between rib pieces
-    # that share a node. ACI 318-11 §12.10.6 requires anchorage where a bar is
-    # not parallel to the compression face and gives no length for a step, so
-    # each piece stays prismatic.
-    rib_depth_step::typeof(1.0u"inch") = 6.0u"inch"
+    # Rib stem below the topping for every ribbed concrete story (waffle and
+    # one-way joists). `nothing` lets the depth screen pick each story's stem
+    # from `rib_stems` on carbon (docs/sizing-map/ribbed-floors.md).
+    rib_stem::Union{Nothing, typeof(1.0u"inch")} = nothing
+    # Stems the depth screen tries, shallowest first. `STANDARD_DOME_STEMS`
+    # restricts a story to standard 30 in dome forms.
+    rib_stems::Vector{typeof(1.0u"inch")} =
+        [6.0, 8.0, 10.0, 12.0, 14.0, 16.0, 18.0, 20.0, 24.0] .* u"inch"
+    # ACI 318-11 Table 9.5(b) (corpus: aci-318-11, PDF page 133) limit on the
+    # deflection after nonstructural elements are attached: `:sensitive` is
+    # l/480 (elements likely to be damaged), `:total` is l/240.
+    rib_deflection_limit::Symbol = :sensitive
     # ENGINEERING JUDGMENT. A rib bay whose least centerline width, minus the
     # ribs, is below this joins the nearest solid head.
     min_rib_void::typeof(1.0u"inch") = 12.0u"inch"

@@ -7,12 +7,12 @@ title: 'Building-model head checks: first grid/x1y1 dense waffle result'
 node_label: 'Building-model head checks: first grid/x1y1 dense '
 tags: waffle,solid-head,building-model,result
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-6897c4bc
 created_at: '2026-11-18T17:47:39.361292+00:00'
-updated_at: '2026-11-18T17:47:39.361292+00:00'
+updated_at: '2026-11-19T15:30:49.071850+00:00'
 ---
 Implemented `arrangement_heads_frame.jl`: `resolve_building_heads!` / `check_arrangement_head_on_frame` read column punching (slab members' K u + Q at the joint, girders excluded per ACI 318-11 R13.6.8 p.257), rib one-way shear at own d, and hogging at the face from `struc.asap_model`, enveloped over full + pattern cases; growth re-solves the building. Sign test: `test/analyze/test_slab_joint_demand.jl` (joint equilibrium closes).
 

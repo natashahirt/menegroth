@@ -236,6 +236,11 @@ store `section::Union{AbstractSection, Nothing}` non-parametrically).
 - `solid_head_report`: the resolver's ratios, or `nothing` before it runs.
 - `piece_group_ids`: one member group per grillage rib piece (node to node).
   Empty for a one-way joist level, which still shares `group_id`.
+- `rib_stem`: the story's rib stem below the topping, so every rib on the level
+  is `hf + rib_stem` deep. `nothing` leaves the ribs to the catalog sizer. Set
+  by the member stage for concrete T-beam rib levels
+  (docs/sizing-map/ribbed-floors.md); see [`size_rib_lines!`](@ref).
+- `rib_report`: the rib-line sizer's result per group, or `nothing`.
 """
 @kwdef mutable struct FramingLevel{T}
     slab_idx::Int
@@ -254,6 +259,8 @@ store `section::Union{AbstractSection, Nothing}` non-parametrically).
     solid_heads::Vector{StructuralSizer.ColumnSolidHead} = StructuralSizer.ColumnSolidHead[]
     solid_head_report::Union{Nothing, NamedTuple} = nothing
     piece_group_ids::Vector{UInt64} = UInt64[]
+    rib_stem::Union{Nothing, Unitful.Length} = nothing
+    rib_report::Union{Nothing, NamedTuple} = nothing
 end
 
 """`:tributary` or `:grillage`. Anything else is an error."""

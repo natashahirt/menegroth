@@ -384,4 +384,24 @@ using Asap: kip, ksi
 
 end
 
+@testset "§10.5.3 waives As,min when the bars already exceed the analysis steel" begin
+    # A deep web with two #5 bars is under §10.5.1. A small moment needs far
+    # less than three-quarters of that steel, so §10.5.3 (ACI 318-11 p. 145)
+    # passes the section. A moment that needs more than that does not.
+    sec = RCTBeamSection(bw = 12u"inch", h = 24u"inch", bf = 48u"inch", hf = 5u"inch",
+                         bar_size = 5, n_bars = 2)
+    opts = ConcreteBeamOptions(material = NWC_4000, rebar_material = Rebar_60)
+    geom = ConcreteMemberGeometry(20.0u"ft")
+    light = StructuralSizer.check_tbeam_section(sec, 10.0u"kip*ft", 2.0u"kip", geom, opts;
+                                               Mu_neg = 0.0u"kip*ft")
+    minr = only(c for c in light.checks if c.name == "min_reinforcement")
+    @test minr.passed
+    @test minr.code_clause == "ACI 318-11 10.5.3"
+    heavy = StructuralSizer.check_tbeam_section(sec, 80.0u"kip*ft", 2.0u"kip", geom, opts;
+                                               Mu_neg = 0.0u"kip*ft")
+    minr = only(c for c in heavy.checks if c.name == "min_reinforcement")
+    @test !minr.passed
+    @test minr.code_clause == "ACI 318-11 10.5.1"
+end
+
 println("\n✓ RC T-Beam tests passed")

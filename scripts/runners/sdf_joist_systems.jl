@@ -169,7 +169,9 @@ function design_joist_systems(plans, systems = JOIST_SYSTEMS)
     return csv_path
 end
 
-_systems = haskey(ENV, "JOIST_SYSTEMS") ?
-    [Symbol(strip(s)) for s in split(ENV["JOIST_SYSTEMS"], ",") if !isempty(strip(s))] :
-    JOIST_SYSTEMS
-design_joist_systems(isempty(ARGS) ? JOIST_PLANS : String.(ARGS), _systems)
+if abspath(PROGRAM_FILE) == @__FILE__
+    _systems = haskey(ENV, "JOIST_SYSTEMS") ?
+        [Symbol(strip(s)) for s in split(ENV["JOIST_SYSTEMS"], ",") if !isempty(strip(s))] :
+        JOIST_SYSTEMS
+    design_joist_systems(isempty(ARGS) ? JOIST_PLANS : String.(ARGS), _systems)
+end

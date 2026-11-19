@@ -246,6 +246,21 @@ function _framing_summary(design)
             kind = pat isa ModularRibPattern ? "module" :
                    pat isa LinearAxisPattern ? "joists" : string(typeof(pat))
             push!(lines, "slab $si  $kind  analysis=$(fl.analysis)  spacing=$(pat isa ModularRibPattern || pat isa LinearAxisPattern ? pat.spacing : nothing)")
+            rr = fl.rib_report
+            if rr !== nothing
+                push!(lines, "    rib stem $(rr.stem)  sets=$(rr.n_sets)  failed=$(rr.n_failed)  " *
+                             "carbon=$(round(ustrip(rr.carbon); digits = 0)) kgCO2e" *
+                             (isempty(rr.reasons) ? "" : "  reasons=$(rr.reasons)"))
+                d = rr.deflection
+                d === nothing || push!(lines,
+                    "    deflection ok=$(d.ok)  live=$(round(d.live.ratio; digits = 2))  " *
+                    "long-term($(d.limit))=$(round(d.long_term.ratio; digits = 2))  " *
+                    "l=$(round(d.long_term.l; digits = 2)) m  bays=$(d.n_bays)  converged=$(d.converged)")
+                rr.screen === nothing || for t in rr.screen
+                    push!(lines, "      stem $(t.stem)  strength=$(t.strength)  " *
+                                 "carbon=$(round(ustrip(t.carbon); digits = 0))  deflection=$(t.deflection)")
+                end
+            end
             isempty(fl.solid_heads) && continue
             bays = [length(h.bays) for h in fl.solid_heads]
             rep = fl.solid_head_report

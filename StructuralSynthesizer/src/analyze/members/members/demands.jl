@@ -391,7 +391,7 @@ function _relative_service_deflection(struc::BuildingStructure, idxs;
         profT[i] = pL .+ pS
     end
 
-    lines = _frame_lines(struc)
+    lines = _constant_level_lines(struc, _frame_lines(struc))
     skel = struc.skeleton
     fixed = beam_support_lookup(struc).fixed
     at = Dict{Int, Vector{Int}}()

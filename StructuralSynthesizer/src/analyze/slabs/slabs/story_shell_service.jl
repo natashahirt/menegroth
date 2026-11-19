@@ -274,7 +274,7 @@ Reinforced concrete does not use this table.
 """
 function _shell_line_lookup(struc::BuildingStructure)
     assign_framing_levels!(struc)
-    lines = _frame_lines(struc)
+    lines = _constant_level_lines(struc, _frame_lines(struc))
     fixed = beam_support_lookup(struc).fixed
     at = Dict{Int, Vector{Int}}()
     level_of = Int[]

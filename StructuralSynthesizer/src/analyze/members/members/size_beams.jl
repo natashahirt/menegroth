@@ -101,6 +101,9 @@ function size_beams!(
     # credit. The head-face pass uses it. The ordinary pass leaves it true:
     # ACI 318-11 §11.1.1 permits Vc + Vs.
     stirrup_shear::Bool = true,
+    # ENGINEERING JUDGMENT (`DesignParameters.rib_head_stirrups`): whether a
+    # story-depth rib piece that frames into a solid head is credited stirrups.
+    rib_head_stirrups::Bool = true,
 )
     dp = (hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters)) ?
          struc.design_parameters : nothing
@@ -141,6 +144,21 @@ function size_beams!(
         effective_opts.sizing_strategy
     else
         :discrete
+    end
+
+    # Rib groups with a story depth go to the rib-line sizer, before the
+    # girders they load. Every other group stays with the catalog sizer.
+    owned = story_rib_groups(struc)
+    rib_ids = sort!(UInt64[g for g in keys(owned)
+                           if group_filter === nothing || group_filter(g)])
+    if !isempty(owned) && group_filter !== nothing
+        inner = group_filter
+        group_filter = gid -> !haskey(owned, gid) && inner(gid)
+    end
+    if !isempty(rib_ids)
+        size_rib_lines!(struc, rib_ids; fallback = effective_opts, resolution,
+                        gravity_factor, I_factor, stirrup_shear, rib_head_stirrups)
+        _reanalyze_after_section_change!(struc)
     end
 
     if group_filter === nothing
@@ -190,6 +208,8 @@ function size_beams!(
             _verify_tbeam_flanges(struc, nothing)
             return struc
         end
+        # One pass left: it must still skip the story-owned ribs.
+        isempty(owned) || (group_filter = only(passes).accept)
     end
 
     result = _size_beams_one!(struc, effective_opts, strategy;
@@ -359,9 +379,11 @@ function _beam_sizing_passes(struc::BuildingStructure, default_opts)
     for slab in struc.slabs
         for fl in slab.framing_levels
             fl.group_id === nothing && continue
+            # A level with a story rib depth is sized by `size_rib_lines!`.
             push!(levels, (level = fl.level, slab_idx = fl.slab_idx,
                            group_ids = level_group_ids(fl),
-                           sizing_ids = level_sizing_group_ids(fl),
+                           sizing_ids = fl.rib_stem === nothing ?
+                                        level_sizing_group_ids(fl) : UInt64[],
                            beam_options = fl.beam_options))
         end
     end
@@ -389,7 +411,8 @@ function _beam_sizing_passes(struc::BuildingStructure, default_opts)
         accept = let g = groups
             gid -> gid in g
         end
-        push!(passes, _BeamSizingPass(opts, accept, own))
+        # A level whose ribs are all story-owned has nothing for the catalog.
+        isempty(groups) || push!(passes, _BeamSizingPass(opts, accept, own))
     end
     # Groups no level claimed, including an override gid that matches nothing.
     rest = let c = claimed
@@ -494,6 +517,8 @@ function _size_beams_impl!(
     prior_section_keys = nothing,
     composite_lock::Bool = false,
     composite_solved_search::Bool = false,
+    # Searches already run after a rejected confirmation; see `_composite_ratchet_floors`.
+    composite_ratchet::Int = 0,
     shell_demands = nothing,
     shell_spans = nothing,
     section_floor = nothing,
@@ -793,7 +818,8 @@ function _size_beams_impl!(
     # invokelatest: this closure calls the function that created it. A direct
     # call makes inference of this pass include itself until subtype checking
     # does not finish.
-    again = function (; pass, keys, lock = false, solved_search = false)
+    again = function (; pass, keys, lock = false, solved_search = false,
+                      floor = section_floor, ratchet = composite_ratchet)
         Base.invokelatest(_size_beams_impl!, struc, opts, Val(:discrete);
                           resolution, reanalyze, gravity_factor,
                           member_group_overrides, I_factor,
@@ -804,8 +830,25 @@ function _size_beams_impl!(
                           composite_pass = pass, prior_section_keys = keys,
                           composite_lock = lock,
                           composite_solved_search = solved_search,
+                          composite_ratchet = ratchet,
                           shell_demands, shell_spans,
-                          section_floor, group_filter)
+                          section_floor = floor, group_filter)
+    end
+    # A reselected section is confirmed on its own solved model. A stiffer
+    # section draws more moment, so it can still miss. Then every group keeps
+    # at least its current section and the catalog is searched again on the
+    # solved deflection. The rejected group has to move up, so this ends.
+    confirm = function (keys)
+        try
+            return again(; pass = 3, keys = keys, lock = true)
+        catch e
+            _composite_lock_rejected(e) || rethrow()
+            floors = _composite_ratchet_floors(struc, opts, group_ids, section_floor,
+                                               composite_ratchet)
+            floors === nothing && rethrow()
+            return again(; pass = 2, keys = keys, lock = false, solved_search = true,
+                         floor = floors, ratchet = composite_ratchet + 1)
+        end
     end
 
     shored_now = composite_shored === nothing ? opts.composite_shored : composite_shored
@@ -853,18 +896,17 @@ function _size_beams_impl!(
                                           resolution = resolution,
                                           service = service_needs)
             _note_composite_section_pass!(struc, 2, result.sections)
-            # Pass 3 is locked by `composite_pass > 2`. One confirmation.
-            return again(; pass = 3, keys = keys_now, lock = true)
+            # Pass 3 is locked by `composite_pass > 2`.
+            return confirm(keys_now)
         elseif changed
             # The confirmation failed and the catalog chose another section.
-            # Solve that section, then check it alone. A failed check is not
-            # kept: the pass-1 section already failed its own confirmation.
+            # Solve that section, then check it alone.
             _reanalyze_changed_composite!(struc, result, group_ids, composite_kw,
                                           opts.material, shored_now;
                                           resolution = resolution,
                                           service = service_needs)
             _note_composite_section_pass!(struc, 2, result.sections)
-            return again(; pass = 3, keys = keys_now, lock = true)
+            return confirm(keys_now)
         else
             # Same steel section. The scaling search asked for a heavier stud
             # layout. Those studs are the design: install them and confirm on
@@ -1140,6 +1182,33 @@ end
 
 _composite_lock_rejected(::Any) = false
 _composite_lock_rejected(e::ArgumentError) = occursin("No feasible sections", e.msg)
+
+"""Searches allowed after rejected composite confirmations before the rejection is final."""
+const COMPOSITE_RATCHET_MAX = 6
+
+"""
+    _composite_ratchet_floors(struc, opts, group_ids, section_floor, ratchet) -> Dict or nothing
+
+Floors for the search after a rejected confirmation. Each group keeps its
+installed section or a heavier one. An exact caller floor is kept as given.
+`nothing` when no search is left: the limit is reached, or the options
+cannot take a floor (a shared-section cap or a multi-material catalog).
+"""
+function _composite_ratchet_floors(struc, opts, group_ids, section_floor, ratchet::Int)
+    ratchet < COMPOSITE_RATCHET_MAX || return nothing
+    (opts.n_max_sections == 0 && opts.materials === nothing) || return nothing
+    floors = section_floor === nothing ? Dict{Any, Any}() : Dict{Any, Any}(section_floor)
+    for gid in group_ids
+        fl = get(floors, gid, nothing)
+        fl !== nothing && fl.exact && continue
+        mg = struc.member_groups[gid]
+        isempty(mg.member_indices) && continue
+        sec = section(struc.beams[first(mg.member_indices)])
+        sec === nothing && continue
+        floors[gid] = (section = sec, exact = false)
+    end
+    return floors
+end
 
 # [P2 section-identity, fix cycle 4] Structural (value-level) equality of two catalog
 # section FIELDS. `_beam_sec_key` keys identity on `(typename, name)` only, so two

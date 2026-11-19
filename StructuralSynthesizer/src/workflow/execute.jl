@@ -45,6 +45,7 @@ function capture_design(struc::BuildingStructure, params::DesignParameters;
     _populate_beam_results!(design, owned_struc)
     _populate_foundation_results!(design, owned_struc)
     _capture_ordinary_walls!(design, owned_struc)
+    _add_placed_slab_rebar!(design)
     _compute_design_summary!(design, owned_struc, owned_params)
 
     # Capture structural offsets before restore! wipes them.

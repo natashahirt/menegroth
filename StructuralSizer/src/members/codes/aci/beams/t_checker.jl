@@ -188,14 +188,19 @@ function is_feasible(
     # 4. Net tensile strain (ACI 318-11 §10.3.5) — εt ≥ 0.004 for beams
     cache.εt[j] ≥ 0.004 || return false
 
-    # 5. Minimum reinforcement (ACI 318-11 §10.5.1) — uses bw for T-beams
+    # 5. Minimum reinforcement. §10.5.1 uses bw. §10.5.3 waives it when the
+    #    steel is at least one-third over the analysis area. The piece is
+    #    prismatic, so the envelope moment is the largest area required.
     fc_psi = cache.fc_ksi * 1000.0
     fy_psi = cache.fy_ksi * 1000.0
     bw_in  = ustrip(u"inch", section.bw)
     d_in   = ustrip(u"inch", section.d)
     As_in  = ustrip(u"inch^2", section.As)
     As_min = _as_min_aci_1051(bw_in, d_in, fc_psi, fy_psi)
-    As_in ≥ As_min || return false
+    As_req = ustrip(u"inch^2", tbeam_as_required(
+        to_kipft(demand.Mu) * kip * u"ft", section.bw, section.d, section.bf, section.hf,
+        fc_psi * u"psi", fy_psi * u"psi"))
+    _min_steel_check(As_in, As_min, float(As_req)).passed || return false
 
     # 6. Deflection check (ACI §24.2) — only when service loads are provided
     if checker.w_dead_kplf > 0
@@ -393,8 +398,12 @@ function explain_feasibility(
     d_in = ustrip(u"inch", section.d)
     As_in = ustrip(u"inch^2", section.As)
     As_min = _as_min_aci_1051(bw_in, d_in, fc_psi, fy_psi)
-    push!(checks, CheckResult("min_reinforcement", As_in >= As_min,
-          As_min / max(As_in, 1e-10), As_min, As_in, "ACI 318-11 10.5.1"))
+    As_req = ustrip(u"inch^2", tbeam_as_required(
+        Mu * kip * u"ft", section.bw, section.d, section.bf, section.hf,
+        fc_psi * u"psi", fy_psi * u"psi"))
+    steel = _min_steel_check(As_in, As_min, float(As_req))
+    push!(checks, CheckResult("min_reinforcement", steel.passed,
+          steel.ratio, As_min, As_in, steel.clause))
 
     _push_shell_deflection_check!(checks, checker, demand.member_idx, section)
 

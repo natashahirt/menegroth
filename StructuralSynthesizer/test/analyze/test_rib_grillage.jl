@@ -335,6 +335,40 @@ end
     @test ustrip(u"m", SY._sized_rib_depth(struc, level)) ≈ 0.40
 end
 
+@testset "a web too narrow for the shared bars is widened" begin
+    struc, _ = _grillage_bay()
+    initialize_segments!(struc)
+    initialize_members!(struc)
+    slab = only(struc.slabs)
+    concrete = StructuralSizer.NWC_4000
+    level = SY.FramingLevel{Float64}(slab_idx = 1, level = 1,
+                                     pattern = IsoparametricPattern(2, 2),
+                                     material = concrete, analysis = :grillage)
+    push!(slab.framing_levels, level)
+    joists = SY.materialize_level!(struc, slab, level)
+    along = [b for b in joists if begin
+        a, c = SY._beam_terminals(struc, b)
+        pa, pc = SY._vertex_xy_m(struc.skeleton, a), SY._vertex_xy_m(struc.skeleton, c)
+        pa[2] == 2.0 && pc[2] == 2.0
+    end]
+    # Four #5s need two #8s, and a 5.5 in web holds one #8.
+    narrow = StructuralSizer.RCTBeamSection(bw = 5.5u"inch", h = 0.30u"m", bf = 0.60u"m",
+                                            hf = 0.10u"m", bar_size = 5, n_bars = 4)
+    heavy = StructuralSizer.RCTBeamSection(bw = 0.25u"m", h = 0.40u"m", bf = 0.80u"m",
+                                           hf = 0.10u"m", bar_size = 8, n_bars = 3)
+    SY.set_section!(along[1], narrow)
+    SY.set_section!(along[2], heavy)
+    As_narrow = ustrip(u"inch^2", narrow.As)
+    opts = StructuralSizer.ConcreteBeamOptions(material = concrete, include_flange = true)
+    rib_spec = SY._GroupFlange(0.10u"m", SY._MemberFlange[], 1.0u"m")
+    SY._share_collinear_rib_bars!(struc, [SY.group_id(b) for b in along],
+                                 [rib_spec, rib_spec], opts)
+    grown = SY.section(along[1])
+    @test grown.bar_size == 8
+    @test ustrip(u"inch", grown.bw) > 5.5
+    @test ustrip(u"inch^2", grown.As) + 1e-9 >= As_narrow
+end
+
 @testset "a shared-bar rib section is checked before it is installed" begin
     struc, _ = _grillage_bay()
     initialize_segments!(struc)

@@ -218,3 +218,24 @@ end
                                 ((0.0, 0.0), (8.0, 0.0), (8.0, 6.0), (0.0, 6.0))]
     _check_rectangle(turned; span_axis = _span_of(turned))
 end
+
+@testset "a strip side over several members keeps its whole area" begin
+    trap(ps, ws) = sum(0.5 * (ws[i] + ws[i + 1]) * (ps[i + 1] - ps[i]) for i in 1:length(ps) - 1)
+    # A triangle's depth profile, rising to a peak at 0.4 and back to zero.
+    ps = [0.0, 0.4, 1.0]
+    ws = [0.0, 2.0, 0.0]
+    whole = trap(ps, ws)
+    cuts = [0.0, 0.25, 0.4, 0.7, 1.0]
+    parts = 0.0
+    for k in 1:length(cuts) - 1
+        cps, cws = SS._clip_depth_profile(ps, ws, cuts[k], cuts[k + 1])
+        @test first(cps) == cuts[k] && last(cps) == cuts[k + 1]
+        parts += trap(cps, cws)
+    end
+    @test parts ≈ whole rtol = 1e-12
+    # Outside the profile there is no depth.
+    cps, cws = SS._clip_depth_profile([0.2, 0.6], [1.0, 1.0], 0.0, 1.0)
+    @test (first(cps), last(cps)) == (0.2, 0.6)
+    @test trap(cps, cws) ≈ 0.4 rtol = 1e-12
+    @test isempty(first(SS._clip_depth_profile([0.2, 0.6], [1.0, 1.0], 0.7, 1.0)))
+end

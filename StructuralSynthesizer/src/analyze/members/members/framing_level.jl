@@ -1,13 +1,16 @@
 # Framing level from the beam layout.
 #
-# A line of collinear beams that reaches a column, a wall, or a `:support`
-# vertex in two places carries itself. A line that lands on other beams is
-# one level above the highest beam at either end. `Beam.level` is that rank:
-# a lower level supports a higher one where they meet. Two lines of the same
-# level support neither one.
+# A line with two columns, walls, or `:support` vertices is level 0 and stays
+# one piece. Any other line is cut where a beam that already has a level
+# crosses it. When two unranked spans cross and both already reach a support
+# at each end, the shorter one is ranked and the longer one is cut. Equal
+# lengths support neither. A piece's level is one above the higher beam it
+# stops on. A free tip does not raise the level.
 #
 # ENGINEERING JUDGMENT. No code states which of two crossing beams supports
-# the other. The rule above is the one the deflection check uses.
+# the other. This is the rule the deflection check uses. It is the one read
+# off the hand-drawn 2024 strokes: the stroke that runs through a joint is
+# the longer one, and the strokes that stop there are carried by it.
 
 """Beam indices materialized by a framing level, as opposed to the skeleton."""
 function _generated_framing_beams(struc::BuildingStructure)
@@ -173,54 +176,169 @@ function _order_line_vertices(beams::Vector{Int}, chains::Dict{Int, Vector{Int}}
     return verts
 end
 
-"""
-    assign_framing_levels!(struc) -> struc
+"""One straight piece after a longer span has been cut at a shorter one."""
+struct _SpanPiece
+    beams::Vector{Int}
+    verts::Vector{Int}
+end
 
-Write `Beam.level` from [`_frame_lines`](@ref).
+"""Where `piece`'s beams sit on its vertices: `(beam, first index, last index)`."""
+function _piece_beam_spans(struc::BuildingStructure, piece::_SpanPiece)
+    pos = Dict{Int, Int}()
+    for (k, v) in enumerate(piece.verts)
+        get!(pos, v, k)
+    end
+    spans = Tuple{Int, Int, Int}[]
+    for bi in piece.beams
+        chain = _beam_vertex_chain(struc, struc.beams[bi])
+        chain === nothing && continue
+        ks = Int[pos[v] for v in chain if haskey(pos, v)]
+        isempty(ks) && continue
+        push!(spans, (bi, minimum(ks), maximum(ks)))
+    end
+    sort!(spans; by = s -> s[2])
+    return spans
+end
 
-A line with two or more column, wall, or `:support` vertices is level 0.
-Any other line, once both of its ends are known, is one level above the
-higher of those ends. An end on a column or a free tip counts as ground.
-Lines that close a loop on each other share the highest level already
-assigned, so neither supports the other.
+"""Plan length (m) of `verts`."""
+function _chain_length(skel, verts::Vector{Int})
+    cum, _ = _line_stations(skel, verts)
+    return cum[end]
+end
+
 """
-function assign_framing_levels!(struc::BuildingStructure)
-    lines = _frame_lines(struc)
-    isempty(lines) && return struc
-    fixed = beam_support_lookup(struc).fixed
-    at = Dict{Int, Vector{Int}}()
-    for (i, ln) in enumerate(lines)
-        for v in ln.verts
-            push!(get!(at, v, Int[]), i)
+Pieces of `piece` on either side of `cuts`.
+
+A cut that falls in the middle of one beam is dropped. A member has one level,
+and the skeleton is what splits a beam at a joint.
+"""
+function _split_piece(struc::BuildingStructure, piece::_SpanPiece, cuts)
+    spans = _piece_beam_spans(struc, piece)
+    keep = Int[k for k in cuts if !any(s -> s[2] < k < s[3], spans)]
+    isempty(keep) && return _SpanPiece[piece]
+    sort!(keep)
+    bounds = [1; keep; length(piece.verts)]
+    out = _SpanPiece[]
+    for i in 1:(length(bounds) - 1)
+        a, b = bounds[i], bounds[i + 1]
+        a < b || continue
+        beams = Int[s[1] for s in spans if a <= s[2] && s[3] <= b]
+        isempty(beams) && continue
+        push!(out, _SpanPiece(beams, piece.verts[a:b]))
+    end
+    return isempty(out) ? _SpanPiece[piece] : out
+end
+
+"""
+Cut longer spans where a shorter span that already reaches supports crosses them.
+
+`placed` marks pieces that have been accepted and now cut whatever crosses
+them. The numbers those pieces eventually carry are assigned afterwards.
+"""
+function _cut_shorter_spans!(struc::BuildingStructure, pieces::Vector{_SpanPiece},
+                             placed::Vector{Bool}, fixed)
+    skel = struc.skeleton
+    n0 = length(pieces)
+    for _ in 1:(4 * n0 + 8)
+        at = Dict{Int, Vector{Int}}()
+        for (i, p) in enumerate(pieces)
+            for v in p.verts
+                push!(get!(at, v, Int[]), i)
+            end
+        end
+        cut_any = false
+        nxt_p = _SpanPiece[]
+        nxt_f = Bool[]
+        for (i, p) in enumerate(pieces)
+            cuts = Int[]
+            if !placed[i]
+                for k in 2:(length(p.verts) - 1)
+                    any(j -> j != i && placed[j], get(at, p.verts[k], Int[])) || continue
+                    push!(cuts, k)
+                end
+            end
+            parts = isempty(cuts) ? _SpanPiece[p] : _split_piece(struc, p, cuts)
+            length(parts) == 1 || (cut_any = true)
+            for part in parts
+                push!(nxt_p, part)
+                push!(nxt_f, length(parts) == 1 && placed[i])
+            end
+        end
+        if cut_any
+            pieces, placed = nxt_p, nxt_f
+            continue
+        end
+        supported(v, i) = v in fixed ||
+            let others = [j for j in get(at, v, Int[]) if j != i]
+                isempty(others) || any(j -> placed[j], others)
+            end
+        ready = Int[i for (i, p) in enumerate(pieces)
+                    if !placed[i] && supported(p.verts[1], i) && supported(p.verts[end], i)]
+        isempty(ready) && break
+        lengths = Dict(i => _chain_length(skel, pieces[i].verts) for i in ready)
+        blocked = Set{Int}()
+        for i in ready
+            p = pieces[i]
+            for k in 2:(length(p.verts) - 1)
+                for j in get(at, p.verts[k], Int[])
+                    j in keys(lengths) || continue
+                    lengths[j] < lengths[i] - 1e-4 || continue
+                    push!(blocked, i)
+                end
+            end
+        end
+        commit = isempty(setdiff(ready, blocked)) ? ready : [i for i in ready if i ∉ blocked]
+        for i in commit
+            placed[i] = true
         end
     end
-    rank = Vector{Union{Nothing, Int}}(nothing, length(lines))
-    for i in eachindex(lines)
-        count(v -> v in fixed, lines[i].verts) >= 2 && (rank[i] = 0)
+    return pieces, placed
+end
+
+"""
+Level of each piece from the beams that run through its ends.
+
+An end on a column, a wall, a `:support`, or a free tip is ground (`-1`).
+Where several pieces meet, the one that runs through the joint carries the
+ones that stop. Pieces that only hold each other up share the highest level
+already assigned.
+"""
+function _wave_levels(pieces::Vector{_SpanPiece}, fixed)
+    at = Dict{Int, Vector{Tuple{Int, Int, Int}}}()
+    for (i, p) in enumerate(pieces)
+        n = length(p.verts)
+        for (k, v) in enumerate(p.verts)
+            push!(get!(at, v, Tuple{Int, Int, Int}[]), (i, k, n))
+        end
     end
-    moved = true
-    while moved
+    rank = Vector{Union{Nothing, Int}}(nothing, length(pieces))
+    for i in eachindex(pieces)
+        count(v -> v in fixed, pieces[i].verts) >= 2 && (rank[i] = 0)
+    end
+    for _ in 1:(length(pieces) + 2)
         moved = false
-        for i in eachindex(lines)
+        for i in eachindex(pieces)
             rank[i] === nothing || continue
             deps = Int[]
             known = true
-            for v in (lines[i].verts[1], lines[i].verts[end])
+            for v in (pieces[i].verts[1], pieces[i].verts[end])
                 if v in fixed
                     push!(deps, -1)
                     continue
                 end
-                others = [j for j in get(at, v, Int[]) if j != i]
+                others = [h for h in get(at, v, Tuple{Int, Int, Int}[]) if h[1] != i]
                 if isempty(others)
                     push!(deps, -1)
                     continue
                 end
-                for j in others
-                    if rank[j] === nothing
+                through = [h for h in others if 1 < h[2] < h[3]]
+                pool = isempty(through) ? others : through
+                for h in pool
+                    if rank[h[1]] === nothing
                         known = false
                         break
                     end
-                    push!(deps, rank[j])
+                    push!(deps, rank[h[1]])
                 end
                 known || break
             end
@@ -228,16 +346,73 @@ function assign_framing_levels!(struc::BuildingStructure)
             rank[i] = max(0, 1 + maximum(deps))
             moved = true
         end
+        moved || break
     end
     top = maximum(something(r, -1) for r in rank)
     fallback = top < 0 ? 0 : top
-    for (i, ln) in enumerate(lines)
-        lv = something(rank[i], fallback)
-        for bi in ln.beams
-            struc.beams[bi].level = lv
+    return [something(r, fallback) for r in rank]
+end
+
+"""
+    assign_framing_levels!(struc) -> struc
+
+Write `Beam.level` for every straight beam.
+
+A line with two or more column, wall, or `:support` vertices is level 0.
+A longer line is cut where a shorter line, already reaching a support at
+both ends, crosses it. Each piece is then one level above the higher beam
+at either end. Pieces that close a loop on each other share the highest
+level already assigned, so neither supports the other.
+"""
+function assign_framing_levels!(struc::BuildingStructure)
+    lines = _frame_lines(struc)
+    isempty(lines) && return struc
+    fixed = beam_support_lookup(struc).fixed
+    pieces = [_SpanPiece(ln.beams, ln.verts) for ln in lines]
+    placed = [count(v -> v in fixed, p.verts) >= 2 for p in pieces]
+    pieces, _ = _cut_shorter_spans!(struc, pieces, placed, fixed)
+    rank = _wave_levels(pieces, fixed)
+    for (i, p) in enumerate(pieces)
+        for bi in p.beams
+            struc.beams[bi].level = rank[i]
         end
     end
     return struc
+end
+
+"""
+Runs of one framing level along each straight line.
+
+Beams of the same level stay one run, so a shorter beam that crosses the
+middle is a support of that run. A change of level starts a new run. Each
+beam keeps the level [`assign_framing_levels!`](@ref) wrote.
+"""
+function _constant_level_lines(struc::BuildingStructure, lines::Vector{_FrameLine})
+    out = _FrameLine[]
+    for ln in lines
+        spans = _piece_beam_spans(struc, _SpanPiece(ln.beams, ln.verts))
+        isempty(spans) && continue
+        acc = Int[spans[1][1]]
+        k0, k1 = spans[1][2], spans[1][3]
+        lv = struc.beams[spans[1][1]].level
+        function _push()
+            push!(out, _FrameLine(copy(acc), ln.verts[k0:k1]))
+        end
+        for s in @view spans[2:end]
+            blv = struc.beams[s[1]].level
+            if blv == lv && s[2] <= k1 + 1
+                push!(acc, s[1])
+                k1 = max(k1, s[3])
+            else
+                _push()
+                empty!(acc)
+                push!(acc, s[1])
+                k0, k1, lv = s[2], s[3], blv
+            end
+        end
+        _push()
+    end
+    return out
 end
 
 """Station (m) of each vertex along `verts`, and the polyline coordinates."""

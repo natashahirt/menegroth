@@ -182,6 +182,57 @@ function _spec_has_edge(spec)
     return any(mf -> mf.one_side === true, spec.members)
 end
 
+"""Flange at web `bw`. A spec with no member flanges keeps `fallback`."""
+function _flange_at_web(struc, spec, bw, hf, opts, batch, fallback)
+    isempty(spec.members) && return fallback
+    return _raised_flange_width(struc, spec, bw, hf, opts, batch)
+end
+
+"""
+Section of `proto`'s geometry with `bar_size`, widened until those bars fit.
+
+The count is the one from [`_rib_bottom_count`](@ref) and [`_rib_top_count`](@ref):
+capacity, `As`, tension control, and §10.5.1 are kept. Widening stops at the
+rib web cap and at a flange narrower than the web. `nothing` when no width
+in that range works.
+"""
+function _rib_shared_section(struc, old, proto, spec, opts, batch, bar_size, fc_psi, fy_psi)
+    function placed(p)
+        n_bot = _rib_bottom_count(p, old, bar_size, fc_psi, fy_psi)
+        n_top = n_bot === nothing ? nothing : _rib_top_count(p, old, bar_size)
+        return n_bot, n_top
+    end
+    function build(p, n_bot, n_top)
+        return StructuralSizer.RCTBeamSection(;
+            bw = p.bw, h = p.h, bf = p.bf, hf = p.hf,
+            bar_size = bar_size, n_bars = n_bot,
+            cover = p.cover, stirrup_size = p.stirrup_size,
+            bar_size_prime = n_top > 0 ? bar_size : 0,
+            n_bars_prime = n_top)
+    end
+    n_bot, n_top = placed(proto)
+    n_bot !== nothing && n_top !== nothing && return build(proto, n_bot, n_top)
+    cap = _rib_web_max(opts, spec.joist_spacing)
+    bw = proto.bw
+    while true
+        nxt = bw + 1.0u"inch"
+        ustrip(u"m", nxt) <= ustrip(u"m", cap) + 1e-9 || break
+        bf = _flange_at_web(struc, spec, nxt, proto.hf, opts, batch, proto.bf)
+        ustrip(u"m", bf) + 1e-9 >= ustrip(u"m", nxt) || break
+        trial = StructuralSizer.RCTBeamSection(;
+            bw = nxt, h = proto.h, bf = bf, hf = proto.hf,
+            bar_size = old.bar_size, n_bars = old.n_bars,
+            cover = old.cover, stirrup_size = old.stirrup_size,
+            bar_size_prime = old.n_bars_prime > 0 ? old.bar_size_prime : 0,
+            n_bars_prime = old.n_bars_prime)
+        n_bot, n_top = placed(trial)
+        bw = nxt
+        proto = trial
+        n_bot !== nothing && n_top !== nothing && return build(proto, n_bot, n_top)
+    end
+    return nothing
+end
+
 """True when piece `mi` is the edge T-beam in `spec`."""
 function _piece_one_side(spec, mi::Int)
     for mf in spec.members
@@ -198,8 +249,9 @@ Give every rib piece on a collinear line one bar size.
 Each piece keeps the fewest bars of that size that preserve its sagging
 capacity and its top-steel area. When `uniform` is set, every rib in the pass
 is first raised to the largest web and the largest depth, and the flange is
-recomputed at that web. A piece whose bars then cannot satisfy the checks
-above keeps the section the sizer gave it.
+recomputed at that web. A piece whose shared bars do not fit is widened an
+inch at a time, up to the rib web cap and its flange. A piece that still
+cannot satisfy the checks keeps the section the sizer gave it.
 
 `recheck(mi, sec)` returns the sizer's `FeasibilityExplanation` for the new
 section of piece `mi` against that piece's demand. A piece whose new section
@@ -266,23 +318,18 @@ function _share_collinear_rib_bars!(struc, group_ids, specs, opts;
         proto = _rib_proto(struc, mi, old, spec_of[mi], opts, batch,
                            get(line_bw, mi, bw_max), get(line_h, mi, h_max))
         bar_size = bar_of[mi]
-        n_bot = _rib_bottom_count(proto, old, bar_size, fc_psi, fy_psi)
-        n_top = n_bot === nothing ? nothing : _rib_top_count(proto, old, bar_size)
-        if n_bot === nothing || n_top === nothing
+        sec = _rib_shared_section(struc, old, proto, spec_of[mi], opts, batch,
+                                  bar_size, fc_psi, fy_psi)
+        if sec === nothing
             @warn "Rib piece $mi keeps the section from sizing: the shared bars " *
                   "do not fit this web without losing capacity." maxlog = 4
             continue
         end
-        unchanged = proto.bw == old.bw && proto.h == old.h && proto.bf == old.bf &&
-            proto.hf == old.hf && old.bar_size == bar_size && old.n_bars == n_bot &&
-            old.n_bars_prime == n_top && (n_top == 0 || old.bar_size_prime == bar_size)
+        unchanged = sec.bw == old.bw && sec.h == old.h && sec.bf == old.bf &&
+            sec.hf == old.hf && old.bar_size == sec.bar_size && old.n_bars == sec.n_bars &&
+            old.n_bars_prime == sec.n_bars_prime &&
+            (sec.n_bars_prime == 0 || old.bar_size_prime == sec.bar_size_prime)
         unchanged && continue
-        sec = StructuralSizer.RCTBeamSection(;
-            bw = proto.bw, h = proto.h, bf = proto.bf, hf = proto.hf,
-            bar_size = bar_size, n_bars = n_bot,
-            cover = old.cover, stirrup_size = old.stirrup_size,
-            bar_size_prime = n_top > 0 ? bar_size : 0,
-            n_bars_prime = n_top)
         expl = recheck === nothing ? nothing : recheck(mi, sec)
         if expl !== nothing && !expl.passed
             @warn "Rib piece $mi keeps the section from sizing: the shared-bar " *

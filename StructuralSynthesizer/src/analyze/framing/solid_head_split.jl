@@ -759,7 +759,7 @@ function grow_building_solid_heads!(struc, params; fallback = params.beams)
         size_pieces = opts === nothing ? nothing : ids -> size_beams!(struc, opts;
             reanalyze = false, I_factor = params.beam_I_factor,
             gravity_factor = member_self_weight_acceleration(params),
-            stirrup_shear = params.rib_head_stirrups, group_filter = g -> g in ids)
+            rib_head_stirrups = params.rib_head_stirrups, group_filter = g -> g in ids)
         resolved = resolve_building_heads!(struc, slab, level, arr, owners, start, params;
             concrete = concrete, d_head = d_head,
             fy = _beam_materials(params)[2].Fy, topping = topping,

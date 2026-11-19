@@ -147,6 +147,40 @@ _fl_simple(w, L, E, I) = 5 * w * L^4 / (384 * E * I)
         @test all(b -> b.level == 0, struc.beams)
     end
 
+    @testset "the shorter span stays continuous and cuts the longer one" begin
+        # 12 m by 10 m. The vertical across the short direction is one line.
+        # The horizontal is longer, so it is cut where the vertical crosses.
+        skel = BuildingSkeleton{Float64}()
+        z = 3.0
+        V(x, y) = add_vertex!(skel, [x, y, z])
+        A, B, C = V(0, 0), V(6, 0), V(12, 0)
+        D, E, F = V(0, 5), V(6, 5), V(12, 5)
+        G, H, I = V(0, 10), V(6, 10), V(12, 10)
+        for v in (A, C, G, I)
+            push!(get!(skel.groups_vertices, :support, Int[]), v)
+        end
+        struc = BuildingStructure(skel)
+        names = Dict{Symbol, Int}()
+        function add(name, a, b)
+            bi, _ = _fl_add!(struc, a, b)
+            names[name] = bi
+        end
+        add(:bot1, A, B); add(:bot2, B, C)
+        add(:top1, G, H); add(:top2, H, I)
+        add(:left1, A, D); add(:left2, D, G)
+        add(:right1, C, F); add(:right2, F, I)
+        add(:short1, B, E); add(:short2, E, H)
+        add(:long1, D, E); add(:long2, E, F)
+        SS.assign_framing_levels!(struc)
+        for name in (:bot1, :bot2, :top1, :top2, :left1, :left2, :right1, :right2)
+            @test struc.beams[names[name]].level == 0
+        end
+        @test struc.beams[names[:short1]].level == 1
+        @test struc.beams[names[:short2]].level == 1
+        @test struc.beams[names[:long1]].level == 2
+        @test struc.beams[names[:long2]].level == 2
+    end
+
     @testset "a joist reports its own sag, not the girder's" begin
         struc, sec, ix = _fl_joist_on_girder()
         E = ustrip(u"Pa", sec.E)

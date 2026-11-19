@@ -1364,26 +1364,64 @@ _beam_xy(el::Asap.FrameElement) = (
     (ustrip(u"m", el.nodeStart.position[1]), ustrip(u"m", el.nodeStart.position[2])),
     (ustrip(u"m", el.nodeEnd.position[1]), ustrip(u"m", el.nodeEnd.position[2])))
 
-"""Beam that contains the segment `a→b`, or `nothing`."""
-function _beam_covering_segment(beams::Vector{<:Asap.FrameElement},
-                                a::NTuple{2, Float64}, b::NTuple{2, Float64};
-                                tol::Float64 = 1e-4)
-    ab = hypot(b[1] - a[1], b[2] - a[2])
-    ab <= tol && return nothing
+"""
+Beams lying along the segment `a→b`, each with the stretch `(lo, hi)` of
+`a→b` it covers, as fractions from 0 at `a` to 1 at `b`.
+
+A bay side carries one element between each pair of landings, so a strip's
+side can run over several of them. Each gets the part of the strip it lies under.
+"""
+function _beams_along_segment(beams::Vector{<:Asap.FrameElement},
+                              a::NTuple{2, Float64}, b::NTuple{2, Float64};
+                              tol::Float64 = 1e-4)
+    out = Tuple{eltype(beams), Float64, Float64}[]
+    d = (b[1] - a[1], b[2] - a[2])
+    L2 = d[1] * d[1] + d[2] * d[2]
+    L2 <= tol * tol && return out
+    L = sqrt(L2)
+    t_of(pt) = ((pt[1] - a[1]) * d[1] + (pt[2] - a[2]) * d[2]) / L2
+    off(pt) = abs((pt[1] - a[1]) * d[2] - (pt[2] - a[2]) * d[1]) / L
     for beam in beams
         p, q = _beam_xy(beam)
-        d = (q[1] - p[1], q[2] - p[2])
-        L2 = d[1] * d[1] + d[2] * d[2]
-        L2 <= tol * tol && continue
-        function on(pt)
-            t = ((pt[1] - p[1]) * d[1] + (pt[2] - p[2]) * d[2]) / L2
-            (-tol <= t <= 1 + tol) || return false
-            foot = (p[1] + t * d[1], p[2] + t * d[2])
-            return hypot(pt[1] - foot[1], pt[2] - foot[2]) <= tol
-        end
-        on(a) && on(b) && return beam
+        (off(p) <= tol && off(q) <= tol) || continue
+        lo = max(0.0, min(t_of(p), t_of(q)))
+        hi = min(1.0, max(t_of(p), t_of(q)))
+        (hi - lo) * L > tol || continue
+        push!(out, (beam, lo, hi))
     end
-    return nothing
+    return out
+end
+
+"""
+Piecewise-linear `depths` at `positions`, cut to `[lo, hi]`. Outside the
+profile there is no depth, so the cut also stops where the profile stops.
+Returns empty vectors when nothing is left.
+"""
+function _clip_depth_profile(positions::Vector{Float64}, depths::Vector{Float64},
+                             lo::Float64, hi::Float64)
+    order = sortperm(positions)
+    s = positions[order]
+    w = depths[order]
+    lo = max(lo, s[1])
+    hi = min(hi, s[end])
+    hi > lo || return Float64[], Float64[]
+    at(t) = begin
+        t <= s[1] && return w[1]
+        t >= s[end] && return w[end]
+        k = searchsortedlast(s, t)
+        ds = s[k + 1] - s[k]
+        ds <= 1e-15 ? w[k + 1] : w[k] + (w[k + 1] - w[k]) * (t - s[k]) / ds
+    end
+    ps = Float64[lo]
+    ws = Float64[at(lo)]
+    for (sk, wk) in zip(s, w)
+        lo < sk < hi || continue
+        push!(ps, sk)
+        push!(ws, wk)
+    end
+    push!(ps, hi)
+    push!(ws, at(hi))
+    return ps, ws
 end
 
 """
@@ -1419,11 +1457,12 @@ end
 """
 One-way joist loads of `poly` with `openings` cut out.
 
-The bay is divided where joists meet the opening, then each band is cut
+The bay is divided where joists meet an opening, then each band is cut
 along its joists. An opening edge is not a support: the strip from that
-edge goes to the joist at its other end.
+edge goes to the joist at its other end. A strip side that runs over several
+members loads each one over its own stretch.
 """
-function _joist_loads_around_openings(poly::Vector{NTuple{2, Float64}},
+function _joist_strip_loads(poly::Vector{NTuple{2, Float64}},
                                       openings::Vector{Vector{NTuple{2, Float64}}},
                                       beams::Vector{<:Asap.FrameElement},
                                       interiors::Vector{<:Asap.FrameElement},
@@ -1449,14 +1488,15 @@ function _joist_loads_around_openings(poly::Vector{NTuple{2, Float64}},
             length(tribs) == length(sub) || return nothing
             n = length(sub)
             for i in 1:n
-                tp = tribs[i]
                 a = sub[i]
                 b = sub[mod1(i + 1, n)]
-                beam = _beam_covering_segment(beams, a, b)
-                beam === nothing && continue
-                positions, depths = Asap._extract_depth_profile(tp)
-                ld = _tributary_on_beam(beam, a, b, positions, depths)
-                ld === nothing || push!(loads, ld)
+                positions, depths = Asap._extract_depth_profile(tribs[i])
+                isempty(positions) && continue
+                for (beam, lo, hi) in _beams_along_segment(beams, a, b)
+                    ps, ws = _clip_depth_profile(positions, max.(depths, 0.0), lo, hi)
+                    ld = _tributary_on_beam(beam, a, b, ps, ws)
+                    ld === nothing || push!(loads, ld)
+                end
             end
         end
     end
@@ -1521,13 +1561,7 @@ function _cell_split_joist_loads(struc::BuildingStructure, cell::Cell,
 
     beams = vcat(boundary, interiors)
     tls = try
-        if isempty(openings)
-            Asap._shell_to_tributary_loads_with_interior(
-                poly, beams, interiors, 1.0u"Pa";
-                axis = axis, direction = (0.0, 0.0, -1.0), tol = 1e-4)
-        else
-            _joist_loads_around_openings(poly, openings, beams, interiors, axis)
-        end
+        _joist_strip_loads(poly, openings, beams, interiors, axis)
     catch err
         @warn "joist bay could not be split along its joists" exception = (err, catch_backtrace())
         return nothing

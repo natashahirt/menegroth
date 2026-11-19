@@ -7,12 +7,12 @@ title: ACI 318-11 §8.13.2 uses the rib's least width; a depth step stays prisma
 node_label: ACI 318-11 §8.13.2 uses the rib's least width; a d
 tags: ''
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-c91e4357
 created_at: '2026-11-17T23:40:52.083354+00:00'
-updated_at: '2026-11-17T23:40:52.083354+00:00'
+updated_at: '2026-11-19T14:36:41.155026+00:00'
 ---
 ACI 318-11 reading used for variable-thickness ribs (corpus: aci-318-11).
 

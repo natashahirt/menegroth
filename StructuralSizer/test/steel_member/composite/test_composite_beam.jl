@@ -1425,6 +1425,21 @@ end
         @test good.ok == true
     end
 
+    @testset "A failed strength search returns the fewest or the most rows" begin
+        b = get_b_eff(fix.slab, fix.L_beam)
+        ϕ_s = get_ϕMn(fix.section, fix.material; Lb=0.0u"m", Cb=1.0, axis=:strong)
+        lay(fb) = design_shear_anchors(fix.section, fix.material, fix.slab, fix.anchor, b,
+                                       fix.L_beam, 100 * ϕ_s; ϕMn_steel=ϕ_s, fallback=fb)
+        fewest, most = lay(:fewest), lay(:most)
+        @test !fewest.ok && fewest.reason === :strength
+        @test !most.ok && most.reason === :strength
+        @test most.n_rows > fewest.n_rows
+        @test most.n_rows <= most.n_rows_max
+        @test most.ductile
+        @test most.ΣQn >= fewest.ΣQn
+        @test_throws ArgumentError lay(:all)
+    end
+
     @testset "Default stud (AISC Manual 14th ed., PDF p. 165)" begin
         s = default_headed_stud()
         @test isapprox(s.d_sa, 0.75u"inch"; rtol=1e-12)

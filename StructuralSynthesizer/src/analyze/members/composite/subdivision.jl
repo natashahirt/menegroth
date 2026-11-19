@@ -1008,20 +1008,16 @@ function _write_beam_composite_ix!(struc, beam, section, material, field, ctx;
         b = b_eff_at_station(slab, L, region.s_peak;
                              left = field.left, right = field.right,
                              supports = field.supports)
-        lay = design_shear_anchors(section, material, slab, ctx.anchor, b, L,
-                                   region.M_peak * u"N*m";
-                                   ϕMn_steel = ϕMn_steel,
-                                   shear_spans = region_shear_spans(region, L),
-                                   slip_checked = ctx.slip_checked,
-                                   I_need = I_for(region))
-        # A failing probe is the minimum row count. Installing it after the
-        # catalog counted a higher I_LB would put too few studs on the beam.
-        if I_for(region) !== nothing && !lay.ok
-            throw(ArgumentError(
-                "Shear anchors for this composite beam do not reach the I_LB " *
-                "the deflection check counted ($(lay.reason))."))
-        end
-        return lay
+        # This moment is the steel solve of the section just chosen, not the
+        # demand the catalog checked. When no layout meets it, the most rows
+        # the spacing allows are placed, and the confirmation pass that
+        # follows every install rejects the section if the solved model fails.
+        return design_shear_anchors(section, material, slab, ctx.anchor, b, L,
+                                    region.M_peak * u"N*m";
+                                    ϕMn_steel = ϕMn_steel,
+                                    shear_spans = region_shear_spans(region, L),
+                                    slip_checked = ctx.slip_checked,
+                                    I_need = I_for(region), fallback = :most)
     end
     layouts = Dict{Any, Any}()
     for region in regions

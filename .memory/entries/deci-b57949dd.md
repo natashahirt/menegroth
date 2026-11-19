@@ -8,12 +8,12 @@ title: At a crossing the shorter span that already reaches supports stays contin
 node_label: Shorter span carries the longer one
 tags: framing-level,hierarchy,nova,engineering-judgment,joists
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-489e7aa7
 created_at: '2026-11-18T22:18:47.562992+00:00'
-updated_at: '2026-11-18T22:18:47.562992+00:00'
+updated_at: '2026-11-19T04:50:51.841522+00:00'
 ---
 Natasha confirmed this reading of the hand-drawn 2024 strokes (test_drawn, triple_bay_drawn, triple_bay_bau_drawn). ENGINEERING JUDGMENT. No code states which crossing beam supports the other.
 

@@ -27,8 +27,12 @@ const DECK_FILL = SR.Concrete(SR.NWC_4000.E, SR.NWC_4000.fc′,
 
 `deck` follows Tan's ETABS setup where the catalog allows it:
 
-- A992 steel, composite beams, unshored, 3/4 in studs 6 in long with Fu = 65 ksi
-  (her Appendix F).
+- A992 steel, composite beams, unshored, 3/4 in studs with Fu = 65 ksi
+  (her Appendix F). Her studs are 6 in long. Here they are 4.5 in, `hr + 1.5 in`,
+  so they fit every 3VLI total the sizer can pick. AISC 360-22 §I3.2c(b) needs
+  1 1/2 in above the deck and 1/2 in of cover over the stud
+  (corpus: aisc-360-22, PDF p. 170). A 6 in stud in the 5.0 in total has
+  -1.0 in of cover. Eq. I8-1 does not use stud length, so `Qn` is unchanged.
 - Deflection L/360 for live load and L/240 for dead plus live (§3.2).
 - Deck profile `3VLI`. Her Table 3-1 is a 3 in rib at 12 in, 7.5 in over 4.5 in,
   with 3.25 in of concrete above the rib (6.25 in total). `3VLI` is the Vulcraft
@@ -77,9 +81,7 @@ function system_parameters(name::AbstractString, system::Symbol)
                 composite_slab_type = :deck,
                 composite_deck_profile = "3VLI",
                 composite_shored = false,
-                composite_anchor_d = 0.75u"inch",
-                composite_anchor_length = 6.0u"inch",
-                composite_anchor_Fu = 65.0u"ksi",
+                # No stud named: `default_headed_stud` is 3/4 in, Fu = 65 ksi, hr + 1.5 in long.
                 deflection_limit = 1 / 360,
                 total_deflection_limit = 1 / 240,
             ),

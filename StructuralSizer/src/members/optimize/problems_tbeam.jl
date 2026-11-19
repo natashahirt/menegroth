@@ -678,8 +678,12 @@ function _build_tbeam_nlp_section(
         As_required = ρg * bw_in * d_in
         bar = rebar(opts.bar_size)
         As_bar = ustrip(u"inch^2", bar.A)
-
-        n_bars = max(2, ceil(Int, As_required / As_bar))
+        # ACI 318-11 §10.5.1 (corpus: aci-318-11, page 144). Rounding up to the
+        # next bar keeps a snapped section from landing under As,min.
+        fc_psi = ustrip(u"psi", opts.material.fc′)
+        fy_psi = ustrip(u"psi", opts.rebar_material.Fy)
+        As_floor = max(As_required, _as_min_aci_1051(bw_in, d_in, fc_psi, fy_psi))
+        n_bars = max(2, ceil(Int, As_floor / As_bar))
         n_bars = min(n_bars, 20)
 
         return RCTBeamSection(

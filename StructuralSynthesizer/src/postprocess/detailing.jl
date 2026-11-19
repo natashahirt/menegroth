@@ -618,6 +618,46 @@ function _detail_code_slab(design::BuildingDesign, idx::Int)
     return md
 end
 
+"""
+    _add_placed_slab_rebar!(design) -> design
+
+Put the bars the slab detail places into `slab.volumes` for each slab whose
+result carries no rebar: cast-in-place one-way and two-way slabs, rib
+toppings, and the temperature mat over composite deck. The volume is count ×
+bar area × length of the placed groups, the rule the flat-plate takeoff uses.
+A flat plate, and a slab that already has rebar volume, are left alone. A slab
+whose bars cannot be placed gets a diagnostic, not a guessed ratio.
+"""
+function _add_placed_slab_rebar!(design::BuildingDesign)
+    struc = design.structure
+    rebar = something(design.params.materials.rebar, StructuralSizer.Rebar_60)
+    for (idx, slab) in enumerate(struc.slabs)
+        slab.result === nothing && continue
+        slab.result isa StructuralSizer.FlatPlatePanelResult && continue
+        material_takeoff(slab.volumes).rebar_mass > 0.0u"kg" && continue
+        md = try
+            rib = _detail_rib_topping(design, idx)
+            rib === nothing ? _detail_code_slab(design, idx) : rib
+        catch err
+            err isa InterruptException && rethrow()
+            push!(design.diagnostics,
+                  "Slab $idx rebar is not in the takeoff: its bars could not be placed " *
+                  "($(sprint(showerror, err)))")
+            nothing
+        end
+        md === nothing && continue
+        V = sum(g -> g.count * uconvert(u"m^2", StructuralSizer.bar_area(g.bar_size)) *
+                     uconvert(u"m", g.length), md.groups; init = 0.0u"m^3")
+        if V > 0.0u"m^3"
+            _bump_volume!(slab.volumes, rebar, V)
+        elseif slab.floor_type in (:one_way, :two_way)
+            push!(design.diagnostics, "Slab $idx rebar is not in the takeoff: " *
+                  join(md.warnings, "; "))
+        end
+    end
+    return design
+end
+
 "Largest shell area in each face, m²/m, or `nothing` when the field is absent."
 function _shell_face_areas(slab)
     det = slab.design_details

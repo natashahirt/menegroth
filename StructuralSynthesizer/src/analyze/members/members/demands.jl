@@ -115,7 +115,8 @@ changes: dead is `sdl + self_weight`, live is `live_load`, each at factor 1.
   `_sync_shell_area_pressures!`.
 
 Dead also holds the unfactored member self-weight (`GravityLoad` at `g`),
-fire-protection coating, drop-panel weight, and wall self-weight: the same set
+fire-protection coating, drop-panel weight, curtain-wall cladding, and wall
+self-weight: the same set
 as `_unfactored_DL_loads` (foundations). `sdl` is only `cell.sdl` on the same
 tributary routing, with self-weight left out. Vault thrust is split into its
 dead and live parts and is not part of `sdl`. A `:p_delta` notional lateral
@@ -165,7 +166,7 @@ function _service_dead_live_loads(struc::BuildingStructure)
             push!(dead, unfactored_gravity_load(ld))
         elseif ld isa Asap.AreaLoad
             ld.id === :wall_self_weight || push!(slab_area_loads, ld)
-        elseif ld isa Asap.LineLoad && ld.id === FIRE_COATING_LOAD_ID
+        elseif ld isa Asap.LineLoad && (ld.id === FIRE_COATING_LOAD_ID || ld.id === :cladding)
             continue
         elseif ld isa Asap.LineLoad && ld.id === :vault_thrust
             n_thrust += 1
@@ -232,6 +233,7 @@ function _service_dead_live_loads(struc::BuildingStructure)
 
     append!(dead, unfactored_fire_coating_loads(model))
     append!(dead, unfactored_drop_panel_loads(struc))
+    append!(dead, unfactored_cladding_loads(struc, model.frame_elements))
     _append_service_wall_weight!(dead, model)
     return dead, live, sdl
 end

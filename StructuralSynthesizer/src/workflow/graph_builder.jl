@@ -371,6 +371,36 @@ at its installed columns.
 Returns `(passes, redesigned)`: the rounds run, including the last one that
 found nothing stale, and the slabs designed again.
 """
+# --- Debug helpers for SS_DEBUG_MEMBER_SETTLE (no behavior change) ---
+"""Compact `idx=>c1xc2 in` signature of a column plan-size dict, sorted by idx."""
+function _fp_plan_sig(d)
+    inch(x) = x === nothing ? "-" : string(round(ustrip(u"inch", x); digits = 1))
+    return join(("$i=$(inch(v[1]))x$(inch(v[2]))" for (i, v) in sort(collect(d); by = first)), " ")
+end
+
+"""Why slab `sidx` is stale: which supports/aboves differ from installed."""
+function _fp_stale_reason(struc, sidx)
+    dd = struc.slabs[sidx].design_details
+    dd isa NamedTuple && hasproperty(dd, :designed_supports) || return "no-stamp"
+    inch(x) = x === nothing ? "-" : string(round(ustrip(u"inch", x); digits = 1))
+    diffs = String[]
+    for (cidx, (c1, c2, shape)) in dd.designed_supports
+        col = struc.columns[cidx]
+        (col.c1 == c1 && col.c2 == c2 && col.shape == shape) && continue
+        push!(diffs, "sup$cidx $(inch(c1))x$(inch(c2))->$(inch(col.c1))x$(inch(col.c2))")
+    end
+    if hasproperty(dd, :designed_above)
+        for (cidx, rec) in dd.designed_above
+            a = struc.columns[cidx].column_above
+            now = a === nothing ? nothing : (a.c1, a.c2, a.shape)
+            isequal(now, rec) && continue
+            push!(diffs, "above$cidx " * (rec === nothing ? "-" : "$(inch(rec[1]))x$(inch(rec[2]))") *
+                         "->" * (now === nothing ? "-" : "$(inch(now[1]))x$(inch(now[2]))"))
+        end
+    end
+    return isempty(diffs) ? "match?" : join(diffs, ", ")
+end
+
 function _design_flat_plate_members!(struc::BuildingStructure, params::DesignParameters;
                                      tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
     StructuralSizer.emit!(tc, :workflow, "_design_flat_plate_members!", "", :enter;
@@ -382,14 +412,27 @@ function _design_flat_plate_members!(struc::BuildingStructure, params::DesignPar
     _reconcile_columns!(struc, params; tc, floors)
     _harmonize_columns!(struc, params)
     _raise_column_floors!(floors, opened_at, struc)
+    # Grow-only from the first round on: the initial reconcile above may right-size
+    # (shrink) columns once, but after that every column is pinned at its installed
+    # size so the two-sided fit cannot shrink/regrow against the slab checks and
+    # oscillate. See `_floor_columns_at_installed!`.
+    _floor_columns_at_installed!(floors, struc)
     floor_opts = resolve_floor_options(params)
     column_opts = _get_column_opts(params)
     redesigned = Set{Int}()
+    dbg = haskey(ENV, "SS_DEBUG_MEMBER_SETTLE")
     run = StructuralSizer.settle!(;
-            budget = StructuralSizer.monotone_budget(params.max_iterations, 48)) do _
+            budget = StructuralSizer.monotone_budget(params.max_iterations, 48)) do step
         stale = _stale_flat_plate_slabs(struc)
+        if dbg
+            @info "member-settle round" step n_stale = length(stale) floors = _fp_plan_sig(floors) cols = _fp_plan_sig(_column_plan_sizes(struc)) reasons = join(("s$s[$(_fp_stale_reason(struc, s))]" for s in stale), " | ")
+            flush(stderr)
+        end
         isempty(stale) && return false
         before = _column_plan_sizes(struc)
+        # Pin round-start sizes so this round's two-sided fit cannot shrink a
+        # column below where the slabs were last checked (monotone / grow-only).
+        _floor_columns_at_installed!(floors, struc)
         outcomes = Any[nothing for _ in eachindex(struc.slabs)]
         for sidx in stale
             opts = _floor_options_for_slab(struc, sidx, params, floor_opts)
@@ -405,6 +448,10 @@ function _design_flat_plate_members!(struc::BuildingStructure, params::DesignPar
         # The search can grow a column the slab commit did not. That size
         # failed at the smaller plan, so the next round does not go under it.
         _raise_column_floors!(floors, before, struc)
+        if dbg
+            @info "member-settle round end" step cols_after = _fp_plan_sig(_column_plan_sizes(struc))
+            flush(stderr)
+        end
         return true
     end
     StructuralSizer.emit!(tc, :workflow, "_design_flat_plate_members!", "", :decision;
@@ -440,6 +487,34 @@ function _raise_column_floors!(floors, before, struc)
         (col.c1 === nothing || col.c2 === nothing) && continue
         b1, b2 = before[i]
         (col.c1 > b1 + tol || col.c2 > b2 + tol) || continue
+        f1, f2 = get(floors, i, (zero(col.c1), zero(col.c2)))
+        floors[i] = (max(f1, col.c1), max(f2, col.c2))
+    end
+    return floors
+end
+
+"""
+    _floor_columns_at_installed!(floors, struc) -> floors
+
+Pin every installed column at its current plan size, making the member stage
+**grow-only** (monotone).
+
+`_raise_column_floors!` only floors a column that *grew*, so a column left out of
+`floors` can still shrink. The two-sided column fit
+([`_fit_flat_plate_columns!`](@ref)) does shrink when a stiffening frame sheds
+demand off a column — but that shrink re-stales the slab the column supports,
+which regrows the column, which the fit shrinks again: an undamped oscillation
+that exhausts the settle budget and throws (observed on the core office, where
+upper-story columns bounced 12 in → 10 in while the lower columns grew
+16 in → 20 in). Flooring every column at the largest size it has reached removes
+the shrink direction, so the coupled slab/column iteration is monotone and
+terminates (finite catalog, bounded by the column cap). The only cost is that a
+column may finish one catalog step larger than its lightest passing section —
+conservative, never unsafe.
+"""
+function _floor_columns_at_installed!(floors, struc)
+    for (i, col) in enumerate(struc.columns)
+        (col.c1 === nothing || col.c2 === nothing) && continue
         f1, f2 = get(floors, i, (zero(col.c1), zero(col.c2)))
         floors[i] = (max(f1, col.c1), max(f2, col.c2))
     end
@@ -544,8 +619,26 @@ function _slab_checked_at_installed_columns(struc::BuildingStructure, slab_idx::
     dd = struc.slabs[slab_idx].design_details
     dd isa NamedTuple || return true
     (hasproperty(dd, :designed_supports) && hasproperty(dd, :designed_above)) || return false
+    # `designed_supports` is stamped from the slab's own design workspace, which
+    # sizes each column to that slab's punching minimum (ACI 318-11 §11.11). Axial
+    # / uniform column sizing can then grow a shared column past that minimum, and
+    # `_support_beats` refuses to shrink it — so the stamp (the punching minimum)
+    # can never equal the larger installed column, and strict equality would redesign
+    # the slab forever (observed on the core office: a slab stamped at 20 in beside a
+    # column grown to 24 in). A *larger* supporting column is conservative for a flat
+    # PLATE: §11.11.2 two-way shear capacity Vc ∝ b0·d rises, the critical perimeter
+    # moves outward so the direct shear Vu falls, and the clear span ln = l1 − c1
+    # shortens so the transferred moment falls — a plate checked at a smaller column
+    # stays adequate at a larger one, so no redesign is needed (and none is spent).
+    # Flat SLABS are excluded: a larger column can push the critical section past the
+    # drop panel (§13.2.5), so they keep strict equality.
+    plate = struc.slabs[slab_idx].floor_type === :flat_plate
     for (cidx, (c1, c2, shape)) in dd.designed_supports
         col = struc.columns[cidx]
+        if plate && col.c1 !== nothing && col.c2 !== nothing &&
+           col.shape == shape && col.c1 >= c1 && col.c2 >= c2
+            continue  # column grew (or is unchanged): conservative, still valid
+        end
         (col.c1 == c1 && col.c2 == c2 && col.shape == shape) || return false
     end
     for (cidx, rec) in dd.designed_above

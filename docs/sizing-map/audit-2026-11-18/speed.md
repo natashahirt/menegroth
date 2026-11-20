@@ -146,6 +146,18 @@ builds an **identical** first mesh (`build columns 17.0`) [read].
   checked at (`_stale_flat_plate_slabs`), up to 48 rounds, each round a full
   `sync_asap!` and `_reconcile_columns!` [read]. A redesign of a stale slab
   sees a new key, so it starts with a remesh [inferred].
+  - **Update 2026-11-20:** this loop used to grind the full 48-round budget and
+    then **throw** on the core office (two coupled bugs: the two-sided column fit
+    shrank unfloored upper columns and oscillated, and `designed_supports` was
+    stamped from the slab workspace's punching-minimum, which axial sizing grows
+    past, so the slab stayed "stale" forever). Fixed by making the stage
+    grow-only (`_floor_columns_at_installed!`) and treating a *grown* support
+    column as conservatively non-stale for flat plates (§11.11.2). The loop now
+    converges in a handful of rounds instead of 48, which is a large speed win on
+    its own and unblocks the stage-split measurement (open Q1). See
+    `docs/sizing-map/member-stage-fixpoint.md`. Opportunity #12 (re-check instead
+    of redesign) is now reclassified **approximate/gated** — an exact value-only
+    re-check needs the fixed mesh (#1); see the design note §4.
 
 ### 2b. Mesh size controls and typical counts
 

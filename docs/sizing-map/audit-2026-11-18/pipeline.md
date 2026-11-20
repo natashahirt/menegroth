@@ -231,10 +231,20 @@ reuses the prepare factorization. [inferred from the token contents, :19-66]
 2. `_harmonize_columns!`. This does nothing unless `uniform_column_sizing`
    is on.
 3. Settle loop, budget `monotone_budget(max_iterations, 48)` = 48 by
-   default. Each round:
+   default. The stage is **grow-only (monotone)**: `_floor_columns_at_installed!`
+   pins every column into `floors` before the loop and at each round start, so
+   the two-sided fit (`_fit_flat_plate_columns!`, which treats `floors` as a hard
+   lower bound) can never shrink a column and oscillate against the slab it
+   supports. Each round:
    - Slabs whose `designed_supports`/`designed_above` stamps differ from the
      installed columns are redesigned on isolated copies and committed
-     without writing columns.
+     without writing columns. **Staleness is conservative for flat plates**: a
+     support column that only *grew* does not re-stale the slab
+     (`_slab_checked_at_installed_columns`; ACI 318-11 §11.11.2 — a larger
+     column strictly helps a plate's two-way shear and flexure), because the
+     slab's `designed_supports` stamp records its own punching-minimum (from the
+     design workspace), which axial/uniform sizing can grow past. `designed_above`
+     and flat *slabs* (drop panels, §13.2.5) keep strict equality.
    - `_apply_support_envelope!` adopts any growth (grow-only gate
      `_support_beats`).
    - `_raise_column_floors!`.
@@ -242,8 +252,10 @@ reuses the prepare factorization. [inferred from the token contents, :19-66]
    - `_reconcile_columns!(…; floors)`.
    - harmonize.
 
-   The loop ends when no slab is stale. Running out of rounds **throws**
-   (:408).
+   The loop ends when no slab is stale. With the monotone floor + conservative
+   staleness the stage converges (finite catalog, bounded by the column cap);
+   running out of rounds still **throws** (:408) as a genuine-infeasibility
+   backstop. See `docs/sizing-map/member-stage-fixpoint.md`.
 
 ### 2.5 Member stage, beam floors
 

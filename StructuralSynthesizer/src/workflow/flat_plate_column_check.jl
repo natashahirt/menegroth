@@ -10,6 +10,105 @@
 # The frame's beam-line members in a flat-plate building keep the placeholder
 # section `to_asap!` gives them, so the frame's column moments are not used.
 
+# =============================================================================
+# Run-level memo for column capacity caches, catalogs, and plan-size groups
+# =============================================================================
+#
+# `precompute_capacities!` (the P-M diagram build over the whole RC catalog) is
+# the costliest part of the member stage, and the column helpers below
+# (`_stack`/`_grow`/`_fit`, plus the §10.12 joint checks) otherwise rebuild it
+# on every settle round — and `_fit` re-derived the plan-size groups once per
+# column. A filled `ACIColumnCapacityCache` is a pure function of the catalog
+# sections, the concrete (fc, fy, Es, εcu), the objective, and the biaxial
+# flag, and it is only *read* by `is_feasible` / `explain_feasibility`, so it is
+# safe to memoize and share across calls and threads. Entries are validated with
+# `StructuralSizer.cache_matches` plus identity guards before reuse; any mismatch
+# rebuilds. The standard catalog is itself memoized so its object identity is
+# stable (a cheap, deterministic key). This is speed.md opportunity #10, exact.
+
+const _COL_MEMO_LOCK = ReentrantLock()
+const _STD_CATALOG_MEMO = Dict{Tuple{Symbol, Symbol}, Vector}()
+
+struct _ColCacheEntry
+    catalog::Any      # exact catalog the cache was built against (objectid-reuse guard)
+    material::Any
+    objective::Any
+    cache::StructuralSizer.ACIColumnCapacityCache
+end
+const _COL_CACHE_MEMO = Dict{Any, _ColCacheEntry}()
+
+struct _PlanGroupsEntry
+    catalog::Any
+    groups::Vector{Vector{Int}}
+end
+const _COL_GROUPS_MEMO = Dict{Any, _PlanGroupsEntry}()
+
+"""
+    _memo_column_catalog(opts) -> Vector
+
+Catalog for `opts`, memoized. A custom catalog is returned as given (its
+identity is the user's); a standard catalog is built once per
+`(section_shape, catalog)` and cached, so its object identity is stable for
+keying [`_memo_capacity_cache`](@ref) and [`_memo_plan_groups`](@ref).
+"""
+function _memo_column_catalog(opts)
+    opts.custom_catalog === nothing || return opts.custom_catalog
+    key = (opts.section_shape, opts.catalog)
+    return lock(_COL_MEMO_LOCK) do
+        get!(() -> StructuralSizer.rc_column_catalog(opts.section_shape, opts.catalog),
+             _STD_CATALOG_MEMO, key)
+    end
+end
+
+"""
+    _memo_capacity_cache(checker, catalog, material, objective) -> ACIColumnCapacityCache
+
+Precomputed, read-only capacity cache for `catalog` under `material` and
+`objective`, memoized and shared across the run.
+
+A validated hit is returned as-is. `StructuralSizer.cache_matches` re-checks
+f′c / fy / Es and the weak-axis diagrams; the stored catalog / material /
+objective identities guard against `objectid` reuse and against an objective
+change (which `cache_matches` alone would miss, since it does not compare the
+objective coefficients the group ordering reads).
+"""
+function _memo_capacity_cache(checker, catalog, material, objective)
+    key = (objectid(catalog), objectid(material), objectid(objective),
+           checker.include_biaxial, checker.fy_ksi, checker.Es_ksi)
+    return lock(_COL_MEMO_LOCK) do
+        e = get(_COL_CACHE_MEMO, key, nothing)
+        if e !== nothing && e.catalog === catalog && e.material === material &&
+           e.objective === objective &&
+           StructuralSizer.cache_matches(checker, e.cache, catalog, material)
+            return e.cache
+        end
+        cache = StructuralSizer.create_cache(checker, length(catalog))
+        StructuralSizer.precompute_capacities!(checker, cache, catalog, material, objective)
+        _COL_CACHE_MEMO[key] = _ColCacheEntry(catalog, material, objective, cache)
+        return cache
+    end
+end
+
+"""
+    _memo_plan_groups(catalog, cache, cap) -> Vector{Vector{Int}}
+
+Plan-size groups ([`_catalog_plan_groups`](@ref)) for `catalog` at the
+objective coefficients `cache.obj_coeffs` and column cap `cap`, memoized.
+Keyed by the catalog and cache identities (both stable via the memos above)
+and the cap.
+"""
+function _memo_plan_groups(catalog, cache, cap)
+    capkey = cap === nothing ? nothing : round(ustrip(u"inch", cap); digits = 3)
+    key = (objectid(catalog), objectid(cache), capkey)
+    return lock(_COL_MEMO_LOCK) do
+        e = get(_COL_GROUPS_MEMO, key, nothing)
+        (e !== nothing && e.catalog === catalog) && return e.groups
+        groups = _catalog_plan_groups(catalog, cache.obj_coeffs, cap)
+        _COL_GROUPS_MEMO[key] = _PlanGroupsEntry(catalog, groups)
+        return groups
+    end
+end
+
 """
     _flat_plate_joint_moments(struc, column_opts) -> Dict{Int, NamedTuple}
 
@@ -492,7 +591,7 @@ the one it supports.
 function _stack_flat_plate_columns!(struc, params, column_opts, checks)
     checker = _aci_column_checker(column_opts)
     jchecker = _joint_checker(column_opts)
-    catalog = _column_catalog(column_opts)
+    catalog = _memo_column_catalog(column_opts)
     cap = _flat_plate_column_cap(params)
     caches = Dict{Any, Any}()
     is_rc(c) = section(c) isa StructuralSizer.RCColumnSection ||
@@ -517,11 +616,7 @@ function _stack_flat_plate_columns!(struc, params, column_opts, checks)
         end
 
         mat = _column_concrete(col, column_opts)
-        cache = get!(caches, mat) do
-            c = StructuralSizer.create_cache(checker, length(catalog))
-            StructuralSizer.precompute_capacities!(checker, c, catalog, mat, column_opts.objective)
-            c
-        end
+        cache = _memo_capacity_cache(checker, catalog, mat, column_opts.objective)
         demands = _rc_demand_orientations(checks[i].demand, column_opts.βdns)
         geom = checks[i].geometry
         order = sortperm(cache.obj_coeffs)
@@ -617,18 +712,14 @@ function _grow_flat_plate_columns!(struc, params, column_opts, checks)
     isempty(failing) && return (Int[], Int[])
     checker = _aci_column_checker(column_opts)
     jchecker = _joint_checker(column_opts)
-    catalog = _column_catalog(column_opts)
+    catalog = _memo_column_catalog(column_opts)
     cap = _flat_plate_column_cap(params)
     caches = Dict{Any, Any}()
     grown, unresolved = Int[], Int[]
     for i in sort(failing)
         col = struc.columns[i]
         mat = _column_concrete(col, column_opts)
-        cache = get!(caches, mat) do
-            c = StructuralSizer.create_cache(checker, length(catalog))
-            StructuralSizer.precompute_capacities!(checker, c, catalog, mat, column_opts.objective)
-            c
-        end
+        cache = _memo_capacity_cache(checker, catalog, mat, column_opts.objective)
         demands = _rc_demand_orientations(checks[i].demand, column_opts.βdns)
         geom = checks[i].geometry
         order = sortperm(cache.obj_coeffs)
@@ -919,7 +1010,7 @@ columns no section within the cap passes; they keep their section.
     isempty(checks) && return (Int[], Int[])
     checker = _aci_column_checker(column_opts)
     jchecker = _joint_checker(column_opts)
-    catalog = _column_catalog(column_opts)
+    catalog = _memo_column_catalog(column_opts)
     cap = _flat_plate_column_cap(params)
     caches = Dict{Any, Any}()
     changed, unresolved = Int[], Int[]
@@ -938,12 +1029,8 @@ columns no section within the cap passes; they keep their section.
             floor = (f1, f2)
         end
         mat = _column_concrete(col, column_opts)
-        cache = get!(caches, mat) do
-            c = StructuralSizer.create_cache(checker, length(catalog))
-            StructuralSizer.precompute_capacities!(checker, c, catalog, mat, column_opts.objective)
-            c
-        end
-        groups = _catalog_plan_groups(catalog, cache.obj_coeffs, cap)
+        cache = _memo_capacity_cache(checker, catalog, mat, column_opts.objective)
+        groups = _memo_plan_groups(catalog, cache, cap)
         orient = _rc_demand_orientations(checks[i].demand, column_opts.βdns)
         geom = checks[i].geometry
         joint = checks[i].joint
@@ -999,7 +1086,7 @@ function check_flat_plate_columns!(struc::BuildingStructure, params::DesignParam
     grown_all = Set{Int}()
     unresolved = Int[]
     budget = StructuralSizer.monotone_budget(
-        params.max_iterations, length(_column_catalog(column_opts)))
+        params.max_iterations, length(_memo_column_catalog(column_opts)))
     run = StructuralSizer.settle!(; budget) do _
         checks = flat_plate_column_checks(struc, column_opts; params)
         changed, open = _fit_flat_plate_columns!(

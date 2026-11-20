@@ -98,6 +98,7 @@ include("floor_design_contracts.jl")
 # time (method-definition time), not at call time — so `BuildingStructure` and
 # `DesignParameters` must already be defined. This include MUST therefore come
 # after building_types.jl and design_types.jl.
+include("workflow/sizing_probe.jl")
 include("design_graph/_design_graph.jl")
 
 # Design workflow (uses both building_types and design_types)

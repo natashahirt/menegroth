@@ -621,6 +621,7 @@ function to_asap!(struc::BuildingStructure{T, A, P};
     # Cracked-wall E before the first process, so later load-only syncs keep it.
     _apply_stated_cracked_wall_stiffness!(wall_shells, params)
     struc.asap_model = Asap.Model(nodes, frame_elements, shell_elements, loads)
+    probe_register_building_model!(struc.asap_model)
     isempty(fp_cells) || (_FLAT_PLATE_SHELLS[struc.asap_model] = fp_layout)
 
     @debug "Converted to Asap.Model" nodes=length(nodes) frame_elements=length(frame_elements) shell_elements=length(shell_elements) loads=length(loads) rigid_links=length(rigid_links)

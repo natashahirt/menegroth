@@ -225,10 +225,12 @@ code_version(node::StageNode) = node.code_version
 # `fn_ctx` warm variant, run that so it can reuse read-only caches; otherwise run
 # the plain `fn` (the exact, default, `ctx === nothing` behavior).
 function run!(node::StageNode, struc, params, ctx)
-    if ctx !== nothing && node.fn_ctx !== nothing
-        return node.fn_ctx(struc, ctx)
+    probe_stage(string(node.key)) do
+        if ctx !== nothing && node.fn_ctx !== nothing
+            return node.fn_ctx(struc, ctx)
+        end
+        return node.fn(struc)
     end
-    return node.fn(struc)
 end
 
 # =============================================================================

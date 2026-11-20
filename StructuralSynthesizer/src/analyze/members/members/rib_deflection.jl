@@ -206,6 +206,29 @@ end
 
 _m4(x) = x isa Unitful.Quantity ? ustrip(u"m^4", x) : Float64(x)
 
+"""
+    story_comp_steel_carbon(struc, lvl, ρ_prime, rebar) -> kgCO₂e
+
+Embodied carbon of the continuous midspan compression steel added to story
+`lvl`'s ribs at ratio `ρ′ = As′/(bw·d)` for long-term deflection control
+(ACI 318-11 §9.5.2.5). `As′ = ρ′·bw·d` runs the full length of every rib
+element from [`_story_service_elements`](@ref) (solid-head pieces excluded,
+as they are slab). Returns zero carbon at `ρ′ = 0`.
+"""
+function story_comp_steel_carbon(struc, lvl::Int, ρ_prime::Real, rebar)
+    ρ_prime > 0 || return 0.0u"kgCO2e"
+    els = _story_service_elements(struc, lvl)
+    frames = struc.asap_model.frame_elements
+    vol = 0.0u"m^3"
+    for (i, (sec, _)) in els
+        bw = sec isa StructuralSizer.RCTBeamSection ? sec.bw : sec.b
+        As_prime = ρ_prime * bw * sec.d
+        L = _element_length_m(frames[i]) * u"m"
+        vol += uconvert(u"m^3", As_prime * L)
+    end
+    return uconvert(u"kgCO2e", vol * rebar.ρ * rebar.ecc)
+end
+
 """Largest sagging and hogging moments (N·m, magnitudes) along element `el`."""
 function _service_moments(el, uD, uL, c, loadsD, loadsL)
     fD = _element_forces_from_u(el, uD, loadsD; resolution = 5)
@@ -217,6 +240,7 @@ end
 
 """
     story_rib_deflection(struc, lvl; sustained_live_fraction, limit = :sensitive,
+                         comp_steel_ratio = 0.0, pre_attachment_dead_fraction = 0.0,
                          max_iter = 8, tol = 0.05, resolution = 5) -> NamedTuple
 
 Cracked service deflection of story `lvl` against ACI 318-11 Table 9.5(b).
@@ -234,17 +258,30 @@ At each element station the sag is the column-top surface of its bay
 station (§9.5.2.5, Eq. 9-11 with ξ = 2.0 and, conservatively, ρ′ = 0):
 
 - immediate live `Δ_DL − Δ_D ≤ l/360`;
-- after attachment `λΔ Δ_S + (Δ_DL − Δ_S) ≤ l/480` (`limit = :sensitive`) or
-  `l/240` (`:total`).
+- after attachment `λΔ Δ_S + (Δ_DL − Δ_S) − pre·Δ_D ≤ l/480` (`limit =
+  :sensitive`) or `l/240` (`:total`).
+
+`comp_steel_ratio` is the continuous midspan compression steel ρ′ = As′/(bw·d)
+that lowers `λΔ = ξ/(1+50ρ′)` (§9.5.2.5, Eq. 9-11); `pre_attachment_dead_fraction`
+(`pre`) is the share of the dead sag deducted as occurring before the
+nonstructural elements are attached (§9.5.2.6 / R9.5.2.6). Both default to the
+conservative zero.
 
 The model's sections and stiffness are restored; its factored displacements
 are not touched.
 """
 function story_rib_deflection(struc, lvl::Int; sustained_live_fraction::Real,
                               limit::Symbol = :sensitive, concrete, rebar,
+                              comp_steel_ratio::Real = 0.0,
+                              pre_attachment_dead_fraction::Real = 0.0,
                               max_iter::Int = 8, tol::Float64 = 0.05, resolution::Int = 5)
     limit in (:sensitive, :total) || throw(ArgumentError(
         "rib_deflection_limit is :$limit; use :sensitive (l/480) or :total (l/240)"))
+    0.0 <= comp_steel_ratio <= 0.04 || throw(ArgumentError(
+        "comp_steel_ratio is ρ′ = As′/(bw·d); keep it in [0, 0.04], got $comp_steel_ratio"))
+    0.0 <= pre_attachment_dead_fraction <= 1.0 || throw(ArgumentError(
+        "pre_attachment_dead_fraction is a fraction of the dead sag in [0, 1], " *
+        "got $pre_attachment_dead_fraction"))
     ψ = StructuralSizer._as_sustained_live_fraction(sustained_live_fraction)
     model = struc.asap_model
     frames = model.frame_elements
@@ -326,7 +363,14 @@ function story_rib_deflection(struc, lvl::Int; sustained_live_fraction::Real,
         _restore_column_springs!(model)
     end
 
-    λΔ = StructuralSizer.long_term_deflection_factor(2.0, 0.0)
+    # ACI 318-11 §9.5.2.5, Eq. (9-11): λΔ = ξ/(1+50ρ′), ξ = 2.0 for a 5-year
+    # sustained load; ρ′ is the continuous midspan compression steel, which
+    # R9.5.2.5 credits for reducing creep/shrinkage deflection (corpus:
+    # aci-318-11, PDF page 132). ρ′ = `comp_steel_ratio` is applied story-wide
+    # (one value at midspan per §9.5.2.5), representing top bars detailed
+    # continuous through the sagging regions.
+    λΔ = StructuralSizer.long_term_deflection_factor(2.0, Float64(comp_steel_ratio))
+    pre = Float64(pre_attachment_dead_fraction)
     after_div = limit === :sensitive ? 480.0 : 240.0
     worst_ll = (ratio = 0.0, Δ = 0.0, l = 0.0, at = (NaN, NaN))
     worst_lt = worst_ll
@@ -341,7 +385,11 @@ function story_rib_deflection(struc, lvl::Int; sustained_live_fraction::Real,
                 sag(name) = _bay_surface(bay.xy, corner_w[name][b], p) - profiles[name][i][j]
                 ΔD, ΔS, ΔDL = sag(:D), sag(:S), sag(:DL)
                 Δ_ll = ΔDL - ΔD
-                Δ_lt = λΔ * ΔS + (ΔDL - ΔS)
+                # Table 9.5(b) after-attachment deflection = long-term sustained
+                # (λΔ·ΔS) + immediate non-sustained live (ΔDL − ΔS), less the
+                # dead sag that occurs before attachment (§9.5.2.6 / R9.5.2.6,
+                # PDF page 133): deduct `pre`·ΔD.
+                Δ_lt = λΔ * ΔS + (ΔDL - ΔS) - pre * ΔD
                 r_ll = Δ_ll / (bay.l / 360)
                 r_lt = Δ_lt / (bay.l / after_div)
                 r_ll > worst_ll.ratio && (worst_ll = (ratio = r_ll, Δ = Δ_ll, l = bay.l, at = p))
@@ -351,5 +399,7 @@ function story_rib_deflection(struc, lvl::Int; sustained_live_fraction::Real,
     end
     return (ok = worst_ll.ratio <= 1.0 && worst_lt.ratio <= 1.0,
             live = worst_ll, long_term = worst_lt, limit = limit,
+            comp_steel_ratio = Float64(comp_steel_ratio),
+            pre_attachment_dead_fraction = pre,
             n_bays = length(bays), converged = converged)
 end

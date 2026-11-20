@@ -1,5 +1,7 @@
 using Test
 using StructuralSynthesizer
+using Unitful
+import StructuralSizer as SS
 const SSy = StructuralSynthesizer
 
 @testset "rib story column bays" begin
@@ -38,4 +40,29 @@ const SSy = StructuralSynthesizer
     area(b) = 0.5 * sum(SSy._cross2((0.0, 0.0), irr[b[k]], irr[b[mod1(k + 1, length(b))]])
                         for k in eachindex(b))
     @test sum(area, b2) ≈ hull rtol = 1e-9
+end
+
+@testset "rib compression-steel ladder" begin
+    # `_rib_comp_ratios` sorts, de-duplicates, and always starts at 0.0.
+    @test SSy._rib_comp_ratios((rib_comp_steel_ratios = Float64[],)) == [0.0]
+    @test SSy._rib_comp_ratios((rib_comp_steel_ratios = [0.02, 0.01, 0.01],)) ==
+          [0.0, 0.01, 0.02]
+    @test SSy._rib_comp_ratios((rib_comp_steel_ratios = [0.0, 0.015],)) == [0.0, 0.015]
+
+    # λΔ = ξ/(1+50ρ′) (ACI 318-11 §9.5.2.5, Eq. 9-11) falls as ρ′ rises, and
+    # ρ′ ≈ 0.02 halves the 5-year multiplier.
+    @test SS.long_term_deflection_factor(2.0, 0.0) ≈ 2.0
+    @test SS.long_term_deflection_factor(2.0, 0.02) ≈ 1.0
+    @test SS.long_term_deflection_factor(2.0, 0.01) ≈ 2.0 / 1.5
+
+    # `_screen_defl_ok` summarizes a stem's deflection over the tried ρ′:
+    # missing when untried, false when every tried ρ′ failed, true if any passed.
+    ratios = [0.0, 0.01, 0.02]
+    checked = Dict{Any, NamedTuple}()
+    @test SSy._screen_defl_ok(checked, 10.0u"inch", ratios) === missing
+    checked[(10.0u"inch", 0.0)] = (ok = false,)
+    checked[(10.0u"inch", 0.01)] = (ok = false,)
+    @test SSy._screen_defl_ok(checked, 10.0u"inch", ratios) === false
+    checked[(10.0u"inch", 0.02)] = (ok = true,)
+    @test SSy._screen_defl_ok(checked, 10.0u"inch", ratios) === true
 end

@@ -238,6 +238,7 @@ function _record_rib_reports!(struc, sized, owner)
             reasons = unique([prev[g].reason for g in failed]),
             deflection = old === nothing ? nothing : old.deflection,
             screen = old === nothing ? nothing : old.screen,
+            comp_steel_ratio = old === nothing ? 0.0 : get(old, :comp_steel_ratio, 0.0),
         )
     end
     return struc
@@ -291,62 +292,112 @@ Pick each ribbed story's stem and check its service deflection.
 
 `params.rib_stem` fixes every story's stem. Otherwise every stem in
 `params.rib_stems` is sized on the frame's current demands
-([`_size_story_stem!`](@ref)); among those whose every rib set passes, the
-least embodied carbon whose cracked service deflection
-([`story_rib_deflection`](@ref)) passes is chosen. With none passing
-deflection the deepest strength-passing stem is kept, and with none passing
-strength the deepest stem; the level's `rib_report` then shows the failure.
+([`_size_story_stem!`](@ref)). The screen then searches two axes jointly —
+stem depth and the continuous compression-steel ratio `ρ′` from
+`params.rib_comp_steel_ratios` — and picks the `(stem, ρ′)` of least total
+embodied carbon (stems/bars plus added top steel) whose cracked service
+deflection ([`story_rib_deflection`](@ref)) meets Table 9.5(b). `ρ′` lowers
+the long-term multiplier `λΔ = ξ/(1+50ρ′)` (ACI 318-11 §9.5.2.5). With no
+combination passing deflection the deepest strength-passing stem and the
+richest `ρ′` are kept, and with none passing strength the deepest stem; the
+level's `rib_report` then shows the failure.
 
-The chosen stem is installed, and each level's `rib_report` gets the story's
-`deflection` and the `screen` trials. Returns `true` when any stem changed.
+The chosen `(stem, ρ′)` is installed, and each level's `rib_report` gets the
+story's `deflection`, chosen `ρ′`, and the `screen` trials. Returns `true`
+when any stem changed.
 """
 function screen_rib_stems!(struc, params; fallback, size_kwargs...)
     changed = false
+    ratios = _rib_comp_ratios(params)
+    pre = params.rib_pre_attachment_dead_fraction
     for (lvl, levels) in sort!(collect(_rib_stories(struc, fallback)); by = first)
         before = [fl.rib_stem for fl in levels]
         opts = _level_concrete_options(first(levels), fallback)
         checked = Dict{Any, NamedTuple}()
-        deflection(stem) = get!(checked, stem) do
+        deflection(stem, ρ) = get!(checked, (stem, ρ)) do
             story_rib_deflection(struc, lvl;
                 sustained_live_fraction = opts.sustained_live_fraction,
                 limit = params.rib_deflection_limit,
+                comp_steel_ratio = ρ, pre_attachment_dead_fraction = pre,
                 concrete = opts.material, rebar = opts.rebar_material)
         end
         screen = nothing
+        ρ_final = 0.0
         if params.rib_stem !== nothing
             stem = params.rib_stem
+            _size_story_stem!(struc, levels, stem; fallback, size_kwargs...)
+            # Fixed stem: add the least compression steel that meets Table 9.5(b).
+            ρ_final = ratios[end]
+            for ρ in ratios
+                deflection(stem, ρ).ok && (ρ_final = ρ; break)
+            end
         else
             stems = sort(params.rib_stems)
             isempty(stems) && throw(ArgumentError("rib_stems is empty"))
             trials = [(stem = s, _size_story_stem!(struc, levels, s; fallback, size_kwargs...)...)
                       for s in stems]
             strong = sort([t for t in trials if t.ok]; by = t -> t.carbon)
-            chosen = nothing
+            # Two-axis search over (stem depth, compression-steel ρ′): pick the
+            # least total embodied carbon — stem stems/bars + added top steel —
+            # that meets deflection. For a fixed stem, ρ′ only adds carbon, so
+            # the first passing ρ′ is its optimum; stems are tried in ascending
+            # bare carbon, so once a stem's bare carbon already exceeds the best
+            # total, no deeper stem can win and the search stops.
+            best = nothing
             for t in strong
+                best !== nothing && t.carbon >= best.total && break
                 _size_story_stem!(struc, levels, t.stem; fallback, size_kwargs...)
-                if deflection(t.stem).ok
-                    chosen = t
+                for ρ in ratios
+                    deflection(t.stem, ρ).ok || continue
+                    total = t.carbon + story_comp_steel_carbon(struc, lvl, ρ, opts.rebar_material)
+                    (best === nothing || total < best.total) &&
+                        (best = (stem = t.stem, ρ = ρ, total = total))
                     break
                 end
             end
-            stem = chosen !== nothing ? chosen.stem :
-                   isempty(strong) ? last(stems) : maximum(t.stem for t in strong)
+            if best !== nothing
+                stem, ρ_final = best.stem, best.ρ
+            else
+                stem = isempty(strong) ? last(stems) : maximum(t.stem for t in strong)
+                ρ_final = ratios[end]
+            end
             screen = [(stem = t.stem, strength = t.ok, carbon = t.carbon,
-                       deflection = haskey(checked, t.stem) ? checked[t.stem].ok : missing)
-                      for t in trials]
+                       deflection = _screen_defl_ok(checked, t.stem, ratios)) for t in trials]
         end
         _size_story_stem!(struc, levels, stem; fallback, size_kwargs...)
-        _attach_rib_deflection!(levels, deflection(stem); screen)
+        _attach_rib_deflection!(levels, deflection(stem, ρ_final); screen,
+                                comp_steel_ratio = ρ_final)
         changed |= any(b -> b === nothing || b != stem, before)
     end
     return changed
 end
 
-function _attach_rib_deflection!(levels, d; screen = missing)
+"""Deflection compression-steel ladder `ρ′`, sorted unique and starting at 0.0."""
+function _rib_comp_ratios(params)
+    rs = isempty(params.rib_comp_steel_ratios) ? Float64[0.0] : params.rib_comp_steel_ratios
+    return sort(unique(Float64[0.0; rs]))
+end
+
+"""Screen deflection flag for stem `s`: `true`/`false` over tried `ρ′`, else `missing`."""
+function _screen_defl_ok(checked, s, ratios)
+    seen = false
+    passed = false
+    for ρ in ratios
+        haskey(checked, (s, ρ)) || continue
+        seen = true
+        checked[(s, ρ)].ok && (passed = true)
+    end
+    return seen ? passed : missing
+end
+
+function _attach_rib_deflection!(levels, d; screen = missing, comp_steel_ratio = missing)
     for fl in levels
         fl.rib_report === nothing && continue
         s = screen === missing ? fl.rib_report.screen : screen
-        fl.rib_report = merge(fl.rib_report, (deflection = d, screen = s))
+        ρ = comp_steel_ratio === missing ?
+            get(fl.rib_report, :comp_steel_ratio, 0.0) : comp_steel_ratio
+        fl.rib_report = merge(fl.rib_report,
+                              (deflection = d, screen = s, comp_steel_ratio = ρ))
     end
 end
 
@@ -361,19 +412,34 @@ function report_rib_deflection!(struc, params; fallback)
     for (lvl, levels) in _rib_stories(struc, fallback)
         any(fl -> fl.rib_stem === nothing, levels) && continue
         opts = _level_concrete_options(first(levels), fallback)
+        # Re-check on the final sections with the compression steel the screen
+        # chose, so the authoritative result matches what was designed.
+        ρ = _report_comp_ratio(levels)
         d = story_rib_deflection(struc, lvl;
             sustained_live_fraction = opts.sustained_live_fraction,
             limit = params.rib_deflection_limit,
+            comp_steel_ratio = ρ,
+            pre_attachment_dead_fraction = params.rib_pre_attachment_dead_fraction,
             concrete = opts.material, rebar = opts.rebar_material)
         d.ok || @warn "Ribbed story $lvl fails service deflection: live " *
                       "$(round(d.live.ratio; digits = 2)), long-term " *
-                      "$(round(d.long_term.ratio; digits = 2)) of the Table 9.5(b) limit"
+                      "$(round(d.long_term.ratio; digits = 2)) of the Table 9.5(b) " *
+                      "limit (ρ′ = $(round(ρ; digits = 4)))"
         # A non-converged Ie ratchet only ever under-reports (stiffness ratchets
         # down), so the ratios above are a lower bound: flag it for defensibility.
         d.converged || @warn "Ribbed story $lvl deflection Ie ratchet did not " *
                              "converge in max_iter passes; reported ratios are a " *
                              "lower bound (actual deflection is at least this large)"
-        _attach_rib_deflection!(levels, d)
+        _attach_rib_deflection!(levels, d; comp_steel_ratio = ρ)
     end
     return struc
+end
+
+"""Compression-steel ρ′ the screen recorded on `levels`, or 0.0 if none."""
+function _report_comp_ratio(levels)
+    for fl in levels
+        fl.rib_report === nothing && continue
+        return get(fl.rib_report, :comp_steel_ratio, 0.0)
+    end
+    return 0.0
 end

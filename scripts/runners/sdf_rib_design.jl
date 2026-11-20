@@ -255,6 +255,7 @@ function _framing_summary(design)
                 d === nothing || push!(lines,
                     "    deflection ok=$(d.ok)  live=$(round(d.live.ratio; digits = 2))  " *
                     "long-term($(d.limit))=$(round(d.long_term.ratio; digits = 2))  " *
+                    "ρ′=$(round(get(rr, :comp_steel_ratio, 0.0); digits = 4))  " *
                     "l=$(round(d.long_term.l; digits = 2)) m  bays=$(d.n_bays)  converged=$(d.converged)")
                 rr.screen === nothing || for t in rr.screen
                     push!(lines, "      stem $(t.stem)  strength=$(t.strength)  " *

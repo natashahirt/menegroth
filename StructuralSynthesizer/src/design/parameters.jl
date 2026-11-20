@@ -317,6 +317,24 @@ Base.@kwdef mutable struct DesignParameters
     # deflection after nonstructural elements are attached: `:sensitive` is
     # l/480 (elements likely to be damaged), `:total` is l/240.
     rib_deflection_limit::Symbol = :sensitive
+    # Continuous midspan compression-steel ratios ρ′ = As′/(bw·d) the deflection
+    # screen may add to the ribs to cut the long-term multiplier λΔ = ξ/(1+50ρ′)
+    # (ACI 318-11 §9.5.2.5, Eq. 9-11; corpus: aci-318-11, PDF page 132). The
+    # screen escalates up this ladder only when depth alone fails Table 9.5(b),
+    # and picks the (stem, ρ′) with the least total embodied carbon. `0.0` must
+    # stay first so the no-added-steel case is always tried. ENGINEERING
+    # JUDGMENT: the 0.02 cap keeps λΔ gains from flattening and the top mat
+    # buildable; the bars are detailed continuous through midspan so §9.5.2.5
+    # credits ρ′ there.
+    rib_comp_steel_ratios::Vector{Float64} = [0.0, 0.005, 0.01, 0.015, 0.02]
+    # Fraction of the immediate dead-load sag taken to occur before the
+    # nonstructural elements are attached, and therefore deducted from the
+    # after-attachment deflection (ACI 318-11 §9.5.2.6 / R9.5.2.6; corpus:
+    # aci-318-11, PDF page 133: "the portion of the deflection before attachment
+    # of the nonstructural elements may be deducted"). ENGINEERING JUDGMENT:
+    # magnitude depends on the construction sequence; `0.0` (deduct nothing) is
+    # the conservative default.
+    rib_pre_attachment_dead_fraction::Float64 = 0.0
     # ENGINEERING JUDGMENT. A rib bay whose least centerline width, minus the
     # ribs, is below this joins the nearest solid head.
     min_rib_void::typeof(1.0u"inch") = 12.0u"inch"

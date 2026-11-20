@@ -368,6 +368,11 @@ function report_rib_deflection!(struc, params; fallback)
         d.ok || @warn "Ribbed story $lvl fails service deflection: live " *
                       "$(round(d.live.ratio; digits = 2)), long-term " *
                       "$(round(d.long_term.ratio; digits = 2)) of the Table 9.5(b) limit"
+        # A non-converged Ie ratchet only ever under-reports (stiffness ratchets
+        # down), so the ratios above are a lower bound: flag it for defensibility.
+        d.converged || @warn "Ribbed story $lvl deflection Ie ratchet did not " *
+                             "converge in max_iter passes; reported ratios are a " *
+                             "lower bound (actual deflection is at least this large)"
         _attach_rib_deflection!(levels, d)
     end
     return struc

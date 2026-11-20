@@ -217,7 +217,7 @@ end
 
 """
     story_rib_deflection(struc, lvl; sustained_live_fraction, limit = :sensitive,
-                         max_iter = 4, tol = 0.05, resolution = 5) -> NamedTuple
+                         max_iter = 8, tol = 0.05, resolution = 5) -> NamedTuple
 
 Cracked service deflection of story `lvl` against ACI 318-11 Table 9.5(b).
 
@@ -242,7 +242,7 @@ are not touched.
 """
 function story_rib_deflection(struc, lvl::Int; sustained_live_fraction::Real,
                               limit::Symbol = :sensitive, concrete, rebar,
-                              max_iter::Int = 4, tol::Float64 = 0.05, resolution::Int = 5)
+                              max_iter::Int = 8, tol::Float64 = 0.05, resolution::Int = 5)
     limit in (:sensitive, :total) || throw(ArgumentError(
         "rib_deflection_limit is :$limit; use :sensitive (l/480) or :total (l/240)"))
     ψ = StructuralSizer._as_sustained_live_fraction(sustained_live_fraction)

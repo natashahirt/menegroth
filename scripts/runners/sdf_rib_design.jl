@@ -56,7 +56,12 @@ function rib_parameters(plan_name::AbstractString, system::Symbol)
     end
     params.name = SYSTEM_TITLE[system]
     params.description = String(plan_name)
-    params.max_iterations = 4
+    # The coupled columns <-> ribs <-> growing solid-head system settles slowly:
+    # a dense waffle (30 in pans) needs ~9 passes per screen round to reach a
+    # fixed point. The old cap of 4 left the member loop falsely "not settled"
+    # (every beam flagged, fail ratio floored to 1.0) even though all members
+    # pass; 12 converges with margin (production default is 20).
+    params.max_iterations = 12
     params.skip_visualization = true
     return params
 end
@@ -248,8 +253,10 @@ function _framing_summary(design)
             push!(lines, "slab $si  $kind  analysis=$(fl.analysis)  spacing=$(pat isa ModularRibPattern || pat isa LinearAxisPattern ? pat.spacing : nothing)")
             rr = fl.rib_report
             if rr !== nothing
+                cc = get(rr, :comp_steel_carbon, 0.0u"kgCO2e")
                 push!(lines, "    rib stem $(rr.stem)  sets=$(rr.n_sets)  failed=$(rr.n_failed)  " *
                              "carbon=$(round(ustrip(rr.carbon); digits = 0)) kgCO2e" *
+                             (ustrip(cc) > 0 ? "  +comp_steel=$(round(ustrip(cc); digits = 0)) kgCO2e" : "") *
                              (isempty(rr.reasons) ? "" : "  reasons=$(rr.reasons)"))
                 d = rr.deflection
                 d === nothing || push!(lines,

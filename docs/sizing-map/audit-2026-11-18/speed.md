@@ -333,20 +333,42 @@ Notes on ideas the brief asked about:
 
 New levers found 2026-11-20 (profiler-driven; `chec-4ffcbf9e`):
 
-- **#18 — one building re-solve per member-stage round.** The member settle
-  loop re-solves the building frame after *each* column change
-  (`_resolve_after_column_change!` inside `check_flat_plate_columns!`'s own
-  settle), so a round that grows several columns pays several fresh rigid-link
-  factorizations. Batch a round's column grows and re-solve once at round end.
-  Exact *iff* the converged state is unchanged (it re-solves at round end
-  anyway); needs a convergence-equivalence proof since it reorders decisions.
-  Attaches to `graph_builder.jl::_design_flat_plate_members!` /
-  `flat_plate_column_check.jl::check_flat_plate_columns!`. Pairs with #7.
-- **#19 — unify the member-stage and slab-stage P-M catalog caches.** #10's
-  memo (`flat_plate_column_check.jl`) and the slab stage's
-  `StructuralSizer._precompute_flat_plate_col_cache` build the same catalog
-  diagrams independently. One run-level cache keyed by (catalog, material,
-  objective) shared across both stages removes the duplicate precompute. Exact.
+- **#18 — skip the redundant member-stage install re-solve. DONE
+  (`chec-fd1e7734`, exact, verified).** *Correction to the original framing:*
+  the column re-solves in `check_flat_plate_columns!` are **already batched
+  per settle iteration** (one `_resolve_after_column_change!` per pass over all
+  columns, not per column). The real redundancy: each member settle round runs
+  `refresh_flat_plate_analysis!` — which **solves** the current state —
+  immediately followed by `_reconcile_columns!` → `_install_sized_column_frame!`,
+  which re-solved **unconditionally** even when it changed no frame section
+  (gravity loads are already idempotent). That install re-solve is redundant
+  whenever the columns are unchanged, because refresh just solved exactly those.
+  Fix (`column_reconciliation.jl` + `graph_builder.jl`):
+  `_install_column_frame_section!` value-compares `Asap.Section` (immutable;
+  `_rc_column_frame_section` is deterministic in the column dims) and returns
+  `changed`; `_install_sized_column_frame!(…; skip_resolve_if_unchanged)` skips
+  the solve when nothing changed and no load was added; `_reconcile_columns!(…;
+  model_current)` passes `true` only from the in-loop caller (right after
+  `refresh`, where the precondition is proven — nothing mutates the model
+  between). Pre-loop keeps always-solve. **Verified:** member-stage suite
+  299/299 bit-identical **and** `scripts/runners/equiv_member_resolve_skip.jl`
+  (skip ON vs OFF, gated by `SS_DISABLE_MEMBER_RESOLVE_SKIP`) byte-identical on
+  48 columns + 3 slabs. Pairs with #7.
+- **#19 — DONE (exact, verified; `deci-0d395562`).** The slab stage's
+  `StructuralSizer._precompute_flat_plate_col_cache` built the full-catalog P-M
+  diagrams fresh on **every** call — and `prepare_floor_design_workspace` calls
+  it on every isolated-floor-redesign workspace in the member settle loop
+  (`graph_builder.jl`, `scheduler.jl`) and every default-workspace
+  `design_floor!`, re-integrating the same diagrams each round. Added a
+  content-keyed run-level memo (`_FLAT_PLATE_COL_CACHE_MEMO` + lock in
+  `slabs/sizing.jl`) keyed on `(section_shape, catalog, objectid(custom_catalog),
+  objectid(material), objectid(objective), include_slenderness, include_biaxial,
+  fy_ksi, Es_ksi, max_depth)`, validated with `===` guards + `cache_matches`. The
+  cache was already shared read-only across slabs (incl. concurrently via
+  `Threads.@spawn`), so sharing across calls is safe. **Verified:** StructuralSizer
+  flat-plate suites 239/239 and member-stage golden 299/299 bit-identical. (The
+  member-stage `_memo_capacity_cache` still owns its one build; full cross-package
+  unification is a small follow-up.)
 - **#20 — resolve `_rc_section_check` against the full-catalog cache.** Idea A
   memoizes a 1-section cache; if the installed section is a catalog section
   (it is, when picked from the catalog), index into the already-built
@@ -384,17 +406,32 @@ New levers found 2026-11-20 (profiler-driven; `chec-4ffcbf9e`):
    factorizations. Full report: the `==== SIZING PROBE REPORT ====` block of
    `logs/profile_stages_overnight.log`.
 
-   **#7 implementation note / obstacle (for sign-off).** The mutating
-   `solve!(model, links)` (member-stage building solves) can cache on `model`:
-   store `G`, `dependent`, `retained_free`, and the reduced CHOLMOD symbolic
-   factor keyed on the link set + `S` sparsity pattern, then numeric-only
-   `cholesky!` on value changes — exactly the proven-exact pattern the slab FEA
-   already uses (`factorization_cache.jl::_get_factorization`). The multi-case
-   `solve(model, cases, links)` (the walls' 28 factorizations + 60 RHS) is
-   **non-mutating by contract** ("does not write `model._factorization`"), so its
-   cache has no clean home on `model`; it needs either a passed-in cache handle
-   or a contract change. Because this is the core, safety-critical analysis path,
-   it is left for explicit sign-off rather than an autonomous rewrite.
+   **#7 — DONE (phases 1 + 2a + 2b), exact, verified.** Design note:
+   `docs/sizing-map/rigidlink-factorization-cache.md`
+   (`deci-498f6f53`/`chec-0d9ea7d0`). The mutating `solve!(model, links)` (the
+   member/wall building value-only re-solves) now routes the reduced system
+   `Krr` through `factorization_cache.jl::_get_reduced_factorization!`, which
+   does numeric-only `cholesky!` reuse of the symbolic ordering keyed on
+   `(objectid(S), nnz(S), retained_free, Krr.colptr, Krr.rowval)` — the same
+   proven-exact pattern `_get_factorization` uses for the unreduced system —
+   caching in the model's existing `_factorization`/`_stale`/`_key` slots (the
+   link path owns them; no `Model` struct change). No blind fast-path: it always
+   recomputes numerics from the current `Krr`, so reuse is of symbolic work only.
+   `solve!` now **keeps** the reduced factor instead of nulling it. **Verified:**
+   Asap rigid-link + factorization-cache + diaphragm + P-delta + mixed-model =
+   239/239, and the member-stage golden suite stays 299/299 bit-identical.
+   The multi-case `solve(model, cases, links)` is **non-mutating by contract**.
+   **Phase 2a (DONE):** the plain reduced solve (no `K_G`, shells kept) reuses
+   `model._factorization` **read-only** when its pattern key matches — removing
+   the second factorization `_solve_with_patterns!` paid on every pattern-based
+   building re-solve. **Phase 2b (DONE):** the walls' P-Δ (`geometric_stiffness`)
+   and frame-only (`exclude_shells`) solves — which build matrices with no
+   counterpart in `model._factorization` — now take a caller-owned
+   `Asap.RigidLinkFactorCache` (held in `struc._analysis_caches`, dropped on
+   remesh) keyed on pattern + variant, so each per-gravity-key P-Δ sweep pays one
+   symbolic analysis instead of one per key (walls' 28 factorizations). **Verified:**
+   phase-2b equivalence/reuse 13/13 (bit-identical, 1 `:factor` + N-1 `:refactor`),
+   `analyze/test_ordinary_wall_stage.jl` 701/701, member golden 299/299.
 2. **How many remeshes, value-only updates and column steps per slab in the
    66-min run?** `FEAModelCache.n_rebuilds` / `n_updates` are written on
    `size_flat_plate!` exit (`chec-cda68f1e`); extract them per slab, and keep

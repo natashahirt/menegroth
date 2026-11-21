@@ -335,10 +335,45 @@ Notes on ideas the brief asked about:
 
 ## 4. Open questions and measurements needed
 
-1. **Where do the core office's 699 s of `pipeline` go?** No stage timing
-   exists. Run the Phase 1 instrumentation (`phase1-benchmarks.md` §4: Asap
-   analysis log with `:factor` / `:refactor` / `:rhs` / `:dense_factor` and
-   stage labels) on core office v6 and the 66-min building.
+1. **Where do the core office's 699 s of `pipeline` go?** **Answered
+   2026-11-20** (`scripts/runners/profile_design_building_stages.jl`, `SizingProbe`,
+   on the now-converging core office; busy machine so read the *relative* split,
+   not the absolute seconds). `pipeline` splits by stage (building-frame vs other
+   = slab-mesh / story-shell / wall factorizations):
+
+   | stage | time(s) | bldg fac / refac / rhs | other fac / refac |
+   |---|---|---|---|
+   | `ordinary_walls` | **709** | 28 / 0 / 60 | 7 / 10 |
+   | `members` | **594** | 16 / 3 / 15 | 6 / 10 |
+   | `slab_sizing_s1` | 374 | 0 / 0 / 0 | 1 / 4 |
+   | `slab_sizing_s2–s4` | 46 / 29 / 29 | 0 | ~1 / ~3 each |
+   | `foundations` | 70 | 2 / 0 / 2 | 0 |
+   | TOTAL | 1850 | 48 / 3 / 79 | 19 / 34 |
+
+   Reading: the two heavy stages are **walls (709 s)** and **members (594 s)**,
+   and both are dominated by **building-frame full factorizations** (28 + 16 = 44
+   of the 48 total). Under the rigid diaphragm every building solve refactors
+   from scratch (`rigidlink.jl::solve!` / `solve` null the factor; §2c), so those
+   44 fresh factorizations are the single largest recoverable cost — this is the
+   quantitative case for **#7 (rigid-link factorization cache)**, now the top exact
+   target. The member stage also pays **6 full + 10 numeric slab remeshes**
+   in-stage (stale-slab redesign), the case for #4/#1. The P-M / catalog compute
+   that #10 (landed 2026-11-20, exact) removed is *not* a factorization and so is
+   invisible to this probe; it lives inside the `members` 594 s alongside the
+   factorizations. Full report: the `==== SIZING PROBE REPORT ====` block of
+   `logs/profile_stages_overnight.log`.
+
+   **#7 implementation note / obstacle (for sign-off).** The mutating
+   `solve!(model, links)` (member-stage building solves) can cache on `model`:
+   store `G`, `dependent`, `retained_free`, and the reduced CHOLMOD symbolic
+   factor keyed on the link set + `S` sparsity pattern, then numeric-only
+   `cholesky!` on value changes — exactly the proven-exact pattern the slab FEA
+   already uses (`factorization_cache.jl::_get_factorization`). The multi-case
+   `solve(model, cases, links)` (the walls' 28 factorizations + 60 RHS) is
+   **non-mutating by contract** ("does not write `model._factorization`"), so its
+   cache has no clean home on `model`; it needs either a passed-in cache handle
+   or a contract change. Because this is the core, safety-critical analysis path,
+   it is left for explicit sign-off rather than an autonomous rewrite.
 2. **How many remeshes, value-only updates and column steps per slab in the
    66-min run?** `FEAModelCache.n_rebuilds` / `n_updates` are written on
    `size_flat_plate!` exit (`chec-cda68f1e`); extract them per slab, and keep

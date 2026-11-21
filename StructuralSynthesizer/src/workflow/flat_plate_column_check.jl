@@ -109,6 +109,40 @@ function _memo_plan_groups(catalog, cache, cap)
     end
 end
 
+struct _SecCacheEntry
+    section::Any
+    material::Any
+    objective::Any
+    cache::StructuralSizer.ACIColumnCapacityCache
+end
+const _SEC_CACHE_MEMO = Dict{Any, _SecCacheEntry}()
+
+"""
+    _memo_section_cache(checker, section, material, objective) -> ACIColumnCapacityCache
+
+Single-section capacity cache (one entry, index 1) for checking an already
+installed section, memoized. Many columns carry the same catalog section, so
+this reuses the P-M diagram across them and across settle rounds instead of
+rebuilding it on each `_rc_section_check`. Same exactness guarantees and guards
+as [`_memo_capacity_cache`](@ref).
+"""
+function _memo_section_cache(checker, section, material, objective)
+    key = (objectid(section), objectid(material), objectid(objective),
+           checker.include_biaxial, checker.fy_ksi, checker.Es_ksi)
+    return lock(_COL_MEMO_LOCK) do
+        e = get(_SEC_CACHE_MEMO, key, nothing)
+        if e !== nothing && e.section === section && e.material === material &&
+           e.objective === objective &&
+           StructuralSizer.cache_matches(checker, e.cache, (section,), material)
+            return e.cache
+        end
+        cache = StructuralSizer.create_cache(checker, 1)
+        StructuralSizer.precompute_capacities!(checker, cache, [section], material, objective)
+        _SEC_CACHE_MEMO[key] = _SecCacheEntry(section, material, objective, cache)
+        return cache
+    end
+end
+
 """
     _flat_plate_joint_moments(struc, column_opts) -> Dict{Int, NamedTuple}
 
@@ -393,8 +427,7 @@ _column_concrete(col, opts) = something(col.concrete, opts.material)
 governing ratio, for reporting.
 """
 function _rc_section_check(checker, opts, section, material, demands, geometry)
-    cache = StructuralSizer.create_cache(checker, 1)
-    StructuralSizer.precompute_capacities!(checker, cache, [section], material, opts.objective)
+    cache = _memo_section_cache(checker, section, material, opts.objective)
     passed = all(d -> StructuralSizer.is_feasible(checker, cache, 1, section, material, d, geometry),
                  demands)
     worst = nothing

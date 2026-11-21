@@ -1,4 +1,33 @@
 # =============================================================================
+# Member-stage wall-time attribution (diagnostic; inert unless SS_MEMBER_TIMING=1)
+# =============================================================================
+# Lightweight, opt-in timers that attribute the member stage's wall time to its
+# sub-phases (rib sizing kernel vs deflection screening vs demand/flange
+# extraction vs FE solves vs column sizing). Gated on an env var so it adds
+# nothing — no branch state, just one closure call that returns immediately — to
+# a production run, keeping sizing behavior and timing bit-identical when off.
+const _MEMBER_PHASE_TIMERS = Dict{Symbol, Float64}()
+const _MEMBER_PHASE_COUNTS = Dict{Symbol, Int}()
+
+"""Reset the member-stage timers (call before a profiled `design_building`)."""
+function reset_member_timers!()
+    empty!(_MEMBER_PHASE_TIMERS)
+    empty!(_MEMBER_PHASE_COUNTS)
+    return nothing
+end
+
+"""Run `f`, accumulating its wall time under `key` when `SS_MEMBER_TIMING=1`."""
+@inline function _member_timed(f::Function, key::Symbol)
+    get(ENV, "SS_MEMBER_TIMING", "") == "1" || return f()
+    t0 = time_ns()
+    r = f()
+    dt = (time_ns() - t0) / 1e9
+    _MEMBER_PHASE_TIMERS[key] = get(_MEMBER_PHASE_TIMERS, key, 0.0) + dt
+    _MEMBER_PHASE_COUNTS[key] = get(_MEMBER_PHASE_COUNTS, key, 0) + 1
+    return r
+end
+
+# =============================================================================
 # Uniform Column Size Harmonization
 # =============================================================================
 
@@ -332,15 +361,21 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
         converged, iters_used = false, 0
         for round in 1:(has_ribs ? RIB_SCREEN_ROUNDS : 1)
             if has_ribs
-                moved = screen_rib_stems!(struc, params; fallback = beam_opts, rib_kwargs...)
+                moved = _member_timed(:screen_rib_stems) do
+                    screen_rib_stems!(struc, params; fallback = beam_opts, rib_kwargs...)
+                end
                 round > 1 && !moved && break
-                _reanalyze_after_section_change!(struc)
+                _member_timed(() -> _reanalyze_after_section_change!(struc), :reanalyze_fe)
             end
-            converged, n = _iterate_beams_columns!(struc, params, beam_opts,
-                                                   column_opts, beam_kwargs; tc = tc)
+            converged, n = _member_timed(:iterate_members) do
+                _iterate_beams_columns!(struc, params, beam_opts,
+                                        column_opts, beam_kwargs; tc = tc)
+            end
             iters_used += n
         end
-        has_ribs && report_rib_deflection!(struc, params; fallback = beam_opts)
+        has_ribs && _member_timed(:report_rib_deflection) do
+            report_rib_deflection!(struc, params; fallback = beam_opts)
+        end
     else
         converged, iters_used = _size_with_story_shell!(struc, params, beam_opts,
                                                         column_opts, beam_kwargs,
@@ -363,7 +398,9 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
     # accept it as settled only when every beam and column group passes. This is
     # strictly weaker than a fixed point, so it cannot pass an unsafe design.
     if !converged
-        converged = _verify_installed_design!(struc, params, beam_opts, column_opts)
+        converged = _member_timed(:verify_installed) do
+            _verify_installed_design!(struc, params, beam_opts, column_opts)
+        end
         converged && @info "Member sizing hit max_iterations without a fixed point, but " *
             "every beam and column passes its final-analysis check — accepting the " *
             "installed design as settled."
@@ -397,21 +434,26 @@ function _iterate_beams_columns!(struc, params, beam_opts, column_opts, beam_kwa
     for iter in 1:max_iter
         beams_before = [_story_beam_section(struc, b) for b in struc.beams]
         columns_before = [section(c) for c in struc.columns]
-        size_beams!(struc, beam_opts; shell_demands = shell_demands,
-                    shell_spans = shell_spans,
-                    section_floor = upward_only ? _section_floors(struc) : nothing,
-                    beam_kwargs...)
+        _member_timed(:size_beams) do
+            size_beams!(struc, beam_opts; shell_demands = shell_demands,
+                        shell_spans = shell_spans,
+                        section_floor = upward_only ? _section_floors(struc) : nothing,
+                        beam_kwargs...)
+        end
         # The solid head is the bays around each column. A failing check grows
         # those bays, which adds beams, so the next pass sizes against them.
-        grow_building_solid_heads!(struc, params; fallback = beam_opts)
+        _member_timed(() -> grow_building_solid_heads!(struc, params; fallback = beam_opts),
+                      :grow_heads)
         _sync_fire_coating_loads!(struc, params)
-        update_analysis!(struc, :stiffness; tc)
-        size_columns!(struc, column_opts; reanalyze=false, tc=tc,
-                      I_factor=params.column_I_factor,
-                      gravity_factor=member_self_weight_acceleration(params))
+        _member_timed(() -> update_analysis!(struc, :stiffness; tc), :update_stiffness)
+        _member_timed(:size_columns) do
+            size_columns!(struc, column_opts; reanalyze=false, tc=tc,
+                          I_factor=params.column_I_factor,
+                          gravity_factor=member_self_weight_acceleration(params))
+        end
         _harmonize_columns!(struc, params)
         _sync_fire_coating_loads!(struc, params)
-        update_analysis!(struc, :stiffness; tc)
+        _member_timed(() -> update_analysis!(struc, :stiffness; tc), :update_stiffness)
         held = length(beams_before) == length(struc.beams) &&
                all(_sections_identical(a, _story_beam_section(struc, b))
                    for (a, b) in zip(beams_before, struc.beams)) &&

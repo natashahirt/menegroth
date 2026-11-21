@@ -135,17 +135,18 @@ function size_rib_lines!(struc, gids; fallback, resolution::Int = 200, gravity_f
     end
     _add_gravity_loads!(struc, edge_ids, gravity_factor)
 
-    sets = _rib_sets(struc, gids, owner)
+    sets = _member_timed(() -> _rib_sets(struc, gids, owner), :rib_demands)
     needed = Set(g for s in sets for g in s)
-    group_ids, demands, L_totals = _beam_group_demands(
-        struc, g -> g in needed; resolution, shell_demands = nothing,
-        service_deflection = false)[1:3]
+    group_ids, demands, L_totals = _member_timed(:rib_demands) do
+        _beam_group_demands(struc, g -> g in needed; resolution, shell_demands = nothing,
+                            service_deflection = false)[1:3]
+    end
     row = Dict(g => i for (i, g) in enumerate(group_ids))
     for s in sets, g in s
         haskey(row, g) || throw(ArgumentError(
             "rib group $g has no demand; the frame has no element for it"))
     end
-    specs = _compute_flange_params(struc, group_ids)
+    specs = _member_timed(() -> _compute_flange_params(struc, group_ids), :rib_demands)
     spec_of = Dict(g => specs[i] for (i, g) in enumerate(group_ids))
     faces = Set{UInt64}()
     rib_head_stirrups == stirrup_shear ||
@@ -179,9 +180,11 @@ function size_rib_lines!(struc, gids; fallback, resolution::Int = 200, gravity_f
         Nu = [x.Pu_t > 0 ? -x.Pu_t * u"N" : x.Pu_c * u"N" for x in d]
         geoms = [StructuralSizer.ConcreteMemberGeometry(L_totals[i] * u"m") for i in idx]
         flags = [g in faces ? rib_head_stirrups : stirrup_shear for g in set]
-        res = StructuralSizer.size_rib_set(Mu, Vu, geoms, opts; h, hf, flange_width = bf_of,
-                                           joist_spacing = js, Mu_neg, Nu,
-                                           stirrup_shear = flags)
+        res = _member_timed(:rib_kernel) do
+            StructuralSizer.size_rib_set(Mu, Vu, geoms, opts; h, hf, flange_width = bf_of,
+                                         joist_spacing = js, Mu_neg, Nu,
+                                         stirrup_shear = flags)
+        end
         fc_psi = ustrip(u"psi", opts.material.fc′)
         fy_psi = ustrip(u"psi", opts.rebar_material.Fy)
         if !res.ok
@@ -239,6 +242,8 @@ function _record_rib_reports!(struc, sized, owner)
             deflection = old === nothing ? nothing : old.deflection,
             screen = old === nothing ? nothing : old.screen,
             comp_steel_ratio = old === nothing ? 0.0 : get(old, :comp_steel_ratio, 0.0),
+            comp_steel_carbon = old === nothing ? 0.0u"kgCO2e" :
+                                get(old, :comp_steel_carbon, 0.0u"kgCO2e"),
         )
     end
     return struc
@@ -315,11 +320,13 @@ function screen_rib_stems!(struc, params; fallback, size_kwargs...)
         opts = _level_concrete_options(first(levels), fallback)
         checked = Dict{Any, NamedTuple}()
         deflection(stem, ρ) = get!(checked, (stem, ρ)) do
-            story_rib_deflection(struc, lvl;
-                sustained_live_fraction = opts.sustained_live_fraction,
-                limit = params.rib_deflection_limit,
-                comp_steel_ratio = ρ, pre_attachment_dead_fraction = pre,
-                concrete = opts.material, rebar = opts.rebar_material)
+            _member_timed(:rib_deflection) do
+                story_rib_deflection(struc, lvl;
+                    sustained_live_fraction = opts.sustained_live_fraction,
+                    limit = params.rib_deflection_limit,
+                    comp_steel_ratio = ρ, pre_attachment_dead_fraction = pre,
+                    concrete = opts.material, rebar = opts.rebar_material)
+            end
         end
         screen = nothing
         ρ_final = 0.0
@@ -390,14 +397,18 @@ function _screen_defl_ok(checked, s, ratios)
     return seen ? passed : missing
 end
 
-function _attach_rib_deflection!(levels, d; screen = missing, comp_steel_ratio = missing)
+function _attach_rib_deflection!(levels, d; screen = missing, comp_steel_ratio = missing,
+                                 comp_steel_carbon = missing)
     for fl in levels
         fl.rib_report === nothing && continue
         s = screen === missing ? fl.rib_report.screen : screen
         ρ = comp_steel_ratio === missing ?
             get(fl.rib_report, :comp_steel_ratio, 0.0) : comp_steel_ratio
+        cc = comp_steel_carbon === missing ?
+            get(fl.rib_report, :comp_steel_carbon, 0.0u"kgCO2e") : comp_steel_carbon
         fl.rib_report = merge(fl.rib_report,
-                              (deflection = d, screen = s, comp_steel_ratio = ρ))
+                              (deflection = d, screen = s, comp_steel_ratio = ρ,
+                               comp_steel_carbon = cc))
     end
 end
 
@@ -409,18 +420,28 @@ and heads ([`story_rib_deflection`](@ref)) and put it on each level's
 `rib_report`.
 """
 function report_rib_deflection!(struc, params; fallback)
+    ratios = _rib_comp_ratios(params)
     for (lvl, levels) in _rib_stories(struc, fallback)
         any(fl -> fl.rib_stem === nothing, levels) && continue
         opts = _level_concrete_options(first(levels), fallback)
-        # Re-check on the final sections with the compression steel the screen
-        # chose, so the authoritative result matches what was designed.
-        ρ = _report_comp_ratio(levels)
-        d = story_rib_deflection(struc, lvl;
+        check(ρ) = story_rib_deflection(struc, lvl;
             sustained_live_fraction = opts.sustained_live_fraction,
             limit = params.rib_deflection_limit,
             comp_steel_ratio = ρ,
             pre_attachment_dead_fraction = params.rib_pre_attachment_dead_fraction,
             concrete = opts.material, rebar = opts.rebar_material)
+        # The screen picks (stem, ρ′) on the previous member loop's softer
+        # demands, so it over-provides. On the final sections, relax ρ′ to the
+        # least ladder value that still meets Table 9.5(b): ρ′ is a pure overlay
+        # on λΔ (§9.5.2.5), so no re-size is needed. If none pass, keep the
+        # richest ρ′ and warn.
+        ρ = ratios[end]
+        d = nothing
+        for ρ_try in ratios
+            d = check(ρ_try)
+            d.ok && (ρ = ρ_try; break)
+        end
+        cc = story_comp_steel_carbon(struc, lvl, ρ, opts.rebar_material)
         d.ok || @warn "Ribbed story $lvl fails service deflection: live " *
                       "$(round(d.live.ratio; digits = 2)), long-term " *
                       "$(round(d.long_term.ratio; digits = 2)) of the Table 9.5(b) " *
@@ -430,16 +451,30 @@ function report_rib_deflection!(struc, params; fallback)
         d.converged || @warn "Ribbed story $lvl deflection Ie ratchet did not " *
                              "converge in max_iter passes; reported ratios are a " *
                              "lower bound (actual deflection is at least this large)"
-        _attach_rib_deflection!(levels, d; comp_steel_ratio = ρ)
+        _attach_rib_deflection!(levels, d; comp_steel_ratio = ρ, comp_steel_carbon = cc)
     end
     return struc
 end
 
-"""Compression-steel ρ′ the screen recorded on `levels`, or 0.0 if none."""
-function _report_comp_ratio(levels)
-    for fl in levels
+"""
+    rib_comp_steel_ec(struc) -> kgCO₂e
+
+Total embodied carbon of the continuous compression (top) steel added to the
+ribs for long-term deflection control (ACI 318-11 §9.5.2.5), summed once per
+story from each level's `rib_report.comp_steel_carbon`. The story total is
+stored on every level of the story, so stories are de-duplicated by index.
+"""
+function rib_comp_steel_ec(struc)
+    total = 0.0u"kgCO2e"
+    seen = Set{Int}()
+    for slab in struc.slabs, fl in slab.framing_levels
         fl.rib_report === nothing && continue
-        return get(fl.rib_report, :comp_steel_ratio, 0.0)
+        cc = get(fl.rib_report, :comp_steel_carbon, 0.0u"kgCO2e")
+        cc > 0.0u"kgCO2e" || continue
+        lvl = _slab_story(struc, slab)
+        lvl in seen && continue
+        push!(seen, lvl)
+        total += cc
     end
-    return 0.0
+    return total
 end

@@ -554,6 +554,14 @@ function assign_solid_head_sections!(struc, level::FramingLevel, depth::Length, 
         w = _beam_solid_width(struc, struc.beams[bi], skel_width)
         sec = StructuralSizer.solid_head_section(w * u"m", depth_m, concrete; density = ρ)
         out[bi] = sec
+        # The piece is cast into the solid head: the gross rectangle `sec` goes
+        # on its frame elements below, and the head's own punching, one-way, and
+        # hogging checks govern it (ACI 318-11 §11.11.1). Drop any stale
+        # bare-rib verdict it carried from before it was claimed, so it is not
+        # reported as a failing thin rib it no longer is. The member section
+        # field holds only `StructuralSizer` section types, so it keeps the rib
+        # section as a label; `volumes` (carbon) stays on the member untouched.
+        struc.beams[bi].base.check = nothing
         nels == 0 && continue
         for si in segs
             e = struc.segments[si].edge_idx

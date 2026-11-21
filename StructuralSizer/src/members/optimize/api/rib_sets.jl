@@ -47,6 +47,61 @@ function rib_section_carbon(sec::RCTBeamSection, concrete::Concrete, rebar, L::L
     return uconvert(u"kgCO2e", Vc * concrete.ρ * concrete.ecc + Vs * rebar.ρ * rebar.ecc)
 end
 
+# ==============================================================================
+# Per-section capacity memo (speed; bit-identical)
+# ==============================================================================
+# `size_rib_set` builds a fresh `RCTBeamSection` for every (web, bar size, bar
+# count, piece) trial, and every rib set is re-sized across many stem-screen
+# rounds and member-iteration passes. The capacities ACI 318-11 demands — φMn
+# (§10.2), the hogging φMn⁻, φVn,max (Chapter 11), and the net tensile strain εt
+# (§10.3.5) — are a pure function of the section geometry and the checker's
+# material/strength configuration; they do not depend on a piece's demand. The
+# same section+configuration therefore recurs on the order of millions of times
+# across a design. This memo caches those precomputed capacities, keyed by every
+# value `precompute_capacities!` reads. The feasibility decision (`is_feasible`)
+# and the least-carbon pick are unchanged, so the installed sizing is byte-for-byte
+# identical to recomputing the capacities on every trial.
+const _RIB_CAP_MEMO = Dict{Any, NTuple{5, Float64}}()
+const _RIB_CAP_MEMO_LOCK = ReentrantLock()
+
+"""Value key over everything `precompute_capacities!` reads for one rib section + checker."""
+@inline function _rib_cap_key(sec::RCTBeamSection, chk::ACIBeamChecker, mat)
+    return (
+        # Section geometry and reinforcement (every field but the display `name`,
+        # which is a heap string that would defeat value equality).
+        sec.bw, sec.h, sec.d, sec.bf, sec.hf, sec.cover,
+        sec.As, sec.n_bars, sec.bar_size,
+        sec.As_prime, sec.n_bars_prime, sec.bar_size_prime, sec.d_prime,
+        sec.stirrup_size,
+        # Material and checker configuration the capacity math depends on: fc for
+        # φMn/φVn, fy for flexure, Es for nothing here but kept for completeness, λ
+        # for the shear Vc, and the §8.13.8 joist-Vc inputs (spacing, direction,
+        # whether stirrups are credited via `stirrup_shear`).
+        fc_ksi(mat), chk.fy_ksi, chk.Es_ksi, chk.λ,
+        chk.joist_spacing_in, chk.joist_direction, chk.stirrup_shear,
+    )
+end
+
+"""
+    _rib_section_capacities(chk, sec, mat, objective) -> (φMn, φMn_neg, φVn_max, εt, depth)
+
+Memoized capacities for one rib section under `chk`. On a miss, runs the same
+`precompute_capacities!` the fused trial loop ran and stores its results, so a
+hit returns byte-identical values.
+"""
+function _rib_section_capacities(chk::ACIBeamChecker, sec::RCTBeamSection, mat, objective)
+    key = _rib_cap_key(sec, chk, mat)
+    return lock(_RIB_CAP_MEMO_LOCK) do
+        hit = get(_RIB_CAP_MEMO, key, nothing)
+        hit === nothing || return hit
+        tmp = create_cache(chk, 1)
+        precompute_capacities!(chk, tmp, [sec], mat, objective)
+        v = (tmp.φMn[1], tmp.φMn_neg[1], tmp.φVn_max[1], tmp.εt[1], tmp.depths[1])
+        _RIB_CAP_MEMO[key] = v
+        return v
+    end
+end
+
 """
     size_rib_set(Mu, Vu, geometries, opts::ConcreteBeamOptions;
                  h, hf, flange_width, joist_spacing, Mu_neg, Nu,
@@ -113,11 +168,26 @@ function size_rib_set(
             demands[i] = dem[k]
         end
     end
+    # One reusable single-slot cache per stirrup setting. Its material/strength
+    # constants are set once, exactly as `precompute_capacities!` would; each trial
+    # then writes only the memoized per-section capacities, so `is_feasible` sees
+    # the same cache the fused precompute produced — at no per-trial allocation or
+    # recompute cost.
+    caches = Dict{Bool, ACIBeamCapacityCache}()
+    for (flag, chk) in checkers
+        c = create_cache(chk, 1)
+        c.fc_ksi = fc_ksi(mat)
+        c.fy_ksi = chk.fy_ksi
+        c.Es_ksi = chk.Es_ksi
+        caches[flag] = c
+    end
     passes(sec, i) = begin
-        chk = checkers[stirrup_shear[i]]
-        cache = create_cache(chk, 1)
-        precompute_capacities!(chk, cache, [sec], mat, opts.objective)
-        is_feasible(chk, cache, 1, sec, mat, demands[i], geoms[i])
+        flag = stirrup_shear[i]
+        chk = checkers[flag]
+        c = caches[flag]
+        c.φMn[1], c.φMn_neg[1], c.φVn_max[1], c.εt[1], c.depths[1] =
+            _rib_section_capacities(chk, sec, mat, opts.objective)
+        is_feasible(chk, c, 1, sec, mat, demands[i], geoms[i])
     end
     cov_in = ustrip(u"inch", cover)
     d_stir = ustrip(u"inch", rebar(stirrup_size).diameter)

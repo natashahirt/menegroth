@@ -60,6 +60,20 @@ function _memo_column_catalog(opts)
     end
 end
 
+"""Memo key for a full-catalog capacity cache under `checker`/`material`/`objective`."""
+_capacity_cache_key(checker, catalog, material, objective) =
+    (objectid(catalog), objectid(material), objectid(objective),
+     checker.include_biaxial, checker.fy_ksi, checker.Es_ksi)
+
+"""True when memo entry `e` is a valid, reusable cache for this request. The
+identity guards pin the catalog/material/objective (so `εcu` and the objective
+coefficients, which `cache_matches` does not compare, cannot drift) and
+`cache_matches` re-checks f′c/fy/Es and the weak-axis diagrams."""
+_capacity_entry_valid(e, checker, catalog, material, objective) =
+    e !== nothing && e.catalog === catalog && e.material === material &&
+    e.objective === objective &&
+    StructuralSizer.cache_matches(checker, e.cache, catalog, material)
+
 """
     _memo_capacity_cache(checker, catalog, material, objective) -> ACIColumnCapacityCache
 
@@ -73,19 +87,59 @@ change (which `cache_matches` alone would miss, since it does not compare the
 objective coefficients the group ordering reads).
 """
 function _memo_capacity_cache(checker, catalog, material, objective)
-    key = (objectid(catalog), objectid(material), objectid(objective),
-           checker.include_biaxial, checker.fy_ksi, checker.Es_ksi)
+    key = _capacity_cache_key(checker, catalog, material, objective)
     return lock(_COL_MEMO_LOCK) do
         e = get(_COL_CACHE_MEMO, key, nothing)
-        if e !== nothing && e.catalog === catalog && e.material === material &&
-           e.objective === objective &&
-           StructuralSizer.cache_matches(checker, e.cache, catalog, material)
-            return e.cache
-        end
+        _capacity_entry_valid(e, checker, catalog, material, objective) && return e.cache
         cache = StructuralSizer.create_cache(checker, length(catalog))
         StructuralSizer.precompute_capacities!(checker, cache, catalog, material, objective)
         _COL_CACHE_MEMO[key] = _ColCacheEntry(catalog, material, objective, cache)
         return cache
+    end
+end
+
+"""
+    _peek_capacity_cache(checker, catalog, material, objective) -> ACIColumnCapacityCache or nothing
+
+The already-built, validated full-catalog capacity cache for this request, or
+`nothing` when none is memoized. Unlike [`_memo_capacity_cache`](@ref) it never
+builds one — it is for reusing a catalog diagram the sizing stage already paid
+for (speed.md #20) without forcing a full-catalog precompute just to check one
+installed section.
+"""
+function _peek_capacity_cache(checker, catalog, material, objective)
+    key = _capacity_cache_key(checker, catalog, material, objective)
+    return lock(_COL_MEMO_LOCK) do
+        e = get(_COL_CACHE_MEMO, key, nothing)
+        _capacity_entry_valid(e, checker, catalog, material, objective) ? e.cache : nothing
+    end
+end
+
+"""Identity → index map of a catalog's sections, memoized by catalog identity so a
+column installed from the catalog can be found in O(1)."""
+const _CATALOG_INDEX_MEMO = Dict{Any, IdDict{Any, Int}}()
+
+"""
+    _catalog_section_index(opts, section) -> Int or nothing
+
+The index `j` with `catalog[j] === section` in `opts`'s (memoized) column
+catalog, or `nothing` when `section` is not a catalog section (a user-specified
+section, or a non-RC section). Identity-based: a column sized from the catalog
+holds the exact catalog object (`set_section!` stores it as-is), so its P-M
+diagram in a full-catalog cache at `j` is the one a one-section cache would
+rebuild.
+"""
+function _catalog_section_index(opts, section)
+    catalog = _memo_column_catalog(opts)
+    return lock(_COL_MEMO_LOCK) do
+        idx = get!(_CATALOG_INDEX_MEMO, objectid(catalog)) do
+            m = IdDict{Any, Int}()
+            for (j, sec) in enumerate(catalog)
+                get!(m, sec, j)   # first index wins if a section repeats
+            end
+            m
+        end
+        get(idx, section, nothing)
     end
 end
 
@@ -425,17 +479,42 @@ _column_concrete(col, opts) = something(col.concrete, opts.material)
 `passed` is the sizer's own test, `is_feasible`, under every demand.
 `explanation` is the `explain_feasibility` of the demand with the highest
 governing ratio, for reporting.
+
+When `section` is a catalog section and the sizing stage already built the
+full-catalog capacity cache for this `checker`/`material`/`objective`, the check
+indexes into that cache instead of building a single-section one
+([`_column_capacity_slot`](@ref), speed.md #20) — exactly the same diagram, so
+the result is identical.
 """
 function _rc_section_check(checker, opts, section, material, demands, geometry)
-    cache = _memo_section_cache(checker, section, material, opts.objective)
-    passed = all(d -> StructuralSizer.is_feasible(checker, cache, 1, section, material, d, geometry),
+    cache, j = _column_capacity_slot(checker, opts, section, material)
+    passed = all(d -> StructuralSizer.is_feasible(checker, cache, j, section, material, d, geometry),
                  demands)
     worst = nothing
     for d in demands
-        ex = StructuralSizer.explain_feasibility(checker, cache, 1, section, material, d, geometry)
+        ex = StructuralSizer.explain_feasibility(checker, cache, j, section, material, d, geometry)
         (worst === nothing || ex.governing_ratio > worst.governing_ratio) && (worst = ex)
     end
     return (passed, worst)
+end
+
+"""
+    _column_capacity_slot(checker, opts, section, material) -> (cache, index)
+
+A capacity cache and the index at which it holds `section`'s P-M diagram. Reuses
+the already-built full-catalog cache at the section's catalog index when one is
+memoized (speed.md #20); otherwise falls back to a single-section cache at index
+1. Both carry the identical diagram for `section`, so the feasibility result is
+the same either way.
+"""
+function _column_capacity_slot(checker, opts, section, material)
+    j = haskey(ENV, "SS_DISABLE_COL_CATALOG_SLOT") ? nothing :
+        _catalog_section_index(opts, section)
+    if j !== nothing
+        cache = _peek_capacity_cache(checker, _memo_column_catalog(opts), material, opts.objective)
+        cache === nothing || return (cache, j)
+    end
+    return (_memo_section_cache(checker, section, material, opts.objective), 1)
 end
 
 """Geometry of a column checked under its frame forces: its own `Lb`, `Kx`, `Ky` and bracing."""

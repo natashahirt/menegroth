@@ -369,10 +369,23 @@ New levers found 2026-11-20 (profiler-driven; `chec-4ffcbf9e`):
   flat-plate suites 239/239 and member-stage golden 299/299 bit-identical. (The
   member-stage `_memo_capacity_cache` still owns its one build; full cross-package
   unification is a small follow-up.)
-- **#20 — resolve `_rc_section_check` against the full-catalog cache.** Idea A
-  memoizes a 1-section cache; if the installed section is a catalog section
-  (it is, when picked from the catalog), index into the already-built
-  full-catalog diagram instead of building one. Exact; a refinement of #10.
+- **#20 — DONE (exact, verified; `chec-c4103e86`).** `_rc_section_check` now
+  resolves an installed **catalog** section against the already-built
+  full-catalog P-M cache instead of building a 1-section cache. New helpers in
+  `flat_plate_column_check.jl`: `_peek_capacity_cache` (GET-only memo lookup,
+  never builds), `_catalog_section_index` (identity `IdDict{section=>j}` memoized
+  per catalog — `set_section!` stores the catalog object as-is, so
+  `section(col) === catalog[j]`), and `_column_capacity_slot` returning
+  `(full_catalog_cache, j)` on a peek-hit else `(_memo_section_cache, 1)`. The
+  memo key/validity rule was factored into `_capacity_cache_key` /
+  `_capacity_entry_valid` (identity guards pin `εcu` and the objective
+  coefficients `cache_matches` does not compare). Exact: the diagram at `j` is
+  the one a 1-section cache would rebuild. **Verified:** catalog slot ON vs OFF
+  byte-identical (48 cols + 3 slabs, `scripts/runners/equiv_col_catalog_slot.jl`,
+  gated by `SS_DISABLE_COL_CATALOG_SLOT`) and member-stage golden 299/299. The
+  §10.12 joint path (`jchecker`, joint material) isn't in the memo, so it
+  peek-misses and falls back cleanly — routing `_joint_feasible` through
+  `_memo_capacity_cache` is a scoped follow-up. A refinement of #10/#19.
 
 ---
 

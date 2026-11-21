@@ -331,6 +331,27 @@ Notes on ideas the brief asked about:
   column, plus edge bands sized from the cap; then only patch tags and stub
   sections change.
 
+New levers found 2026-11-20 (profiler-driven; `chec-4ffcbf9e`):
+
+- **#18 — one building re-solve per member-stage round.** The member settle
+  loop re-solves the building frame after *each* column change
+  (`_resolve_after_column_change!` inside `check_flat_plate_columns!`'s own
+  settle), so a round that grows several columns pays several fresh rigid-link
+  factorizations. Batch a round's column grows and re-solve once at round end.
+  Exact *iff* the converged state is unchanged (it re-solves at round end
+  anyway); needs a convergence-equivalence proof since it reorders decisions.
+  Attaches to `graph_builder.jl::_design_flat_plate_members!` /
+  `flat_plate_column_check.jl::check_flat_plate_columns!`. Pairs with #7.
+- **#19 — unify the member-stage and slab-stage P-M catalog caches.** #10's
+  memo (`flat_plate_column_check.jl`) and the slab stage's
+  `StructuralSizer._precompute_flat_plate_col_cache` build the same catalog
+  diagrams independently. One run-level cache keyed by (catalog, material,
+  objective) shared across both stages removes the duplicate precompute. Exact.
+- **#20 — resolve `_rc_section_check` against the full-catalog cache.** Idea A
+  memoizes a 1-section cache; if the installed section is a catalog section
+  (it is, when picked from the catalog), index into the already-built
+  full-catalog diagram instead of building one. Exact; a refinement of #10.
+
 ---
 
 ## 4. Open questions and measurements needed

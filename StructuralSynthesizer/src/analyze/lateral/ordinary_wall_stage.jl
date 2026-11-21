@@ -998,6 +998,9 @@ function _build_second_order(struc, basic; wind=nothing, elf=nothing,
         keys = _stage_gravity_keys(roof)
     end
     sets = Dict{GravityStiffnessKey, StorySecondOrderSet}()
+    # One reduced symbolic factorization is reused across every gravity key: the
+    # P-Δ `K_G` changes, the reduced pattern does not (#7 phase 2b).
+    factor_cache = _lateral_factor_cache(struc)
     for key in keys
         u1 = key.D .* basic.u[1] .+ key.L .* basic.u[2] .+ key.roof .* basic.u[3]
         loads = vcat(scale_story_loads(basic.loads[1], key.D),
@@ -1006,7 +1009,8 @@ function _build_second_order(struc, basic; wind=nothing, elf=nothing,
         profiles = story_axial_profiles(model, u1, struc.wall_mesh, masters, base;
                                         loads=loads, base_master=base_master)
         Kg = story_geometric_stiffness(model, profiles)
-        u2 = Asap.solve(model, batch, struc.asap_rigid_links; geometric_stiffness=Kg)
+        u2 = Asap.solve(model, batch, struc.asap_rigid_links;
+                        geometric_stiffness=Kg, factor_cache=factor_cache)
         ug = key.D .* u2[1] .+ key.L .* u2[2] .+ key.roof .* u2[3]
         _require_gravity_cut_equilibrium(struc, ug, loads,
             "factored gravity D=$(key.D) L=$(key.L) $(roof)=$(key.roof)";

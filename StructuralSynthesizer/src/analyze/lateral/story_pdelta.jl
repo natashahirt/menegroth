@@ -287,3 +287,30 @@ function _require_fixed_base_in_plan(model, mesh::WallMesh, z::Float64)
         "story_axial_profiles: nothing at the base z = $(z) m is fixed in plan. " *
         "Give the base a master or fix the members that cross it."))
 end
+
+# ==============================================================================
+# #7 phase 2b — reduced-factorization cache for the lateral second-order solves
+# ==============================================================================
+
+# Reserved `_analysis_caches` key (not a slab index). Holds the caller-owned
+# `Asap.RigidLinkFactorCache` shared by the P-Δ (`geometric_stiffness`) and
+# frame-only (`exclude_shells`) lateral solves, which each build a reduced matrix
+# `model._factorization` cannot serve. `clear_geometry_caches!` drops it with the
+# rest of the cache, so a remesh (new `S`) starts from a clean cache.
+const _LATERAL_FACTOR_CACHE_KEY = -3
+
+"""
+    _lateral_factor_cache(struc) -> Asap.RigidLinkFactorCache
+
+The persistent reduced-factorization cache for the lateral second-order solves,
+created on first use and held in `struc._analysis_caches` so every gravity key
+and load case in a stage reuses one CHOLMOD symbolic factorization per reduced
+pattern (the `K_G` values change, the pattern does not). Cleared with the other
+geometry caches on a remesh.
+"""
+function _lateral_factor_cache(struc::BuildingStructure)
+    inner = get!(() -> Dict{Symbol, Any}(), struc._analysis_caches,
+                 _LATERAL_FACTOR_CACHE_KEY)
+    return get!(() -> Asap.RigidLinkFactorCache(), inner,
+                :cache)::Asap.RigidLinkFactorCache
+end

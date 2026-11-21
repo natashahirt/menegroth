@@ -462,12 +462,17 @@ function _check_frame_only_stability!(struc, elf, second, inputs, seismic_system
         [e for e in seismic_effect_cases(elf; orthogonal=false) if e.torsion === :none])
     loads = vcat([c[4] for c in cases], [c[4] for c in stability])
     θmax = stability_coefficient_limit(inputs.β, seismic_system.Cd; Ω0=seismic_system.Ω0)
+    # One reduced symbolic factorization is reused across every gravity key: the
+    # P-Δ `K_G` changes, the frame-only reduced pattern does not (#7 phase 2b).
+    factor_cache = _lateral_factor_cache(struc)
     for key in _earthquake_gravity_keys(inputs.roof)
         haskey(second, key) || throw(ArgumentError(
             "interactive system: no story stiffness for gravity D=$(key.D) " *
             "L=$(key.L) roof=$(key.roof)."))
         Kg = second[key].Kg
-        solved = Asap.solve(model, loads, links; geometric_stiffness=Kg, exclude_shells=true)
+        solved = Asap.solve(model, loads, links;
+                            geometric_stiffness=Kg, exclude_shells=true,
+                            factor_cache=factor_cache)
         for (i, (_, _, label, case_loads)) in enumerate(cases)
             for lv in elf.levels
                 z = lv.elevation_m - lv.story_height_m
@@ -584,9 +589,13 @@ function _check_frame_member_strength(struc, basic, elf, second, inputs, directi
     cases = _quarter_story_cases(struc, elf, directions, effects)
     loads = [c[4] for c in cases]
     solved = Dict{GravityStiffnessKey, Vector{Vector{Float64}}}()
+    # One reduced symbolic factorization is reused across every gravity key: the
+    # P-Δ `K_G` changes, the frame-only reduced pattern does not (#7 phase 2b).
+    factor_cache = _lateral_factor_cache(struc)
     for key in _earthquake_gravity_keys(inputs.roof)
         solved[key] = Asap.solve(struc.asap_model, loads, struc.asap_rigid_links;
-                                 geometric_stiffness=second[key].Kg, exclude_shells=true)
+                                 geometric_stiffness=second[key].Kg, exclude_shells=true,
+                                 factor_cache=factor_cache)
     end
     out = FrameMemberCheck[]
     rows = Dict{Tuple{Symbol, Int}, Vector{Tuple{String, Any}}}()

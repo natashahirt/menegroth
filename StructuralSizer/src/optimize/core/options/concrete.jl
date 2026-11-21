@@ -58,7 +58,7 @@ opts = ConcreteColumnOptions(
 - `include_slenderness`: Consider slenderness effects (default: true)
 - `include_biaxial`: Consider biaxial bending (default: true)
 - `βdns`: Sustained load ratio for slenderness (default: 0.6)
-- `objective`: MinWeight(), MinVolume(), MinCost(), MinCarbon() (default: MinWeight())
+- `objective`: MinWeight(), MinVolume(), MinCost(), MinCarbon() (default: MinCarbon())
 - `solver`: `:auto`, `:highs`, `:gurobi` (default: `:auto`)
 - `shape_constraint`: `:square`, `:bounded`, `:free` (default: `:square`)
   - `:square` — force c1 = c2 at every growth step (current behavior)
@@ -105,7 +105,11 @@ Base.@kwdef struct ConcreteColumnOptions
     include_slenderness::Bool = true
     include_biaxial::Bool = true
     βdns::Float64 = 0.6
-    objective::AbstractObjective = MinWeight()
+    # MinCarbon (not MinWeight): rank sections by true embodied carbon, counting
+    # rebar — see `_column_cache_material` (StructuralSynthesizer, WP 2.5). The
+    # flat-plate cache is built from a `ReinforcedConcreteMaterial`, so this is
+    # rebar-inclusive; P-M capacity is unchanged (only `obj_coeffs` move).
+    objective::AbstractObjective = MinCarbon()
     solver::Symbol = :auto
     time_limit_sec::Real = 30.0  # MIP solver time limit (discrete only)
 

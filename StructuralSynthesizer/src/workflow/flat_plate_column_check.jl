@@ -357,6 +357,56 @@ _joint_demand_orientations(e) =
 _joint_concrete(col, opts, e) =
     StructuralSizer.with_compressive_strength(_column_concrete(col, opts), e.fc)
 
+"""Identity-stable joint concrete, keyed by the base material and joint strength.
+
+`_joint_concrete` builds a fresh material every call, so its `objectid` is never
+stable — which would defeat [`_memo_capacity_cache`](@ref) (keyed by material
+identity) and force a fresh full-catalog precompute per joint entry per settle
+round. Memoising on `(base material identity, f′c)` gives one stable object per
+distinct joint material, so the joint capacity cache is built once and shared
+across rounds, and the §10.12 joint check in [`flat_plate_column_checks`](@ref)
+peek-hits the same cache ([`_column_capacity_slot`](@ref), speed.md #20)."""
+const _JOINT_CONCRETE_MEMO = Dict{Tuple{UInt, Any}, Any}()
+
+function _memo_joint_concrete(col, opts, e)
+    key = (objectid(_column_concrete(col, opts)), e.fc)
+    return lock(_COL_MEMO_LOCK) do
+        get!(() -> _joint_concrete(col, opts, e), _JOINT_CONCRETE_MEMO, key)
+    end
+end
+
+"""Identity-stable reinforced-concrete material for a column's capacity cache.
+
+Wraps the column's concrete ([`_column_concrete`](@ref)) with `opts`'s rebar
+grades so [`_memo_capacity_cache`](@ref) routes through the
+`ReinforcedConcreteMaterial` overload of `precompute_capacities!`: the objective
+coefficients then count the rebar (WP 2.5 — true embodied carbon under
+`MinCarbon`, matching `ec.jl`), which drives the lowest-objective pick in
+[`_grow_flat_plate_columns!`](@ref) / [`_stack_flat_plate_columns!`](@ref) and
+the within-plan-size pick in [`_fit_flat_plate_columns!`](@ref).
+
+The P-M **capacity is unchanged**: the material tuple fed to
+`generate_PM_diagram` is identical to the plain-`Concrete` path (same f′c, and
+fy/Es from the same `rebar_material` the checker is built from), so only
+`obj_coeffs` move (proven by `scripts/runners/equiv_column_rc_capacity.jl`).
+
+A fresh `ReinforcedConcreteMaterial` every call would have an unstable
+`objectid` and defeat the material-identity memo, forcing a full-catalog
+precompute per column per settle round; this memoises one stable object per
+`(concrete, longitudinal rebar, transverse rebar)` triple."""
+const _COL_RC_MATERIAL_MEMO = Dict{Tuple{UInt, UInt, UInt}, Any}()
+
+function _column_cache_material(col, opts)
+    concrete = _column_concrete(col, opts)
+    rebar = opts.rebar_material
+    transverse = something(opts.transverse_rebar_material, opts.rebar_material)
+    key = (objectid(concrete), objectid(rebar), objectid(transverse))
+    return lock(_COL_MEMO_LOCK) do
+        get!(() -> StructuralSizer.ReinforcedConcreteMaterial(concrete, rebar, transverse),
+             _COL_RC_MATERIAL_MEMO, key)
+    end
+end
+
 """Index of the column directly below each column that has one."""
 function _column_below_index(struc::BuildingStructure)
     below = Dict{Int, Int}()
@@ -574,7 +624,7 @@ function flat_plate_column_checks(struc::BuildingStructure, column_opts; params 
         passed, check, ratio = r.passed, r.governing_check, r.governing_ratio
         for e in entries
             ok, ex = _rc_section_check(jchecker, column_opts, section(col),
-                                       _joint_concrete(col, column_opts, e),
+                                       _memo_joint_concrete(col, column_opts, e),
                                        _joint_demand_orientations(e),
                                        _flat_plate_column_geometry(struc, col))
             passed &= ok
@@ -606,17 +656,18 @@ function flat_plate_column_checks(struc::BuildingStructure, column_opts; params 
 end
 
 """
-True when catalog section `j` passes every §10.12 joint entry of `col`. The
-catalog capacities at each joint strength are cached in `caches`.
+True when catalog section `j` passes every §10.12 joint entry of `col`.
+
+The joint capacity diagrams are the run-level full-catalog cache
+([`_memo_capacity_cache`](@ref)) under the joint checker and each joint's
+material, built once and shared across settle rounds and with the §10.12 check
+in [`flat_plate_column_checks`](@ref). The joint material is identity-stable
+([`_memo_joint_concrete`](@ref)) so that sharing actually hits.
 """
-function _joint_feasible(jchecker, caches, catalog, j, sec, col, opts, entries, geom)
+function _joint_feasible(jchecker, catalog, j, sec, col, opts, entries, geom)
     for e in entries
-        mat = _joint_concrete(col, opts, e)
-        cache = get!(caches, (:joint, mat)) do
-            c = StructuralSizer.create_cache(jchecker, length(catalog))
-            StructuralSizer.precompute_capacities!(jchecker, c, catalog, mat, opts.objective)
-            c
-        end
+        mat = _memo_joint_concrete(col, opts, e)
+        cache = _memo_capacity_cache(jchecker, catalog, mat, opts.objective)
         all(d -> StructuralSizer.is_feasible(jchecker, cache, j, sec, mat, d, geom),
             _joint_demand_orientations(e)) || return false
     end
@@ -634,7 +685,7 @@ function _rc_column_check(checker, opts, col, d, geometry)
     sec = section(col)
     (sec isa StructuralSizer.RCColumnSection || sec isa StructuralSizer.RCCircularSection) ||
         return nothing
-    passed, ex = _rc_section_check(checker, opts, sec, _column_concrete(col, opts),
+    passed, ex = _rc_section_check(checker, opts, sec, _column_cache_material(col, opts),
                                    _rc_demand_orientations(d, opts.βdns), geometry)
     k = findfirst(c -> c.name == "axial_cap", ex.checks)
     return (passed = passed, governing_check = ex.governing_check,
@@ -705,7 +756,6 @@ function _stack_flat_plate_columns!(struc, params, column_opts, checks)
     jchecker = _joint_checker(column_opts)
     catalog = _memo_column_catalog(column_opts)
     cap = _flat_plate_column_cap(params)
-    caches = Dict{Any, Any}()
     is_rc(c) = section(c) isa StructuralSizer.RCColumnSection ||
                section(c) isa StructuralSizer.RCCircularSection
     tol = 0.05u"inch"
@@ -727,7 +777,7 @@ function _stack_flat_plate_columns!(struc, params, column_opts, checks)
             continue
         end
 
-        mat = _column_concrete(col, column_opts)
+        mat = _column_cache_material(col, column_opts)
         cache = _memo_capacity_cache(checker, catalog, mat, column_opts.objective)
         demands = _rc_demand_orientations(checks[i].demand, column_opts.βdns)
         geom = checks[i].geometry
@@ -736,7 +786,7 @@ function _stack_flat_plate_columns!(struc, params, column_opts, checks)
             sec = catalog[j]
             _section_covers(sec, col.shape, c1, c2) && _section_within_cap(sec, cap) &&
                 all(d -> StructuralSizer.is_feasible(checker, cache, j, sec, mat, d, geom), demands) &&
-                _joint_feasible(jchecker, caches, catalog, j, sec, col, column_opts, checks[i].joint, geom)
+                _joint_feasible(jchecker, catalog, j, sec, col, column_opts, checks[i].joint, geom)
         end
         if pick === nothing
             @warn "No catalog section covers the column above within the flat-plate cap; stack left non-monotone" column = i
@@ -826,11 +876,10 @@ function _grow_flat_plate_columns!(struc, params, column_opts, checks)
     jchecker = _joint_checker(column_opts)
     catalog = _memo_column_catalog(column_opts)
     cap = _flat_plate_column_cap(params)
-    caches = Dict{Any, Any}()
     grown, unresolved = Int[], Int[]
     for i in sort(failing)
         col = struc.columns[i]
-        mat = _column_concrete(col, column_opts)
+        mat = _column_cache_material(col, column_opts)
         cache = _memo_capacity_cache(checker, catalog, mat, column_opts.objective)
         demands = _rc_demand_orientations(checks[i].demand, column_opts.βdns)
         geom = checks[i].geometry
@@ -839,7 +888,7 @@ function _grow_flat_plate_columns!(struc, params, column_opts, checks)
             sec = catalog[j]
             _section_covers_column(sec, col) && _section_within_cap(sec, cap) &&
                 all(d -> StructuralSizer.is_feasible(checker, cache, j, sec, mat, d, geom), demands) &&
-                _joint_feasible(jchecker, caches, catalog, j, sec, col, column_opts, checks[i].joint, geom)
+                _joint_feasible(jchecker, catalog, j, sec, col, column_opts, checks[i].joint, geom)
         end
         if pick === nothing
             push!(unresolved, i)
@@ -1014,12 +1063,12 @@ the stored demand a heavier layout is the stronger one, so its failure rejects
 the plan size without trying the lighter layouts.
 """
 @noinline function _group_has_strength(group, catalog, checker, cache, mat, orient, geom,
-                             jchecker, caches, col, column_opts, joint)
-    @nospecialize group catalog checker cache mat orient geom jchecker caches col column_opts joint
+                             jchecker, col, column_opts, joint)
+    @nospecialize group catalog checker cache mat orient geom jchecker col column_opts joint
     for j in Iterators.reverse(group)
         s = catalog[j]
         all(d -> StructuralSizer.is_feasible(checker, cache, j, s, mat, d, geom), orient) || continue
-        _joint_feasible(jchecker, caches, catalog, j, s, col, column_opts, joint, geom) || continue
+        _joint_feasible(jchecker, catalog, j, s, col, column_opts, joint, geom) || continue
         return true
     end
     return false
@@ -1029,12 +1078,12 @@ end
 Index, within `group`, of the lightest section that passes strength and the joint.
 """
 @noinline function _lightest_in_group(group, catalog, checker, cache, mat, orient, geom,
-                            jchecker, caches, col, column_opts, joint)
-    @nospecialize group catalog checker cache mat orient geom jchecker caches col column_opts joint
+                            jchecker, col, column_opts, joint)
+    @nospecialize group catalog checker cache mat orient geom jchecker col column_opts joint
     for j in group
         s = catalog[j]
         all(d -> StructuralSizer.is_feasible(checker, cache, j, s, mat, d, geom), orient) || continue
-        _joint_feasible(jchecker, caches, catalog, j, s, col, column_opts, joint, geom) || continue
+        _joint_feasible(jchecker, catalog, j, s, col, column_opts, joint, geom) || continue
         return j
     end
     return nothing
@@ -1049,8 +1098,8 @@ not report a demand, and that does not reject the group.
 """
 @noinline function _plan_group_passes(group, catalog, floor, punch, struc, params, col, demands,
                             checker, cache, mat, orient, geom,
-                            jchecker, caches, column_opts, joint)
-    @nospecialize group catalog floor punch struc params col demands checker cache mat orient geom jchecker caches column_opts joint
+                            jchecker, column_opts, joint)
+    @nospecialize group catalog floor punch struc params col demands checker cache mat orient geom jchecker column_opts joint
     sec = catalog[group[1]]
     _plan_covers_floor(sec, floor) || return false
     bb = StructuralSizer.bounding_box(sec)
@@ -1061,7 +1110,7 @@ not report a demand, and that does not reject the group.
     end
     pok === false && return false
     return _group_has_strength(group, catalog, checker, cache, mat, orient, geom,
-                               jchecker, caches, col, column_opts, joint)
+                               jchecker, col, column_opts, joint)
 end
 
 """
@@ -1074,14 +1123,14 @@ Returns `nothing` when no group passes.
 """
 @noinline function _lightest_passing_group(groups, catalog, floor, punch, struc, params, col, demands,
                                  checker, cache, mat, orient, geom,
-                                 jchecker, caches, column_opts, joint)
-    @nospecialize groups catalog floor punch struc params col demands checker cache mat orient geom jchecker caches column_opts joint
+                                 jchecker, column_opts, joint)
+    @nospecialize groups catalog floor punch struc params col demands checker cache mat orient geom jchecker column_opts joint
     lo, hi = 1, length(groups) + 1
     while lo < hi
         mid = (lo + hi) ÷ 2
         if _plan_group_passes(groups[mid], catalog, floor, punch, struc, params, col, demands,
                               checker, cache, mat, orient, geom,
-                              jchecker, caches, column_opts, joint)
+                              jchecker, column_opts, joint)
             hi = mid
         else
             lo = mid + 1
@@ -1093,7 +1142,7 @@ Returns `nothing` when no group passes.
     for j in (lo - 1):-1:1
         _plan_group_passes(groups[j], catalog, floor, punch, struc, params, col, demands,
                            checker, cache, mat, orient, geom,
-                           jchecker, caches, column_opts, joint) || break
+                           jchecker, column_opts, joint) || break
         lo = j
     end
     return lo
@@ -1124,7 +1173,6 @@ columns no section within the cap passes; they keep their section.
     jchecker = _joint_checker(column_opts)
     catalog = _memo_column_catalog(column_opts)
     cap = _flat_plate_column_cap(params)
-    caches = Dict{Any, Any}()
     changed, unresolved = Int[], Int[]
     shrink = params.uniform_column_sizing === :off
     for i in sort!(collect(keys(checks)))
@@ -1140,7 +1188,7 @@ columns no section within the cap passes; they keep their section.
             f2 = floor === nothing ? col.c2 : max(floor[2], col.c2)
             floor = (f1, f2)
         end
-        mat = _column_concrete(col, column_opts)
+        mat = _column_cache_material(col, column_opts)
         cache = _memo_capacity_cache(checker, catalog, mat, column_opts.objective)
         groups = _memo_plan_groups(catalog, cache, cap)
         orient = _rc_demand_orientations(checks[i].demand, column_opts.βdns)
@@ -1149,11 +1197,11 @@ columns no section within the cap passes; they keep their section.
         punch = Dict{Tuple{Float64, Float64}, Union{Bool, Nothing}}()
         lo = _lightest_passing_group(
             groups, catalog, floor, punch, struc, params, col, demands,
-            checker, cache, mat, orient, geom, jchecker, caches, column_opts, joint)
+            checker, cache, mat, orient, geom, jchecker, column_opts, joint)
         lo === nothing && (push!(unresolved, i); continue)
         pick = _lightest_in_group(
             groups[lo], catalog, checker, cache, mat, orient, geom,
-            jchecker, caches, col, column_opts, joint)
+            jchecker, col, column_opts, joint)
         pick === nothing && (push!(unresolved, i); continue)
         sec = catalog[pick]
         _installed_section(col, sec) && continue

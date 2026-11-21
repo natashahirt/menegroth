@@ -355,6 +355,19 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
         converged, iters_used = _resize_beams_after_thickness!(
             struc, params, beam_opts, column_opts, beam_kwargs, shell_levels; tc = tc)
     end
+    # Graceful degradation: a slow-settling coupled system (columns <-> ribs <->
+    # growing solid heads) can exhaust max_iterations without a strict section
+    # fixed point even though the sections in the model pass their final
+    # analysis. Rather than fail every member (and report a floored 1.0 that
+    # looks like overstress), verify the installed design against a fresh solve;
+    # accept it as settled only when every beam and column group passes. This is
+    # strictly weaker than a fixed point, so it cannot pass an unsafe design.
+    if !converged
+        converged = _verify_installed_design!(struc, params, beam_opts, column_opts)
+        converged && @info "Member sizing hit max_iterations without a fixed point, but " *
+            "every beam and column passes its final-analysis check — accepting the " *
+            "installed design as settled."
+    end
     _record_member_convergence!(struc, converged)
 
     StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :exit;

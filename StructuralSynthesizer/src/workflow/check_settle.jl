@@ -574,6 +574,51 @@ function _check_settle!(struc, states::Vector{_MemberState}, params, beam_opts, 
     return false
 end
 
+"""
+    _verify_installed_design!(struc, params, beam_opts, column_opts; shell_demands, shell_spans)
+        -> Bool
+
+Verify the sections **already installed** on the model against a fresh solve,
+without resizing anything. Returns `true` only when every beam group and every
+column group passes its sizer's own checker on the current analysis; on success
+it records those checks onto the members (so `member_check` reflects the final
+analysis, not a stale pass).
+
+This is the graceful-degradation gate for a member loop that hit
+`max_iterations` without reaching a strict section fixed point. A discrete
+fixed point need not exist (two stiffnesses can each make the sizer pick the
+other), but what structural safety actually requires is that the *installed*
+sections pass the *final* analysis — which is exactly this check. It is strictly
+weaker than a fixed point (it does not demand that a resize would re-pick the
+same sections), so it never turns a failing design into a passing one: a `true`
+result means every member is verified against the model it is standing on.
+
+Returns `false` (caller keeps the design marked not-settled) when the option
+sets cannot be checked one installed section at a time — the same guard
+[`_check_settle!`](@ref) uses.
+"""
+function _verify_installed_design!(struc, params, beam_opts, column_opts;
+                                   shell_demands = nothing, shell_spans = nothing)
+    opts_of = _beam_opts_by_group(struc, beam_opts)
+    (_settle_checkable(beam_opts) && _settle_checkable(column_opts) &&
+     all(_settle_checkable, values(opts_of))) || return false
+    _reanalyze_after_section_change!(struc)
+    beams = _beam_group_report(struc, beam_opts; shell_demands, shell_spans, resolution = 200)
+    columns = _column_group_report(struc, column_opts; resolution = 200)
+    if beams === nothing || columns === nothing
+        @info "Installed-design verify skipped: options are not checkable section by section" beams_checkable=(beams !== nothing) columns_checkable=(columns !== nothing)
+        return false
+    end
+    nb_fail = count(!, values(beams.passed))
+    nc_fail = count(!, values(columns))
+    if nb_fail > 0 || nc_fail > 0
+        @info "Installed-design verify: some groups fail their final-analysis check" beam_groups_failing=nb_fail of_beam_groups=length(beams.passed) column_groups_failing=nc_fail of_column_groups=length(columns)
+        return false
+    end
+    _record_beam_checks!(struc, beams.explanations, beams.hogging)
+    return true
+end
+
 _beam_sections_identical(a, b) =
     length(a) == length(b) && all(_sections_identical(x, y) for (x, y) in zip(a, b))
 

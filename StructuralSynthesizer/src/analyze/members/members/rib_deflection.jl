@@ -275,13 +275,36 @@ function story_rib_deflection(struc, lvl::Int; sustained_live_fraction::Real,
                               comp_steel_ratio::Real = 0.0,
                               pre_attachment_dead_fraction::Real = 0.0,
                               max_iter::Int = 8, tol::Float64 = 0.05, resolution::Int = 5)
-    limit in (:sensitive, :total) || throw(ArgumentError(
-        "rib_deflection_limit is :$limit; use :sensitive (l/480) or :total (l/240)"))
-    0.0 <= comp_steel_ratio <= 0.04 || throw(ArgumentError(
-        "comp_steel_ratio is ρ′ = As′/(bw·d); keep it in [0, 0.04], got $comp_steel_ratio"))
-    0.0 <= pre_attachment_dead_fraction <= 1.0 || throw(ArgumentError(
-        "pre_attachment_dead_fraction is a fraction of the dead sag in [0, 1], " *
-        "got $pre_attachment_dead_fraction"))
+    field = story_rib_service_field(struc, lvl; sustained_live_fraction, concrete, rebar,
+                                    max_iter, tol, resolution)
+    return eval_rib_deflection(field; limit, comp_steel_ratio, pre_attachment_dead_fraction)
+end
+
+"""One precomputed station of a service field: the three sags, span, and location."""
+const _RibStation = @NamedTuple{ΔD::Float64, ΔS::Float64, ΔDL::Float64,
+                                l::Float64, at::Tuple{Float64, Float64}}
+
+"""
+    story_rib_service_field(struc, lvl; sustained_live_fraction, concrete, rebar,
+                            max_iter = 8, tol = 0.05, resolution = 5) -> NamedTuple
+
+The compression-steel-independent part of [`story_rib_deflection`](@ref): the
+three cracked service solves (dead `D`, sustained `D + ψL`, full `D + L`) with
+the ACI 318-11 Eq. (9-8) `Ie` ratchet, reduced to the sag at each element
+station of its column bay. This is the entire FE cost, and it depends on
+neither `comp_steel_ratio` (ρ′ enters only through λΔ, Eq. 9-11) nor the
+deflection limit — so one field can be checked against many ρ′ with
+[`eval_rib_deflection`](@ref) at no further solve.
+
+Returns `(; stations, converged, n_bays)` where `stations` is each
+`(ΔD, ΔS, ΔDL, l, at)` in the deterministic element→station→bay order the limit
+check scans, so a later evaluation picks the same governing station on ties.
+The model's sections and stiffness are restored; its factored displacements are
+not touched.
+"""
+function story_rib_service_field(struc, lvl::Int; sustained_live_fraction::Real,
+                                 concrete, rebar, max_iter::Int = 8, tol::Float64 = 0.05,
+                                 resolution::Int = 5)
     ψ = StructuralSizer._as_sustained_live_fraction(sustained_live_fraction)
     model = struc.asap_model
     frames = model.frame_elements
@@ -363,17 +386,10 @@ function story_rib_deflection(struc, lvl::Int; sustained_live_fraction::Real,
         _restore_column_springs!(model)
     end
 
-    # ACI 318-11 §9.5.2.5, Eq. (9-11): λΔ = ξ/(1+50ρ′), ξ = 2.0 for a 5-year
-    # sustained load; ρ′ is the continuous midspan compression steel, which
-    # R9.5.2.5 credits for reducing creep/shrinkage deflection (corpus:
-    # aci-318-11, PDF page 132). ρ′ = `comp_steel_ratio` is applied story-wide
-    # (one value at midspan per §9.5.2.5), representing top bars detailed
-    # continuous through the sagging regions.
-    λΔ = StructuralSizer.long_term_deflection_factor(2.0, Float64(comp_steel_ratio))
-    pre = Float64(pre_attachment_dead_fraction)
-    after_div = limit === :sensitive ? 480.0 : 240.0
-    worst_ll = (ratio = 0.0, Δ = 0.0, l = 0.0, at = (NaN, NaN))
-    worst_lt = worst_ll
+    # Reduce the solves to per-station sags once. Order (element, station, each
+    # containing bay) is the exact order the limit check scans below, so the
+    # governing station is identical regardless of how many ρ′ read this field.
+    stations = _RibStation[]
     for i in idx
         el = frames[i]
         p0, p1 = _xy_m(el.nodeStart), _xy_m(el.nodeEnd)
@@ -383,23 +399,55 @@ function story_rib_deflection(struc, lvl::Int; sustained_live_fraction::Real,
             for (b, bay) in enumerate(bays)
                 _in_bay(bay.xy, p, 1e-6) || continue
                 sag(name) = _bay_surface(bay.xy, corner_w[name][b], p) - profiles[name][i][j]
-                ΔD, ΔS, ΔDL = sag(:D), sag(:S), sag(:DL)
-                Δ_ll = ΔDL - ΔD
-                # Table 9.5(b) after-attachment deflection = long-term sustained
-                # (λΔ·ΔS) + immediate non-sustained live (ΔDL − ΔS), less the
-                # dead sag that occurs before attachment (§9.5.2.6 / R9.5.2.6,
-                # PDF page 133): deduct `pre`·ΔD.
-                Δ_lt = λΔ * ΔS + (ΔDL - ΔS) - pre * ΔD
-                r_ll = Δ_ll / (bay.l / 360)
-                r_lt = Δ_lt / (bay.l / after_div)
-                r_ll > worst_ll.ratio && (worst_ll = (ratio = r_ll, Δ = Δ_ll, l = bay.l, at = p))
-                r_lt > worst_lt.ratio && (worst_lt = (ratio = r_lt, Δ = Δ_lt, l = bay.l, at = p))
+                push!(stations, (ΔD = sag(:D), ΔS = sag(:S), ΔDL = sag(:DL),
+                                 l = bay.l, at = p))
             end
         end
+    end
+    return (; stations, converged, n_bays = length(bays))
+end
+
+"""
+    eval_rib_deflection(field; limit = :sensitive, comp_steel_ratio = 0.0,
+                        pre_attachment_dead_fraction = 0.0) -> NamedTuple
+
+Apply ACI 318-11 Table 9.5(b) to a [`story_rib_service_field`](@ref): the
+immediate-live `l/360` check and the after-attachment long-term check
+(`l/480` sensitive, `l/240` total), with ρ′ overlaid on λΔ = ξ/(1+50ρ′)
+(§9.5.2.5, Eq. 9-11; corpus: aci-318-11, PDF p. 132) and the pre-attachment
+dead deduction (§9.5.2.6 / R9.5.2.6). Pure arithmetic over the field's
+precomputed station sags — no solve — so the result is identical to a fresh
+`story_rib_deflection` at the same ρ′ on the same sections.
+"""
+function eval_rib_deflection(field; limit::Symbol = :sensitive,
+                             comp_steel_ratio::Real = 0.0,
+                             pre_attachment_dead_fraction::Real = 0.0)
+    limit in (:sensitive, :total) || throw(ArgumentError(
+        "rib_deflection_limit is :$limit; use :sensitive (l/480) or :total (l/240)"))
+    0.0 <= comp_steel_ratio <= 0.04 || throw(ArgumentError(
+        "comp_steel_ratio is ρ′ = As′/(bw·d); keep it in [0, 0.04], got $comp_steel_ratio"))
+    0.0 <= pre_attachment_dead_fraction <= 1.0 || throw(ArgumentError(
+        "pre_attachment_dead_fraction is a fraction of the dead sag in [0, 1], " *
+        "got $pre_attachment_dead_fraction"))
+    λΔ = StructuralSizer.long_term_deflection_factor(2.0, Float64(comp_steel_ratio))
+    pre = Float64(pre_attachment_dead_fraction)
+    after_div = limit === :sensitive ? 480.0 : 240.0
+    worst_ll = (ratio = 0.0, Δ = 0.0, l = 0.0, at = (NaN, NaN))
+    worst_lt = worst_ll
+    for st in field.stations
+        Δ_ll = st.ΔDL - st.ΔD
+        # Table 9.5(b) after-attachment deflection = long-term sustained (λΔ·ΔS)
+        # + immediate non-sustained live (ΔDL − ΔS), less the dead sag that
+        # occurs before attachment (deduct `pre`·ΔD).
+        Δ_lt = λΔ * st.ΔS + (st.ΔDL - st.ΔS) - pre * st.ΔD
+        r_ll = Δ_ll / (st.l / 360)
+        r_lt = Δ_lt / (st.l / after_div)
+        r_ll > worst_ll.ratio && (worst_ll = (ratio = r_ll, Δ = Δ_ll, l = st.l, at = st.at))
+        r_lt > worst_lt.ratio && (worst_lt = (ratio = r_lt, Δ = Δ_lt, l = st.l, at = st.at))
     end
     return (ok = worst_ll.ratio <= 1.0 && worst_lt.ratio <= 1.0,
             live = worst_ll, long_term = worst_lt, limit = limit,
             comp_steel_ratio = Float64(comp_steel_ratio),
             pre_attachment_dead_fraction = pre,
-            n_bays = length(bays), converged = converged)
+            n_bays = field.n_bays, converged = field.converged)
 end

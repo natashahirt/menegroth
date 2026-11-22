@@ -18,6 +18,23 @@ const STANDARD_DOME_STEMS = [8.0, 10.0, 12.0, 14.0, 16.0, 20.0] .* u"inch"
 """Most stem screens per member stage; each after the first follows a member loop."""
 const RIB_SCREEN_ROUNDS = 3
 
+"""
+    _rib_section_fingerprint(model) -> UInt
+
+Hash the identity of every frame element's section. `story_rib_service_field`
+reads these sections, so an unchanged fingerprint means a cached service field
+still matches the installed state and may be reused; any section swap (a new
+stem, added compression steel) changes an `objectid` and forces a fresh solve.
+Sections are immutable structs replaced on resize, so identity tracks value.
+"""
+function _rib_section_fingerprint(model)
+    h = zero(UInt)
+    for el in model.frame_elements
+        h = hash(objectid(el.section), h)
+    end
+    return h
+end
+
 """True when `level` holds concrete T-beam ribs this module can own."""
 function _story_rib_eligible(level::FramingLevel, fallback)
     opts = _level_concrete_options(level, fallback)
@@ -319,14 +336,44 @@ function screen_rib_stems!(struc, params; fallback, size_kwargs...)
         before = [fl.rib_stem for fl in levels]
         opts = _level_concrete_options(first(levels), fallback)
         checked = Dict{Any, NamedTuple}()
-        deflection(stem, ρ) = get!(checked, (stem, ρ)) do
-            _member_timed(:rib_deflection) do
-                story_rib_deflection(struc, lvl;
-                    sustained_live_fraction = opts.sustained_live_fraction,
-                    limit = params.rib_deflection_limit,
-                    comp_steel_ratio = ρ, pre_attachment_dead_fraction = pre,
-                    concrete = opts.material, rebar = opts.rebar_material)
+        # The cracked service solve (the FE cost) is ρ′-independent — ρ′ only
+        # overlays λΔ (ACI Eq. 9-11) in `eval_rib_deflection` — so one field
+        # serves every ρ′. The field depends on the installed sections, which
+        # `_size_story_stem!` changes between stems, so it is cached against a
+        # fingerprint of the model's sections and recomputed whenever they
+        # change: a reuse is taken only when the sections are byte-for-byte the
+        # ones a fresh solve would read. Keying on the stem alone is unsafe —
+        # a field can outlive the sections it was solved for. Proven exact by
+        # byte-comparing a design against an SS_RIB_DEFLECTION_NOCACHE=1 run.
+        field_fp = Ref{UInt}(0)
+        field_cache = Ref{Any}(nothing)
+        service_field() = begin
+            fp = _rib_section_fingerprint(struc.asap_model)
+            if field_cache[] === nothing || field_fp[] != fp
+                field_fp[] = fp
+                field_cache[] = _member_timed(:rib_deflection) do
+                    story_rib_service_field(struc, lvl;
+                        sustained_live_fraction = opts.sustained_live_fraction,
+                        concrete = opts.material, rebar = opts.rebar_material)
+                end
             end
+            field_cache[]
+        end
+        deflection(stem, ρ) = get!(checked, (stem, ρ)) do
+            # A/B switch: SS_RIB_DEFLECTION_NOCACHE forces a fresh cracked solve
+            # per (stem, ρ′) — the pre-optimization path — so a run with it on and
+            # one with it off can be byte-compared to prove the field cache is exact.
+            if get(ENV, "SS_RIB_DEFLECTION_NOCACHE", "") == "1"
+                return _member_timed(:rib_deflection) do
+                    story_rib_deflection(struc, lvl;
+                        sustained_live_fraction = opts.sustained_live_fraction,
+                        limit = params.rib_deflection_limit,
+                        comp_steel_ratio = ρ, pre_attachment_dead_fraction = pre,
+                        concrete = opts.material, rebar = opts.rebar_material)
+                end
+            end
+            eval_rib_deflection(service_field(); limit = params.rib_deflection_limit,
+                                comp_steel_ratio = ρ, pre_attachment_dead_fraction = pre)
         end
         screen = nothing
         ρ_final = 0.0
@@ -424,12 +471,23 @@ function report_rib_deflection!(struc, params; fallback)
     for (lvl, levels) in _rib_stories(struc, fallback)
         any(fl -> fl.rib_stem === nothing, levels) && continue
         opts = _level_concrete_options(first(levels), fallback)
-        check(ρ) = story_rib_deflection(struc, lvl;
-            sustained_live_fraction = opts.sustained_live_fraction,
-            limit = params.rib_deflection_limit,
-            comp_steel_ratio = ρ,
-            pre_attachment_dead_fraction = params.rib_pre_attachment_dead_fraction,
-            concrete = opts.material, rebar = opts.rebar_material)
+        # One service solve on the final sections; every ρ′ is an overlay on it.
+        # The sections are fixed here, so the field is valid for all ρ′.
+        # SS_RIB_DEFLECTION_NOCACHE restores the per-ρ′ fresh solve for A/B checks.
+        if get(ENV, "SS_RIB_DEFLECTION_NOCACHE", "") == "1"
+            check = ρ -> story_rib_deflection(struc, lvl;
+                sustained_live_fraction = opts.sustained_live_fraction,
+                limit = params.rib_deflection_limit, comp_steel_ratio = ρ,
+                pre_attachment_dead_fraction = params.rib_pre_attachment_dead_fraction,
+                concrete = opts.material, rebar = opts.rebar_material)
+        else
+            defl_field = story_rib_service_field(struc, lvl;
+                sustained_live_fraction = opts.sustained_live_fraction,
+                concrete = opts.material, rebar = opts.rebar_material)
+            check = ρ -> eval_rib_deflection(defl_field;
+                limit = params.rib_deflection_limit, comp_steel_ratio = ρ,
+                pre_attachment_dead_fraction = params.rib_pre_attachment_dead_fraction)
+        end
         # The screen picks (stem, ρ′) on the previous member loop's softer
         # demands, so it over-provides. On the final sections, relax ρ′ to the
         # least ladder value that still meets Table 9.5(b): ρ′ is a pure overlay

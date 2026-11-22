@@ -768,11 +768,13 @@ function grow_building_solid_heads!(struc, params; fallback = params.beams)
             reanalyze = false, I_factor = params.beam_I_factor,
             gravity_factor = member_self_weight_acceleration(params),
             rib_head_stirrups = params.rib_head_stirrups, group_filter = g -> g in ids)
-        resolved = resolve_building_heads!(struc, slab, level, arr, owners, start, params;
-            concrete = concrete, d_head = d_head,
-            fy = _beam_materials(params)[2].Fy, topping = topping,
-            free_loops = free_loops, max_solid_fraction = cap,
-            rib_stirrups = params.rib_head_stirrups, size_pieces = size_pieces)
+        resolved = _member_timed(:resolve_heads) do
+            resolve_building_heads!(struc, slab, level, arr, owners, start, params;
+                concrete = concrete, d_head = d_head,
+                fy = _beam_materials(params)[2].Fy, topping = topping,
+                free_loops = free_loops, max_solid_fraction = cap,
+                rib_stirrups = params.rib_head_stirrups, size_pieces = size_pieces)
+        end
         level.solid_heads = resolved.heads
         grown = length(before) != length(resolved.heads) ||
                 any(zip(before, resolved.heads)) do (was, now)

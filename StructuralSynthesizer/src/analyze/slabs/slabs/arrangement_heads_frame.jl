@@ -243,9 +243,13 @@ end
 [`check_arrangement_head_on_frame`](@ref) for each head of one slab, on the
 building model as solved now.
 """
-function check_building_heads(struc, slab, level, arr, owners, heads, params;
-                              concrete, d_head, fy, topping, free_loops,
-                              rib_stirrups::Bool = false)
+check_building_heads(struc, slab, level, arr, owners, heads, params; kw...) =
+    _member_timed(() -> _check_building_heads_impl(struc, slab, level, arr, owners,
+                                                   heads, params; kw...), :check_heads)
+
+function _check_building_heads_impl(struc, slab, level, arr, owners, heads, params;
+                                    concrete, d_head, fy, topping, free_loops,
+                                    rib_stirrups::Bool = false)
     model = struc.asap_model
     z = _slab_face_z_m(struc, slab)
     adj = _level_frame_adjacency(model, z)

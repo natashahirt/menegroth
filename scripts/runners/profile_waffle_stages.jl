@@ -55,7 +55,8 @@ println("\n-- member sub-phase wall time (SS_MEMBER_TIMING) --")
 partition = [:screen_rib_stems, :reanalyze_fe, :iterate_members, :report_rib_deflection,
              :verify_installed]
 internals = [:size_beams, :grow_heads, :size_columns, :update_stiffness]
-crosscut  = [:rib_demands, :rib_kernel, :rib_deflection]
+crosscut  = [:rib_demands, :rib_kernel, :rib_deflection,
+             :grillage_bays, :resolve_heads, :check_heads]
 function _show_timers(keys)
     for k in keys
         t = get(SY._MEMBER_PHASE_TIMERS, k, nothing)

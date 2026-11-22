@@ -302,7 +302,36 @@ same direction. The face inside a ring is the void and is not a bay.
 Two skeleton vertices within `tol` metres are one node. Throws when two
 members join the same two points, or when a member ends inside a bay.
 """
-function grillage_bays(struc, slab, fl::FramingLevel; tol::Float64 = 1e-6)
+grillage_bays(struc, slab, fl::FramingLevel; tol::Float64 = 1e-6) =
+    _member_timed(() -> _grillage_bays_impl(struc, slab, fl; tol), :grillage_bays)
+
+# Per-`struc` memo of the grillage bay arrangement. `grillage_bays` is pure
+# geometry (the skeleton node coordinates are frozen for the whole design) yet
+# re-derived thousands of times — load assembly, head seeding, solid-head area
+# — so it dominates grow_heads' wall time. A `WeakKeyDict` lets each entry die
+# with its `struc` (no leak in the long-lived API server). Keyed by the full
+# candidate-edge set, so head growth (which splits beams and regroups ribs,
+# changing those edges) invalidates it exactly. `SS_GRILLAGE_BAYS_NOCACHE=1`
+# bypasses it, for the A/B exactness proof.
+const _GRILLAGE_BAYS_MEMO = WeakKeyDict{Any, Dict{UInt, Any}}()
+const _GRILLAGE_BAYS_LOCK = ReentrantLock()
+
+function _grillage_bays_cached(struc, key::UInt)
+    lock(_GRILLAGE_BAYS_LOCK) do
+        inner = get(_GRILLAGE_BAYS_MEMO, struc, nothing)
+        inner === nothing ? nothing : get(inner, key, nothing)
+    end
+end
+
+function _grillage_bays_store!(struc, key::UInt, val)
+    lock(_GRILLAGE_BAYS_LOCK) do
+        inner = get!(() -> Dict{UInt, Any}(), _GRILLAGE_BAYS_MEMO, struc)
+        inner[key] = val
+    end
+    return val
+end
+
+function _grillage_bays_impl(struc, slab, fl::FramingLevel; tol::Float64 = 1e-6)
     skel = struc.skeleton
     z = _slab_face_z_m(struc, slab)
     cand = vcat(_slab_boundary_sub_edges(struc, slab), _slab_interior_sub_edges(struc, slab),
@@ -311,6 +340,12 @@ function grillage_bays(struc, slab, fl::FramingLevel; tol::Float64 = 1e-6)
         push!(cand, struc.segments[si].edge_idx)
     end
     unique!(sort!(cand))
+    use_cache = get(ENV, "SS_GRILLAGE_BAYS_NOCACHE", "") != "1"
+    cache_key = hash((objectid(slab), objectid(fl), round(Int, z * 1e6), cand))
+    if use_cache
+        hit = _grillage_bays_cached(struc, cache_key)
+        hit === nothing || return hit
+    end
     nodes = NTuple{2, Float64}[]
     function node_at(p)
         for (k, q) in enumerate(nodes)
@@ -343,7 +378,9 @@ function grillage_bays(struc, slab, fl::FramingLevel; tol::Float64 = 1e-6)
     nodes, E, src = StructuralSizer.stitch_nodes_onto_edges(nodes, E; tol = 1e-3)
     owners = [owners[k] for k in src]
     arr = StructuralSizer.planar_bays(nodes, E)
-    return (StructuralSizer.without_hole_bays(arr, _slab_hole_loops_m(struc, slab)), owners)
+    result = (StructuralSizer.without_hole_bays(arr, _slab_hole_loops_m(struc, slab)), owners)
+    use_cache && _grillage_bays_store!(struc, cache_key, result)
+    return result
 end
 
 """

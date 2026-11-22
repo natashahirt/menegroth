@@ -103,6 +103,21 @@ function _rib_sets(struc, gids, owner)
 end
 
 """
+    _rib_geom_cached(f, cache, key)
+
+Return `cache[key]`, computing it with `f()` on first miss. The collinear rib
+sets and the §8.12 flange geometry depend only on the frame's geometry, not on
+the stem depth or installed sections, so one `cache` (a `Dict{Symbol,Any}`
+created per screen, where geometry is fixed) lets every trial stem reuse them.
+`cache === nothing` (the cold `size_beams.jl` path) or `SS_RIB_GEOM_NOCACHE=1`
+(the A/B exactness switch) always recomputes.
+"""
+function _rib_geom_cached(f, cache, key::Symbol)
+    (cache === nothing || get(ENV, "SS_RIB_GEOM_NOCACHE", "") == "1") && return f()
+    return get!(f, cache, key)
+end
+
+"""
 Strongest section the set's web and bar limits allow at depth `h`, for a set
 no web and bar size can carry. It is installed so the frame has a stiffness,
 and its failing check is recorded.
@@ -139,7 +154,7 @@ Returns `group id => (ok, carbon, set)` for the groups sized.
 """
 function size_rib_lines!(struc, gids; fallback, resolution::Int = 200, gravity_factor,
                          I_factor::Real, stirrup_shear::Bool = true,
-                         rib_head_stirrups::Bool = true)
+                         rib_head_stirrups::Bool = true, rib_geom_cache = nothing)
     owner = story_rib_groups(struc)
     gids = [g for g in gids if haskey(owner, g)]
     out = Dict{UInt64, NamedTuple}()
@@ -152,8 +167,12 @@ function size_rib_lines!(struc, gids; fallback, resolution::Int = 200, gravity_f
     end
     _add_gravity_loads!(struc, edge_ids, gravity_factor)
 
-    sets = _member_timed(() -> _rib_sets(struc, gids, owner), :rib_demands)
+    # Collinear sets are pure geometry — stem-independent — so cache per screen.
+    sets = _rib_geom_cached(rib_geom_cache, :sets) do
+        _member_timed(() -> _rib_sets(struc, gids, owner), :rib_demands)
+    end
     needed = Set(g for s in sets for g in s)
+    # Demands track the per-stem stale re-solve, so they are always recomputed.
     group_ids, demands, L_totals = _member_timed(:rib_demands) do
         _beam_group_demands(struc, g -> g in needed; resolution, shell_demands = nothing,
                             service_deflection = false)[1:3]
@@ -163,8 +182,12 @@ function size_rib_lines!(struc, gids; fallback, resolution::Int = 200, gravity_f
         haskey(row, g) || throw(ArgumentError(
             "rib group $g has no demand; the frame has no element for it"))
     end
-    specs = _member_timed(() -> _compute_flange_params(struc, group_ids), :rib_demands)
-    spec_of = Dict(g => specs[i] for (i, g) in enumerate(group_ids))
+    # §8.12 flange geometry is also stem-independent (it depends on span, slab,
+    # and framing, not on the web depth), so cache it keyed by group id.
+    spec_of = _rib_geom_cached(rib_geom_cache, :spec_of) do
+        specs = _member_timed(() -> _compute_flange_params(struc, group_ids), :rib_demands)
+        Dict(g => specs[i] for (i, g) in enumerate(group_ids))
+    end
     faces = Set{UInt64}()
     rib_head_stirrups == stirrup_shear ||
         foreach(fl -> union!(faces, _head_face_group_ids(struc, fl)), unique(values(owner)))
@@ -335,6 +358,9 @@ function screen_rib_stems!(struc, params; fallback, size_kwargs...)
     for (lvl, levels) in sort!(collect(_rib_stories(struc, fallback)); by = first)
         before = [fl.rib_stem for fl in levels]
         opts = _level_concrete_options(first(levels), fallback)
+        # The geometry (collinear sets, §8.12 flange) is fixed for this story
+        # across every trial stem, so size each stem through one shared cache.
+        rib_geom_cache = Dict{Symbol, Any}()
         checked = Dict{Any, NamedTuple}()
         # The cracked service solve (the FE cost) is ρ′-independent — ρ′ only
         # overlays λΔ (ACI Eq. 9-11) in `eval_rib_deflection` — so one field
@@ -379,7 +405,7 @@ function screen_rib_stems!(struc, params; fallback, size_kwargs...)
         ρ_final = 0.0
         if params.rib_stem !== nothing
             stem = params.rib_stem
-            _size_story_stem!(struc, levels, stem; fallback, size_kwargs...)
+            _size_story_stem!(struc, levels, stem; fallback, rib_geom_cache, size_kwargs...)
             # Fixed stem: add the least compression steel that meets Table 9.5(b).
             ρ_final = ratios[end]
             for ρ in ratios
@@ -388,7 +414,9 @@ function screen_rib_stems!(struc, params; fallback, size_kwargs...)
         else
             stems = sort(params.rib_stems)
             isempty(stems) && throw(ArgumentError("rib_stems is empty"))
-            trials = [(stem = s, _size_story_stem!(struc, levels, s; fallback, size_kwargs...)...)
+            trials = [(stem = s,
+                       _size_story_stem!(struc, levels, s; fallback, rib_geom_cache,
+                                         size_kwargs...)...)
                       for s in stems]
             strong = sort([t for t in trials if t.ok]; by = t -> t.carbon)
             # Two-axis search over (stem depth, compression-steel ρ′): pick the
@@ -400,7 +428,8 @@ function screen_rib_stems!(struc, params; fallback, size_kwargs...)
             best = nothing
             for t in strong
                 best !== nothing && t.carbon >= best.total && break
-                _size_story_stem!(struc, levels, t.stem; fallback, size_kwargs...)
+                _size_story_stem!(struc, levels, t.stem; fallback, rib_geom_cache,
+                                  size_kwargs...)
                 for ρ in ratios
                     deflection(t.stem, ρ).ok || continue
                     total = t.carbon + story_comp_steel_carbon(struc, lvl, ρ, opts.rebar_material)
@@ -418,7 +447,7 @@ function screen_rib_stems!(struc, params; fallback, size_kwargs...)
             screen = [(stem = t.stem, strength = t.ok, carbon = t.carbon,
                        deflection = _screen_defl_ok(checked, t.stem, ratios)) for t in trials]
         end
-        _size_story_stem!(struc, levels, stem; fallback, size_kwargs...)
+        _size_story_stem!(struc, levels, stem; fallback, rib_geom_cache, size_kwargs...)
         _attach_rib_deflection!(levels, deflection(stem, ρ_final); screen,
                                 comp_steel_ratio = ρ_final)
         changed |= any(b -> b === nothing || b != stem, before)

@@ -7,9 +7,15 @@
 #   all-loaded case (ACI 318-11 §13.7.6.3). Full live on adjacent spans
 #   (ACI 318-19 §6.4.2) raises it. More loaded spans means more displacement.
 #   Vertical reactions balance the applied load.
-# - Flat-plate k: no wall and no Q is sway, k > 1 (Fig. R10.10.1.1).
-#   Q ≤ 0.05 is nonsway, k = 1 (ACI 318-11 §10.10.5.2 and R10.10.6.3).
-#   A thicker slab or a smaller column lowers the sway k.
+# - Flat-plate k: a flat plate is not a lateral system (the shear-wall core
+#   takes sidesway), so a flat-plate column carries no sway moment and the
+#   §10.10.7.3 Q-method uses k = 1.0 either way — braced (R10.10.6.3) when
+#   nonsway, the §10.10.7.2 minimum when sway. The distinction a story makes
+#   is the `braced` designation, not the k value: Q ≤ 0.05 is nonsway
+#   (braced), Q > 0.05 is sway (ACI 318-11 §10.10.5.2). The alignment chart
+#   (Fig. R10.10.1.1) is not consulted — a flat plate on pinned footings has
+#   no finite sway k there, which is the physical statement that the frame
+#   needs a lateral system; that is a clean upstream error, not a chart k.
 
 using Test
 using Unitful
@@ -68,40 +74,46 @@ end
         @test h_end < slab1.result.thickness
     end
 
-    @testset "Sway k moves with the story and the stiffness" begin
+    @testset "Flat-plate k and the sway designation follow Q" begin
         struc = _plate(1, 1, 20.0u"ft", 20.0u"ft")
         col = first(struc.columns)
         slab = first(struc.slabs)
         h = 8.0u"inch"
+
+        # No wall and no Q (story_properties unset): the proxy designates the
+        # story sway. k = 1.0 (ACI 318-11 §10.10.7.2 minimum); no chart.
         g = StructuralSizer.flat_plate_column_geometry(col, slab, struc; h=h)
         @test !col.braced
-        @test g.kx > 1.0
-        @test g.ky > 1.0
+        @test !g.braced
+        @test g.kx == 1.0
+        @test g.ky == 1.0
 
-        # A thicker slab restrains the joint, so ψ and k drop.
+        # k does not depend on slab thickness or column size any more — the
+        # alignment chart (the only thing those fed) is retired for flat plates.
         g_thick = StructuralSizer.flat_plate_column_geometry(col, slab, struc; h=12.0u"inch")
-        @test g_thick.kx < g.kx
-        @test g_thick.ky < g.ky
-
-        # A larger column is stiffer relative to the slab, so k rises.
+        @test g_thick.kx == 1.0
+        @test g_thick.ky == 1.0
         col.c1 = col.c2 = 24.0u"inch"
         g_big = StructuralSizer.flat_plate_column_geometry(col, slab, struc; h=h)
-        @test g_big.kx > g.kx
+        @test g_big.kx == 1.0
         col.c1 = col.c2 = 16.0u"inch"
 
-        # §10.10.5.2. Q = 1000*0.4/(200*120) = 0.0167 ≤ 0.05 → nonsway, k = 1.
+        # §10.10.5.2. Q = 1000*0.4/(200*120) = 0.0167 ≤ 0.05 → nonsway, braced.
         col.story_properties = (ΣPu=1000.0, ΣPc=0.0, Vus=200.0, Δo=0.4, lc=120.0)
         g_ns = StructuralSizer.flat_plate_column_geometry(col, slab, struc; h=h)
         @test col.braced
+        @test g_ns.braced
         @test g_ns.kx == 1.0
         @test g_ns.ky == 1.0
-        @test g_ns.braced
 
-        # Q = 1000*2.0/(200*120) = 0.083 > 0.05 → sway again.
+        # Q = 1000*2.0/(200*120) = 0.083 > 0.05 → sway. Designation flips to
+        # unbraced; k stays 1.0 (the §10.10.7.3 along-length value, Ms = 0).
         col.story_properties = (ΣPu=1000.0, ΣPc=0.0, Vus=200.0, Δo=2.0, lc=120.0)
         g_sw = StructuralSizer.flat_plate_column_geometry(col, slab, struc; h=h)
         @test !col.braced
-        @test g_sw.kx > 1.0
+        @test !g_sw.braced
+        @test g_sw.kx == 1.0
+        @test g_sw.ky == 1.0
     end
 
     @testset "Pattern live, hogging, and vertical equilibrium" begin

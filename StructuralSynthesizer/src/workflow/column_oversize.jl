@@ -97,6 +97,101 @@ Read-only: `struc` is never mutated.
 end
 
 """
+    flat_plate_column_oversize_carbon(struc, params, column_opts) -> Dict{Int, NamedTuple}
+
+Carbon analogue of [`flat_plate_column_oversize`](@ref): for every flat-plate RC
+column on a finished design, the **lowest-embodied-carbon** catalog section that
+still passes the column's full-load strength, its §10.12 joint sections and
+punching **at the column's own final demands**, with no grow-only floor.
+
+Where [`flat_plate_column_oversize`](@ref) ranks by gross plan area (smallest
+footprint), this ranks by rebar-inclusive embodied carbon ([`MinCarbon`](@ref),
+counting longitudinal and transverse steel). The two can disagree: a larger
+low-ρ section can embody less carbon than a smaller high-ρ one. This probe
+therefore measures the carbon actually reducible under the column's own demands
+— the quantity a carbon-ordered fitter (Part B) would capture — and is a
+read-only preview of that selection.
+
+Returns, per column index `i`, a NamedTuple:
+
+- `installed`         — the section currently on the column,
+- `lightest`          — the min-carbon feasible catalog section at the final demands,
+- `carbon_installed` / `carbon_lightest` — their rebar-inclusive kgCO₂e (typed),
+- `reducible`         — `(carbon_installed - carbon_lightest) / carbon_installed`,
+                        ≥ 0 (0 if already min-carbon, never negative since the
+                        installed section is itself a feasible candidate),
+- `story`, `source`.
+
+Columns with no stored punching demand are skipped, the same conservatism as
+[`flat_plate_column_oversize`](@ref). Read-only: `struc` is never mutated.
+"""
+@noinline function flat_plate_column_oversize_carbon(struc::BuildingStructure, params, column_opts)
+    @nospecialize struc params column_opts
+    checks = flat_plate_column_checks(struc, column_opts; params)
+    out = Dict{Int, NamedTuple}()
+    isempty(checks) && return out
+    checker = _aci_column_checker(column_opts)
+    jchecker = _joint_checker(column_opts)
+    catalog = _memo_column_catalog(column_opts)
+    cap = _flat_plate_column_cap(params)
+    for i in sort!(collect(keys(checks)))
+        col = struc.columns[i]
+        sec0 = section(col)
+        (sec0 isa StructuralSizer.RCColumnSection ||
+            sec0 isa StructuralSizer.RCCircularSection) || continue
+        # Same punching conservatism as the plan-area probe: no stored demand ⇒
+        # the column cannot be shrunk, so it has no measurable oversize here.
+        demands = _column_punching_demands(struc, col)
+        isempty(demands) && continue
+        mat = _column_cache_material(col, column_opts)
+        # Rank by carbon, not plan area: build the capacity cache against
+        # MinCarbon (diagrams depend only on the material tuple, so this shares
+        # with the production cache), then score every section by its own
+        # rebar-inclusive embodied carbon at the column's length.
+        cache = _memo_capacity_cache(checker, catalog, mat, StructuralSizer.MinCarbon())
+        orient = _rc_demand_orientations(checks[i].demand, column_opts.βdns)
+        geom = checks[i].geometry
+        joint = checks[i].joint
+        punch = Dict{Tuple{Float64, Float64}, Union{Bool, Nothing}}()
+        concrete = _column_concrete(col, column_opts)
+        rebar = column_opts.rebar_material
+        transverse = something(column_opts.transverse_rebar_material, column_opts.rebar_material)
+        carbon_of(sec) = StructuralSizer.objective_value(StructuralSizer.MinCarbon(),
+            sec, concrete, col.base.L; rebar = rebar, transverse = transverse)
+        # Candidate sections within the plan-size cap, ascending by carbon. The
+        # first one that passes every check is the global min-carbon feasible
+        # section (the carbon analogue of a carbon-ordered `_fit`).
+        cands = [j for j in eachindex(catalog) if _section_within_cap(catalog[j], cap)]
+        sort!(cands; by = j -> ustrip(u"kgCO2e", carbon_of(catalog[j])))
+        pick = nothing
+        for j in cands
+            s = catalog[j]
+            bb = StructuralSizer.bounding_box(s)
+            key = (round(ustrip(u"inch", bb.width); digits = 3),
+                   round(ustrip(u"inch", bb.depth); digits = 3))
+            pok = get!(punch, key) do
+                _punching_passes_at(struc, params, col, bb.width, bb.depth, demands)
+            end
+            pok === false && continue
+            all(d -> StructuralSizer.is_feasible(checker, cache, j, s, mat, d, geom), orient) || continue
+            _joint_feasible(jchecker, catalog, j, s, col, column_opts, joint, geom) || continue
+            pick = j
+            break
+        end
+        pick === nothing && continue
+        lightest = catalog[pick]
+        c_inst = carbon_of(sec0)
+        c_light = carbon_of(lightest)
+        frac = c_inst > zero(c_inst) ? Float64((c_inst - c_light) / c_inst) : 0.0
+        out[i] = (installed = sec0, lightest = lightest,
+                  carbon_installed = c_inst, carbon_lightest = c_light,
+                  reducible = max(frac, 0.0), story = col.story,
+                  source = checks[i].source)
+    end
+    return out
+end
+
+"""
     flat_plate_column_shrink_verify!(struc, params, column_opts) -> Vector{Int}
 
 The "final shrink pass" of the architecture (architecture.md §2): on a finished

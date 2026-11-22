@@ -139,7 +139,7 @@ export scene_buffer, scene_f32, scene_u32, scene_u16, scene_u8
 export scene_station_displacement, hermite_local, demo_frame_model
 
 # --- Geometry generation ---
-export gen_medium_office
+export gen_medium_office, add_center_core!
 
 # --- Building types ---
 export BuildingSkeleton, BuildingStructure, Story

@@ -1,5 +1,6 @@
 """
-    gen_medium_office(x, y, floor_height, x_bays, y_bays, n_stories; irregular=:none, offset=0.0u"m")
+    gen_medium_office(x, y, floor_height, x_bays, y_bays, n_stories;
+                      irregular=:none, offset=0.0u"m", core=:none)
 
 Generate a medium office building skeleton.
 
@@ -13,10 +14,16 @@ Generate a medium office building skeleton.
     (creates true trapezoids: adjacent columns in the same row shift opposite
     directions, so every bay has unequal-length horizontal edges)
 - `offset::Unitful.Length`: Amount to shift interior columns (default 0.0m)
+- `core::Symbol`: Lateral-force-resisting core to add after the frame is built
+  - `:none` - Bare frame, no shear walls (default)
+  - `:center_box` - A closed box of shear walls around the central bay, braced
+    over the full height. See [`add_center_core!`](@ref). Give the resulting
+    skeleton a `DesignParameters.wall_thickness`; `:walls` edges require one.
 """
 function gen_medium_office(x::Unitful.Length, y::Unitful.Length, floor_height::Unitful.Length, 
                            x_bays::Int64, y_bays::Int64, n_stories::Int64;
-                           irregular::Symbol=:none, offset::Unitful.Length=0.0u"m")::BuildingSkeleton
+                           irregular::Symbol=:none, offset::Unitful.Length=0.0u"m",
+                           core::Symbol=:none)::BuildingSkeleton
     # convert everything to meters internally
     x = uconvert(u"m", x)
     y = uconvert(u"m", y)
@@ -126,5 +133,83 @@ function gen_medium_office(x::Unitful.Length, y::Unitful.Length, floor_height::U
         append!(skel.groups_faces[target_grp], story.faces)
     end
 
+    # Lateral system. `find_faces!` has already populated each story's faces,
+    # which the wall pier-height needs, so the core is added last.
+    if core === :center_box
+        add_center_core!(skel, get_pt, x_bays, y_bays, n_stories)
+    elseif core !== :none
+        throw(ArgumentError("gen_medium_office: unknown core :$core (expected :none or :center_box)"))
+    end
+
+    return skel
+end
+
+"""
+    _claim_or_add_wall_edge!(skel, p1, p2, level_idx) -> Int
+
+Ensure the plan edge `p1`–`p2` at `level_idx` belongs to the `:walls` group,
+returning its edge index.
+
+If an edge already spans those two points (a floor beam), it is moved into
+`:walls` — removed from every other edge group so it cannot also become a
+`Beam` (`initialize_members!` rejects an edge that is in two groups). If no such
+edge exists (the grade level, where `gen_medium_office` lays no beams), a new
+`:walls` edge is added between the points.
+"""
+function _claim_or_add_wall_edge!(skel::BuildingSkeleton, p1::Meshes.Point,
+                                  p2::Meshes.Point, level_idx::Int)
+    v1 = find_vertex(skel, p1)
+    v2 = find_vertex(skel, p2)
+    ei = (v1 === nothing || v2 === nothing) ? nothing : find_edge(skel, v1, v2)
+    if ei === nothing
+        return add_element!(skel, Meshes.Segment(p1, p2); group=:walls, level_idx=level_idx)
+    end
+    # Claim the existing edge: drop it from every non-wall group, add to :walls.
+    for (g, members) in skel.groups_edges
+        g === :walls && continue
+        filter!(!=(ei), members)
+    end
+    walls = get!(skel.groups_edges, :walls, Int[])
+    ei in walls || push!(walls, ei)
+    return ei
+end
+
+"""
+    add_center_core!(skel, get_pt, x_bays, y_bays, n_stories) -> skel
+
+Add a closed box of shear walls around the central bay of a DOE office grid,
+forming a lateral-force-resisting core braced over the full height.
+
+The four plan edges of the central bay are put into the `:walls` group on every
+story from grade through the story just below the roof. A `:walls` plan edge at
+floor level `k` becomes a `Wall` with `story = k` spanning `z = k·h → (k+1)·h`
+(`_push_wall!`), so edges on levels `0 … n_stories-1` brace physical stories
+`1 … n_stories` — the entire height. The roof face stays a slab, and the four
+box corners are existing column lines that already reach the roof, so no extra
+roof vertices are needed (unlike an interior shaft core).
+
+`get_pt(i, j, k)` is the grid point generator from [`gen_medium_office`](@ref),
+so the core honours any `irregular` column shifts. The central bay is the one
+whose lower-left corner is column `((x_bays-1)÷2, (y_bays-1)÷2)`; for an odd bay
+count this is the exact middle, and for an even count it is the lower-middle bay.
+
+ACI 318-11 §10.10: these walls give the frame a lateral system, so the stability
+index `Q` (Eq. 10-10) and story drift can be evaluated — instead of a bare sway
+frame with `ψ → ∞` crashing the Jackson–Moreland alignment chart.
+
+The resulting skeleton has a non-empty `:walls` group, so a design run must
+supply `DesignParameters.wall_thickness`.
+"""
+function add_center_core!(skel::BuildingSkeleton, get_pt, x_bays::Int, y_bays::Int,
+                          n_stories::Int)
+    ci = (x_bays - 1) ÷ 2
+    cj = (y_bays - 1) ÷ 2
+    # Corner column indices of the central bay, walked as a closed loop.
+    corner_ij = ((ci, cj), (ci + 1, cj), (ci + 1, cj + 1), (ci, cj + 1))
+    for k in 0:(n_stories - 1), e in 1:4
+        (ai, aj) = corner_ij[e]
+        (bi, bj) = corner_ij[mod1(e + 1, 4)]
+        _claim_or_add_wall_edge!(skel, get_pt(ai, aj, k), get_pt(bi, bj, k), k)
+    end
     return skel
 end

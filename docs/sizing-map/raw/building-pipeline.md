@@ -4,6 +4,37 @@ Scope: `StructuralSynthesizer/src/workflow/*`, `design_graph/*`, `floor_design_c
 Paths are relative to `StructuralSynthesizer/src/` unless prefixed `SS/` (= `StructuralSizer/src/`).
 Status: COMPLETE (Parts A, B, C and the top-5 list).
 
+### Loops added since the 2026-11-11 snapshot (2026-11-23 audit)
+
+These are not yet written up as full L-records below; anchors given for follow-up:
+
+- **L17 — Two-way αfm recheck** (`member_iteration.jl:385-392`, helpers `:744-784`).
+  After the beam/column fixed point, up to 2 rounds of `_recheck_two_way_thickness!`
+  (recompute αfm from the sized edge beams → `min_thickness(TwoWay(); αfm)`,
+  can thin h) + `_resize_beams_after_thickness!`. Resolves rank 2 / the two-way
+  αfm stand-in. Monotone: no (h can drop). Budget: 2.
+- **L18 — Rib-stem screen rounds** (`member_iteration.jl:356-378`, `RIB_SCREEN_ROUNDS`).
+  For grillage (ribbed/waffle) stories: `screen_rib_stems!` → reanalyze → L9,
+  repeated until the stem screen keeps every stem; then `report_rib_deflection!`.
+  Rib depth owned by `analyze/members/members/rib_story.jl`; cracked-story
+  deflection with a ρ′ lever.
+- **Member verify-installed fallback** (`member_iteration.jl:393-408`). On
+  `max_iterations` without a strict fixed point, `_verify_installed_design!`
+  accepts the installed sections if every group passes a fresh final analysis
+  (replaces the floored-1.0 fake pass; changes the L9/L11/L13 budget-out
+  outcome — it can now converge=true at the cap).
+- **Flat-plate column objective now rebar-inclusive + `_fit` pass** (WP 2.5,
+  `flat_plate_column_check.jl:378-407`). L5/L6/L7 picks are objective-ordered
+  on rebar-inclusive `obj_coeffs`; a within-plan-size `_fit_flat_plate_columns!`
+  pass was added. Footprint is still grow-only (empirical gate: carbon-ordered
+  shrinking ≤ 0.5%).
+
+Many L4–L13 speed opportunities below have since landed (P-M cache hoist,
+single-section/T-beam/grillage_bays memos, `RigidLinkFactorCache`); see the
+README §5 audit note.
+
+---
+
 Shared iteration primitives (SS/iteration.jl):
 - `monotone_budget(requested, span; ceiling=48)` = `max(requested, min(span, 48))` (SS/iteration.jl:35-43).
 - `settle!(step!; budget)` runs `step!(k)` until it returns `false` (`:settled`) or `budget` passes (`:budget`, converged=false) (SS/iteration.jl:56-63).

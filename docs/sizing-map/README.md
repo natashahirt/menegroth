@@ -52,6 +52,47 @@ Re-audited 2026-11-23 (two-way slabs, lateral sway):
   so the classification only sets `braced` / raises a lateral-inadequacy error.
   Steel's array sizing path still warns "B2 amplification not implemented" for
   `braced = false` (`SS/members/codes/aisc/checker/steel_feasibility.jl:52-59`).
+  The sway build is proceeding in stages: the shared bridge (Stages A–C), the
+  `story_stability_records` ELF→`StoryStability` adapter keyed by (story,
+  direction) (`SY/analyze/lateral/story_demands.jl:372-437`, Stage D), and
+  `seismic_design_category` (ASCE 7-22 §11.6, Stage E) are all built and
+  tested. The missing piece is consumption: nothing calls
+  `design_column_moments` with a populated `story`/`lt` during member sizing.
+- **Rebar now counts in the flat-plate column objective** (rank 11 partially
+  resolved — WP 2.5). `_column_cache_material` wraps the column's concrete and
+  rebar grades in a `ReinforcedConcreteMaterial`, so `obj_coeffs` include rebar
+  carbon under `MinCarbon` (the default), and column picks are objective-ordered
+  (`sortperm(cache.obj_coeffs)`) in `_grow_flat_plate_columns!`,
+  `_stack_flat_plate_columns!`, and a new within-plan-size pass
+  `_fit_flat_plate_columns!` (`SY/workflow/flat_plate_column_check.jl:378-407`).
+  P-M capacity is byte-identical; only the objective moved. RC **beams, walls
+  and footings** still size on gross section (the rest of Phase 2.5). An
+  empirical gate found carbon-ordered column *shrinking* unjustified (≤ 0.5%
+  reducible carbon; plan-area min ≈ carbon min), so the grow-only footprint
+  ratchet (ranks 1, 3, 5) stands.
+- **Ribbed / waffle floors are now sized** (not just thickness-picked). A rib
+  grillage story gets a rib depth (`SY/analyze/members/members/rib_story.jl`),
+  rib-line member sizing, and cracked-story deflection with a compression-steel
+  (ρ′) lever. The member stage gained a `screen_rib_stems!` round loop
+  (`RIB_SCREEN_ROUNDS`) and `report_rib_deflection!`
+  (`SY/workflow/member_iteration.jl:356-378`). §3's "Waffle" row (table pick +
+  head loop) now understates ribbed-floor sizing.
+- **Member loop has a verify-installed fallback** (graceful degradation). When
+  `_iterate_beams_columns!` / the story-shell path hits `max_iterations` without
+  a strict section fixed point, `_verify_installed_design!` accepts the
+  installed sections if every beam and column group passes a fresh final-analysis
+  check (`SY/workflow/member_iteration.jl:393-408`). This replaces the old
+  floored-1.0 "fake pass" at the cap; L9/L11 budget-out no longer just flags
+  `stage_diagnostics[:members]`.
+- **Speed: several §5 opportunities have landed** (exact / bit-identical).
+  Column P-M capacity caches, catalog and plan-groups are hoisted out of the
+  settle loop and memoized by content (`speed.md` #10, #20); single-section P-M
+  cache memoized; T-beam capacity precompute reused across member iterations
+  (−41%); `grillage_bays` and `grow_heads` memoized (−97% / −73%); a
+  caller-owned `RigidLinkFactorCache` reuses the reduced factorization across
+  lateral P-Δ / exclude-shells solves. §5's "rebuilt per round" items #5 (caches)
+  are largely addressed for columns; the FEA remesh-per-column-step (#4) and
+  walls⇄members rebuild (#2) remain.
 
 ---
 
@@ -101,7 +142,7 @@ where a local sizing decision becomes a building-level one.
 | Flat plate / flat slab | h, column c1×c2, studs, strip bars; drop depth fixed at ACI min | h on 0.5" grid to ln/10; columns 0.5" steps or RC catalog | Greedy first-pass (default `:grow_columns`), or min carbon (`:joint_search`) | Iterative, grow-only |
 | Two-way with beams | h (beams sized by the member stage) | §9.5.3.3: unknown-αfm bound as seed, then Eq. (9-12)/(9-13) at the real αfm | thinnest passing (can thin after beams) | Seed, then ≤ 2 αfm recheck + beam-resize rounds |
 | One-way | h | ACI table by thickest support condition | none | Closed form |
-| Waffle | form depth; solid-head size | {8…24}" forms; whole rib modules | none | Table pick; head growth loop |
+| Waffle / ribbed | form/rib depth; solid-head size; rib-line sections; ρ′ | {8…24}" forms; whole rib modules; rib catalog | thinnest passing (ribbed: deflection-governed) | Table pick + head loop; ribbed: rib-depth owner + `screen_rib_stems!` rounds + cracked-story deflection |
 | Composite deck | depth × gage | tabulated | min self weight | Exhaustive |
 | Vault | rise, thickness | grid / bisection | volume | Grid or bisection |
 | RC columns | catalog section or (b, h, ρg) NLP | `rc_column_catalog` 8–36" | gross Ag only (**rebar not counted**) | MIP per pass |
@@ -130,7 +171,7 @@ the rest are the raw reports' reading-level findings.
 | 8 | **Foundation grouping envelope** | Component-wise max of P, M, V, c over a ±15% cluster whose reference only grows (`SY/analyze/foundations/grouping.jl:144-151, 300-325`) | Sort descending, bound by group min; concurrent demands | — |
 | 9 | **Column stacking and harmonize** | max c1 and max c2 taken independently: 12×20 over 20×12 forces 20×20 (`flat_plate_column_check.jl:492-551`, `member_iteration.jl:72-73`). Both are design policy, not code | Compare by area / allow rotation; joint group sizing in MIP | — |
 | 10 | **Section floors never relax** | Row-F seismic floors and story-shell `section_floor` are objective-sorted masks kept for the run; shell rounds 2–3 skip the trim pass (`interactive_checks.jl:903-920`, `size_beams_story_shell.jl:200-216`) | Store floors as demand rows; trim on the last round | — |
-| 11 | **RC objectives ignore rebar** | MinCarbon/MinCost use gross Ag only, so the carbon objective can't see steel (`SS/members/codes/aci/columns/checker.jl:536-624`) | Add As·ρs·ecc_s to the coefficient | — |
+| 11 | **PARTIAL (2026-11-23): flat-plate columns now count rebar** (WP 2.5); RC beams/walls/footings still gross | Flat-plate column cache routes through `ReinforcedConcreteMaterial` so `obj_coeffs` include rebar carbon (`SY/workflow/flat_plate_column_check.jl:378-407`); picks are objective-ordered. Beams/walls/footings still size on gross section | Add As·ρs·ecc_s to the remaining RC objectives (rest of Phase 2.5) | — |
 | 12 | **Drop panels, pattern loading, h-dependent edge beams lose scaling and joint search** | Fall back to blind 0.5" steps; drop depth/extent never sized (`thickness_jump.jl:51-57`) | Scale D and L separately; add drop variables to the joint search | — |
 | 13 | **Group envelopes (members)** | Max P paired with max M, longest L, worst Lb/Cb/K across a group (`SY/analyze/members/members/demands.jl:560-723`) | Check each member against the shared section | — |
 | 14 | **Wall out-of-plane moment** | Max slab moment paired with every N, including 0.9D (`ordinary_wall_stage.jl`). The reinforcement ratio is re-picked from the §11.6.2 floor on every call | Concurrent Moop/N | — |

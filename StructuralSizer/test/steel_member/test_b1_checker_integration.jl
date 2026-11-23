@@ -169,6 +169,57 @@ println("Testing B1 Moment Amplification in AISCChecker...")
         @test n_flip > 0
         @test n_reverse == 0
     end
+
+    @testset "B2 (P-Δ sway) amplification routes through is_feasible" begin
+        # is_feasible now applies AISC 360-16 Appendix 8 Eqs. A-8-1/A-8-2 through
+        # the shared `_aisc_amplified_forces` core when a `story` is supplied:
+        # Mr = B1·Mnt + B2·Mlt, Pr = Pnt + B2·Plt. Only the dimensionless B2 and
+        # the sway flag flow into the SI amplification, so a kip/in story record
+        # is fine. AISC Design Examples V15.1 story → B2 ≈ 1.13.
+        sway = StoryStability(; ΣPu = 2000.0, V = 50.0, Δ = 0.36, L = 144.0,
+                                Pmf = 2000.0)
+        @test StructuralSizer.is_sway_frame(sway)
+        @test story_B2(sway) > 1.1
+        braced_story = StoryStability(; ΣPu = 2000.0, V = 50.0, Δ = 0.001, L = 144.0)
+        @test !StructuralSizer.is_sway_frame(braced_story)
+
+        # Raw SI (N, N·m): is_feasible normalizes via to_newtons/to_newton_meters,
+        # so a bare-Float demand is interpreted as SI. (Avoids a Unitful promotion
+        # quirk when a LateralTranslation mixes unitful + Float64-zero defaults.)
+        # A column whose strong-axis moment comes from lateral translation (lt):
+        # a sway story amplifies that Mlt by B2 (Eq. A-8-1); a braced story / no
+        # story leaves B2 = 1. Sweeping the lt moment across the strong-axis
+        # flexural boundary, the sway case must never be *more* feasible than the
+        # no-story case, and must flip at least one case to infeasible.
+        n_flip = 0
+        n_reverse = 0
+        for mlt in 20.0e3:2.0e3:70.0e3     # 20 → 70 kN·m in N·m
+            dem = MemberDemand(1; Pu_c = 150.0e3, Mux = 5.0e3,
+                               M1x = 0.0, M2x = 5.0e3,
+                               lt = LateralTranslation(; M2ltx = mlt))
+            ok_nostory = StructuralSizer.is_feasible(checker, cache, 1, section,
+                                                     material, dem, geometry)
+            ok_sway = StructuralSizer.is_feasible(checker, cache, 1, section,
+                                                  material, dem, geometry; story = sway)
+            if ok_nostory && !ok_sway
+                n_flip += 1
+            elseif !ok_nostory && ok_sway
+                n_reverse += 1
+            end
+        end
+        println("  B2 sway amplification: flip=$n_flip reverse=$n_reverse")
+        @test n_reverse == 0
+        @test n_flip > 0
+
+        # No-op contract: a braced (non-sway) story is byte-identical to no story
+        # (B2 collapses to 1), for a demand that carries an lt split.
+        dem2 = MemberDemand(1; Pu_c = 150.0e3, Mux = 5.0e3, M1x = 0.0, M2x = 5.0e3,
+                            lt = LateralTranslation(; M2ltx = 40.0e3))
+        @test StructuralSizer.is_feasible(checker, cache, 1, section, material,
+                                          dem2, geometry; story = braced_story) ==
+              StructuralSizer.is_feasible(checker, cache, 1, section, material,
+                                          dem2, geometry)
+    end
 end
 
 println("\n✅ B1 integration tests completed!")

@@ -151,7 +151,7 @@ Absorbs the former Workstream V. Source: `raw/vertical-floor-interaction.md`
 
 | WP | Work | Acceptance |
 |---|---|---|
-| 6.1 | Two-way: size beams, compute αfm, re-check h (Eq. 9-12/9-13), re-size beams once (rank 2); credit wall edges in mixed panels | B4 slab h at or below baseline, verified |
+| 6.1 | Two-way: size beams, compute αfm, re-check h (Eq. 9-12/9-13), re-size beams once (rank 2); credit wall edges in mixed panels. **αfm recheck landed 2026-11-14** (`_recheck_two_way_thickness!`, ≤ 2 rounds); remaining: credit wall edges in mixed panels and the verified B4 baseline check | B4 slab h at or below baseline, verified |
 | 6.2 | Spread footings: rectangular; joint (B, h) minimum volume (rank 15) | Footing carbon at or below baseline, verified |
 | 6.3 | Mat strips: the remaining open items (Decisions) after corpus check (rank 7) | Signed off before code |
 | 6.4 | Mat rigidity ratio includes the framed-member (superstructure) stiffness term, after a corpus check of its definition (ACI 336.2R). Changes rigid versus flexible classification | Hand test on a mat with and without framing |

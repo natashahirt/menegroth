@@ -20,6 +20,39 @@ Detail lives in four raw reports (one record per loop, file:line cited):
 Line numbers are from the working tree on 2026-11-11. Paths: `SS/` =
 `StructuralSizer/src/`, `SY/` = `StructuralSynthesizer/src/`.
 
+### Code audit updates since the 2026-11-11 snapshot
+
+Re-audited 2026-11-23 (two-way slabs, lateral sway):
+
+- **Two-way slab with beams now uses the real αfm** (rank 2 / sign-off item 2
+  resolved). After the beams exist, `_size_beams_columns!` runs up to two
+  `_recheck_two_way_thickness!` + `_resize_beams_after_thickness!` rounds
+  (`SY/workflow/member_iteration.jl:385-392`). `_recheck_two_way_thickness!`
+  computes each panel's αfm from the sized edge beams (`_panel_alpha` →
+  `panel_alpha_fm`) and re-runs `min_thickness(TwoWay(), ln; αfm=…)` with
+  Eq. (9-12)/(9-13); it writes the newly computed h, so the slab can **thin**
+  when stiff beams allow it. The `alpha_fm = nothing` bound is now only the
+  initial seed (before beams) and the fallback when a panel lacks beams on all
+  sides. Landed 2026-11-14 (memory checkpoint `chec-4c32c360`), which replaced
+  the earlier "two-way thickness stays fixed once the beams are in the shell"
+  decision. `Ib` is the beam stem only; §9.5.3.4 computed-deflection thinning
+  stays out.
+- **Lateral sway: the second-order bridge is built and unit-tested but not yet
+  wired into `design_building`.** `StoryStability` (`SS/members/codes/shared/story_stability.jl`)
+  carries one first-order story record onto both ACI §10.10.7 `δs` and AISC
+  App.8 `B2`; `design_column_moments` (`SS/members/codes/shared/column_moments.jl`)
+  returns `Mns + δs·Ms` (RC, Eq. 10-18) or `B1·Mnt + B2·Mlt` (steel, Eq. A-8-1)
+  and no-ops on a non-sway story. These and the `LateralTranslation` demand
+  split are **not called anywhere in production `src/`** — only defined and
+  tested — so `demand.lt` is always `nothing` today. `compute_story_properties!`
+  is **not called in the pipeline** (only inside `p_delta_iterate!`, which the
+  pipeline does not call), so flat-plate columns take their sway designation
+  from the wall-presence proxy, not a real `Q`. Flat-plate columns still use
+  k = 1 both ways (the core takes sidesway; `SS/.../utils/column_bracing.jl`),
+  so the classification only sets `braced` / raises a lateral-inadequacy error.
+  Steel's array sizing path still warns "B2 amplification not implemented" for
+  `braced = false` (`SS/members/codes/aisc/checker/steel_feasibility.jl:52-59`).
+
 ---
 
 ## 1. Stage graph
@@ -36,7 +69,7 @@ flowchart TD
     TWO --> SYNC
     SYNC --> MEM{"2. members"}
     MEM -->|"flat plate / flat slab"| FPM["stale-slab settle loop<br/>reconcile, full-load check, stack, harmonize"]
-    MEM -->|"beam floors"| BC["beams then columns<br/>until no section changes"]
+    MEM -->|"beam floors"| BC["beams then columns<br/>until no section changes;<br/>then ≤2 two-way αfm rechecks"]
     MEM -->|"story shell"| SH["shell rounds (max 3)"]
     FPM -->|"columns grew: slabs stale"| FPM
     SH --> BC
@@ -66,7 +99,7 @@ where a local sizing decision becomes a building-level one.
 | Element | Variables | Candidates | Objective | Loop style |
 |---|---|---|---|---|
 | Flat plate / flat slab | h, column c1×c2, studs, strip bars; drop depth fixed at ACI min | h on 0.5" grid to ln/10; columns 0.5" steps or RC catalog | Greedy first-pass (default `:grow_columns`), or min carbon (`:joint_search`) | Iterative, grow-only |
-| Two-way with beams | h | ACI 318-11 §9.5.3.3 bound | none | Closed form, single pass |
+| Two-way with beams | h (beams sized by the member stage) | §9.5.3.3: unknown-αfm bound as seed, then Eq. (9-12)/(9-13) at the real αfm | thinnest passing (can thin after beams) | Seed, then ≤ 2 αfm recheck + beam-resize rounds |
 | One-way | h | ACI table by thickest support condition | none | Closed form |
 | Waffle | form depth; solid-head size | {8…24}" forms; whole rib modules | none | Table pick; head growth loop |
 | Composite deck | depth × gage | tabulated | min self weight | Exhaustive |
@@ -88,7 +121,7 @@ the rest are the raw reports' reading-level findings.
 | # | Loop / rule | Mechanism | Fix direction | Checked |
 |---|---|---|---|---|
 | 1 | **Columns never shrink, from a conservative seed** | Seed ≥ building-average span/15 and ≥ axial at ρg = 0.01 over all floors above (`SY/analyze/members/members/size_columns.jl:517-597`). Every later step is `max(old, new)`. `start = :axial` is used only when `column_span_minimum = false` (`SY/workflow/prepare.jl:97-101`) | Seed from the column's own demand; final shrink-and-verify pass | yes |
-| 2 | **Two-way slab with beams uses the "beams unknown" thickness bound** | `alpha_fm = nothing` gives max(Table 9.5(c) exterior, 1.1·Eq. 9-12 at αfm = 0.2, 5") (`SS/slabs/codes/concrete/min_thickness.jl:198-203`). No production caller passes `alpha_fm`. ~35% thicker than Eq. 9-13 for stiff beams | Size beams, compute αfm, re-check h, re-size beams | yes |
+| 2 | **RESOLVED (2026-11-23 audit).** ~~Two-way slab with beams uses the "beams unknown" thickness bound~~ | The unknown-αfm bound (`SS/slabs/codes/concrete/min_thickness.jl:198-203`) is now only the pre-beam seed. After beams, `_recheck_two_way_thickness!` recomputes αfm and re-runs Eq. (9-12)/(9-13), thinning h (`SY/workflow/member_iteration.jl:385-392`, `:744-784`); ≤ 2 recheck + beam-resize rounds. See the audit note above | Done: size beams, compute αfm, re-check h, re-size beams | yes |
 | 3 | **Flat-plate stale-slab loop** | Column growth (axial, full-load P-M, stacking, harmonize) marks slabs stale; redesign can grow columns again; nothing undone (`SY/workflow/graph_builder.jl:373-409`) | Joint slab/column search at building level; size axial before slabs | — |
 | 4 | **Flat-plate default punching is greedy** | `:grow_columns` grows columns before considering h or studs; columns grown at a thin h are kept when h rises (`SS/slabs/.../punching_resolution.jl:129-138`, `column_updates.jl:108-109`) | `:joint_search` (built); reset columns on h restart | — |
 | 5 | **Full-load column check must cover the current footprint** | Picks lightest catalog section ≥ current c1 and c2; never trades footprint for steel (`SY/workflow/flat_plate_column_check.jl:461-473, 635-640`) | Choose among sections ≥ the *required* footprint | — |
@@ -134,8 +167,10 @@ and `corpus.mdc`, each needs a corpus check and the user's sign-off.
    Research in
    [`phase0/seismic-weight-and-foundation-lateral.md`](phase0/seismic-weight-and-foundation-lateral.md)
    (Issue A). Checked.
-2. **Two-way slab thickness never uses the real αfm** (ranked item 2). The
-   bound is labeled engineering judgment in the code. Checked.
+2. **RESOLVED (2026-11-23):** two-way slab thickness now uses the real αfm
+   (ranked item 2; landed 2026-11-14). The unknown-αfm bound is only the
+   pre-beam seed; `_recheck_two_way_thickness!` recomputes αfm from the sized
+   beams and re-runs Eq. (9-12)/(9-13). No open sign-off here.
 3. **Steel Cm = 0.6 for all steel beams and steel columns in compression.**
    Research in
    [`phase0/steel-cm-and-mat-coefficient.md`](phase0/steel-cm-and-mat-coefficient.md)
@@ -196,8 +231,10 @@ the pattern level usually covers several of them.
   cases, slabs, groups. Remedy: check per member/case against a shared section.
 - **Independent per-dimension max.** c1 and c2 maxed separately in stacking,
   harmonize, slab-loop column updates. Remedy: compare whole sections.
-- **Stand-ins that are never replaced.** Two-way αfm bound, column seed,
-  square footings. Remedy: a second pass once the real value is known.
+- **Stand-ins that are never replaced.** Column seed, square footings. (The
+  two-way αfm bound was this pattern's example and is now replaced by the
+  αfm recheck — see the 2026-11-23 audit note.) Remedy: a second pass once
+  the real value is known.
 
 ## 8. Keeping this map current
 

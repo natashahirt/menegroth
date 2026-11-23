@@ -64,6 +64,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
     @testset "Member Defaults" begin
         include("members/test_defaults.jl")
         include("members/test_up_eccentricity.jl")
+        include("members/test_shared_column_moments.jl")
     end
 
     # ─── Concrete Beams ──────────────────────────────────────────────────

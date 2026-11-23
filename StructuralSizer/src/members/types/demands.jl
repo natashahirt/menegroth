@@ -3,6 +3,67 @@
 # Note: AbstractDemand is defined in StructuralSizer/src/types.jl
 
 # ==============================================================================
+# Lateral-translation (sway) demand split — shared across material codes
+# ==============================================================================
+
+"""
+    LateralTranslation{T}
+
+The lateral-translation (sidesway) component of a column's force demand, kept
+separate from the no-translation (gravity-restrained) component so the
+material-specific sway amplifier can magnify only the sway part. This is the
+shared representation behind both approximate second-order procedures:
+
+- ACI 318-11 §10.10.7 (Eq. 10-18): `M = Mns + δs·Ms`, with `Ms` the moment
+  from loads producing appreciable sidesway.
+- AISC 360-16 Appendix 8 (Eq. A-8-1, A-8-2): `Mr = B1·Mnt + B2·Mlt` and
+  `Pr = Pnt + B2·Plt`, with the `lt` subscript the lateral-translation analysis.
+
+A column whose demand carries no `LateralTranslation` (the field is `nothing`)
+is a pure gravity/no-translation member: `Ms = Mlt = 0`, `Plt = 0`, and the
+design reduces exactly to the non-sway procedure. The no-translation
+component stays in the host demand's existing moment/axial fields.
+
+# Fields (all default to zero; same units as the host demand)
+- `Plt`: lateral-translation axial force (signed; + = compression)
+- `M1ltx`, `M2ltx`: lateral-translation end moments about the strong (x) axis
+- `M1lty`, `M2lty`: lateral-translation end moments about the weak (y) axis
+
+End-moment convention matches the host demand: `M1` is the smaller end moment,
+`M2` the larger, signed per the §App.8.2.1.2 / §6.6.4.5.3 curvature rule.
+"""
+struct LateralTranslation{T}
+    Plt::T
+    M1ltx::T
+    M2ltx::T
+    M1lty::T
+    M2lty::T
+end
+
+"""
+    LateralTranslation(; Plt=0.0, M1ltx=0.0, M2ltx=0.0, M1lty=0.0, M2lty=0.0)
+
+Keyword constructor; the element type `T` is inferred by `promote_type` over
+all arguments so a `LateralTranslation` matches its host demand's units.
+"""
+function LateralTranslation(; Plt=0.0, M1ltx=0.0, M2ltx=0.0, M1lty=0.0, M2lty=0.0)
+    vals = (Plt, M1ltx, M2ltx, M1lty, M2lty)
+    T = promote_type(typeof.(vals)...)
+    return LateralTranslation{T}(T(Plt), T(M1ltx), T(M2ltx), T(M1lty), T(M2lty))
+end
+
+"""Strong-axis lateral-translation moment envelope `max(|M1ltx|, |M2ltx|)`."""
+Mltx(lt::LateralTranslation) = max(abs(lt.M1ltx), abs(lt.M2ltx))
+"""Weak-axis lateral-translation moment envelope `max(|M1lty|, |M2lty|)`."""
+Mlty(lt::LateralTranslation) = max(abs(lt.M1lty), abs(lt.M2lty))
+
+"""Convert a `LateralTranslation` (or `nothing`) to element type `T` for a host demand."""
+_convert_lt(::Nothing, ::Type) = nothing
+_convert_lt(lt::LateralTranslation, ::Type{T}) where {T} = LateralTranslation{T}(
+    convert(T, lt.Plt), convert(T, lt.M1ltx), convert(T, lt.M2ltx),
+    convert(T, lt.M1lty), convert(T, lt.M2lty))
+
+# ==============================================================================
 # Steel/General Member Demand (AISC-style)
 # ==============================================================================
 
@@ -66,6 +127,10 @@ struct MemberDemand{T, C} <: AbstractDemand
     I_ref::T     # Reference I used in analysis (for scaling)
     composite::C # Nothing, CompositeContext, PerStationComposite, or true
     transverse_load::Bool  # Whether transverse loading between supports
+    # Lateral-translation (sway) split for AISC 360-16 App. 8 (B1·Mnt + B2·Mlt).
+    # `nothing` = pure no-translation member (Mlt = Plt = 0); the Mnt/Pnt part
+    # stays in the fields above. See `LateralTranslation`.
+    lt::Union{Nothing, LateralTranslation{T}}
 end
 
 """
@@ -95,7 +160,8 @@ function MemberDemand(idx::Int;
     Tu=0.0,
     δ_max_LL=0.0, δ_max_total=0.0, I_ref=1.0,
     composite=nothing,
-    transverse_load=false
+    transverse_load=false,
+    lt::Union{Nothing, LateralTranslation}=nothing
 )
     Mux_pos_val = isnothing(Mux_pos) ? Mux : Mux_pos
     Mux_neg_val = isnothing(Mux_neg) ? Mux : Mux_neg
@@ -114,13 +180,13 @@ function MemberDemand(idx::Int;
                            T(M1x_val), T(M2x_val), T(M1y_val), T(M2y_val),
                            T(Vu_strong), T(Vu_weak), T(Tu),
                            T(δ_max_LL), T(δ_max_total), T(I_ref),
-                           composite, transverse_load)
+                           composite, transverse_load, _convert_lt(lt, T))
     else
         MemberDemand{Any, C}(idx, Pu_c, Pu_t, Mux, Mux_pos_val, Mux_neg_val, Muy,
                              M1x_val, M2x_val, M1y_val, M2y_val,
                              Vu_strong, Vu_weak, Tu,
                              δ_max_LL, δ_max_total, I_ref,
-                             composite, transverse_load)
+                             composite, transverse_load, _convert_lt(lt, Any))
     end
 end
 
@@ -185,6 +251,10 @@ struct RCColumnDemand{T} <: AbstractDemand
     # `false` skips the §6.6 moment magnifier. Row F forces already include
     # story P-delta (ACI 318-19 §6.7); magnifying them again double-counts.
     magnify::Bool
+    # Lateral-translation (sway) split for ACI 318-11 §10.10.7 (Mns + δs·Ms).
+    # `nothing` = pure non-sway member (Ms = Plt = 0); the Mns/Pu part stays in
+    # the fields above (Pu, M1x/M2x, M1y/M2y). See `LateralTranslation`.
+    lt::Union{Nothing, LateralTranslation{T}}
 end
 
 """
@@ -214,6 +284,7 @@ function RCColumnDemand(idx::Int;
     βdns = 0.6,
     transverse_load::Bool = false,
     magnify::Bool = true,
+    lt::Union{Nothing, LateralTranslation} = nothing,
 )
     if isnothing(Mux)
         if isnothing(M2x)
@@ -241,7 +312,7 @@ function RCColumnDemand(idx::Int;
                      typeof(M1x), typeof(M2x), typeof(M1y), typeof(M2y))
     RCColumnDemand{T}(idx, T(Pu), T(Mux), T(Muy),
                       T(M1x), T(M2x), T(M1y), T(M2y),
-                      Float64(βdns), transverse_load, magnify)
+                      Float64(βdns), transverse_load, magnify, _convert_lt(lt, T))
 end
 
 """

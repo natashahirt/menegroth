@@ -46,6 +46,10 @@ include("nds/_nds.jl")
 # ACI 318: Concrete
 include("aci/_aci.jl")
 
+# Shared second-order column design (bridges ACI §10.10 and AISC App.8).
+# After aisc/ and aci/ so their story-property types and B1/B2/δs primitives exist.
+include("shared/_shared.jl")
+
 # fib Model Code 2010: FRC shear (used by PixelFrame)
 include("fib/_fib.jl")
 

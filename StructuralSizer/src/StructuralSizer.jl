@@ -399,6 +399,8 @@ export magnify_moment_nonsway, magnification_factor_sway, magnify_moment_sway
 export SwayStoryProperties, stability_index, is_sway_frame, alignment_chart_k
 export B2StoryProperties, magnification_factor_sway_Q
 export effective_stiffness_sway, critical_buckling_load_sway, magnify_moment_sway_complete
+# Shared second-order column design (bridges ACI §10.10 and AISC App.8)
+export LateralTranslation, StoryStability, story_B2, design_column_moments
 
 # --- ACI 318: biaxial bending ---
 export bresler_reciprocal_load, check_bresler_reciprocal

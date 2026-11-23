@@ -195,6 +195,7 @@ export pdelta_displacement_multiplier
 export seismic_design_category
 export OrdinaryConcreteSeismicSystem, ordinary_concrete_seismic_system
 export SpecialConcreteShearWallSystem, concrete_shear_wall_system
+export DualSeismicSystem, dual_seismic_system
 
 # --- Directional-procedure MWFRS wind (ASCE 7-22 Chapter 27) ---
 export wind_figure_2731_roof, wind_wall_cp, wind_design_pressure, wind_surface

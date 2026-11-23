@@ -447,6 +447,54 @@ end
     @test occursin("NP", err.msg)
 end
 
+@testset "Table 12.2-1 Section D dual systems (special moment frames)" begin
+    # Rendered PDF page 174 (printed 113), verified 2026-11-23. Section D rows
+    # are NL in every SDC B–F. See memory note-52af93b5.
+    d3 = dual_seismic_system(:D3, :D)
+    @test d3.R == 7.0 && d3.Ω0 == 2.5 && d3.Cd == 5.5
+    @test d3.detailing == "14.2"
+    d8 = dual_seismic_system(:D8, :E)
+    @test d8.R == 7.5 && d8.Ω0 == 2.5 && d8.Cd == 6.0
+    @test d8.detailing == "14.3"
+    # D.9 — the steel-SMF + RC-core (composite special shear walls) row.
+    d9 = dual_seismic_system(:D9, :F)
+    @test d9.R == 7.0 && d9.Ω0 == 2.5 && d9.Cd == 6.0
+    @test d9.detailing == "14.3"
+
+    # Every Section D row carried here is permitted (NL) in all of B–F.
+    for row in (:D3, :D8, :D9), sdc in (:B, :C, :D, :E, :F)
+        @test dual_seismic_system(row, sdc).row === row
+    end
+
+    # :E8 (Section E, intermediate-moment-frame dual) delegates to the ordinary
+    # table: same R/Cd, and its B/C-only permission still holds.
+    e8 = dual_seismic_system(:E8, :C)
+    @test e8.R == 5.5 && e8.Cd == 4.5
+    err_e8 = try
+        dual_seismic_system(:E8, :D)   # IMF dual is NP in SDC D
+        nothing
+    catch e
+        e
+    end
+    @test err_e8 isa ArgumentError && occursin("NP", err_e8.msg)
+
+    # An unknown row and an out-of-table category both throw.
+    err_row = try
+        dual_seismic_system(:D99, :D)
+        nothing
+    catch e
+        e
+    end
+    @test err_row isa ArgumentError && occursin("not a Table 12.2-1 dual row", err_row.msg)
+    err_cat = try
+        dual_seismic_system(:D9, :A)
+        nothing
+    catch e
+        e
+    end
+    @test err_cat isa ArgumentError && occursin("not a column", err_cat.msg)
+end
+
 @testset "ASCE 7-22 §11.6 Seismic Design Category" begin
     sdc(; SDS, SD1, S1=0.0, rc=:II) =
         seismic_design_category(; SDS=SDS, SD1=SD1, S1=S1, risk_category=rc)

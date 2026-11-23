@@ -158,3 +158,99 @@ function concrete_shear_wall_system(row::Symbol, sdc::Symbol; hn = nothing)
     end
     return system
 end
+
+# ==============================================================================
+# Dual systems — ASCE 7-22 Table 12.2-1 Section D (special moment frames)
+# ==============================================================================
+#
+# "DUAL SYSTEMS WITH SPECIAL MOMENT FRAMES CAPABLE OF RESISTING AT LEAST 25% OF
+# PRESCRIBED SEISMIC FORCES" (ASCE 7-22 §12.2.5.1): a special moment frame shares
+# the lateral load with shear walls/braced frames, and the SMF alone is detailed
+# and proportioned for ≥ 25% of the design seismic force.
+#
+# Values read from the rendered scanned table (asce-7-22 PDF page 174 = printed
+# page 113) on 2026-11-23 and verified in-session; the PDF table is an image, so
+# these are not from the text extraction. Every Section D row carried here is NL
+# (no height limit) in Seismic Design Categories B through F.
+#
+# Section E (dual systems with *intermediate* moment frames) row E.8 (ordinary
+# RC shear walls) is in `_ORDINARY_CONCRETE_SYSTEMS`; `dual_seismic_system`
+# delegates to it so one lookup covers both the SMF-dual and IMF-dual choices.
+
+"""One Section D (special-moment-frame dual) row of ASCE 7-22 Table 12.2-1."""
+struct DualSeismicSystem
+    "Row label, such as `:D9`."
+    row::Symbol
+    title::String
+    "ASCE 7 section where the row's detailing requirements are specified."
+    detailing::String
+    R::Float64
+    Ω0::Float64
+    Cd::Float64
+    "Categories whose height limit is NL. Every other category B–F is NP."
+    permitted::Tuple{Vararg{Symbol}}
+    "PDF page of the row."
+    page::Int
+end
+
+# asce-7-22 PDF page 174 (printed 113). Only the rows needed for RC-core and
+# steel/composite-core dual systems are carried; the remaining Section D rows
+# (braced frames, masonry, plate-wall variants) are added when a system needs
+# them. See memory note-52af93b5 for the full rendered reading.
+const _DUAL_SEISMIC_SYSTEMS = Dict{Symbol, DualSeismicSystem}(
+    # D.3 — special moment frame + special reinforced concrete shear walls.
+    # For a *concrete* special moment frame sharing load with special RC walls.
+    :D3 => DualSeismicSystem(
+        :D3, "dual system, special moment frames with special reinforced concrete shear walls",
+        "14.2", 7.0, 2.5, 5.5, (:B, :C, :D, :E, :F), 174),
+    # D.8 — special moment frame + steel-and-concrete composite plate shear walls.
+    :D8 => DualSeismicSystem(
+        :D8, "dual system, special moment frames with steel and concrete composite plate shear walls",
+        "14.3", 7.5, 2.5, 6.0, (:B, :C, :D, :E, :F), 174),
+    # D.9 — special moment frame + steel-and-concrete composite special shear walls.
+    # The row for a STEEL special moment frame + RC special shear-wall core
+    # (composite dual, §14.3 / AISC 341 Part II).
+    :D9 => DualSeismicSystem(
+        :D9, "dual system, special moment frames with steel and concrete composite special shear walls",
+        "14.3", 7.0, 2.5, 6.0, (:B, :C, :D, :E, :F), 174),
+)
+
+"""
+    dual_seismic_system(row, sdc) -> system
+
+The ASCE 7-22 Table 12.2-1 dual-system row named `row`, when `sdc` is one of its
+permitted categories. Returns a [`DualSeismicSystem`](@ref) for Section D rows
+`:D3`, `:D8`, `:D9`, and delegates `:E8` to
+[`ordinary_concrete_seismic_system`](@ref) (Section E, intermediate-moment-frame
+dual with ordinary RC walls). Both results expose `.R`, `.Ω0`, and `.Cd`.
+
+A category the row marks NP throws; a category outside B–F throws.
+
+# Citation
+ASCE 7-22 Table 12.2-1 Sections D and E (corpus: asce-7-22, PDF pages 174–175)
+and §12.2.5.1 (PDF page 177). Section D values read from the rendered page.
+"""
+function dual_seismic_system(row::Symbol, sdc::Symbol)
+    # E.8 is the Section E (intermediate-moment-frame) dual row; it lives in the
+    # ordinary-concrete table and carries its own B/C-only permission.
+    row === :E8 && return ordinary_concrete_seismic_system(:E8, sdc)
+    system = get(_DUAL_SEISMIC_SYSTEMS, row, nothing)
+    if system === nothing
+        known = join(sort!(collect(keys(_DUAL_SEISMIC_SYSTEMS))), ", ")
+        throw(ArgumentError(
+            "dual system: $row is not a Table 12.2-1 dual row carried here " *
+            "($known, :E8). ASCE 7-22 Table 12.2-1 Section D (corpus: asce-7-22, " *
+            "PDF page 174)."))
+    end
+    sdc in (:B, :C, :D, :E, :F) || throw(ArgumentError(
+        "dual system: Seismic Design Category $sdc is not a column of " *
+        "Table 12.2-1. The columns are B, C, D, E, and F " *
+        "(corpus: asce-7-22, PDF page $(system.page))."))
+    if !(sdc in system.permitted)
+        throw(ArgumentError(
+            "dual system: Table 12.2-1 row $(system.row) ($(system.title)) is NP " *
+            "in Seismic Design Category $sdc. ASCE 7-22 Table 12.2-1 " *
+            "(corpus: asce-7-22, PDF page $(system.page))."))
+    end
+    return system
+end

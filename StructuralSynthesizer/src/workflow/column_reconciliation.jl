@@ -185,14 +185,27 @@ function _rc_column_frame_section(col, params::DesignParameters)
                         k * β * a_dim * b_dim^3 * u"m^4", ρ_kg * u"kg/m^3")
 end
 
-"""Put `asap_sec` on every frame element of `col`."""
+"""
+    _install_column_frame_section!(struc, col, asap_sec) -> Bool
+
+Put `asap_sec` on every frame element of `col`, skipping any element whose
+section already equals it by value. `Asap.Section` is an immutable value type,
+so `==` is an exact field comparison and `_rc_column_frame_section` is
+deterministic in the column's dimensions; an unchanged column therefore writes
+nothing. Returns `true` when any element's section actually changed, so callers
+can tell whether a re-solve is needed.
+"""
 function _install_column_frame_section!(struc::BuildingStructure, col, asap_sec)
+    changed = false
     for seg_idx in segment_indices(col)
         edge_idx = struc.segments[seg_idx].edge_idx
         (edge_idx < 1 || edge_idx > length(struc.asap_model.frame_elements)) && continue
-        struc.asap_model.frame_elements[edge_idx].section = asap_sec
+        el = struc.asap_model.frame_elements[edge_idx]
+        el.section == asap_sec && continue
+        el.section = asap_sec
+        changed = true
     end
-    return col
+    return changed
 end
 
 """
@@ -205,17 +218,27 @@ frame `Pu` leaves out the weight of the columns above. The self-weight is at
 [`member_self_weight_acceleration`](@ref). Returns `true` when the model was
 re-solved.
 """
-function _install_sized_column_frame!(struc::BuildingStructure, params::DesignParameters)
+function _install_sized_column_frame!(struc::BuildingStructure, params::DesignParameters;
+                                     skip_resolve_if_unchanged::Bool = false)
     edges = Set{Int}()
+    changed = false
     for col in struc.columns
         (isnothing(col.c1) || isnothing(col.c2)) && continue
-        _install_column_frame_section!(struc, col, _rc_column_frame_section(col, params))
+        changed |= _install_column_frame_section!(struc, col, _rc_column_frame_section(col, params))
         for seg_idx in segment_indices(col)
             push!(edges, struc.segments[seg_idx].edge_idx)
         end
     end
     isempty(edges) && return false
+    n_before = length(struc.asap_model.loads)
     _add_gravity_loads!(struc, edges, member_self_weight_acceleration(params))
+    added = length(struc.asap_model.loads) > n_before
+    # #18 (exact): when the caller guarantees the model was just solved for the
+    # current state (the in-loop `refresh_flat_plate_analysis!`), a pass that
+    # changed no frame section and added no load leaves `model.u` already
+    # correct — the re-solve would only reproduce it. Skip it. The pre-loop
+    # caller leaves `skip_resolve_if_unchanged=false` and always re-solves.
+    (skip_resolve_if_unchanged && !changed && !added) && return false
     return _resolve_after_column_change!(struc)
 end
 
@@ -260,6 +283,12 @@ section that passes its full-load strength, its §10.12 joints, and punching.
 `floors` is forwarded there: a plan size the slab commit or an earlier
 section search grew a column to. The search does not go under it.
 
+`model_current` (#18): set `true` only when the model was just solved for the
+current state (the in-loop `refresh_flat_plate_analysis!`). It lets
+[`_install_sized_column_frame!`](@ref) skip its re-solve on a round that changes
+no frame section — `model.u` is already correct. The pre-loop caller leaves it
+`false` and always re-solves.
+
 Returns the structure, the number of columns either step grew, whether the
 model was re-solved, and the full-load check's summary.
 """
@@ -268,6 +297,7 @@ function _reconcile_columns!(
     params::DesignParameters;
     tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
     floors::Dict{Int, Tuple} = Dict{Int, Tuple}(),
+    model_current::Bool = false,
 )
     _col_opts = _get_column_opts(params)
     conc = column_concrete(params)
@@ -281,7 +311,7 @@ function _reconcile_columns!(
     StructuralSizer.emit!(tc, :workflow, "_reconcile_columns!", "", :enter;
                           n_columns=length(struc.columns))
 
-    framed = _install_sized_column_frame!(struc, params)
+    framed = _install_sized_column_frame!(struc, params; skip_resolve_if_unchanged = model_current)
 
     for col in struc.columns
         isnothing(col.c1) && continue

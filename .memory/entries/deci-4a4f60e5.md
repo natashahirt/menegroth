@@ -13,9 +13,10 @@ success: 'null'
 files: ''
 session_id: sess-4fae1b60
 created_at: '2026-11-23T17:48:47.157039+00:00'
-updated_at: '2026-11-23T17:48:47.157039+00:00'
+updated_at: '2026-11-23T17:49:31.681265+00:00'
 has_child_rationale: Resolves the two 'LEFT OPEN' sequencing questions on deci-ff84d1d8;
   user accepted the recommended order
+related_to: deci-ff84d1d8
 ---
 Resolves the two sequencing questions left open on deci-ff84d1d8. Agreed with user 2026-11-23.
 

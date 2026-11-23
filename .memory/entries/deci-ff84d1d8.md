@@ -14,10 +14,10 @@ files: StructuralSynthesizer/src/building_types/members.jl@507697a, StructuralSy
   StructuralSynthesizer/src/analyze/members/members/initialize.jl@507697a
 session_id: sess-725b3df8
 created_at: '2026-11-23T17:42:29.772660+00:00'
-updated_at: '2026-11-23T17:43:16.960416+00:00'
+updated_at: '2026-11-23T17:49:31.681265+00:00'
 has_child_rationale: Durable cross-cutting element-taxonomy + sizer decisions agreed
   while scoping the LFRS designer; hold regardless of build order
-related_to: plan-3dbc321c,todo-d937bb05,todo-fcdb03a2
+related_to: plan-3dbc321c,todo-d937bb05,todo-fcdb03a2,deci-4a4f60e5
 ---
 Durable architecture decisions agreed with the user (2026-11-23) while scoping the steel LFRS designer. These hold regardless of build-order sequencing (which is deliberately left open below). Couples Phase H (braced frames) and Phase C (trusses/joists).
 

@@ -446,3 +446,49 @@ end
     @test err isa ArgumentError
     @test occursin("NP", err.msg)
 end
+
+@testset "ASCE 7-22 §11.6 Seismic Design Category" begin
+    sdc(; SDS, SD1, S1=0.0, rc=:II) =
+        seismic_design_category(; SDS=SDS, SD1=SD1, S1=S1, risk_category=rc)
+
+    # Table 11.6-1 columns (SD1 held at A so SDS governs), Risk Category I/II/III.
+    @test sdc(SDS=0.10, SD1=0.0) == :A          # SDS < 0.167
+    @test sdc(SDS=0.167, SD1=0.0) == :B         # lower bound inclusive
+    @test sdc(SDS=0.25, SD1=0.0) == :B
+    @test sdc(SDS=0.33, SD1=0.0) == :C          # lower bound inclusive
+    @test sdc(SDS=0.49, SD1=0.0) == :C
+    @test sdc(SDS=0.50, SD1=0.0) == :D          # lower bound inclusive
+    @test sdc(SDS=1.0, SD1=0.0) == :D
+
+    # Table 11.6-1, Risk Category IV shifts B→C and C→D.
+    @test sdc(SDS=0.25, SD1=0.0, rc=:IV) == :C
+    @test sdc(SDS=0.40, SD1=0.0, rc=:IV) == :D
+    @test sdc(SDS=0.10, SD1=0.0, rc=:IV) == :A
+
+    # Table 11.6-2 columns (SDS held at A so SD1 governs).
+    @test sdc(SDS=0.0, SD1=0.05) == :A          # SD1 < 0.067
+    @test sdc(SDS=0.0, SD1=0.067) == :B
+    @test sdc(SDS=0.0, SD1=0.133) == :C
+    @test sdc(SDS=0.0, SD1=0.20) == :D
+    @test sdc(SDS=0.0, SD1=0.10, rc=:IV) == :C
+    @test sdc(SDS=0.0, SD1=0.15, rc=:IV) == :D
+    @test sdc(SDS=0.0, SD1=0.25, rc=:IV) == :D  # 0.20 ≤ SD1 row, IV column is D
+
+    # §11.6: the more severe of the two tables governs.
+    # SDS→C (0.33–0.50), SD1→D (≥0.20) ⇒ D.
+    @test sdc(SDS=0.40, SD1=0.25) == :D
+    # SDS→D (≥0.50), SD1→B (0.067–0.133) ⇒ D.
+    @test sdc(SDS=0.60, SD1=0.10) == :D
+
+    # §11.6: S1 ≥ 0.75 overrides to E (I/II/III) or F (IV), irrespective of SDS/SD1.
+    @test sdc(SDS=0.10, SD1=0.0, S1=0.75) == :E
+    @test sdc(SDS=0.10, SD1=0.0, S1=0.80, rc=:IV) == :F
+    @test sdc(SDS=1.5, SD1=0.9, S1=1.0, rc=:I) == :E
+    # Just below the S1 threshold, the tables govern (here A).
+    @test sdc(SDS=0.10, SD1=0.0, S1=0.74) == :A
+
+    @test_throws ArgumentError seismic_design_category(;
+        SDS=0.2, SD1=0.1, S1=0.1, risk_category=:V)
+    @test_throws ArgumentError seismic_design_category(;
+        SDS=-0.1, SD1=0.1, S1=0.1, risk_category=:II)
+end

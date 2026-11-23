@@ -192,6 +192,7 @@ export allowable_story_drift, story_drift_is_allowed, vertical_seismic_load_effe
 export drift_live_load_factor, drift_expected_gravity_load
 export stability_coefficient, stability_coefficient_limit
 export pdelta_displacement_multiplier
+export seismic_design_category
 export OrdinaryConcreteSeismicSystem, ordinary_concrete_seismic_system
 export SpecialConcreteShearWallSystem, concrete_shear_wall_system
 

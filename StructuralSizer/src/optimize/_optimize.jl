@@ -23,3 +23,6 @@ include("core/_core.jl")
 
 # Solvers (use abstract interface only)
 include("solvers/_solvers.jl")
+
+# Drift optimality-criteria resizer (pure: participation vectors → new sizes)
+include("drift_optimality.jl")

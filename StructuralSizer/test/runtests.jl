@@ -225,6 +225,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("optimize/test_binary_search_depth.jl")
         include("optimize/test_sizing_strategy_contract.jl")
         include("optimize/test_explain_agreement.jl")
+        include("optimize/test_drift_optimality.jl")
     end
 
     # ─── Structural Walls (lateral system) ───────────────────────────────

@@ -39,6 +39,31 @@ function prepare_lateral_model!(struc, ::DualSystem)
 end
 
 """
+    moment_frame_members(struc) -> (beams, columns, source)
+
+Identify the members that form the §12.2.5.1 moment frame of a dual system
+(decision deci-7a4e26c2):
+
+- **Override (recommended)** — if any beam is flagged `lateral_role = :moment_frame`,
+  the flagged beams are the moment frame (`source = :override`).
+- **Auto default** — otherwise the primary girders (`role = :girder`) are taken
+  as the moment frame (`source = :auto`).
+
+Columns are the vertical frame elements and are always included; the
+moment-frame action is carried by the designated beams' moment connections. The
+caller validates that the beam set is non-empty.
+"""
+function moment_frame_members(struc)
+    columns = collect(eachindex(struc.columns))
+    flagged = [i for (i, b) in enumerate(struc.beams) if lateral_role_of(b) === :moment_frame]
+    if !isempty(flagged)
+        return (beams=flagged, columns=columns, source=:override)
+    end
+    auto = [i for (i, b) in enumerate(struc.beams) if b.role === :girder]
+    return (beams=auto, columns=columns, source=:auto)
+end
+
+"""
     seismic_members(struc, ::DualSystem) -> (walls, beams, columns)
 
 The whole dual system resists the lateral load: every wall (core), beam, and

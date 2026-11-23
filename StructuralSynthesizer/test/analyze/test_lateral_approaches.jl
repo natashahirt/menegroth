@@ -157,6 +157,15 @@ end
     @test_throws ArgumentError system_checks(dstruc, dual; seismic_design_category=:D)
     @test_throws ArgumentError system_checks(dstruc, dual; seismic_design_category=:G)
 
+    # Moment-frame designation: auto (girders) by default, user override wins.
+    gird = Beam([1], 4.0u"m"; role=:girder)
+    joist = Beam([2], 4.0u"m"; role=:joist)
+    auto = StructuralSynthesizer.moment_frame_members((beams=[gird, joist], columns=[1, 2], walls=[1]))
+    @test auto.beams == [1] && auto.columns == [1, 2] && auto.source === :auto
+    jmf = Beam([2], 4.0u"m"; role=:joist, lateral_role=:moment_frame)
+    over = StructuralSynthesizer.moment_frame_members((beams=[gird, jmf], columns=[1], walls=[1]))
+    @test over.beams == [2] && over.source === :override
+
     # §12.2.5.1 25% story-shear-share proxy.
     ok = StructuralSynthesizer.moment_frame_25pct_share([30.0, 25.0], [100.0, 100.0])
     @test ok.satisfies && ok.min_share ≈ 0.25 && ok.worst_story == 2

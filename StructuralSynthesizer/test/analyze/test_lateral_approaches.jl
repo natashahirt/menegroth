@@ -135,3 +135,35 @@ end
                          assignment=BuildingUnit())
     @test_throws ArgumentError diff.system
 end
+
+@testset "DualSystem behavior hooks" begin
+    dual = DualSystem(; moment_frame=:steel_smf, wall=:special_rc)   # row :D9
+    dstruc = (walls=[1], beams=[1, 2], columns=[1, 2])
+
+    # prepare_lateral_model! accepts a complete dual building, refuses a missing half.
+    @test prepare_lateral_model!(dstruc, dual) === dstruc
+    @test_throws ArgumentError prepare_lateral_model!((walls=Int[], beams=[1], columns=[1]), dual)
+    @test_throws ArgumentError prepare_lateral_model!((walls=[1], beams=Int[], columns=[1]), dual)
+    @test_throws ArgumentError prepare_lateral_model!((walls=[1], beams=[1], columns=Int[]), dual)
+
+    # The whole dual system is the SFRS; the carried Table 12.2-1 row reads back.
+    @test seismic_members(dstruc, dual) == (walls=[1], beams=[1, 2], columns=[1, 2])
+    @test StructuralSynthesizer.table_12_2_1_row(dual) === :D9
+
+    # Deformation-compatibility gate mirrors the other systems: A/B/C pass, D/E/F
+    # refuse (not built), a bad category throws.
+    @test isempty(system_checks(dstruc, dual; seismic_design_category=:B))
+    @test isempty(system_checks(dstruc, dual; seismic_design_category=:C))
+    @test_throws ArgumentError system_checks(dstruc, dual; seismic_design_category=:D)
+    @test_throws ArgumentError system_checks(dstruc, dual; seismic_design_category=:G)
+
+    # §12.2.5.1 25% story-shear-share proxy.
+    ok = StructuralSynthesizer.moment_frame_25pct_share([30.0, 25.0], [100.0, 100.0])
+    @test ok.satisfies && ok.min_share ≈ 0.25 && ok.worst_story == 2
+    bad = StructuralSynthesizer.moment_frame_25pct_share([20.0, 30.0], [100.0, 100.0])
+    @test !bad.satisfies && bad.worst_story == 1 && bad.min_share ≈ 0.20
+    # A story with no total shear carries no requirement and is skipped.
+    @test StructuralSynthesizer.moment_frame_25pct_share([50.0], [0.0]).satisfies
+    @test_throws ArgumentError StructuralSynthesizer.moment_frame_25pct_share([1.0], [1.0, 2.0])
+    @test_throws ArgumentError StructuralSynthesizer.moment_frame_25pct_share(Float64[], Float64[])
+end

@@ -117,28 +117,57 @@ function design_column_moments(demand::MemberDemand,
                                story::Union{Nothing, StoryStability},
                                Pe1x, Pe1y; α::Float64 = 1.0)
     lt = demand.lt
-    Pr_nt = demand.Pu_c                       # no-translation axial (compression)
-    Plt = lt === nothing ? zero(Pr_nt) : lt.Plt
+    Plt = lt === nothing ? zero(demand.Pu_c) : lt.Plt
     Mltx_env = lt === nothing ? zero(demand.Mux) : Mltx(lt)
     Mlty_env = lt === nothing ? zero(demand.Muy) : Mlty(lt)
+    return _aisc_amplified_forces(demand.Pu_c, demand.Mux, demand.Muy,
+                                  demand.M1x, demand.M2x, demand.M1y, demand.M2y,
+                                  demand.transverse_load, Plt, Mltx_env, Mlty_env,
+                                  story, Pe1x, Pe1y; α = α)
+end
 
+"""
+    _aisc_amplified_forces(Pnt, Mux_env, Muy_env, M1x, M2x, M1y, M2y,
+                           transverse_load, Plt, Mltx_env, Mlty_env,
+                           story, Pe1x, Pe1y; α=1.0) -> NamedTuple
+
+Scalar core of the AISC 360-16 Appendix 8 beam-column amplification, shared by
+the [`design_column_moments`](@ref) `MemberDemand` trait and the steel feasibility
+checker so there is one implementation of `Mr = B1·Mnt + B2·Mlt` (Eq. A-8-1) and
+`Pr = Pnt + B2·Plt` (Eq. A-8-2). Operating on bare scalars keeps the per-section
+feasibility loop allocation-free and unit-agnostic (the caller supplies a single
+consistent unit system; the checker passes SI N / N·m).
+
+- `Pnt`, `Mux_env`, `Muy_env`: no-translation axial and moment envelopes (`Mnt`).
+- `M1x/M2x`, `M1y/M2y`, `transverse_load`: feed `Cm` (Eq. A-8-4).
+- `Plt`, `Mltx_env`, `Mlty_env`: lateral-translation axial and moment envelopes.
+- `story`: shared story record → `B2` (Eq. A-8-6); `nothing`/non-sway → `B2 = 1`.
+- `Pe1x`, `Pe1y`: no-translation elastic buckling strengths (Eq. A-8-5).
+
+Returns `(; Mrx, Mry, Pr, B1x, B1y, B2, sway_applied)`. With no sway
+(`Plt = Mlt = 0`, `B2 = 1`) this reduces to `Pr = Pnt`, `Mr = B1·Mnt`.
+"""
+function _aisc_amplified_forces(Pnt, Mux_env, Muy_env, M1x, M2x, M1y, M2y,
+                                transverse_load::Bool, Plt, Mltx_env, Mlty_env,
+                                story::Union{Nothing, StoryStability},
+                                Pe1x, Pe1y; α::Float64 = 1.0)
     # B2 (Eq. A-8-6): story P-Δ amplifier; 1.0 if no sway story.
     B2 = (story === nothing || !is_sway_frame(story)) ? 1.0 : story_B2(story; α = α)
 
     # B1 (Eq. A-8-3) per axis; Cm from the no-translation end moments.
     # AISC 360-16 Commentary to §App.8.2.1: Pr in Eq. A-8-3 may be taken as the
     # first-order total Pnt + Plt (not the B2-amplified Pr), which is standard.
-    Pr_for_B1 = Pr_nt + Plt
-    Cmx = compute_Cm(demand.M1x, demand.M2x; transverse_loading = demand.transverse_load)
-    Cmy = compute_Cm(demand.M1y, demand.M2y; transverse_loading = demand.transverse_load)
+    Pr_for_B1 = Pnt + Plt
+    Cmx = compute_Cm(M1x, M2x; transverse_loading = transverse_load)
+    Cmy = compute_Cm(M1y, M2y; transverse_loading = transverse_load)
     B1x = compute_B1(Pr_for_B1, Pe1x, Cmx; α = α)
     B1y = compute_B1(Pr_for_B1, Pe1y, Cmy; α = α)
 
-    Pr = amplify_axial(Pr_nt, Plt, B2)        # Eq. A-8-2: Pr = Pnt + B2·Plt
+    Pr = amplify_axial(Pnt, Plt, B2)          # Eq. A-8-2: Pr = Pnt + B2·Plt
 
     # Eq. A-8-1: Mr = B1·Mnt + B2·Mlt.
-    Mrx = amplify_moments(demand.Mux, Mltx_env, B1x, B2)
-    Mry = amplify_moments(demand.Muy, Mlty_env, B1y, B2)
+    Mrx = amplify_moments(Mux_env, Mltx_env, B1x, B2)
+    Mry = amplify_moments(Muy_env, Mlty_env, B1y, B2)
 
     sway_applied = B2 > 1.0 || Plt != 0 || Mltx_env != 0 || Mlty_env != 0
     return (; Mrx, Mry, Pr, B1x, B1y, B2, sway_applied)

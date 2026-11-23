@@ -1,12 +1,18 @@
 """
-    is_feasible(checker::AISCChecker, cache, j, section, material, demand, geometry) -> Bool
+    is_feasible(checker::AISCChecker, cache, j, section, material, demand, geometry;
+                story=nothing) -> Bool
 
 Check if an I-section satisfies AISC 360 requirements for the given demand.
 Uses cached capacities where available.
 
-Includes B1 moment amplification (P-δ effects) per AISC Appendix 8 when
-compression exists. For sway frames (geometry.braced=false), B2 should be
-applied externally to Mlt before creating the demand (not yet integrated).
+Second-order required strengths follow AISC 360-16 Appendix 8 through the
+shared [`design_column_moments`](@ref) / `_aisc_amplified_forces` core:
+`Mr = B1·Mnt + B2·Mlt` (Eq. A-8-1) and `Pr = Pnt + B2·Plt` (Eq. A-8-2). The
+`demand.lt` lateral-translation split supplies `Mlt`/`Plt`; the optional `story`
+(a `StoryStability`) supplies the story P-Δ amplifier `B2` (Eq. A-8-6). When
+`story === nothing` and `demand.lt === nothing` — the gravity-column case — `B2`
+collapses to 1 and only `B1` (member P-δ) is applied, byte-identical to the
+legacy path.
 """
 function is_feasible(
     checker::AISCChecker,
@@ -15,7 +21,9 @@ function is_feasible(
     section::AbstractSection,
     material::StructuralSteel,
     demand::MemberDemand,
-    geometry::SteelMemberGeometry
+    geometry::SteelMemberGeometry;
+    story = nothing,  # Union{Nothing,StoryStability}; untyped (StoryStability
+                      # is defined in shared/, included after aisc/).
 )::Bool
     # --- Composite branch: delegate to composite overload ---
     # Only a real CompositeContext has slab/anchor data for Chapter I.
@@ -49,13 +57,14 @@ function is_feasible(
     L_m = to_meters(geometry.L)
     Lb_m = to_meters(geometry.Lb)
     
-    # AISC 360-16 Appendix 8 B2 (P-Δ) is DOCUMENTED/SCOPE: functions exist
-    # (`compute_B2`) but are not applied here.  `SteelMemberGeometry.braced`
-    # defaults to `true` (no sidesway); B2 must be applied externally when
-    # `braced=false`.
-    if !geometry.braced
-        @warn "Sway frame (braced=false) specified but B2 amplification not implemented. " *
-              "Only B1 (P-δ) effects are applied. Results may be unconservative for sway frames." maxlog=1
+    # AISC 360-16 Appendix 8 B2 (P-Δ) is applied through the shared
+    # `_aisc_amplified_forces` core when a `story` (StoryStability) is supplied.
+    # `SteelMemberGeometry.braced` defaults to `true` (no sidesway). A sway frame
+    # (`braced=false`) that supplies no `story` gets only B1 (P-δ): warn, since
+    # that is unconservative for sidesway members.
+    if !geometry.braced && story === nothing
+        @warn "Sway frame (braced=false) with no StoryStability supplied: B2 (P-Δ) " *
+              "amplification not applied, only B1 (P-δ). Pass `story=` for sway members." maxlog=1
     end
     
     # --- Depth Check ---
@@ -76,41 +85,52 @@ function is_feasible(
     ϕPn_z = _get_ϕPn_cached!(cache, :torsional, j, Lc_y, section, material)
     ϕPnc = min(ϕPn_x, ϕPn_y, ϕPn_z)
     
-    # --- B1 Moment Amplification (P-δ effects, AISC Appendix 8) ---
-    # AISC 360-16 Appendix 8 Eqs. A-8-1 / A-8-3 — corpus: aisc-360-16, pages 305–306.
-    # Amplify sagging and hogging required moments the same way before H1.
+    # --- B1/B2 Moment Amplification (AISC Appendix 8) via shared core ---
+    # AISC 360-16 Appendix 8 Eqs. A-8-1/A-8-2/A-8-3 — corpus: aisc-360-16, pp. 305–306.
+    # `_aisc_amplified_forces` is the single implementation shared with the
+    # `design_column_moments(::MemberDemand, …)` trait, so RC and steel columns
+    # amplify through one path. The lateral-translation split (`demand.lt`) and
+    # `story` supply Mlt/Plt and B2; absent both, B2 = 1 and only B1 is applied
+    # (byte-identical to the legacy gravity-column path).
     Mux_neg = to_newton_meters(demand.Mux_neg)
     Mux_amp = Mux
     Muy_amp = Muy
     Mux_neg_amp = Mux_neg
-    
+    Pr_c = Pu_c  # second-order required compression (Eq. A-8-2); = Pu_c with no sway
+
     if Pu_c > 0.0
         E = to_pascals(material.E)
         Ix = cache.Ix[j]
         Iy = to_meters_fourth(StructuralSizer.Iy(section))
-        
+
         Lc1_x = geometry.Kx * L_m
         Lc1_y = geometry.Ky * L_m
-        
+
         (Lc1_x > 0 && Lc1_y > 0) || return false  # zero unbraced length → skip P-δ
-        
+
+        # Eq. A-8-5: no-translation elastic buckling strength, each axis (SI N).
         Pe1_x = π^2 * E * Ix / Lc1_x^2
         Pe1_y = π^2 * E * Iy / Lc1_y^2
-        
-        Cm_x = compute_Cm(M1x, M2x; transverse_loading=demand.transverse_load)
-        Cm_y = compute_Cm(M1y, M2y; transverse_loading=demand.transverse_load)
-        
-        # AISC A-8-3, α=1.0 for LRFD — corpus: aisc-360-16, page 306
-        B1_x = compute_B1(Pu_c, Pe1_x, Cm_x; α=1.0)
-        B1_y = compute_B1(Pu_c, Pe1_y, Cm_y; α=1.0)
-        
-        if isinf(B1_x) || isinf(B1_y)
-            return false
-        end
-        
-        Mux_amp = B1_x * Mux
-        Muy_amp = B1_y * Muy
-        Mux_neg_amp = B1_x * Mux_neg
+
+        # Lateral-translation envelopes in SI (0 for a pure gravity column).
+        lt = demand.lt
+        Plt = lt === nothing ? 0.0 : to_newtons(lt.Plt)
+        Mltx_env = lt === nothing ? 0.0 :
+            max(abs(to_newton_meters(lt.M1ltx)), abs(to_newton_meters(lt.M2ltx)))
+        Mlty_env = lt === nothing ? 0.0 :
+            max(abs(to_newton_meters(lt.M1lty)), abs(to_newton_meters(lt.M2lty)))
+
+        design = _aisc_amplified_forces(Pu_c, Mux, Muy, M1x, M2x, M1y, M2y,
+                                        demand.transverse_load, Plt, Mltx_env, Mlty_env,
+                                        story, Pe1_x, Pe1_y; α=1.0)
+
+        (isfinite(design.B1x) && isfinite(design.B1y)) || return false
+
+        Mux_amp = design.Mrx                     # Eq. A-8-1: B1x·Mux + B2·Mltx
+        Muy_amp = design.Mry                     # Eq. A-8-1: B1y·Muy + B2·Mlty
+        # Hogging shares the same lateral-translation envelope (reverse curvature).
+        Mux_neg_amp = amplify_moments(Mux_neg, Mltx_env, design.B1x, design.B2)
+        Pr_c = design.Pr                         # Eq. A-8-2: Pnt + B2·Plt
     end
     
     # --- Hogging Chapter F (bottom-flange LTB: Lb=L, Cb=1.0) ---
@@ -131,10 +151,11 @@ function is_feasible(
 
     # --- H1 interaction: compression and tension, each with sagging and hogging ---
     # Hogging Mcx is Chapter F at Lb=L, Cb=1.0; do not credit deck-braced ϕMnx.
-    # Compression Mr uses B1·Mux / B1·Muy (App. 8). Tension Mr is first-order
-    # (§H1.2, page 134); hogging tension uses ϕMn_neg, not sagging ϕMnx.
+    # Compression uses the second-order Pr (Eq. A-8-2) and Mr = B1·Mnt + B2·Mlt
+    # (Eq. A-8-1). Tension Mr/Pr are first-order (§H1.2, page 134); hogging
+    # tension uses ϕMn_neg, not sagging ϕMnx.
     # AISC 360-16 §H1.1 Eqs. H1-1a/H1-1b — corpus: aisc-360-16, page 133.
-    urs = _h1_pm_utilizations(Pu_c, Pu_t, Mux, Mux_neg, Muy,
+    urs = _h1_pm_utilizations(Pr_c, Pu_t, Mux, Mux_neg, Muy,
                               ϕPnc, cache.ϕPn_tension[j], ϕMnx, ϕMn_neg,
                               cache.ϕMn_weak[j]; Mux_amp=Mux_amp, Muy_amp=Muy_amp,
                               Mux_neg_amp=Mux_neg_amp)

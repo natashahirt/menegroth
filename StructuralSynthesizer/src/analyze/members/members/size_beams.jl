@@ -156,9 +156,11 @@ function size_beams!(
         group_filter = gid -> !haskey(owned, gid) && inner(gid)
     end
     if !isempty(rib_ids)
-        size_rib_lines!(struc, rib_ids; fallback = effective_opts, resolution,
-                        gravity_factor, I_factor, stirrup_shear, rib_head_stirrups)
-        _reanalyze_after_section_change!(struc)
+        _member_timed(:sb_rib_lines) do
+            size_rib_lines!(struc, rib_ids; fallback = effective_opts, resolution,
+                            gravity_factor, I_factor, stirrup_shear, rib_head_stirrups)
+        end
+        _member_timed(() -> _reanalyze_after_section_change!(struc), :sb_reanalyze)
     end
 
     if group_filter === nothing
@@ -181,7 +183,8 @@ function size_beams!(
                 else
                     :discrete
                 end
-                _size_beams_one!(struc, pass_opts, pass_strategy;
+                _member_timed(:sb_one) do
+                    _size_beams_one!(struc, pass_opts, pass_strategy;
                             resolution, reanalyze = false, gravity_factor,
                             member_group_overrides =
                                 _overrides_in(member_group_overrides, pass.accept),
@@ -197,22 +200,24 @@ function size_beams!(
                                 own ? nothing : composite_deck_orientation,
                             shell_demands, shell_spans, section_floor,
                             group_filter = pass.accept, stirrup_shear)
+                end
                 # The next pass reads forces from the sections just installed.
                 # The cached unshored split was sampled before those sections.
                 if k < length(passes) || reanalyze
                     mesh = _composite_mesh(struc)
                     mesh === nothing || _clear_unshored_stage!(mesh)
-                    _reanalyze_after_section_change!(struc)
+                    _member_timed(() -> _reanalyze_after_section_change!(struc), :sb_reanalyze)
                 end
             end
-            _verify_tbeam_flanges(struc, nothing)
+            _member_timed(() -> _verify_tbeam_flanges(struc, nothing), :sb_flange)
             return struc
         end
         # One pass left: it must still skip the story-owned ribs.
         isempty(owned) || (group_filter = only(passes).accept)
     end
 
-    result = _size_beams_one!(struc, effective_opts, strategy;
+    result = _member_timed(:sb_one) do
+        _size_beams_one!(struc, effective_opts, strategy;
                               resolution, reanalyze, gravity_factor,
                               member_group_overrides, I_factor, tc,
                               composite_concrete, composite_t_slab, composite_anchor,
@@ -220,13 +225,14 @@ function size_beams!(
                               composite_deck_hr, composite_deck_wr, composite_deck_orientation,
                               shell_demands, shell_spans, section_floor, group_filter,
                               stirrup_shear)
-    _verify_tbeam_flanges(struc, group_filter)
+    end
+    _member_timed(() -> _verify_tbeam_flanges(struc, group_filter), :sb_flange)
     # A single pass solves inside the sizer, before the solid-head sections
     # exist. The framing path solves through `_reanalyze_after_section_change!`,
     # which hangs them on the frame first.
     written = apply_solid_head_frame_sections!(struc)
     if reanalyze && !isempty(written) && !isempty(struc.asap_model.frame_elements)
-        _reanalyze_after_section_change!(struc)
+        _member_timed(() -> _reanalyze_after_section_change!(struc), :sb_reanalyze)
     end
     return result
 end
@@ -1697,8 +1703,10 @@ function _size_beams_impl!(
     # fallback when a group recorded no station row.
     beam_shear = Vector{Vector{BeamShearCase}}()
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
-        _beam_group_demands(struc, group_filter; resolution, shell_demands,
-                            beam_shear_cases=beam_shear)
+        _member_timed(:sbc_demands) do
+            _beam_group_demands(struc, group_filter; resolution, shell_demands,
+                                beam_shear_cases=beam_shear)
+        end
 
     isempty(group_ids) && return struc
 
@@ -1729,7 +1737,7 @@ function _size_beams_impl!(
         _require_known_rib_form(opts)
         _refuse_frame_floors(struc, group_ids, "T-beam sizing")
 
-        specs = _compute_flange_params(struc, group_ids)
+        specs = _member_timed(() -> _compute_flange_params(struc, group_ids), :sbc_flange)
 
         valid = findall(!isnothing, specs)
         if isempty(valid)
@@ -1774,18 +1782,20 @@ function _size_beams_impl!(
                                                 rib_web_max = rib_max) for i in idxs)
                 end
                 spans = grouped_spans === nothing ? nothing : grouped_spans[idxs]
-                result = _size_tbeams_escalating(
-                    Mu[idxs], Vu[idxs], geoms[idxs], opts;
-                    flange_width     = bf_of,
-                    flange_thickness = hf,
-                    joist_spacing    = js,
-                    Mu_neg           = Mu_neg[idxs],
-                    Nu               = Nu[idxs],
-                    sustained_live_fraction = opts.sustained_live_fraction,
-                    shell_spans      = spans,
-                    stirrup_shear    = stirrup_shear,
-                    shear_cases      = shear_kw === nothing ? nothing : shear_kw[idxs],
-                )
+                result = _member_timed(:sbc_mip) do
+                    _size_tbeams_escalating(
+                        Mu[idxs], Vu[idxs], geoms[idxs], opts;
+                        flange_width     = bf_of,
+                        flange_thickness = hf,
+                        joist_spacing    = js,
+                        Mu_neg           = Mu_neg[idxs],
+                        Nu               = Nu[idxs],
+                        sustained_live_fraction = opts.sustained_live_fraction,
+                        shell_spans      = spans,
+                        stirrup_shear    = stirrup_shear,
+                        shear_cases      = shear_kw === nothing ? nothing : shear_kw[idxs],
+                    )
+                end
                 _apply_beam_results!(struc, result, group_ids[idxs], member_array,
                                      edge_ids_in_group, opts.material; I_factor=I_factor,
                                      rebar=opts.rebar_material)
@@ -1802,12 +1812,14 @@ function _size_beams_impl!(
                     shell_span = grouped_spans === nothing ? nothing : grouped_spans[i],
                     stirrup_shear = stirrup_shear)
             end
-            _share_collinear_rib_bars!(struc, group_ids, specs, opts;
-                                       uniform = opts.uniform_geometry,
-                                       I_factor = I_factor,
-                                       edge_ids = edge_ids_in_group,
-                                       rebar = opts.rebar_material,
-                                       recheck = recheck)
+            _member_timed(:sbc_sharebars) do
+                _share_collinear_rib_bars!(struc, group_ids, specs, opts;
+                                           uniform = opts.uniform_geometry,
+                                           I_factor = I_factor,
+                                           edge_ids = edge_ids_in_group,
+                                           rebar = opts.rebar_material,
+                                           recheck = recheck)
+            end
             missing = findall(isnothing, specs)
             if !isempty(missing)
                 spans = grouped_spans === nothing ? nothing : grouped_spans[missing]

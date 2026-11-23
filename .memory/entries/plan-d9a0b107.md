@@ -16,10 +16,11 @@ files: external/Asap/src/Elements/K.jl@6140dcd, external/Asap/src/Model/postproc
   StructuralSynthesizer/src/building_types/members.jl@507697a, StructuralSizer/src/members/optimize/api/axial.jl@47f817f
 session_id: sess-f794529d
 created_at: '2026-11-23T18:16:28.810260+00:00'
-updated_at: '2026-11-23T18:16:28.810260+00:00'
+updated_at: '2026-11-23T18:16:52.958614+00:00'
 has_child_rationale: Read-only design-scoping pass for step 4 (deci-4a4f60e5); makes
   the explicit-truss layer execute-ready once steps 1-2 land. Gated on the in-flight
   lateral-demand pipeline.
+related_to: todo-fcdb03a2,todo-d937bb05
 ---
 Read-only scoping of step 4 (explicit-truss/braced-frame assembly layer). HEADLINE: almost everything exists; step 4 is mostly reuse. GATED on the other agent's steps 1-2 (lateral-demand pipeline) — do not start implementation until that lands, and do not disturb the lateral vocabulary.
 

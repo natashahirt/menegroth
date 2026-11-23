@@ -37,6 +37,12 @@ section satisfying ACI 318-11 requirements.
 - `catalog_size`: `:standard`, `:small`, `:large` (default `:standard`)
 - `mip_gap`: MIP optimality gap (default 1e-4)
 - `output_flag`: Solver verbosity (default 0)
+- `capacity_store`: Optional `AbstractDict` for reusing precomputed section
+  capacities across calls (default `nothing`). When given, the φMn/φVn/εt
+  precompute for the catalog is cached by content fingerprint and reused by any
+  later call whose rib geometry, material, and rebar grade are bit-identical —
+  the span- and load-dependent checks still run per demand, so results are
+  bit-identical to recomputing. See [`_tbeam_capacity_cache`](@ref).
 
 # Returns
 Named tuple: `(; section_indices, sections, status, objective_value)`
@@ -74,6 +80,7 @@ function size_tbeams(
     shell_spans::Union{Nothing, AbstractVector} = nothing,
     stirrup_shear::Bool = true,
     shear_cases = nothing,
+    capacity_store::Union{Nothing, AbstractDict} = nothing,
 )
     n = length(Mu)
     n == length(Vu)          || throw(ArgumentError("Mu and Vu must have same length"))
@@ -123,16 +130,85 @@ function size_tbeams(
         stirrup_shear, shear_cases)
 
     # Longitudinal and transverse rebar enter the discrete objective.
+    material = _sizing_material(opts.material, opts.rebar_material, get_transverse_rebar(opts))
+
+    # Reuse the catalog's capacity precompute across calls with identical rib
+    # geometry (the dominant cost of discrete T-beam sizing). `nothing` store ⇒
+    # `optimize_discrete` precomputes internally, exactly as before.
+    cache = _tbeam_capacity_cache(capacity_store, cat, material, checker,
+                                  opts.objective, opts.n_max_sections)
+
     return optimize_discrete(
-        checker, demands, conc_geoms, cat,
-        _sizing_material(opts.material, opts.rebar_material, get_transverse_rebar(opts));
+        checker, demands, conc_geoms, cat, material;
         objective      = opts.objective,
         n_max_sections = opts.n_max_sections,
         optimizer      = opts.solver,
         mip_gap        = mip_gap,
         output_flag    = output_flag,
         time_limit_sec = opts.time_limit_sec,
+        cache          = cache,
     )
+end
+
+"""
+    _tbeam_capacity_key(cat, material, checker, objective, n_max_sections) -> UInt
+
+Content fingerprint for a T-beam capacity cache. Two calls share a cache only
+when their catalogs are *bit-identical* and the capacity-relevant checker and
+material inputs match, so a reused cache yields bit-identical sizing. Hashing
+raw (unrounded) field values is deliberate: a geometry that recomputes the same
+`Float64` bits reuses the cache, and any difference forces a rebuild.
+
+Only inputs that [`precompute_capacities!`](@ref) reads enter the key. The
+checker's deflection / service-load fields (`w_dead_kplf`, `w_live_kplf`,
+`shell_spans`, `defl_*`) are applied per demand in [`is_feasible`](@ref), not
+baked into the cache, so they are deliberately excluded — that is exactly what
+lets one cache serve every member iteration whose spans and loads differ.
+"""
+function _tbeam_capacity_key(cat, material, checker::ACIBeamChecker, objective,
+                             n_max_sections)
+    h = hash(:tbeam_capacity_cache_v1)
+    h = hash(objective, h)
+    h = hash(n_max_sections, h)
+    # Capacity-relevant checker fields only (see docstring).
+    h = hash((checker.fy_ksi, checker.fyt_ksi, checker.Es_ksi, Float64(checker.λ)), h)
+    h = hash(fc_ksi(material), h)
+    if material isa ReinforcedConcreteMaterial
+        h = hash((fy_ksi(material), Es_ksi(material)), h)
+    end
+    for s in cat
+        h = hash((ustrip(u"inch", s.bw), ustrip(u"inch", s.h), ustrip(u"inch", s.d),
+                  ustrip(u"inch", s.bf), ustrip(u"inch", s.hf), ustrip(u"inch", s.cover),
+                  ustrip(u"inch^2", s.As), s.n_bars, s.bar_size,
+                  ustrip(u"inch^2", s.As_prime), s.n_bars_prime, s.bar_size_prime,
+                  ustrip(u"inch", s.d_prime), s.stirrup_size), h)
+    end
+    return h
+end
+
+"""
+    _tbeam_capacity_cache(store, cat, material, checker, objective, n_max_sections)
+
+Build or reuse the capacity cache for `cat` under this checker/material, keyed by
+[`_tbeam_capacity_key`](@ref) in the caller-supplied `store`. Returns `nothing`
+when `store === nothing`, so `optimize_discrete` precomputes as before.
+
+The precompute (φMn / φMn_neg / φVn / εt for the whole catalog) is the dominant
+cost of discrete T-beam sizing; reusing it across member iterations with
+identical rib geometry is the point of the store. `optimize_discrete` revalidates
+the returned cache against the catalog and material via `_require_cache_match`
+([`cache_matches`](@ref)), so a mis-keyed cache is caught, not silently used.
+"""
+function _tbeam_capacity_cache(store, cat, material, checker::ACIBeamChecker,
+                               objective, n_max_sections)
+    store === nothing && return nothing
+    key = _tbeam_capacity_key(cat, material, checker, objective, n_max_sections)
+    cached = get(store, key, nothing)
+    cached === nothing || return cached
+    cache = create_cache(checker, length(cat))
+    precompute_capacities!(checker, cache, cat, material, objective)
+    store[key] = cache
+    return cache
 end
 
 """

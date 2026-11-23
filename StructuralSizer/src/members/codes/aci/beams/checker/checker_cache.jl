@@ -34,3 +34,25 @@ end
 """Create an ACI beam capacity cache for `n_sections` catalog entries."""
 create_cache(::ACIBeamChecker, n_sections::Int) = ACIBeamCapacityCache(n_sections)
 
+"""
+    cache_matches(checker::ACIBeamChecker, cache::ACIBeamCapacityCache, catalog, material) -> Bool
+
+True when `cache` holds one entry per catalog section and was precomputed for
+this material's `f'c` and this checker's rebar grade (`fy`, `Es`). Those are the
+only material / checker inputs [`precompute_capacities!`](@ref) reads, so a cache
+that matches them is valid for any demand or span — the span- and load-dependent
+checks run per demand in `is_feasible`, never from the cache.
+
+Backstops a caller-supplied cache (e.g. `size_tbeams`' `capacity_store`) through
+`_require_cache_match`, so a mis-keyed cache throws instead of sizing against
+capacities that belong to a different catalog or grade.
+"""
+function cache_matches(checker::ACIBeamChecker, cache::ACIBeamCapacityCache, catalog, material)
+    length(cache.depths) == length(catalog) || return false
+    fy, Es = material isa ReinforcedConcreteMaterial ?
+        (fy_ksi(material), Es_ksi(material)) : (checker.fy_ksi, checker.Es_ksi)
+    same(a, b) = isapprox(a, b; rtol = 1e-9)
+    return same(cache.fc_ksi, fc_ksi(material)) && same(cache.fy_ksi, fy) &&
+           same(cache.Es_ksi, Es)
+end
+

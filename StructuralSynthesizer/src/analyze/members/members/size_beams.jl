@@ -1649,6 +1649,35 @@ function _apply_beam_results!(
 end
 
 # --- Concrete beams (discrete MIP) ---
+
+# Per-structure T-beam capacity-cache stores. Discrete T-beam sizing spends most
+# of its time precomputing φMn/φVn/εt over the candidate catalog; across the ~20
+# member iterations the rib geometry is frozen, so the same handful of catalogs
+# recur. Keyed by content fingerprint (see `StructuralSizer._tbeam_capacity_key`),
+# the precompute is reused across iterations while every span- and load-dependent
+# check still runs per demand — results are bit-identical to recomputing. The
+# outer `WeakKeyDict` drops a structure's store when the structure is collected,
+# so long-lived API processes do not accumulate caches. Set
+# `SS_TBEAM_CAP_NOCACHE=1` to disable (A/B exactness checks).
+const _TBEAM_CAP_STORE = WeakKeyDict{Any, Dict{UInt, Any}}()
+const _TBEAM_CAP_STORE_LOCK = ReentrantLock()
+
+"""
+    _tbeam_capacity_store(struc) -> Union{Dict{UInt,Any}, Nothing}
+
+The T-beam capacity-cache store for `struc`, created on first use. Returns
+`nothing` when `SS_TBEAM_CAP_NOCACHE=1`, which makes `size_tbeams` precompute
+capacities every call (the pre-cache behavior, for A/B exactness checks). The
+returned dict is mutated serially by the (serial) batch loop, so only the
+per-structure lookup needs the lock.
+"""
+function _tbeam_capacity_store(struc)
+    get(ENV, "SS_TBEAM_CAP_NOCACHE", "") == "1" && return nothing
+    lock(_TBEAM_CAP_STORE_LOCK) do
+        get!(() -> Dict{UInt, Any}(), _TBEAM_CAP_STORE, struc)
+    end
+end
+
 function _size_beams_impl!(
     struc::BuildingStructure,
     opts::StructuralSizer.ConcreteBeamOptions,
@@ -1766,6 +1795,9 @@ function _size_beams_impl!(
             end
             # Group id → (demand index, joist spacing the checker was given).
             checked_as = Dict{UInt64, Tuple{Int, Any}}()
+            # Reuse catalog capacity precomputes across iterations (see
+            # `_tbeam_capacity_store`). Mutated serially by this loop.
+            cap_store = _tbeam_capacity_store(struc)
             for idxs in batches
                 ribs = all(specs[i].joist_spacing !== nothing for i in idxs)
                 hf = ribs && floor_hf !== nothing ? floor_hf :
@@ -1794,6 +1826,7 @@ function _size_beams_impl!(
                         shell_spans      = spans,
                         stirrup_shear    = stirrup_shear,
                         shear_cases      = shear_kw === nothing ? nothing : shear_kw[idxs],
+                        capacity_store   = cap_store,
                     )
                 end
                 _apply_beam_results!(struc, result, group_ids[idxs], member_array,

@@ -68,6 +68,113 @@ ASCE 7-22 Table 12.2-1 row F (corpus: asce-7-22, PDF page 175) and §12.2.5.8
 """
 struct InteractiveShearWallFrameSystem <: LateralSystem end
 
+# Dual system vocabulary. `moment_frame` is the frame material + detailing;
+# `wall` is the shear-wall/core type. The pair fixes the Table 12.2-1 row.
+const _DUAL_MOMENT_FRAMES = (:steel_smf, :composite_smf, :rc_smf,
+                             :steel_imf, :composite_imf, :rc_imf)
+const _DUAL_WALLS = (:special_rc, :composite_special, :composite_plate, :ordinary_rc)
+const _DUAL_ROWS = (:D3, :D8, :D9, :E8)
+
+"""
+    _classify_dual_row(moment_frame, wall) -> Symbol
+
+The ASCE 7-22 Table 12.2-1 row for a dual system, from the moment-frame
+detailing and the wall type:
+
+- special moment frame + composite plate shear walls → `:D8`
+- special moment frame + composite special shear walls → `:D9`
+- *concrete* special moment frame + special reinforced concrete shear walls →
+  `:D3` (all-concrete dual, §14.2)
+- *steel or composite* special moment frame + special RC shear walls → `:D9`:
+  a steel frame sharing load with RC walls is a composite system, so it is the
+  composite special shear-wall row (§14.3 / AISC 341 Part II), not the concrete
+  row D.3
+- intermediate moment frame + ordinary RC shear walls → `:E8`
+
+An unrecognized pairing throws; use the `row` override for a combination not
+classified here.
+
+# Citation
+ASCE 7-22 Table 12.2-1 Sections D and E (corpus: asce-7-22, PDF pages 174–175);
+§14.3 and AISC 341 Part II govern steel-plus-RC (composite) systems.
+"""
+function _classify_dual_row(moment_frame::Symbol, wall::Symbol)
+    is_smf = moment_frame in (:steel_smf, :composite_smf, :rc_smf)
+    is_imf = moment_frame in (:steel_imf, :composite_imf, :rc_imf)
+    if is_smf
+        wall === :composite_plate && return :D8
+        wall === :composite_special && return :D9
+        if wall === :special_rc
+            # A concrete SMF + special RC walls is the all-concrete row D.3; a
+            # steel/composite SMF + RC walls is a composite system → D.9.
+            return moment_frame === :rc_smf ? :D3 : :D9
+        end
+    elseif is_imf
+        wall === :ordinary_rc && return :E8
+    end
+    throw(ArgumentError(
+        "DualSystem: no Table 12.2-1 row is classified for moment_frame " *
+        ":$moment_frame with wall :$wall. Supported: a special moment frame " *
+        "(:steel_smf/:composite_smf/:rc_smf) with :special_rc, :composite_special, " *
+        "or :composite_plate walls, or an intermediate moment frame " *
+        "(:*_imf) with :ordinary_rc walls. Pass an explicit `row` to override. " *
+        "ASCE 7-22 Table 12.2-1 Sections D–E (corpus: asce-7-22, PDF pages 174-175)."))
+end
+
+"""
+    DualSystem(; moment_frame, wall, row=nothing) -> DualSystem
+
+A dual seismic system (ASCE 7-22 §12.2.5.1): a moment frame and shear walls (or
+a core) share the lateral load in one direction, and the moment frame alone is
+detailed and proportioned to resist **at least 25%** of the design seismic
+force. Covers Table 12.2-1 Section D (special moment frames) and the Section E
+intermediate-moment-frame dual row E.8.
+
+`moment_frame` is the frame material + detailing (`:steel_smf`, `:composite_smf`,
+`:rc_smf`, `:steel_imf`, `:composite_imf`, `:rc_imf`); `wall` is the shear-wall /
+core type (`:special_rc`, `:composite_special`, `:composite_plate`,
+`:ordinary_rc`). The pair fixes the Table 12.2-1 row (see
+[`_classify_dual_row`](@ref)); e.g. a steel SMF with an RC special-wall core is
+the composite special shear-wall row `:D9`. `R`, `Ω₀`, and `Cd` come from that
+row, resolved against the Seismic Design Category by the sizer's
+`dual_seismic_system` lookup (which refuses a row that is NP in the SDC — e.g.
+the intermediate-frame row `:E8` outside SDC B/C).
+
+`row` overrides the classification with an explicit, validated Table 12.2-1 dual
+row (`:D3`, `:D8`, `:D9`, `:E8`).
+
+The ≥25% participation requirement (§12.2.5.1) is enforced by this system's
+`system_checks` behavior against the analysis, not at construction.
+
+# Citation
+ASCE 7-22 §12.2.5.1 (corpus: asce-7-22, PDF page 177) and Table 12.2-1 Sections
+D and E (corpus: asce-7-22, PDF pages 174–175).
+"""
+struct DualSystem <: LateralSystem
+    moment_frame::Symbol
+    wall::Symbol
+    row::Symbol
+    function DualSystem(; moment_frame::Symbol, wall::Symbol,
+                        row::Union{Symbol, Nothing}=nothing)
+        moment_frame in _DUAL_MOMENT_FRAMES || throw(ArgumentError(
+            "DualSystem: moment_frame :$moment_frame is not recognized. Use one " *
+            "of $(_DUAL_MOMENT_FRAMES)."))
+        wall in _DUAL_WALLS || throw(ArgumentError(
+            "DualSystem: wall :$wall is not recognized. Use one of $(_DUAL_WALLS)."))
+        classified = _classify_dual_row(moment_frame, wall)
+        if row === nothing
+            resolved = classified
+        else
+            row in _DUAL_ROWS || throw(ArgumentError(
+                "DualSystem: override row :$row is not a Table 12.2-1 dual row " *
+                "$(_DUAL_ROWS). ASCE 7-22 Table 12.2-1 Sections D–E " *
+                "(corpus: asce-7-22, PDF pages 174-175)."))
+            resolved = row
+        end
+        return new(moment_frame, wall, resolved)
+    end
+end
+
 """Core, outrigger or belt truss, and perimeter columns. Not implemented."""
 struct OutriggerSystem <: LateralSystem end
 
@@ -92,6 +199,8 @@ end
 function _systems_agree(a::LateralSystem, b::LateralSystem)
     typeof(a) === typeof(b) || return false
     a isa WallsSeismicSystem && return a.row === b.row
+    a isa DualSystem && return a.row === b.row &&
+        a.moment_frame === b.moment_frame && a.wall === b.wall
     return true
 end
 

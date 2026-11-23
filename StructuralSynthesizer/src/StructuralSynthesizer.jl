@@ -296,7 +296,7 @@ export joint_vertical_shear, corner_vertical_shear, joined_assembly_cuts
 export select_corner_ratio
 export require_seismic_wall_demand_provisions
 export LateralDesign, LateralSystem, DemandAssignment
-export WallsSeismicSystem, InteractiveShearWallFrameSystem
+export WallsSeismicSystem, InteractiveShearWallFrameSystem, DualSystem
 export OutriggerSystem, BuildingUnit, IsolatedWallShare
 export prepare_lateral_model!, seismic_members, system_checks, assign_lateral_demands
 export SeismicStoryDriftCheck, WindStoryDriftReport, FactoredLateralCase

@@ -95,3 +95,43 @@ end
     @test_throws ArgumentError IsolatedWallShare(1.5)
     @test_throws ArgumentError assign_lateral_demands(share, nothing, nothing, Float64[])
 end
+
+@testset "DualSystem classification + validation" begin
+    # ASCE 7-22 Table 12.2-1 Sections D/E (corpus: asce-7-22, PDF pages 174-175).
+    # Steel SMF + RC special-wall core → composite special shear walls, row D.9.
+    steel_core = DualSystem(; moment_frame=:steel_smf, wall=:special_rc)
+    @test steel_core.row === :D9
+    @test DualSystem(; moment_frame=:composite_smf, wall=:special_rc).row === :D9
+    @test DualSystem(; moment_frame=:steel_smf, wall=:composite_special).row === :D9
+    # Composite plate shear walls → D.8 for any special moment frame.
+    @test DualSystem(; moment_frame=:steel_smf, wall=:composite_plate).row === :D8
+    @test DualSystem(; moment_frame=:rc_smf, wall=:composite_plate).row === :D8
+    # Concrete SMF + special RC walls → all-concrete row D.3.
+    @test DualSystem(; moment_frame=:rc_smf, wall=:special_rc).row === :D3
+    # Intermediate moment frame + ordinary RC walls → Section E row E.8.
+    @test DualSystem(; moment_frame=:rc_imf, wall=:ordinary_rc).row === :E8
+
+    # Validated override: an explicit recognized dual row is honored.
+    @test DualSystem(; moment_frame=:steel_smf, wall=:special_rc, row=:D3).row === :D3
+    @test_throws ArgumentError DualSystem(; moment_frame=:steel_smf, wall=:special_rc,
+                                          row=:A1)   # not a dual row
+
+    # Unrecognized vocabulary and unclassified pairings throw.
+    @test_throws ArgumentError DualSystem(; moment_frame=:steel_x, wall=:special_rc)
+    @test_throws ArgumentError DualSystem(; moment_frame=:steel_smf, wall=:timber)
+    @test_throws ArgumentError DualSystem(; moment_frame=:rc_imf, wall=:special_rc)  # IMF needs ordinary RC
+
+    # The carried row resolves to the correct R/Ω₀/Cd via the sizer lookup, and
+    # the SDC permission is enforced there.
+    d9 = dual_seismic_system(steel_core.row, :D)   # re-exported from StructuralSizer
+    @test d9.R == 7.0 && d9.Ω0 == 2.5 && d9.Cd == 6.0
+
+    # LateralDesign integration: same dual system on both axes reads back; two
+    # different dual rows on the two axes do not silently agree.
+    same = LateralDesign(; system=steel_core, assignment=BuildingUnit())
+    @test same.system isa DualSystem && same.system.row === :D9
+    diff = LateralDesign(; system_x=steel_core,
+                         system_y=DualSystem(; moment_frame=:rc_smf, wall=:special_rc),
+                         assignment=BuildingUnit())
+    @test_throws ArgumentError diff.system
+end

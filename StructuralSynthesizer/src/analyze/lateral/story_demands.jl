@@ -369,6 +369,73 @@ function _axis_drift_multiplier(analysis::ElfStoryAnalysis, direction::Symbol, i
     return m
 end
 
+"""
+    story_stability_records(analysis; pmf_fraction=0.0)
+        -> Dict{Tuple{Int, Symbol}, StoryStability}
+
+Per-story `StructuralSizer.StoryStability` from a solved ELF analysis, keyed by
+`(story, direction)` with `direction ∈ (:x, :y)`. These records drive the
+approximate second-order column design (ACI 318-11 §10.10.7 `δs` / AISC 360-16
+Appendix 8 `B2`) through [`design_column_moments`](@ref).
+
+Each record carries the governing first-order story data along its direction:
+
+- `ΣPu = Px` — vertical load at the level and above (ASCE 7-22 Eq. 12.8-18).
+- `V`, `Δ` — the strength story shear `Vx` and the **elastic** story drift
+  `Δxe` of the `:drift` case that maximizes the §12.8.7 stability coefficient
+  `θ = Px·Δxe/(hsx·Vx)` at that story, so the amplifier is the governing one.
+- `L = hsx` — the story height below the level.
+
+By construction `stability_index(record) == stability_coefficient(Px, hsx, Vx,
+Δxe)`, i.e. the ACI sway index `Q` reproduces the ELF seismic `θ`; this
+equivalence is the regression hook in the tests. First-order (un-amplified)
+`Vx` and `Δxe` are used so the amplifier is not applied on top of the §12.8.7
+`1/(1−θ)` drift factor already carried in `case.multiplier`.
+
+`pmf_fraction ∈ [0, 1]` is the fraction of `Px` carried by moment-frame columns
+in the story, for the AISC `RM` factor (Eq. A-8-8); it is `0` for a bearing /
+shear-wall story (`RM = 1`) and is supplied by the dual-system path.
+
+# Units
+`Px`, `Vx` are kN and `Δxe`, `hsx` are m, a consistent system in which both `Q`
+and `B2` are dimensionless.
+
+# Citation
+ASCE 7-22 §12.8.7, Eq. 12.8-18 (corpus: asce-7-22, PDF page 188), through
+`StructuralSizer.stability_coefficient`. The `Px`, `Vx`, `Δxe`, `hsx` mapping
+matches the ELF `θ` computed at `elf_story_cases.jl`.
+"""
+function story_stability_records(analysis::ElfStoryAnalysis; pmf_fraction::Real=0.0)
+    0.0 <= pmf_fraction <= 1.0 || throw(ArgumentError(
+        "pmf_fraction must be in [0, 1]; got $pmf_fraction."))
+    # Governing θ per (story, direction) and the (Vx, Δxe) that produced it.
+    best = Dict{Tuple{Int, Symbol}, Tuple{Float64, Float64, Float64}}()
+    for case in analysis.cases
+        case.purpose === :drift || continue
+        for (i, lv) in enumerate(analysis.levels)
+            Vx = abs(case.Vx_kN[i])
+            Vx > 0 || continue
+            Δxe = abs(case.elastic_drift_m[i])
+            θ = stability_coefficient(lv.px_kN, lv.story_height_m, Vx, Δxe)
+            key = (lv.story, case.direction)
+            prev = get(best, key, nothing)
+            (prev === nothing || θ > prev[1]) && (best[key] = (θ, Vx, Δxe))
+        end
+    end
+    records = Dict{Tuple{Int, Symbol}, StoryStability}()
+    for (i, lv) in enumerate(analysis.levels)
+        for direction in (:x, :y)
+            entry = get(best, (lv.story, direction), nothing)
+            entry === nothing && continue
+            _, Vx, Δxe = entry
+            records[(lv.story, direction)] = StoryStability(;
+                ΣPu = lv.px_kN, V = Vx, Δ = Δxe, L = lv.story_height_m,
+                Pmf = pmf_fraction * lv.px_kN)
+        end
+    end
+    return records
+end
+
 function _orthogonal_story_drift(analysis::ElfStoryAnalysis; risk_category::Symbol,
                                  system::Symbol)
     checks = SeismicStoryDriftCheck[]

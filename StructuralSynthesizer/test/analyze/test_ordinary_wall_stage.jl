@@ -366,6 +366,56 @@ function _stage_put_weak_axis_in_y!(struc)
     return n
 end
 
+@testset "dual system stage backbone" begin
+    # The _stage_office fixture is a steel moment frame + concrete-wall core — a
+    # genuine dual system. A steel SMF + special RC walls is Table 12.2-1 row D.9
+    # (permitted in SDC D). The backbone is material-agnostic: it reads R/Cd/Ω0
+    # from the row and runs the shared ELF/wind/drift plumbing on the solved
+    # frame+core model. `material` in the inputs is the concrete core.
+    dual = DesignParameters(
+        lateral=LateralDesign(;
+            system=DualSystem(; moment_frame=:steel_smf, wall=:special_rc),
+            assignment=BuildingUnit()),
+        wall_inputs=_stage_inputs(; sdc=:D, material=RC_4000_60),
+        skip_visualization=true,
+        jump_wall_thickness=false,
+    )
+
+    # Refusals land before any solve: a non-dual system, and a no-walls building.
+    walls_params = DesignParameters(
+        lateral=LateralDesign(; system=WallsSeismicSystem(:A3), assignment=BuildingUnit()),
+        wall_inputs=_stage_inputs(; sdc=:D), skip_visualization=true, jump_wall_thickness=false)
+    @test_throws ArgumentError design_dual_system!(_stage_office(), walls_params)
+    no_walls = BuildingStructure(gen_medium_office(10.0u"m", 6.0u"m", 4.0u"m", 1, 1, 1))
+    @test design_dual_system!(no_walls, dual) === nothing
+
+    # park_wall_overlaps=false keeps the frame columns and column-to-column
+    # girders (park=true collapses them into the walls), so this fixture is a
+    # genuine moment frame + core.
+    struc = _stage_office(; park_wall_overlaps=false)
+    @test count(b -> b.role === :girder, struc.beams) > 0
+    # Designate the primary girders as the moment frame (override path). Joists
+    # and secondary beams stay gravity: only a column-to-column girder is a
+    # steel moment-frame member (the only declared steel moment-frame release).
+    for b in struc.beams
+        b.role === :girder && (b.lateral_role = :moment_frame)
+    end
+    @test any(b -> b.lateral_role === :moment_frame, struc.beams)
+    # The Asap model must be processed first.
+    @test_throws ArgumentError design_dual_system!(struc, dual)
+
+    to_asap!(struc; params=dual, diaphragms=:rigid)
+    result = design_dual_system!(struc, dual)
+    @test result isa DualSystemResult
+    @test result.row_x === :D9 && result.row_y === :D9
+    @test result.moment_frame.source === :override && !isempty(result.moment_frame.beams)
+    @test !isempty(result.drift)
+    @test length(result.pdelta_multipliers) == length(result.drift)
+    @test isfinite(result.max_story_stability) && result.max_story_stability ≥ 0.0
+    @test haskey(struc.stage_diagnostics, :dual)
+    @test length(result.pending) == 3
+end
+
 @testset "Ordinary wall stage" begin
     bare = BuildingStructure(gen_medium_office(10.0u"m", 6.0u"m", 4.0u"m", 1, 1, 1))
     gravity = DesignParameters()
@@ -1411,3 +1461,4 @@ end
         end
     end
 end
+

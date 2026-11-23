@@ -287,6 +287,7 @@ export assembly_wall_action, combine_wall_action, wall_strength_actions
 export wind_pier_actions, seismic_strength_pier_actions
 export WallCheckRecord, check_ordinary_wall
 export OrdinaryWallInputs, OrdinaryWallResult, design_ordinary_walls!
+export DualSystemResult, design_dual_system!
 export WallThicknessTrial, propose_wall_thickness, scale_wall_action
 export shared_wall_thickness, wall_thickness_groups, WALL_THICKNESS_GROUPINGS,
        propose_wall_thicknesses, wall_thickness_candidates, wall_thickness_passes

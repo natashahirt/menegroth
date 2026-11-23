@@ -152,3 +152,246 @@ function drift_optimality_resize(c::AbstractVector{<:Real}, s::AbstractVector{<:
     end
     return DriftOptimalityResult(s_new, λ, frozen, predicted, true)
 end
+
+# ==============================================================================
+# Multi-constraint resizer (several simultaneous drift limits)
+# ==============================================================================
+#
+# A tall building is governed by many drift limits at once: an allowable
+# inter-story drift at every story (ASCE 7 §12.12 under seismic) and a total-
+# height wind serviceability limit (≈ H/400). Each limit j is a separable
+# constraint on the same shared sizing variables s_e:
+#
+#     δ_j(s') = Σ_e γ_{e,j} / s'_e ≤ δ_allow_j,     γ_{e,j} = c_{e,j} · s_e,
+#
+# where c_{e,j} is member e's participation in drift j (one virtual load case per
+# constraint; inter-story participations are differences of nodal ones, which is
+# exact by linearity of the unit-load solve).
+#
+# Minimizing W = Σ w_e s'_e subject to all the limits gives the multi-constraint
+# optimality criterion with one multiplier λ_j ≥ 0 per constraint (KKT):
+#
+#     w_e = Σ_j λ_j γ_{e,j} / s'^2_e   ⇒   s'_e = sqrt( (Σ_j λ_j γ_{e,j}) / w_e ),
+#
+# with complementary slackness λ_j (δ_j − δ_allow_j) = 0. The multipliers are the
+# maximizer of the (concave) dual φ(λ); its gradient is the constraint residual
+# g_j(λ) = δ_j(λ) − δ_allow_j and its Hessian is
+#
+#     H_{jk} = −Σ_e γ_{e,j} γ_{e,k} / (2 w_e s_e(λ)^3)   (members off their floor),
+#
+# so we solve g = 0 by a damped Newton method (quadratic convergence, robust to
+# the near-degeneracy of coupled story-drift limits that cripples a first-order
+# recursion), wrapped in an active set: start from the violated limits, drop any
+# whose multiplier goes to zero (slack), and add any inactive limit that becomes
+# violated. Strength floors enter through max(s_min, ·) in the size update and
+# are simply excluded from the Hessian. Reduces to the single-constraint closed
+# form when m = 1. (Khot/Berke; Chan, Grierson & Sherbourne 1995.)
+
+"""
+    MultiDriftOptimalityResult
+
+Output of [`drift_optimality_resize_multi`](@ref):
+
+- `sizes`  — new stiffness variable per member.
+- `λ`      — one optimality multiplier per constraint (≈ 0 ⇒ non-binding).
+- `frozen` — `true` where a member sits at its strength floor.
+- `predicted_drift` — `δ_j = Σ γ_{e,j}/s'_e` per constraint at the new sizes.
+- `active` — `true` where the constraint binds (`λ_j` meaningfully positive).
+- `iterations` — total Newton iterations taken across the active-set passes.
+- `converged`  — feasible and the sizes reached a fixed point within tolerance.
+"""
+struct MultiDriftOptimalityResult
+    sizes::Vector{Float64}
+    λ::Vector{Float64}
+    frozen::Vector{Bool}
+    predicted_drift::Vector{Float64}
+    active::Vector{Bool}
+    iterations::Int
+    converged::Bool
+end
+
+"""
+    drift_optimality_resize_multi(C, s, w, s_min, δ_allow; max_iters=50,
+                                  tol=1e-8, λ_floor=1e-30) -> MultiDriftOptimalityResult
+
+Size `s` against several simultaneous drift limits by a Newton dual over an
+active set of constraints. `C` is the `n×m` participation matrix (`C[e,j]` =
+member `e`'s participation in constraint `j`, with `sum(C[:,j]) == δ_j`, the
+current drift for limit `j`); `w`, `s_min` are length-`n`; `δ_allow` is length
+`m`. All inputs are plain `Float64` in consistent SI units. `tol` is the
+relative constraint-residual tolerance and `max_iters` the Newton cap per
+active-set pass.
+
+Returns a [`MultiDriftOptimalityResult`](@ref). When every limit is already met
+the sizes are returned unchanged.
+"""
+function drift_optimality_resize_multi(C::AbstractMatrix{<:Real}, s::AbstractVector{<:Real},
+                                       w::AbstractVector{<:Real}, s_min::AbstractVector{<:Real},
+                                       δ_allow::AbstractVector{<:Real};
+                                       max_iters::Integer = 50, tol::Real = 1e-8,
+                                       λ_floor::Real = 1e-30)
+    n, m = size(C)
+    (length(s) == n && length(w) == n && length(s_min) == n) || throw(ArgumentError(
+        "drift_optimality_resize_multi: s, w, s_min must have length size(C,1) = $n."))
+    length(δ_allow) == m || throw(ArgumentError(
+        "drift_optimality_resize_multi: δ_allow must have length size(C,2) = $m."))
+    all(>(0), δ_allow) || throw(ArgumentError("drift_optimality_resize_multi: δ_allow must be > 0."))
+    all(>(0), s)       || throw(ArgumentError("drift_optimality_resize_multi: current sizes s must be > 0."))
+    all(>(0), w)       || throw(ArgumentError("drift_optimality_resize_multi: weights w must be > 0."))
+    all(≥(0), s_min)   || throw(ArgumentError("drift_optimality_resize_multi: strength floors s_min must be ≥ 0."))
+
+    wv = Float64.(collect(w))
+    smin = Float64.(collect(s_min))
+    dall = Float64.(collect(δ_allow))
+    γ = Float64[C[e, j] * s[e] for e in 1:n, j in 1:m]   # stiffness-free coefficients
+    δ_now = zeros(m)                                       # current drift per constraint
+    @inbounds for j in 1:m
+        δ_now[j] = sum(C[e, j] for e in 1:n)              # = Σ γ_{e,j}/s_e at current s
+    end
+
+    # All limits already satisfied → leave the members alone.
+    if all(δ_now[j] ≤ dall[j] for j in 1:m)
+        return MultiDriftOptimalityResult(Float64.(collect(s)), zeros(m), falses(n),
+                                          δ_now, falses(m), 0, true)
+    end
+
+    sbuf = zeros(n)
+    floored = falses(n)
+    # s_e(λ) = max(s_min_e, sqrt( (Σ_j λ_j γ_{e,j}) / w_e )); mark floored members.
+    compute_sizes! = function (λ)
+        @inbounds for e in 1:n
+            num = 0.0
+            for j in 1:m
+                num += λ[j] * γ[e, j]
+            end
+            se = num > 0 ? sqrt(num / wv[e]) : 0.0
+            if se < smin[e]
+                sbuf[e] = smin[e]; floored[e] = true
+            else
+                sbuf[e] = se;      floored[e] = false
+            end
+        end
+    end
+    drift(j) = begin
+        acc = 0.0
+        @inbounds for e in 1:n
+            sbuf[e] > 0 && (acc += γ[e, j] / sbuf[e])
+        end
+        acc
+    end
+    single_λ(j) = begin
+        S = 0.0
+        @inbounds for e in 1:n
+            γ[e, j] > 0 && (S += sqrt(γ[e, j] * wv[e]))
+        end
+        (S / dall[j])^2
+    end
+
+    # Active set of binding constraints; warm-start the violated ones.
+    active = falses(m)
+    λ = zeros(m)
+    @inbounds for j in 1:m
+        if δ_now[j] > dall[j]
+            active[j] = true
+            λ[j] = single_λ(j)
+        end
+    end
+
+    iters = 0
+    for _pass in 1:(m + 2)
+        A = findall(active)
+        isempty(A) && break
+        k = length(A)
+
+        # Newton on the active set: solve g_A(λ_A) = 0, g_j = δ_j(λ) − δ_allow_j.
+        for _ in 1:max_iters
+            iters += 1
+            compute_sizes!(λ)
+            g = Float64[drift(A[a]) - dall[A[a]] for a in 1:k]
+            maxrel = 0.0
+            @inbounds for a in 1:k
+                maxrel = max(maxrel, abs(g[a]) / dall[A[a]])
+            end
+            maxrel < tol && break
+
+            # Hessian H_{ab} = −Σ_{e off floor} γ_{e,A[a]} γ_{e,A[b]} / (2 w_e s_e^3).
+            H = zeros(k, k)
+            @inbounds for e in 1:n
+                floored[e] && continue
+                f = 1.0 / (2 * wv[e] * sbuf[e]^3)
+                for a in 1:k
+                    ga = γ[e, A[a]]
+                    ga == 0 && continue
+                    for b in a:k
+                        H[a, b] -= ga * γ[e, A[b]] * f
+                    end
+                end
+            end
+            @inbounds for a in 1:k, b in (a + 1):k   # symmetrize
+                H[b, a] = H[a, b]
+            end
+
+            # Newton step for the concave dual: Δ = −H⁻¹ g (gradient step if singular).
+            Δ = try
+                -(H \ g)
+            catch
+                -g
+            end
+
+            # Largest α ≤ 1 keeping every active λ ≥ 0, then backtrack on ‖g‖.
+            αmax = 1.0
+            @inbounds for a in 1:k
+                Δ[a] < 0 && (αmax = min(αmax, -λ[A[a]] / Δ[a]))
+            end
+            α = min(1.0, αmax)
+            g0 = sum(abs2, g)
+            λtrial = copy(λ)
+            accepted = false
+            for _ls in 1:40
+                @inbounds for a in 1:k
+                    λtrial[A[a]] = max(0.0, λ[A[a]] + α * Δ[a])
+                end
+                compute_sizes!(λtrial)
+                gt = 0.0
+                @inbounds for a in 1:k
+                    gt += abs2(drift(A[a]) - dall[A[a]])
+                end
+                if gt ≤ g0 || α < 1e-12
+                    @inbounds for a in 1:k
+                        λ[A[a]] = λtrial[A[a]]
+                    end
+                    accepted = true
+                    break
+                end
+                α /= 2
+            end
+            accepted || break
+        end
+
+        # Active-set update: drop slack limits (λ → 0), add newly violated ones.
+        changed = false
+        @inbounds for j in A
+            if λ[j] ≤ λ_floor
+                active[j] = false; λ[j] = 0.0; changed = true
+            end
+        end
+        compute_sizes!(λ)
+        @inbounds for j in 1:m
+            if !active[j] && drift(j) > dall[j] * (1 + tol)
+                active[j] = true; λ[j] = single_λ(j); changed = true
+            end
+        end
+        changed || break
+    end
+
+    compute_sizes!(λ)
+    s_new = copy(sbuf)
+    frozen = copy(floored)
+    δ_pred = Float64[drift(j) for j in 1:m]
+    feasible = all(δ_pred[j] ≤ dall[j] * (1 + 1e-6) for j in 1:m)
+    active_out = Bool[λ[j] > λ_floor for j in 1:m]
+    # Converged = feasible with every binding limit tight.
+    converged = feasible && all(!active_out[j] || abs(δ_pred[j] / dall[j] - 1) ≤ 1e-5
+                                for j in 1:m)
+    return MultiDriftOptimalityResult(s_new, copy(λ), frozen, δ_pred, active_out, iters, converged)
+end

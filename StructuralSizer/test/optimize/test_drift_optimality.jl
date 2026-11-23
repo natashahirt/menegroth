@@ -117,3 +117,121 @@ using Unitful
         @test δ_final ≈ δ_allow rtol = 3e-2                 # converged to the target
     end
 end
+
+@testset "multi-constraint drift optimality-criteria resizer" begin
+
+    @testset "m = 1 reproduces the single-constraint closed form" begin
+        c = [0.015, 0.005]; s = [1.0e-4, 1.0e-4]; w = [1.0, 4.0]
+        s_min = [0.0, 0.0]; δ_allow = 0.01
+        single = drift_optimality_resize(c, s, w, s_min, δ_allow)
+        multi = drift_optimality_resize_multi(reshape(c, :, 1), s, w, s_min, [δ_allow])
+        @test multi.converged
+        @test multi.sizes ≈ single.sizes rtol = 1e-4
+        @test multi.predicted_drift[1] ≈ δ_allow rtol = 1e-4
+    end
+
+    @testset "two uncoupled constraints each solve independently" begin
+        # Members 1,2 feed constraint 1 only; members 3,4 feed constraint 2 only.
+        C = [0.015 0.0;
+             0.005 0.0;
+             0.0   0.012;
+             0.0   0.008]
+        s = fill(1.0e-4, 4); w = [1.0, 4.0, 1.0, 2.0]; s_min = zeros(4)
+        δ_allow = [0.01, 0.01]
+        res = drift_optimality_resize_multi(C, s, w, s_min, δ_allow)
+        @test res.converged
+        @test res.predicted_drift[1] ≈ 0.01 rtol = 2e-3
+        @test res.predicted_drift[2] ≈ 0.01 rtol = 2e-3
+        # Must match the two independent single-constraint solves.
+        s1 = drift_optimality_resize([0.015, 0.005], [1.0e-4, 1.0e-4], [1.0, 4.0], zeros(2), 0.01)
+        @test res.sizes[1:2] ≈ s1.sizes rtol = 3e-3
+    end
+
+    @testset "coupled constraints: feasibility + KKT stationarity" begin
+        # Both constraints share all three members (lower members participate more).
+        C = [0.012 0.010;
+             0.006 0.007;
+             0.004 0.002]
+        s = fill(1.0e-4, 3); w = [1.0, 1.5, 2.0]; s_min = zeros(3)
+        δ_allow = [0.012, 0.010]
+        res = drift_optimality_resize_multi(C, s, w, s_min, δ_allow)
+        @test res.converged
+        @test all(res.predicted_drift .≤ δ_allow .* (1 + 2e-3))   # feasible
+        # Stationarity: w_e s_e² == Σ_j λ_j γ_{e,j} for every (off-floor) member.
+        γ = C .* s
+        for e in 1:3
+            lhs = w[e] * res.sizes[e]^2
+            rhs = sum(res.λ[j] * γ[e, j] for j in 1:2)
+            @test lhs ≈ rhs rtol = 1e-3
+        end
+    end
+
+    @testset "slack constraint drops out (λ → 0)" begin
+        # Constraint 2 is generously loose; only constraint 1 should bind.
+        C = [0.015 0.001;
+             0.005 0.001]
+        s = fill(1.0e-4, 2); w = [1.0, 1.0]; s_min = zeros(2)
+        δ_allow = [0.01, 0.05]
+        res = drift_optimality_resize_multi(C, s, w, s_min, δ_allow)
+        @test res.converged
+        @test res.active[1]
+        @test !res.active[2]
+        @test res.predicted_drift[1] ≈ 0.01 rtol = 2e-3
+        @test res.predicted_drift[2] < δ_allow[2]
+    end
+
+    @testset "all limits already satisfied is a no-op" begin
+        C = [0.004 0.003; 0.002 0.001]
+        s = fill(1.0e-4, 2)
+        res = drift_optimality_resize_multi(C, s, [1.0, 1.0], zeros(2), [0.01, 0.01])
+        @test res.converged
+        @test all(.!res.active)
+        @test res.sizes == s
+    end
+
+    @testset "closed loop vs Asap: multi-story drifts driven feasible" begin
+        # Vertical cantilever stick with a drift limit at every story. Resize each
+        # element's I, re-solve, and confirm every inter-story drift lands at or
+        # below its allowable — the multi-λ recursion on a real FE model.
+        E = 200.0e9; G = 80.0e9; story_h = 3.5; P = 8.0e4
+        A = 1.0e-2; J = 1.0e-6; nstory = 4
+        mksec(I) = Section(A * u"m^2", E * u"Pa", G * u"Pa",
+                           I * u"m^4", I * u"m^4", J * u"m^4")
+        nodes = [Node([0.0u"m", 0.0u"m", (k * story_h)u"m"], k == 0 ? :fixed : :free)
+                 for k in 0:nstory]
+        els = [Element(nodes[k], nodes[k + 1], mksec(6.0e-4)) for k in 1:nstory]
+        loads = [NodeForce(nodes[k + 1], [P * u"N", 0.0u"N", 0.0u"N"]) for k in 1:nstory]
+        model = FrameModel(nodes, els, loads)
+        solve!(model)
+
+        story_dofs = [nodes[k + 1].globalID[1] for k in 1:nstory]   # x-DOF per story top
+        # Baseline inter-story drifts, then tighten every limit to 65%.
+        base = [drift_participation(model, d).δ for d in story_dofs]
+        story0 = [base[1]; diff(base)]
+        δ_allow = 0.65 .* story0
+
+        Lvec = [ustrip(u"m", el.length) for el in model.elements]
+        local res
+        for _ in 1:12
+            solve!(model)
+            # Nodal participations → inter-story participation columns (exact by linearity).
+            nodal = [drift_participation(model, d).c for d in story_dofs]
+            C = zeros(nstory, nstory)
+            C[:, 1] = nodal[1]
+            for k in 2:nstory
+                C[:, k] = nodal[k] .- nodal[k - 1]
+            end
+            s = [ustrip(u"m^4", el.section.Ix) for el in model.elements]
+            res = drift_optimality_resize_multi(C, s, Lvec, fill(1.0e-8, nstory), δ_allow)
+            for (i, el) in enumerate(model.elements)
+                el.section = mksec(res.sizes[i])
+            end
+            Asap.update!(model; values_only = true)
+        end
+        solve!(model)
+        u = [drift_participation(model, d).δ for d in story_dofs]
+        story_final = [u[1]; diff(u)]
+        @test all(story_final .≤ δ_allow .* (1 + 3e-2))     # every story feasible
+        @test res.converged
+    end
+end

@@ -205,3 +205,22 @@ function explain_feasibility(
 
     FeasibilityExplanation(all_pass, checks, gov.name, gov.ratio)
 end
+
+"""
+Strength/serviceability checks use the concrete; the rebar on a
+`ReinforcedConcreteMaterial` only enters the objective. Mirrors the
+`is_feasible` RC overload so `optimize_discrete`, which passes the
+rebar-carrying sizing material, gets the full per-check explanation instead of
+the generic `explain_feasibility` fallback ("aggregate", one check).
+"""
+function explain_feasibility(
+    checker::ACIBeamChecker,
+    cache::ACIBeamCapacityCache,
+    j::Int,
+    section::RCBeamSection,
+    material::ReinforcedConcreteMaterial,
+    demand::RCBeamDemand,
+    geometry::ConcreteMemberGeometry,
+)::FeasibilityExplanation
+    explain_feasibility(checker, cache, j, section, material.concrete, demand, geometry)
+end

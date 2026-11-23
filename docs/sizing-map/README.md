@@ -96,6 +96,94 @@ Re-audited 2026-11-23 (two-way slabs, lateral sway):
 
 ---
 
+## Capabilities and building archetypes
+
+What the sizer can engineer today, which building types that adds up to, and
+where the edges are. (Audited 2026-11-23; a capability is "full" when the
+pipeline sizes it end to end, "partial" when it sizes but with a known
+stand-in or missing check, "none" when it throws or has no designer.)
+
+### By element type
+
+| Element / system | Status | Notes |
+|---|---|---|
+| Flat plate / flat slab | full | DDM/EFM/FEA, punching + studs/caps/capitals, drop panels, joint search |
+| Two-way on beams | full | real αfm feedback (L17); beams sized in the member stage |
+| One-way slab | full | ACI deflection tables |
+| Waffle / ribbed | partial | rib-depth owner, rib-line sizing, cracked-story deflection (L18); heads grow all corners together |
+| Composite steel deck | full | depth × gage enumeration, Vulcraft catalog |
+| Vault | full | Haile analytic + shell FEA |
+| PT banded, hollow core, non-composite/joist deck | none | throw `UnsupportedFloorSystemError` |
+| Timber floors (CLT/DLT/NLT, mass-timber joist) | none | types + NDS checker exist; sizing throws |
+| Steel columns / beams | full | AISC 360-16; W/HSS/Pipe; MIP + NLP; composite beams, per-station checks |
+| RC columns / beams | full | catalog MIP + NLP; P-M, biaxial, slenderness, torsion |
+| PixelFrame (FRC) | full | ACI 318-19 + fib MC2010 |
+| Structural walls (lateral) | full | in/out-of-plane, special seismic detailing, drift loop, layout NLP |
+| Spread / strip / combined / mat footings | full | rigid / Shukla / Winkler-FEA |
+| Deep foundations (piles, shafts, micropiles) | none | typed; no designer |
+| Steel moment / braced frames (LFRS) | none | Phase H; lateral is concrete-wall only today |
+| Outrigger / belt-truss systems | none | `OutriggerSystem` typed, not implemented |
+
+### Building archetypes we can analyze end to end
+
+| Archetype | Supported? | Caveats |
+|---|---|---|
+| Mid-rise concrete flat-plate + shear-wall core | yes (best path) | slab → columns → walls → footings all sized |
+| Concrete frame: two-way-on-beams / one-way / waffle on columns | yes | ribbed/waffle is partial |
+| Steel gravity frame + composite deck + concrete shear walls | yes | lateral still carried by concrete walls, not steel frames |
+| Masonry / concrete vaulted structures | yes (specialty) | — |
+| Steel high-rise (moment / braced-frame LFRS) | **no** | see "what's left for steel high-rise" below |
+| Tall / dynamically wind-sensitive buildings | **no** | no cross-wind / acceleration serviceability; sway not wired |
+| Buildings on deep foundations | **no** | no pile/shaft designer; lateral never reaches footings |
+
+The common supported thread: a **concrete or steel gravity system on a column
+grid with concrete shear walls for lateral, on shallow foundations** — a large
+share of ordinary mid-rise construction.
+
+### What's left for steel high-rise
+
+Steel high-rise needs a lateral-force-resisting system the sizer does not yet
+have, plus the second-order and foundation work a tall building forces. Ranked
+by how blocking each is (roadmap anchors in brackets):
+
+1. **A steel LFRS designer — the hard blocker.** No steel moment frame or
+   braced frame exists; lateral is concrete walls only. Needs: braced frames
+   (CBF/EBF/BRBF — brace member design, tension/compression-only Asap
+   behavior, EBF links) [Phase H1]; moment frames (rigid connections,
+   **panel-zone** shear per AISC J10.6, doubler/continuity plates, member P-M
+   under combined actions) [Phase H2].
+2. **Wire the sway / second-order machinery (currently built, not consumed).**
+   Moment frames are drift- and stability-governed; the `StoryStability` /
+   `B2` / `design_column_moments` bridge exists and is tested but nothing in
+   the pipeline calls it, and steel still warns "B2 not implemented." Columns
+   must be designed as sway members with amplified demands [Phase A5/H2, and
+   the sway-wiring gap in the 2026-11-23 audit note].
+3. **Drift control as a sizing driver.** Today drift drives wall thickness;
+   a steel frame needs drift to drive beam/column *stiffness* (an owner that
+   sizes for inter-story drift limits), plus integrated stability/drift
+   acceptance and lateral-system selection (braced vs moment vs dual, and
+   bracing-bay / moment-line placement) [Phase H4].
+4. **Seismic capacity design for steel** (SDC C+): AISC 341-16 ductile
+   detailing (SCBF/OCBF, SMF/IMF/OMF, EBF, protected zones, Ry capacity
+   design) and AISC 358 prequalified moment connections [Phase H3]. Needs the
+   AISC 341/358 corpus ingestion first.
+5. **Foundations for high load and overturning.** Deep foundations (piles /
+   drilled shafts under high axial + uplift) and the lateral-loads-reach-
+   foundations fix (overturning, uplift, sliding, base shear — a signed-off
+   gap today) [Phase G, §6 sign-off item 4].
+6. **Dynamic wind.** The gust-effect factor for flexible structures and an
+   approximate natural frequency exist, but cross-wind response, vortex
+   shedding, higher modes, and occupant-comfort acceleration limits do not —
+   these govern slender tall buildings.
+7. **Composite columns** (concrete-filled tube / encased), common in
+   high-rise, are not built (only composite beams are).
+
+Items 1–3 are the minimum to size a *strength-and-drift* steel moment/braced-
+frame building in low seismic + ordinary wind; 4–7 extend it to high-seismic,
+very tall, and deep-foundation cases.
+
+---
+
 ## 1. Stage graph
 
 The pipeline runs once, in this order. There is no outer whole-building loop:

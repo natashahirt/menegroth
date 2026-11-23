@@ -1,6 +1,7 @@
 include("api/columns.jl")
 include("api/conversions.jl")
 include("api/beams.jl")
+include("api/axial.jl")
 include("api/batching.jl")
 include("api/rc_columns_nlp.jl")
 include("api/rc_beams_nlp.jl")

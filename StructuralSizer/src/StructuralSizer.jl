@@ -433,7 +433,7 @@ export get_rebar_fy, get_transverse_rebar, get_transverse_bar_diameter
 
 # --- Optimization: discrete (MIP) ---
 export optimize_discrete, optimize_binary_search, expand_catalog_with_materials
-export size_columns, size_beams, size_members
+export size_columns, size_beams, size_members, size_axial_members
 export to_steel_demands, to_rc_demands
 export to_steel_geometry, to_concrete_geometry, convert_geometries
 

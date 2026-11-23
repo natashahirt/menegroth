@@ -58,6 +58,8 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         # Composite beams
         include("steel_member/composite/test_composite_beam.jl")
         include("steel_member/composite/test_composite_per_station.jl")
+        # Pure axial members (braces / truss chords / struts / ties)
+        include("steel_member/test_axial_members.jl")
     end
 
     # ─── Members: connection defaults ────────────────────────────────────

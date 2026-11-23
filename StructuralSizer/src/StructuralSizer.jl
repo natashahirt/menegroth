@@ -198,6 +198,8 @@ export SpecialConcreteShearWallSystem, concrete_shear_wall_system
 export DualSeismicSystem, dual_seismic_system
 export drift_optimality_resize, DriftOptimalityResult
 export drift_optimality_resize_multi, MultiDriftOptimalityResult
+export resize_for_drift!, DriftConstraint, DriftGovernorResult, snap_up
+export total_drift_constraint, interstory_drift_constraint
 
 # --- Directional-procedure MWFRS wind (ASCE 7-22 Chapter 27) ---
 export wind_figure_2731_roof, wind_wall_cp, wind_design_pressure, wind_surface

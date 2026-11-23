@@ -26,3 +26,6 @@ include("solvers/_solvers.jl")
 
 # Drift optimality-criteria resizer (pure: participation vectors → new sizes)
 include("drift_optimality.jl")
+
+# Drift governor (catalog-aware outer loop over an Asap model)
+include("drift_governor.jl")

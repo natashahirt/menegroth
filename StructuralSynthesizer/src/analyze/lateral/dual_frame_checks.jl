@@ -406,3 +406,168 @@ function dual_frame_shear_shares(struc, set, elf, effects, mf)
     end
     return sort!(collect(values(best)); by = c -> (c.story, c.direction))
 end
+
+# ==============================================================================
+# Increment (3): frame-only capability gate at 25% of the design base shear
+# ==============================================================================
+#
+# The authoritative tier of deci-7d2c3467. ASCE 7-22 §12.2.5.1 (corpus:
+# asce-7-22, PDF page 177) requires the moment frame to be *capable* of resisting
+# at least 25% of the design seismic forces. This gate clones the lateral model
+# with the core/walls removed (`exclude_shells=true`), applies 25% of each design
+# seismic effect, and verifies the bare moment frame on its own:
+#   * stability — the bare-frame story stability coefficient θ (§12.8.7, divided
+#     by (1+θ)) stays within θmax, so the frame does not need the core to stand;
+#   * strength  — every steel frame member passes the AISC 360-16 Appendix 8
+#     beam-column check (increment 2's machinery) under the 25% frame-only
+#     lateral demand plus the full factored gravity.
+#
+# It is the literal "capable of resisting" test and runs once (at the gate), not
+# every sizing iteration — the cheap in-loop share proxy (increment 1) steers the
+# loop in between. Gravity flows through the real structure (`second[key].u`, the
+# full frame+core second-order solve); only the 25% lateral is resisted by the
+# bare frame. Results are RECORDED (pass/fail), matching increments (1)/(2); the
+# redesign decision is left to the caller.
+
+"""
+One story and one plan direction of the §12.2.5.1 frame-only stability check.
+
+`θ` is the bare-frame story stability coefficient (ASCE 7-22 Eq. 12.8-18, divided
+by (1+θ) per §12.8.7), the governing value over the earthquake-gravity cases;
+`θmax` is Eq. 12.8-19. `passed` is `θ ≤ θmax`.
+"""
+struct FrameCapabilityStability
+    story::Int
+    direction::Symbol
+    θ::Float64
+    θmax::Float64
+    passed::Bool
+end
+
+"""
+    _capability_member_rows(kind, index, els, second, solved, cases, basic, inputs, story)
+        -> Vector{(label, MemberDemand)}
+
+Steel `MemberDemand` rows for one member under the 25% frame-only demand: full
+factored gravity from the second-order full-model solve (`second[key].u[1..3]`)
+plus the bare-frame 25% lateral (`solved[key]`, already scaled by
+`_quarter_story_cases`). `story` carries the per-story `B2`. Mirrors
+[`_steel_member_rows`] but on the frame-only (core-removed) lateral solve.
+"""
+function _capability_member_rows(kind, index, els, second, solved, cases, basic, inputs, story)
+    rho = Float64(inputs.rho); SDS = inputs.SDS; roof = inputs.roof
+    b2 = _story_b2_value(story)
+    dead = [_loads_on_element(basic.loads[1], el) for el in els]
+    live = [_loads_on_element(basic.loads[2], el) for el in els]
+    rliv = [_loads_on_element(basic.loads[3], el) for el in els]
+    rows = Tuple{String, StructuralSizer.MemberDemand}[]
+    for combo in asce7_strength_combinations
+        (combo.E != 0.0 || combo.Ev != 0.0) || continue   # seismic combos only
+        key = _gravity_key(combo, roof)
+        set = second[key]
+        lateral = solved[key]
+        for (k, (_, _, label, _)) in enumerate(cases)
+            for (j, el) in enumerate(els)
+                D = _element_forces_from_u(el, set.u[1], dead[j])
+                L = _element_forces_from_u(el, set.u[2], live[j])
+                C = _element_forces_from_u(el, set.u[3], rliv[j])
+                eh = _element_forces_from_u(el, lateral[k], Asap.AbstractLoad[])
+                nt, lt = _split_nt_lt(combo, roof, D, L, C, eh, SDS, rho)
+                demand = _steel_nt_lt_demand(kind, index, nt, lt, b2)
+                push!(rows, ("$(combo.name) + $label (25% frame-only)", demand))
+            end
+        end
+    end
+    return rows
+end
+
+"""
+    dual_frame_capability_gate(struc, second, basic, elf, effects, inputs,
+                               seismic_system, mf, directions)
+        -> (stability, members, skipped)
+
+Frame-only capability gate (increment 3, deci-7d2c3467). Solves the bare moment
+frame (`exclude_shells=true`) under 25% of each seismic effect on every
+earthquake-gravity geometric stiffness, then records:
+
+- `stability::Vector{FrameCapabilityStability}` — the governing bare-frame θ per
+  `(story, direction)` against θmax (ASCE 7-22 §12.8.7);
+- `members::Vector{FrameMemberCheck}` — each designated steel moment-frame member
+  under the 25% frame-only demand (AISC 360-16 App. 8), non-steel skipped+counted.
+
+`second` is the full-model second-order set from `_build_second_order`;
+`seismic_system` supplies Cd/Ω0 for θmax; `directions` are the dual axes (`:x`/`:y`).
+"""
+function dual_frame_capability_gate(struc, second, basic, elf, effects, inputs,
+                                    seismic_system, mf, directions)
+    model = struc.asap_model
+    links = struc.asap_rigid_links
+    roof = inputs.roof
+    # 25%-scaled seismic loads: torsion-included for member demands, no-torsion
+    # for the θ stability shear (ASCE 7-22 §12.2.5.8 pattern, §12.5.1 directions).
+    cases = _quarter_story_cases(struc, elf, directions, effects)
+    stab = _quarter_story_cases(struc, elf, directions,
+        [e for e in seismic_effect_cases(elf; orthogonal=false) if e.torsion === :none])
+    θmax = stability_coefficient_limit(inputs.β, seismic_system.Cd; Ω0=seismic_system.Ω0)
+    factor_cache = _lateral_factor_cache(struc)
+
+    case_loads = [c[4] for c in cases]
+    stab_loads = [c[4] for c in stab]
+    solved = Dict{GravityStiffnessKey, Vector{Vector{Float64}}}()
+    # Governing (largest) bare-frame θ per (story, direction) across gravity keys.
+    θbest = Dict{Tuple{Int, Symbol}, Float64}()
+    for key in _earthquake_gravity_keys(roof)
+        haskey(second, key) || throw(ArgumentError(
+            "dual capability gate: no story stiffness for gravity key $key."))
+        Kg = second[key].Kg
+        all_u = Asap.solve(model, vcat(case_loads, stab_loads), links;
+                           geometric_stiffness=Kg, exclude_shells=true,
+                           factor_cache=factor_cache)
+        solved[key] = all_u[1:length(cases)]
+        for (s, (direction, _, _, _)) in enumerate(stab)
+            u = all_u[length(cases) + s]
+            drifts = _master_story_drifts(elf.levels, u, elf_direction_vector(elf, direction))
+            si = _strength_case_index(elf, direction)
+            for (k, lv) in enumerate(elf.levels)
+                # ASCE 7-22 §12.2.5.1 (corpus: asce-7-22, PDF page 177): 25% of
+                # the design story shear resisted by the bare frame.
+                Vx = _DUAL_FRAME_SHARE_MIN * abs(elf.cases[si].Vx_kN[k])
+                Vx > 0 || continue
+                θ = stability_coefficient(lv.px_kN, lv.story_height_m, Vx, abs(drifts[k]))
+                # ASCE 7-22 §12.8.7 (corpus: asce-7-22, PDF page 188).
+                θ_check = θ / (1 + θ)
+                tkey = (lv.story, direction)
+                θbest[tkey] = max(get(θbest, tkey, 0.0), θ_check)
+            end
+        end
+    end
+    stability = [FrameCapabilityStability(story, dir, θ, θmax, θ <= θmax + 1e-9)
+                 for ((story, dir), θ) in θbest]
+    sort!(stability; by = c -> (c.story, c.direction))
+
+    by_story = _dual_story_b2_records(elf)
+    members = FrameMemberCheck[]
+    skipped = 0
+    for (kind, indices, kmembers) in ((:column, mf.columns, struc.columns),
+                                      (:beam, mf.beams, struc.beams))
+        for i in indices
+            member = kmembers[i]
+            section = member.base.section
+            if !(section isa StructuralSizer.ISymmSection)
+                skipped += 1
+                continue
+            end
+            els = _member_frame_elements(struc, member)
+            if isempty(els)
+                push!(members, FrameMemberCheck(kind, i, false, "no frame element"))
+                continue
+            end
+            story = get(by_story, _member_story(member), nothing)
+            rows = _capability_member_rows(kind, i, els, second, solved, cases, basic, inputs, story)
+            material = _steel_member_material(section)
+            geometry = _steel_frame_geometry(member)
+            push!(members, _steel_member_report(kind, i, section, material, geometry, rows, story))
+        end
+    end
+    return stability, members, skipped
+end

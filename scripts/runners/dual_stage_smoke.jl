@@ -174,6 +174,24 @@ function main()
                 " ratio=", round(c.governing_ratio; digits=3),
                 " check=", c.governing_check, " @ ", c.case_label)
     end
+    println("=== frame_shares (§12.2.5.1 in-loop proxy) ===")
+    for c in result.frame_shares
+        println("  story ", c.story, " ", c.direction, " share=",
+                round(c.share; digits=3), " passed=", c.passed)
+    end
+    println("=== capability gate (25% frame-only) ===")
+    println("stability θ checks=", length(result.capability_stability),
+            " over θmax=", count(c -> !c.passed, result.capability_stability))
+    for c in result.capability_stability
+        println("  story ", c.story, " ", c.direction, " θ=", round(c.θ; digits=4),
+                " θmax=", round(c.θmax; digits=4), " passed=", c.passed)
+    end
+    println("members checked=", length(result.capability_members),
+            " failing=", count(c -> !c.passed, result.capability_members))
+    for c in result.capability_members
+        println("  ", c.kind, " #", c.index, " passed=", c.passed,
+                " ratio=", round(c.governing_ratio; digits=3))
+    end
     println("stage_diagnostics[:dual]=", get(struc.stage_diagnostics, :dual, "<none>"))
     println("SMOKE OK")
 end

@@ -10,8 +10,8 @@
 # moment-frame designation, then runs the dual-specific checks:
 #   1. §12.2.5.1 story-shear-share proxy — in-loop, from the combined model (done),
 #   2. frame-member strength with second-order (B1/B2) demands, steel (done; RC pending),
-#   3. the separate frame-only capability gate at 25% of the base shear (pending).
-# The pending check is named in `struc.stage_diagnostics[:dual]`.
+#   3. the separate frame-only capability gate at 25% of the base shear (done; steel).
+# Only the RC frame-member path remains, tracked in `struc.stage_diagnostics[:dual]`.
 
 """Analysis backbone of one dual-system run: drift, θ, and the moment frame."""
 struct DualSystemResult
@@ -27,6 +27,10 @@ struct DualSystemResult
     frame_members::Vector{FrameMemberCheck}
     "§12.2.5.1 25% story-shear-share proxy (in-loop): the moment frame's governing share of each story shear in the combined model, one entry per (story, direction)."
     frame_shares::Vector{FrameShareCheck}
+    "§12.2.5.1 frame-only capability gate: bare-frame story stability θ at 25% of the design base shear, one entry per (story, direction)."
+    capability_stability::Vector{FrameCapabilityStability}
+    "§12.2.5.1 frame-only capability gate: each steel moment-frame member under the 25% frame-only demand (AISC App. 8); one entry per checked steel member."
+    capability_members::Vector{FrameMemberCheck}
     "Table 12.2-1 dual row used on the X plan axis."
     row_x::Symbol
     "Table 12.2-1 dual row used on the Y plan axis."
@@ -52,10 +56,11 @@ same convention as the ordinary-wall stage.
 This backbone solves the gravity, wind, and ELF cases, measures the design story
 drift (with the §12.8.7 P-delta multiplier), records the moment-frame member
 designation (user override or auto; see [`moment_frame_members`](@ref)), runs the
-§12.2.5.1 in-loop share proxy ([`dual_frame_shear_shares`](@ref)) and the steel
-frame-member strength checks ([`dual_frame_member_checks`](@ref)). The frame-only
-capability gate and the RC frame-member path are recorded as pending in
-`struc.stage_diagnostics[:dual]` until their increments land.
+§12.2.5.1 in-loop share proxy ([`dual_frame_shear_shares`](@ref)), the steel
+frame-member strength checks ([`dual_frame_member_checks`](@ref)), and the
+frame-only capability gate at 25% of the base shear
+([`dual_frame_capability_gate`](@ref)). Only the RC frame-member path remains,
+tracked in `struc.stage_diagnostics[:dual]`.
 
 # Citation
 ASCE 7-22 §12.2.5.1 (corpus: asce-7-22, PDF page 177) and Table 12.2-1 Sections
@@ -163,18 +168,30 @@ function design_dual_system!(struc::BuildingStructure, params::DesignParameters;
     frame_shares = dual_frame_shear_shares(struc, set, elf, effects, mf)
     short = count(c -> !c.passed, frame_shares)
 
-    pending = [
-        "separate frame-only capability gate at 25% of the design base shear",
-    ]
+    # Increment (3): the authoritative frame-only capability gate — the bare
+    # moment frame alone must carry 25% of the design base shear (deci-7d2c3467).
+    second = _build_second_order(struc, basic; wind, elf, effects)
+    directions = Symbol[:x, :y]
+    cap_stability, cap_members, cap_skipped =
+        dual_frame_capability_gate(struc, second, basic, elf, effects, inputs, sysx, mf, directions)
+    unstable = count(c -> !c.passed, cap_stability)
+    cap_failed = count(c -> !c.passed, cap_members)
+
+    pending = String[]  # all three dual-specific checks are now wired (RC member path aside)
     frame_note = "Steel frame-member strength (AISC App. 8 B1/B2): " *
         "$(length(frame_members)) checked, $failed failing" *
         (skipped > 0 ? ", $skipped non-steel member(s) skipped (RC path pending)" : "") * ". "
     share_note = "§12.2.5.1 frame share (in-loop proxy): $(length(frame_shares)) " *
-        "story-direction(s) checked, $short below 25%."
+        "story-direction(s) checked, $short below 25%. "
+    gate_note = "§12.2.5.1 frame-only capability gate (25% base shear): " *
+        "$(length(cap_stability)) story-direction θ check(s), $unstable over θmax; " *
+        "$(length(cap_members)) steel member(s), $cap_failed failing" *
+        (cap_skipped > 0 ? ", $cap_skipped non-steel skipped (RC path pending)" : "") * "."
     struc.stage_diagnostics[:dual] =
         "Dual-system analysis backbone ran (drift + θ + moment-frame designation). " *
-        frame_note * share_note * " Pending dual-specific checks: " * join(pending, "; ") * "."
+        frame_note * share_note * gate_note
 
     return DualSystemResult(drift, θmax, pdelta_multipliers, mf, frame_members, frame_shares,
+                            cap_stability, cap_members,
                             table_12_2_1_row(sx), table_12_2_1_row(sy), pending)
 end

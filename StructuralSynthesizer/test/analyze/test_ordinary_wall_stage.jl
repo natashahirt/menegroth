@@ -422,7 +422,7 @@ end
     @test length(result.pdelta_multipliers) == length(result.drift)
     @test isfinite(result.max_story_stability) && result.max_story_stability ≥ 0.0
     @test haskey(struc.stage_diagnostics, :dual)
-    @test length(result.pending) == 1
+    @test isempty(result.pending)
     # Increment (2): steel frame members checked as AISC App. 8 beam-columns.
     @test result.frame_members isa Vector{StructuralSynthesizer.FrameMemberCheck}
     @test !isempty(result.frame_members)
@@ -439,6 +439,16 @@ end
     @test all(c -> c.total_shear_N > 0.0, result.frame_shares)
     @test all(c -> c.passed == (c.share >= 0.25 - 1e-9), result.frame_shares)
     @test occursin("frame share", struc.stage_diagnostics[:dual])
+    # Increment (3): frame-only capability gate at 25% of the design base shear.
+    @test result.capability_stability isa Vector{StructuralSynthesizer.FrameCapabilityStability}
+    @test !isempty(result.capability_stability)
+    # θ is a finite, non-negative stability coefficient judged against θmax.
+    @test all(c -> isfinite(c.θ) && c.θ >= 0.0, result.capability_stability)
+    @test all(c -> c.θmax > 0.0 && c.passed == (c.θ <= c.θmax + 1e-9), result.capability_stability)
+    @test result.capability_members isa Vector{StructuralSynthesizer.FrameMemberCheck}
+    @test !isempty(result.capability_members)
+    @test all(c -> isfinite(c.governing_ratio), result.capability_members)
+    @test occursin("capability gate", struc.stage_diagnostics[:dual])
 end
 
 @testset "Ordinary wall stage" begin

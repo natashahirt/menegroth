@@ -355,7 +355,66 @@ Smallest end-to-end validation, on a path the pipeline already supports:
 If that holds, it validates Pillars A and C.3 on a supported path before taking
 on the steel-LFRS wiring or the heavy-FEA scheduler.
 
-## 10. Open questions / sign-offs
+## 10. API surface: every toggle reachable from the request
+
+A toggle nobody can set is dead. Every knob these three pillars introduce must
+be a first-class field on `DesignParameters` (`design/parameters.jl`) and travel
+the **same plumbing chain** the existing `optimize_for` does, so it is reachable
+from the REST `/design` + `/schema` path and from the agent/chat tools — not
+buried as an internal kwarg. That chain, for one scalar toggle, is:
+
+1. **DTO field** — `APIParams` (`api/schema/input_types.jl`), typed, with a
+   today-preserving default.
+2. **Deserialize** — `json_to_params` (`api/deserialize/floors.jl`) maps it onto
+   `DesignParameters`.
+3. **Validate fail-loud** — an enum/range check in `api/validation.jl` against a
+   published constant (pattern: `API_OPTIMIZE_FOR` + `_push_enum!`), so a bad
+   value fails at the boundary, not deep in sizing.
+4. **Publish** — `/schema` via `api/schema/input_schema.jl` +
+   `api/schema/params_schema.jl` (enum line + description + default).
+5. **Agent/chat exposure** — `api/ontology.jl`, `api/design_state.jl`,
+   `api/agent_tools/orientation.jl`, and the chat allow-list
+   `api/chat/param_patches.jl`, so the design-assistant tools can read and set it.
+
+**Default-preserving rule.** Every new toggle defaults to *today's behavior*
+(relaxation off, full fidelity, single `optimize_for`), so flag-off runs stay
+byte-identical — the same discipline the plan already uses for member-group
+overrides and framing auto-generation. A test asserts the flag-off path is a
+no-op.
+
+### Toggle registry (target)
+
+| Toggle | Pillar | Type / values | Default | Notes |
+|---|---|---|---|---|
+| `optimize_for` | B | `weight \| carbon \| cost` (exists) | `weight` | generalise to a vector below |
+| `objective_terms` | B | list of (objective, weight) | `[(optimize_for, 1)]` | compounded / scalarized objective |
+| `pareto_sweep` | B | nothing \| {objectives, n_points} | `nothing` | **response-shape change** — see below |
+| `relaxation_seed` | A | `off \| on` | `off` | continuous warm start into the owners |
+| `candidate_band` | A | int ≥ 0 (catalog steps) | owner default | width of the bounded discrete search |
+| `report_optimality_gap` | A | bool | `false` | emit the certified gap in the result |
+| `allow_shrink` | A | bool | current policy | shrink-and-grow vs grow-only in verify |
+| `fidelity` | C | `fast \| full` | `full` | selects the analysis-service tier (architecture.md §5) |
+| `compute_budget` | C | nothing \| budget spec | `nothing` | scheduler ration; surrogate enable + escalation threshold |
+
+### One deeper change, flagged early
+
+`optimize_for` → `objective_terms` and `fidelity` are ordinary scalar/enum
+toggles and fit the chain above unchanged. **`pareto_sweep` is different: it
+changes the response shape** — a sweep returns a *set* of verified designs with
+their gaps, not one `DesignResult`. That needs a `/design` response schema
+addition (a `front: [...]` block) and a viewer that can hold multiple designs,
+so it is scoped as its own WP (part of P.3) rather than a drop-in field. The
+single-objective toggles (A, C, and `objective_terms`) land with no response
+change.
+
+### Work package
+
+| WP | Work | Acceptance |
+|---|---|---|
+| API.1 | Thread A/C toggles + `objective_terms` through all five chain stages; fail-loud enums; `/schema` publishes them; chat allow-list updated | Each toggle settable via `/design` JSON and visible in `/schema`; flag-off runs byte-identical on B1–B7 |
+| API.2 | `pareto_sweep` response-shape extension (`front` block) + multi-design result | A 2-objective sweep returns N gap-certified designs over REST |
+
+## 11. Open questions / sign-offs
 
 - **Multi-λ update** stability and the exact dual scheme for several
   simultaneously-active constraints (drift per story + wind + strength).

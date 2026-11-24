@@ -125,6 +125,44 @@ using Unitful
         @test_throws ArgumentError relaxation_warm_start(I_cat, A_cat[1:2], [1.0e-4]) # length mismatch
     end
 
+    @testset "certified lower bound is a true lower envelope (synthetic)" begin
+        I_cat = [1.0e-4, 2.0e-4, 4.0e-4, 8.0e-4]
+        A_cat = 3.0 .* sqrt.(I_cat)
+        law = fit_section_scaling_law(I_cat, A_cat)
+        targets = [1.3e-4, 2.7e-4, 5.1e-4]
+        lengths = [6.0, 8.0, 10.0]
+        lb = relaxation_lower_bound(law, targets, lengths)
+        # The discrete (projected) volume must be ≥ the certified bound.
+        ws = relaxation_warm_start(I_cat, A_cat, targets; k = 0)
+        disc_vol = sum(A_cat[ws.mip_start[g]] * lengths[g] for g in 1:length(targets))
+        @test disc_vol ≥ lb
+        @test optimality_gap(disc_vol, lb) ≥ -1e-12
+        @test optimality_gap(lb, lb) ≈ 0.0 atol = 1e-12
+        @test_throws ArgumentError optimality_gap(1.0, 0.0)
+        @test_throws ArgumentError relaxation_lower_bound(law, targets, lengths[1:2])
+    end
+
+    @testset "lower envelope ≤ lightest feasible on a SCATTERED catalog" begin
+        # The failure mode a real catalog exposes: area is NOT a tight function of I.
+        # Two families at each stiffness — an efficient deep section and a stocky one —
+        # so a least-squares price would sit ABOVE the efficient sections. The convex
+        # envelope must still never exceed the lightest feasible section.
+        I_cat = Float64[]
+        A_cat = Float64[]
+        for i in 1:12
+            Iv = 1.0e-4 * i
+            push!(I_cat, Iv); push!(A_cat, 2.0 * sqrt(Iv))          # efficient frontier
+            push!(I_cat, Iv); push!(A_cat, 3.2 * sqrt(Iv))          # stocky, same I
+        end
+        law = fit_section_scaling_law(I_cat, A_cat)
+        for t in range(1.1e-4, 1.15e-3; length = 40)
+            lb_area = catalog_lower_envelope(law, t)
+            feasible = [A_cat[j] for j in eachindex(I_cat) if I_cat[j] ≥ t]
+            @test !isempty(feasible)
+            @test lb_area ≤ minimum(feasible) + 1e-15           # a TRUE lower bound
+        end
+    end
+
     @testset "real RC-column catalog smoke test" begin
         cat = rc_column_catalog(:rect, :standard)
         @test length(cat) ≥ 2
@@ -141,6 +179,21 @@ using Unitful
         else
             @test law.I[idx] ≥ target
             @test candidate_band(law, idx, 2) ⊆ 1:length(law.I)
+        end
+    end
+
+    @testset "lower envelope certified on the real W catalog" begin
+        # Regression guard for the scatter bug the continuation sweep exposed: on the
+        # full W catalog the certified bound must never exceed the lightest feasible.
+        cat = steel_column_catalog(:w, :all)
+        Ivals = [ustrip(u"m^4", Ix(s)) for s in cat]
+        Avals = [ustrip(u"m^2", section_area(s)) for s in cat]
+        law = fit_section_scaling_law(Ivals, Avals)
+        lo, hi = minimum(Ivals), maximum(Ivals)
+        for t in range(lo * 1.001, hi * 0.999; length = 60)
+            lb_area = catalog_lower_envelope(law, t)
+            feasible = [Avals[j] for j in eachindex(Ivals) if Ivals[j] ≥ t]
+            @test lb_area ≤ minimum(feasible) + 1e-12
         end
     end
 end

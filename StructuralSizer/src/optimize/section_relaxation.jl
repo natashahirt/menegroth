@@ -123,9 +123,11 @@ end
     continuous_area(law, I_target) -> Float64
 
 Continuous (relaxed) area in m² for a strong-axis stiffness target `I_target`
-(m⁴), from the power-law fit `A ≈ exp(a_A)·I^b_A`. This is the price the
-continuous relaxation pays for stiffness; it lower-bounds the discrete catalog
-area whenever the family's `A(I)` is convex in log space (the usual case).
+(m⁴), from the power-law fit `A ≈ exp(a_A)·I^b_A`. This is a smooth *price* for
+stiffness tracking the family's average `A(I)`; it is NOT a bound — a real
+catalog scatters about the fit, so an efficient deep section can fall below it.
+For a certified lower bound use [`catalog_lower_envelope`](@ref) (the convex lower
+hull); use this only to price the relaxation and to supply the marginal weight.
 """
 function continuous_area(law::SectionScalingLaw, I_target::Real)
     I_target > 0 || throw(ArgumentError("continuous_area: I_target must be > 0; got $I_target."))
@@ -308,4 +310,109 @@ function relaxation_warm_start(I_catalog::AbstractVector{<:Real}, A_catalog::Abs
         gap[g] = projection_gap(law, t, li)
     end
     return RelaxationWarmStart(mip_start, band, gap, grown)
+end
+
+"""
+    _lower_hull_indices(I, A) -> Vector{Int}
+
+Indices of the **lower convex hull** of the points `(I, A)` (given ascending in
+`I`), by Andrew's monotone chain. A point is dropped when it lies on or above the
+chord of its neighbours (cross product ≤ 0), leaving the convex, piecewise-linear
+lower boundary — the efficient frontier of area versus stiffness.
+"""
+function _lower_hull_indices(I::AbstractVector{<:Real}, A::AbstractVector{<:Real})
+    hull = Int[]
+    @inbounds for i in eachindex(I)
+        while length(hull) ≥ 2
+            o, a = hull[end - 1], hull[end]
+            cross = (I[a] - I[o]) * (A[i] - A[o]) - (A[a] - A[o]) * (I[i] - I[o])
+            cross ≤ 0 ? pop!(hull) : break
+        end
+        push!(hull, i)
+    end
+    return hull
+end
+
+"""
+    catalog_lower_envelope(law, I_target) -> Float64
+
+Certified lower bound (m²) on the area of *any* catalog section whose strong-axis
+stiffness meets `I_target`. It is the minimum of the catalog's convex lower
+envelope over the feasible tail `I ≥ I_target`:
+
+    min_{I' ≥ I_target}  E(I'),   E = convex lower hull of the catalog's (I, A).
+
+Because every catalog point sits on or above `E`, and the lightest feasible
+section is one such point with `I ≥ I_target`, this never exceeds the discrete
+optimum — unlike the least-squares `continuous_area`, which only tracks the
+family's *average* and may over- or under-estimate a scattered real catalog.
+"""
+function catalog_lower_envelope(law::SectionScalingLaw, I_target::Real)
+    I, A = law.I, law.A
+    hull = _lower_hull_indices(I, A)
+    # E(I_target): piecewise-linear on the hull, clamped to the hull's I-range.
+    E = if I_target ≤ I[hull[1]]
+        A[hull[1]]
+    elseif I_target ≥ I[hull[end]]
+        A[hull[end]]
+    else
+        v = A[hull[end]]
+        @inbounds for k in 1:(length(hull) - 1)
+            i1, i2 = hull[k], hull[k + 1]
+            if I[i1] ≤ I_target ≤ I[i2]
+                t = (float(I_target) - I[i1]) / (I[i2] - I[i1])
+                v = A[i1] + t * (A[i2] - A[i1])
+                break
+            end
+        end
+        v
+    end
+    # The lightest feasible section may sit at I > I_target, so take the minimum of
+    # the (convex) envelope over the whole feasible tail — robust to any dip where
+    # a stiffer section is also lighter.
+    lb = E
+    @inbounds for h in hull
+        I[h] ≥ I_target && (lb = min(lb, A[h]))
+    end
+    return lb
+end
+
+"""
+    relaxation_lower_bound(law, I_targets, lengths) -> Float64
+
+Certified lower bound (m³) on the discrete catalog volume for per-group stiffness
+targets `I_targets` (m⁴) and lengths `lengths` (m):
+
+    LB = Σ_g catalog_lower_envelope(law, I_targets[g]) · lengths[g].
+
+Each term lower-bounds the lightest feasible catalog section for its group (see
+[`catalog_lower_envelope`](@ref)), so the sum bounds the catalog optimum from
+below — the left inequality of `obj(continuous*) ≤ obj(catalog*) ≤ obj(detailed*)`.
+A design whose volume is within ε of this bound is provably within ε of the global
+catalog optimum, without enumerating the catalog.
+"""
+function relaxation_lower_bound(law::SectionScalingLaw, I_targets::AbstractVector{<:Real},
+                                lengths::AbstractVector{<:Real})
+    length(I_targets) == length(lengths) || throw(ArgumentError(
+        "relaxation_lower_bound: I_targets and lengths must have equal length; got " *
+        "$(length(I_targets)) and $(length(lengths))."))
+    all(>(0), lengths) || throw(ArgumentError("relaxation_lower_bound: all lengths must be > 0."))
+    lb = 0.0
+    for (t, L) in zip(I_targets, lengths)
+        lb += catalog_lower_envelope(law, t) * float(L)
+    end
+    return lb
+end
+
+"""
+    optimality_gap(discrete_objective, lower_bound) -> Float64
+
+Relative optimality gap `(discrete_objective − lower_bound) / lower_bound ≥ 0` of a
+discrete design against a certified `relaxation_lower_bound`. Zero means the design
+sits on the continuous bound (globally optimal to within the relaxation); a small
+positive value certifies near-optimality without enumerating the catalog.
+"""
+function optimality_gap(discrete_objective::Real, lower_bound::Real)
+    lower_bound > 0 || throw(ArgumentError("optimality_gap: lower_bound must be > 0; got $lower_bound."))
+    return (float(discrete_objective) - float(lower_bound)) / float(lower_bound)
 end

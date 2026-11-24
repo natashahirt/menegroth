@@ -64,13 +64,26 @@ solve(; mip_start = nothing, feasible = nothing) = optimize_discrete(
     objective = MinVolume(), mip_start = mip_start, feasible = feasible,
     time_limit_sec = 60.0)
 
-# ─── Warm up (precompile the solver path) ─────────────────────────────────────
-# Use a DIFFERENT-SIZED sub-problem so the warmup cannot populate the memo key of
-# any timed solve below (the MIP memoizes on its argument tuple). Each of the three
-# timed configs is therefore a genuine first-time compute — a fair comparison.
-println("Warming up the MIP solver (precompile, 3-group sub-problem)…")
-_ = optimize_discrete(checker, demands[1:3], geometries[1:3], catalog, A992_Steel;
+# ─── Warm up (precompile the FULL-SIZE solver path) ──────────────────────────
+# Warm up at the SAME problem size with PERTURBED demands: same model-build code
+# path (so JIT compilation is excluded from the timings below) but a different memo
+# key (so no timed config returns a cache hit). This isolates true solve time —
+# a smaller-sized warmup would leave the full-size model build to compile inside
+# the first timed solve and badly inflate it.
+println("Warming up the MIP solver (precompile, full size, all three solver paths)…")
+let warm_demands = [MemberDemand(g; Mux = 5.0e3,
+                                 δ_max_LL = I_required[g] * 1.13 * DEFLECTION_LIMIT * Ls[g],
+                                 I_ref = 1.0) for g in 1:N_GROUPS],
+    warm_ws = relaxation_warm_start(Ix_cat, A_cat,
+                                    [Ix_sorted[r] * 1.13 for r in ranks]; k = BAND_K)
+    # Compile each code path (cold, mip_start, feasible) so none inflates its timing.
+    optimize_discrete(checker, warm_demands, geometries, catalog, A992_Steel;
                       objective = MinVolume(), time_limit_sec = 60.0)
+    optimize_discrete(checker, warm_demands, geometries, catalog, A992_Steel;
+                      objective = MinVolume(), mip_start = warm_ws.mip_start, time_limit_sec = 60.0)
+    optimize_discrete(checker, warm_demands, geometries, catalog, A992_Steel;
+                      objective = MinVolume(), feasible = warm_ws.band, time_limit_sec = 60.0)
+end
 
 # ─── 1. Cold solve (fresh) ───────────────────────────────────────────────────
 t_cold = @elapsed cold = solve()

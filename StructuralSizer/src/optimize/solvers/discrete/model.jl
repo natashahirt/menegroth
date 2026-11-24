@@ -330,6 +330,28 @@ function optimize_discrete(
     for i in 1:n_groups
         vals = [JuMP.value(x[i, j]) for j in feasible[i]]
         bestj = feasible[i][argmax(vals)]
+        # Reflection-invariant tie-break (separable case, n_max_sections == 0):
+        # when several feasible sections achieve this group's MINIMUM objective
+        # coefficient, the MIP is indifferent and the solver's branch order picks
+        # one arbitrarily — a member-index-dependent choice that, on a non-chiral
+        # plan, hands two mirror-symmetric groups different-but-equal-cost sections
+        # and seeds a chiral design (bistable split). Instead pick the LOWEST
+        # catalog index among the equal-minimum-cost feasible sections. The catalog
+        # and the feasibility screen are shared by every group, so two groups with
+        # identical demands resolve the tie to the SAME section. This never changes
+        # the total objective (equal coefficient) and the section is already
+        # feasibility-screened. Gated on n_max_sections == 0: with a unique-section
+        # budget the objective couples groups, so an equal-cost swap could violate
+        # the cap or change the optimum, and the solver's coupled choice must stand.
+        if n_max_sections == 0 && length(feasible[i]) > 1
+            best_coeff = get_objective_coeff(checker, cache, bestj)
+            for j in feasible[i]          # feasible[i] is in ascending catalog order
+                if get_objective_coeff(checker, cache, j) == best_coeff
+                    bestj = j
+                    break
+                end
+            end
+        end
         section_indices[i] = bestj
         sections[i] = catalog[bestj]
     end

@@ -401,6 +401,15 @@ end
         b.role === :girder && (b.lateral_role = :moment_frame)
     end
     @test any(b -> b.lateral_role === :moment_frame, struc.beams)
+    # Install steel W-shapes on the moment-frame members (the dual stage runs
+    # after steel member sizing in the pipeline; here we assign sections so the
+    # AISC App. 8 beam-column check has real sections to check — increment 2).
+    for c in struc.columns
+        c.base.section = W("W14X145")
+    end
+    for b in struc.beams
+        b.role === :girder && (b.base.section = W("W24X84"))
+    end
     # The Asap model must be processed first.
     @test_throws ArgumentError design_dual_system!(struc, dual)
 
@@ -413,7 +422,14 @@ end
     @test length(result.pdelta_multipliers) == length(result.drift)
     @test isfinite(result.max_story_stability) && result.max_story_stability ≥ 0.0
     @test haskey(struc.stage_diagnostics, :dual)
-    @test length(result.pending) == 3
+    @test length(result.pending) == 2
+    # Increment (2): steel frame members checked as AISC App. 8 beam-columns.
+    @test result.frame_members isa Vector{StructuralSynthesizer.FrameMemberCheck}
+    @test !isempty(result.frame_members)
+    @test all(c -> c isa StructuralSynthesizer.FrameMemberCheck, result.frame_members)
+    # Every checked member gets a finite governing demand/capacity ratio.
+    @test all(c -> isfinite(c.governing_ratio), result.frame_members)
+    @test occursin("AISC App. 8", struc.stage_diagnostics[:dual])
 end
 
 @testset "Ordinary wall stage" begin

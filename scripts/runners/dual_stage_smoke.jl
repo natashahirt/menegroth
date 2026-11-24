@@ -141,6 +141,15 @@ function main()
     for b in struc.beams
         b.role === :girder && (b.lateral_role = :moment_frame)
     end
+    # Assign steel W-shapes to the moment-frame members (the dual stage normally
+    # runs after steel member sizing; here we install sections so the AISC
+    # beam-column check has real sections to check).
+    for c in struc.columns
+        c.base.section = W("W14X145")
+    end
+    for b in struc.beams
+        b.role === :girder && (b.base.section = W("W24X84"))
+    end
     dual = DesignParameters(
         lateral=LateralDesign(; system=DualSystem(; moment_frame=:steel_smf, wall=:special_rc),
                               assignment=BuildingUnit()),
@@ -157,6 +166,14 @@ function main()
             " pdelta_multipliers=", length(result.pdelta_multipliers))
     println("max_story_stability θ=", result.max_story_stability)
     println("pending=", result.pending)
+    println("=== frame_members (AISC App. 8 B1/B2) ===")
+    println("checked=", length(result.frame_members),
+            " failing=", count(c -> !c.passed, result.frame_members))
+    for c in result.frame_members
+        println("  ", c.kind, " #", c.index, " passed=", c.passed,
+                " ratio=", round(c.governing_ratio; digits=3),
+                " check=", c.governing_check, " @ ", c.case_label)
+    end
     println("stage_diagnostics[:dual]=", get(struc.stage_diagnostics, :dual, "<none>"))
     println("SMOKE OK")
 end

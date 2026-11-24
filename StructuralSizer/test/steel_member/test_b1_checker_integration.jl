@@ -220,6 +220,29 @@ println("Testing B1 Moment Amplification in AISCChecker...")
               StructuralSizer.is_feasible(checker, cache, 1, section, material,
                                           dem2, geometry)
     end
+
+    @testset "B2 flows into explain_feasibility (governing ratio)" begin
+        # explain_feasibility now mirrors is_feasible's Appendix 8 B1/B2 path when
+        # a `story` is supplied, so the reported governing ratio tracks the sway
+        # amplification and matches the is_feasible pass/fail verdict.
+        sway = StoryStability(; ΣPu = 2000.0, V = 50.0, Δ = 0.36, L = 144.0, Pmf = 2000.0)
+        braced_story = StoryStability(; ΣPu = 2000.0, V = 50.0, Δ = 0.001, L = 144.0)
+        dem = MemberDemand(1; Pu_c = 150.0e3, Mux = 5.0e3, M1x = 0.0, M2x = 5.0e3,
+                           lt = LateralTranslation(; M2ltx = 40.0e3))
+        e_nostory = StructuralSizer.explain_feasibility(checker, cache, 1, section,
+                                                        material, dem, geometry)
+        e_sway = StructuralSizer.explain_feasibility(checker, cache, 1, section,
+                                                     material, dem, geometry; story = sway)
+        e_braced = StructuralSizer.explain_feasibility(checker, cache, 1, section,
+                                                       material, dem, geometry; story = braced_story)
+        # Sway amplifies Mlt (Eq. A-8-1) → governing ratio not below the no-story one.
+        @test e_sway.governing_ratio >= e_nostory.governing_ratio - 1e-9
+        # Braced (non-sway) story is the no-op path: identical to no story.
+        @test e_braced.governing_ratio ≈ e_nostory.governing_ratio
+        # explain.passed tracks the is_feasible verdict under the same story.
+        @test e_sway.passed == StructuralSizer.is_feasible(checker, cache, 1, section,
+                                                           material, dem, geometry; story = sway)
+    end
 end
 
 println("\n✅ B1 integration tests completed!")

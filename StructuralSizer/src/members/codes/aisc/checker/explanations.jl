@@ -3,11 +3,18 @@
 # ==============================================================================
 
 """
-    explain_feasibility(checker::AISCChecker, cache, j, section, material, demand, geometry)
+    explain_feasibility(checker::AISCChecker, cache, j, section, material, demand, geometry;
+                        story=nothing)
 
 Evaluate ALL AISC 360-16 checks without short-circuiting and return per-check
 demand/capacity ratios. Mirrors the logic of `is_feasible` exactly but collects
 every intermediate result.
+
+The optional `story` (a `StoryStability`) feeds the AISC 360-16 Appendix 8
+story amplifier `B2` (Eq. A-8-6) through the same `_aisc_amplified_forces`
+core `is_feasible` uses, so the reported governing ratio matches the
+second-order feasibility verdict. With `story === nothing` (and no
+`demand.lt`) only `B1` is applied, byte-identical to the legacy trace.
 
 Used post-solve by the trace system to explain section selection and rejection.
 """
@@ -18,7 +25,8 @@ function explain_feasibility(
     section::AbstractSection,
     material::StructuralSteel,
     demand::MemberDemand,
-    geometry::SteelMemberGeometry
+    geometry::SteelMemberGeometry;
+    story = nothing,  # Union{Nothing,StoryStability}; untyped (defined in shared/).
 )::FeasibilityExplanation
     if section isa ISymmSection
         if demand.composite isa PerStationComposite
@@ -79,12 +87,16 @@ function explain_feasibility(
     ϕPn_z = _get_ϕPn_cached!(cache, :torsional, j, Lc_y, section, material)
     ϕPnc = min(ϕPn_x, ϕPn_y, ϕPn_z)
 
-    # --- B1 Moment Amplification — AISC Appendix 8 ---
-    # AISC 360-16 Appendix 8 Eqs. A-8-1 / A-8-3 — corpus: aisc-360-16, pages 305–306.
+    # --- B1/B2 Moment Amplification — AISC Appendix 8 (shared core) ---
+    # AISC 360-16 Appendix 8 Eqs. A-8-1/A-8-2/A-8-3 — corpus: aisc-360-16, pages 305–306.
+    # Mirrors `is_feasible`: `Mr = B1·Mnt + B2·Mlt` (Eq. A-8-1), `Pr = Pnt + B2·Plt`
+    # (Eq. A-8-2) via `_aisc_amplified_forces`. `demand.lt` supplies Mlt/Plt and
+    # `story` supplies B2; absent both, B2 = 1 and only B1 is applied.
     Mux_neg = to_newton_meters(demand.Mux_neg)
     Mux_amp = Mux
     Muy_amp = Muy
     Mux_neg_amp = Mux_neg
+    Pr_c = Pu_c  # second-order required compression (Eq. A-8-2); = Pu_c with no sway
     b1_feasible = true
 
     if Pu_c > 0.0
@@ -97,22 +109,30 @@ function explain_feasibility(
         if Lc1_x > 0 && Lc1_y > 0
             Pe1_x = π^2 * E * Ix_j / Lc1_x^2
             Pe1_y = π^2 * E * Iy_j / Lc1_y^2
-            Cm_x = compute_Cm(M1x, M2x; transverse_loading=demand.transverse_load)
-            Cm_y = compute_Cm(M1y, M2y; transverse_loading=demand.transverse_load)
-            B1_x = compute_B1(Pu_c, Pe1_x, Cm_x; α=1.0)
-            B1_y = compute_B1(Pu_c, Pe1_y, Cm_y; α=1.0)
-            b1_feasible = !isinf(B1_x) && !isinf(B1_y)
+
+            lt = demand.lt
+            Plt = lt === nothing ? 0.0 : to_newtons(lt.Plt)
+            Mltx_env = lt === nothing ? 0.0 :
+                max(abs(to_newton_meters(lt.M1ltx)), abs(to_newton_meters(lt.M2ltx)))
+            Mlty_env = lt === nothing ? 0.0 :
+                max(abs(to_newton_meters(lt.M1lty)), abs(to_newton_meters(lt.M2lty)))
+
+            design = _aisc_amplified_forces(Pu_c, Mux, Muy, M1x, M2x, M1y, M2y,
+                                            demand.transverse_load, Plt, Mltx_env, Mlty_env,
+                                            story, Pe1_x, Pe1_y; α=1.0)
+            b1_feasible = isfinite(design.B1x) && isfinite(design.B1y)
             if b1_feasible
-                Mux_amp = B1_x * Mux
-                Muy_amp = B1_y * Muy
-                Mux_neg_amp = B1_x * Mux_neg
+                Mux_amp = design.Mrx              # Eq. A-8-1: B1x·Mux + B2·Mltx
+                Muy_amp = design.Mry              # Eq. A-8-1: B1y·Muy + B2·Mlty
+                Mux_neg_amp = amplify_moments(Mux_neg, Mltx_env, design.B1x, design.B2)
+                Pr_c = design.Pr                  # Eq. A-8-2: Pnt + B2·Plt
             end
         else
             b1_feasible = false
         end
     end
 
-    # Report B1 amplification as a check (Pu/Pe ratio indicates stability)
+    # Report the B1/B2 amplification as a check (Pu/Pe ratio indicates stability).
     if Pu_c > 0.0 && Lc_x > 0
         Pe1_approx = ϕPnc > 0 ? Pu_c / ϕPnc : Inf
         push!(checks, CheckResult("b1_amplification", b1_feasible,
@@ -138,13 +158,14 @@ function explain_feasibility(
     # AISC 360-16 §H1.1 Eqs. H1-1a/H1-1b — corpus: aisc-360-16, page 133.
     # Hogging Mr = B1·Mux_neg (App. 8) — corpus: aisc-360-16, pages 305–306.
     ϕPn_t = cache.ϕPn_tension[j]
-    urs = _h1_pm_utilizations(Pu_c, Pu_t, Mux, Mux_neg, Muy,
+    # Compression uses the second-order Pr (Eq. A-8-2); mirrors `is_feasible`.
+    urs = _h1_pm_utilizations(Pr_c, Pu_t, Mux, Mux_neg, Muy,
                               ϕPnc, ϕPn_t, ϕMnx, ϕMn_neg, ϕMny;
                               Mux_amp=Mux_amp, Muy_amp=Muy_amp,
                               Mux_neg_amp=Mux_neg_amp)
     ur_c = b1_feasible ? urs.ur_c : Inf
     push!(checks, CheckResult("pm_interaction_compression", ur_c <= 1.0,
-          ur_c, max(Pu_c, Mux_amp, Muy_amp), 1.0, "AISC 360-16 H1"))
+          ur_c, max(Pr_c, Mux_amp, Muy_amp), 1.0, "AISC 360-16 H1"))
     push!(checks, CheckResult("pm_interaction_tension", urs.ur_t <= 1.0,
           urs.ur_t, max(Pu_t, Mux, Muy), 1.0, "AISC 360-16 H1"))
     # §H1.2 (page 134): tension with the hogging face. First-order Mr, Mcx = ϕMn_neg.

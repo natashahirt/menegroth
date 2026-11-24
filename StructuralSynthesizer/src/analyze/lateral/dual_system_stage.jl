@@ -23,6 +23,8 @@ struct DualSystemResult
     pdelta_multipliers::Vector{Float64}
     "Moment-frame member designation (indices into struc.beams / struc.columns)."
     moment_frame::@NamedTuple{beams::Vector{Int}, columns::Vector{Int}, source::Symbol}
+    "Steel frame-member strength checks (AISC 360-16 App. 8 B1/B2) under the combined-system seismic demands; one entry per checked steel member."
+    frame_members::Vector{FrameMemberCheck}
     "Table 12.2-1 dual row used on the X plan axis."
     row_x::Symbol
     "Table 12.2-1 dual row used on the Y plan axis."
@@ -139,20 +141,27 @@ function design_dual_system!(struc::BuildingStructure, params::DesignParameters;
         plan_axis=axis, flexible_accidental_torsion=inputs.flexible_accidental_torsion)
 
     orthogonal = inputs.orthogonal_combination
-    effects = seismic_effect_cases(elf; orthogonal)   # built for the pending checks
+    effects = seismic_effect_cases(elf; orthogonal)
     drift, pdelta_multipliers = _story_drift_with_pdelta(elf;
         risk_category=inputs.risk_category, system=inputs.drift_system, orthogonal)
     θmax = _max_drift_theta(elf)
 
+    # Increment (2): steel frame-member strength under the combined-system seismic
+    # demands with AISC 360-16 Appendix 8 B1/B2 amplification (deci-93f9b5ce).
+    frame_members, skipped = dual_frame_member_checks(struc, basic, wind, elf, effects, inputs, mf)
+    failed = count(c -> !c.passed, frame_members)
+
     pending = [
         "§12.2.5.1 25% story-shear-share proxy (per-story frame/wall split)",
-        "frame-member strength with B1/B2 second-order demands (steel/RC)",
         "separate frame-only capability gate at 25% of the design base shear",
     ]
+    frame_note = "Steel frame-member strength (AISC App. 8 B1/B2): " *
+        "$(length(frame_members)) checked, $failed failing" *
+        (skipped > 0 ? ", $skipped non-steel member(s) skipped (RC path pending)" : "") * "."
     struc.stage_diagnostics[:dual] =
         "Dual-system analysis backbone ran (drift + θ + moment-frame designation). " *
-        "Pending dual-specific checks: " * join(pending, "; ") * "."
+        frame_note * " Pending dual-specific checks: " * join(pending, "; ") * "."
 
-    return DualSystemResult(drift, θmax, pdelta_multipliers, mf,
+    return DualSystemResult(drift, θmax, pdelta_multipliers, mf, frame_members,
                             table_12_2_1_row(sx), table_12_2_1_row(sy), pending)
 end

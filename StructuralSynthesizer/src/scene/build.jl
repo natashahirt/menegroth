@@ -28,9 +28,19 @@ since a linkless re-solve of its master nodes is singular.)
 for a hand-built model that carries `model.shell_elements` — the bare path
 otherwise draws only frame centerlines. Off by default so the design-pipeline
 scene builders (which add shells themselves) and existing callers are unchanged.
+
+`include_member_solids` (default `false`) extrudes a solid per frame element so
+sized columns/beams are drawn as volumes rather than centerlines. A hand-built
+model carries only an abstract `Asap.Section` (A, Iₓ, …) with no cross-section
+shape, so each member is drawn as an **Iₓ-equivalent square** (side
+`(12·Iₓ)^{1/4}`, i.e. a solid square with the member's bending inertia) — the
+drawn depth then scales directly with the sizing variable. The design-pipeline
+builder (`_with_member_solids`) uses the real catalog profile instead, so this
+is off by default. Emits `member_solid_position`/`_faces`/`_element`.
 """
 function build_scene(model::Asap.Model; stages = SCENE_STAGES, stations::Int = 9,
-                     resolve::Bool = true, include_shells::Bool = false)
+                     resolve::Bool = true, include_shells::Bool = false,
+                     include_member_solids::Bool = false)
     stage_list = Symbol[Symbol(s) for s in stages]
     for s in stage_list
         s in SCENE_STAGES || error(
@@ -89,11 +99,25 @@ function build_scene(model::Asap.Model; stages = SCENE_STAGES, stations::Int = 9
         end
     end
 
+    # Extrude a solid per frame element (Iₓ-equivalent square) so sized members
+    # read as volumes. Opt-in; the design path extrudes real profiles instead.
+    n_member_tri = 0
+    if include_member_solids && !isempty(elements)
+        mpos, mfaces, mowner = _bare_member_solids(elements, origin)
+        if !isempty(mowner)
+            push!(buffers, SceneBuffer("member_solid_position", mpos))
+            push!(buffers, SceneBuffer("member_solid_faces", mfaces))
+            push!(buffers, SceneBuffer("member_solid_element", mowner))
+            n_member_tri = length(mowner)
+        end
+    end
+
     meta = Dict{String, Any}(
         "counts" => Dict{String, Any}(
             "nodes" => length(nodes),
             "elements" => length(elements),
             "shell_triangles" => n_shell_tri,
+            "member_solid_triangles" => n_member_tri,
             "stations" => need_solved ? stations : 0,
         ),
         "stations" => need_solved ? stations : 0,
@@ -646,6 +670,43 @@ function _with_building_buffers(packet::ScenePacket, model::Asap.Model, struc::B
     end
     meta["counts"] = counts
     return ScenePacket(packet.stages, packet.origin, meta, vcat(packet.buffers, extra))
+end
+
+"""
+Extrude a solid per frame element of a hand-built model. The abstract
+`Asap.Section` has no cross-section shape, so each member is drawn as a square
+with the member's bending inertia Iₓ (side `(12·Iₓ)^{1/4}`); the drawn depth then
+tracks the sizing variable. Returns `(positions, faces, owner)` in the design
+path's convention: `faces` 0-based into `positions` (xyz triples, origin-shifted
+metres) and `owner` the 0-based element index per triangle. Reuses
+`_build_frame_element_mesh` so the geometry matches the catalog-profile path.
+"""
+function _bare_member_solids(elements, origin)
+    pos = Float32[]
+    faces = UInt32[]
+    owner = UInt32[]
+    for (e, elem) in enumerate(elements)
+        Ix = ustrip(u"m^4", elem.section.Ix)
+        s = (12 * Ix)^0.25                       # square side with inertia Ix
+        s < SCENE_MIN_LENGTH && continue
+        h = s / 2
+        poly = [[-h, -h], [h, -h], [h, h], [-h, h]]
+        a = elem.nodeStart.position
+        b = elem.nodeEnd.position
+        p1 = [ustrip(u"m", a[i]) - origin[i] for i in 1:3]
+        p2 = [ustrip(u"m", b[i]) - origin[i] for i in 1:3]
+        verts, tris = _build_frame_element_mesh(poly, p1, p2, 0.0)
+        isempty(tris) && continue
+        base = length(pos) ÷ 3
+        for v in verts
+            push!(pos, Float32(v[1]), Float32(v[2]), Float32(v[3]))
+        end
+        for t in tris
+            push!(faces, UInt32(base + t[1] - 1), UInt32(base + t[2] - 1), UInt32(base + t[3] - 1))
+            push!(owner, UInt32(e - 1))
+        end
+    end
+    return pos, faces, owner
 end
 
 """

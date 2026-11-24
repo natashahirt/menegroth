@@ -119,6 +119,17 @@ add_wall!(1, 2, 2, 2)   # north
 add_wall!(1, 1, 1, 2)   # west
 add_wall!(2, 1, 2, 2)   # east
 
+# Floor slabs, one :slab panel (2 triangles) per bay per level. Membrane-only and
+# thin: no out-of-plane/plate stiffness, so they add no gravity coupling and are
+# redundant with the rigid diaphragm already tying the floor — a pure
+# visualization overlay the scene draws via include_shells.
+for iz in 1:NZ, iy in 0:(NB - 1), ix in 0:(NB - 1)
+    n1 = node(ix, iy, iz); n2 = node(ix + 1, iy, iz)
+    n3 = node(ix + 1, iy + 1, iz); n4 = node(ix, iy + 1, iz)
+    push!(shells, Asap.ShellTri3((n1, n2, n3), 0.20u"m", Ec, νc; id = :slab, ρ = ρc, membrane_only = true))
+    push!(shells, Asap.ShellTri3((n1, n3, n4), 0.20u"m", Ec, νc; id = :slab, ρ = ρc, membrane_only = true))
+end
+
 # ----------------------------------------------------------------------------
 # Loads: gravity (always) + a swappable lateral case. model.loads is mutated.
 # ----------------------------------------------------------------------------
@@ -179,7 +190,7 @@ end
 
 sized = findall(is_sized)
 nsz = length(sized)
-@printf("Tower: %d stories | %d nodes | %d frame elems (%d sized MF) | %d wall shells | %d diaphragm links\n",
+@printf("Tower: %d stories | %d nodes | %d frame elems (%d sized MF) | %d shells (walls+slabs) | %d diaphragm links\n",
         NZ, length(nodes), length(elements), nsz, length(shells), length(links))
 
 # ----------------------------------------------------------------------------
@@ -278,7 +289,8 @@ mkpath(OUTDIR)
 for (name, lateral) in (("seismic", seis), ("wind", wind))
     set_case!(lateral); Asap.solve!(model, links)   # fills node.displacement
     out = joinpath(OUTDIR, "dual_rc_core_$(name).mgscene")
-    packet = export_scene(out, model; resolve = false, include_shells = true)
+    packet = export_scene(out, model; resolve = false, include_shells = true,
+                          include_member_solids = true)
     @printf("wrote %s  (nodes %d, elems %d, shell tris %d, max disp %.3f m)\n",
             out, packet.meta["counts"]["nodes"], packet.meta["counts"]["elements"],
             packet.meta["counts"]["shell_triangles"], packet.meta["max_displacement"])

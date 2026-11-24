@@ -624,6 +624,31 @@ end
     @test scene_u32(read_scene(io), "shell_faces") == scene_u32(on, "shell_faces")
 end
 
+@testset "include_member_solids extrudes sized members on the bare path" begin
+    model = _wall_and_column()
+    off = build_scene(model)
+    @test !any(b -> b.name == "member_solid_position", off.buffers)
+
+    on = build_scene(model; include_member_solids = true)
+    owner = scene_u32(on, "member_solid_element")
+    @test !isempty(owner)
+    @test all(owner .== 0x00000000)                       # the model's one frame element
+    @test length(scene_u32(on, "member_solid_faces")) == 3 * length(owner)
+    @test on.meta["counts"]["member_solid_triangles"] == length(owner)
+
+    # A stiffer member draws a deeper solid (side ∝ Iₓ^{1/4}).
+    span(p) = (x = scene_f32(p, "member_solid_position");
+               maximum(x[1:3:end]) - minimum(x[1:3:end]))
+    big = _wall_and_column()
+    big.frame_elements[1].section = Asap.Section(4.0e-3u"m^2", 200e9u"Pa", 77e9u"Pa",
+        1.0e-3u"m^4", 1.0e-3u"m^4", 8.0e-7u"m^4", 7850.0u"kg/m^3")
+    @test span(build_scene(big; include_member_solids = true)) >
+          span(build_scene(model; include_member_solids = true))
+
+    io = IOBuffer(); write_scene(io, on); seekstart(io)
+    @test scene_u32(read_scene(io), "member_solid_faces") == scene_u32(on, "member_solid_faces")
+end
+
 @testset "resolve=false draws the caller's own solution" begin
     model = _cantilever()
     build_scene(model)                               # solves + fills node.displacement

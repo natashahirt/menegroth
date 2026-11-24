@@ -40,6 +40,12 @@ C deepens **O5** (efficient → compute allocated by information value). None
 weakens **O1** (safety): the relaxation never ships a design — it only *guides*,
 and every reported design still passes the independent full-fidelity verifier.
 
+This layer is additive in capability but **subtractive in code**: each work
+package *retires* the grow-only ratchet, envelope, or stand-in it supersedes, so
+net complexity falls rather than grows (§10). The intent is to leave the sizing
+pipeline simpler and more auditable than it is today, not to pile a second
+control scheme on top of the first.
+
 ## 1. One-sentence reframe
 
 Size by solving a cheap **continuous relaxation globally** to settle the
@@ -52,7 +58,7 @@ parameter.
 The current pipeline is the degenerate case of this: one objective, one
 resolution (catalog), one fidelity, a fixed stage order, grow-only.
 
-## 2. The three axes, made independent
+## 2. The four axes, made independent
 
 The pipeline today entangles four things. Separating them is the refactor that
 makes every goal a dial rather than a feature.
@@ -355,7 +361,48 @@ Smallest end-to-end validation, on a path the pipeline already supports:
 If that holds, it validates Pillars A and C.3 on a supported path before taking
 on the steel-LFRS wiring or the heavy-FEA scheduler.
 
-## 10. API surface: every toggle reachable from the request
+## 10. Leave it better than we found it
+
+Because this layer is additive in capability, the standing risk is that it
+*accretes* — new control alongside the old. The discipline that prevents that:
+**every WP retires the mechanism it supersedes, in the same change, with a test
+that the old path is gone.** A pillar WP is not done while a decision is still
+reachable by two routes. This makes concrete `architecture.md` §9 ("retire the
+old grow-only paths") and plan.md 6.5.
+
+What each pillar retires (anchored to the README tables):
+
+| Lands | Retires | README anchor |
+|---|---|---|
+| A — bound-anchored, shrinkable owners | the column seed + seven grow-only column writers; stacking/harmonize independent-max; section-floor masks | §4 ranks 1, 3, 5, 9, 10; O3 |
+| A — projection candidate band | cold multi-pass discrete settle (beam⇄column toward one pass) | §5 #3 |
+| B — one vector objective functional | gross-section RC objectives and per-element-type carbon branches (half-wired objective) | §4 rank 11 |
+| C — global F0 coupling solve | staleness from the fixed stage order (no outer loop) | §4 ranks 3, 6 |
+| C — surrogates | per-column-step FEA remesh | §5 #4 |
+
+Rules that keep the subtraction real:
+
+- **Single source of truth per decision.** The verifier stays the only trust
+  anchor; no decision may be reachable by both a legacy and a new path.
+- **Migration flags are temporary; user toggles are permanent.** A *migration*
+  flag (e.g. `relaxation_seed`, §11) defaults to today's behaviour only until the
+  pillar is proven on the benchmarks, then the default flips and the legacy
+  branch is deleted — it must not linger as dead weight. A *user* toggle
+  (`objective_terms`, `fidelity`) is a permanent option and stays.
+- **Keep the map honest.** Per README §8, any WP that removes or alters a loop
+  updates the matching raw report and the README §4/§5 tables in the same
+  change; the Workstream-T coverage test fails if a retired node still appears.
+- **Leave no scaffolding.** Probe/debug runners written while proving a slice
+  (the `sdf_*`, `column_oversize_*` scratch runners now dirtying the tree are the
+  cautionary example) are deleted or given a permanent home under
+  `scripts/runners/` when the slice lands — they do not accumulate.
+
+**Repo-wide acceptance.** After each pillar lands, the README §4 size-impact
+rows and §5 hot-spot rows it targeted are struck or downgraded, with benchmark
+deltas showing it. The measure of success is fewer rows in those tables, not
+more code.
+
+## 11. API surface: every toggle reachable from the request
 
 A toggle nobody can set is dead. Every knob these three pillars introduce must
 be a first-class field on `DesignParameters` (`design/parameters.jl`) and travel
@@ -414,7 +461,7 @@ change.
 | API.1 | Thread A/C toggles + `objective_terms` through all five chain stages; fail-loud enums; `/schema` publishes them; chat allow-list updated | Each toggle settable via `/design` JSON and visible in `/schema`; flag-off runs byte-identical on B1–B7 |
 | API.2 | `pareto_sweep` response-shape extension (`front` block) + multi-design result | A 2-objective sweep returns N gap-certified designs over REST |
 
-## 11. Open questions / sign-offs
+## 12. Open questions / sign-offs
 
 - **Multi-λ update** stability and the exact dual scheme for several
   simultaneously-active constraints (drift per story + wind + strength).

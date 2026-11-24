@@ -660,30 +660,6 @@ function _mixed_beams(struc, states, beam_passed, beam_opts)
     return out
 end
 
-# DEBUG (chirality confirmation, revert): beam indices of the four e0c0 hub
-# girders, labelled by their far corner, for per-cycle-state section tracing.
-function _trace_hub_girders(struc)
-    skel = struc.skeleton
-    hub = (12.0, 10.0)
-    far = ("NE" => (18.0, 15.0), "NW" => (6.0, 15.0),
-           "SE" => (18.0, 5.0), "SW" => (6.0, 5.0))
-    near(p, q) = hypot(p[1] - q[1], p[2] - q[2]) <= 1e-3
-    out = Tuple{String, Int}[]
-    for (lab, f) in far
-        for (bi, b) in enumerate(struc.beams)
-            edges = [struc.segments[si].edge_idx for si in segment_indices(b)]
-            isempty(edges) && continue
-            vs = _ordered_chain_vertices(skel, edges)
-            (isempty(vs) || length(vs) < 2) && continue
-            p = _vertex_xy_m(skel, vs[1]); q = _vertex_xy_m(skel, vs[end])
-            if (near(p, hub) && near(q, f)) || (near(q, hub) && near(p, f))
-                push!(out, (lab, bi)); break
-            end
-        end
-    end
-    return out
-end
-
 """
     _check_shell_settle!(run, states, service_on, regions, pass, service_converged)
 
@@ -722,14 +698,6 @@ function _check_shell_settle!(run, states, service_on, regions, pass, service_co
         trace && println("  shell state $k  cost=$(round(costs[end]; digits=1))  " *
                          "beams $(count(values(report.passed)))/$(length(report.passed))  " *
                          "regions=$(regions_ok)  service=$(fresh.service_converged)")
-        # DEBUG (chirality confirmation, revert): per-state hub-girder sections.
-        if trace
-            for (lab, bi) in _trace_hub_girders(struc)
-                sec = state[bi]
-                nm = sec === nothing ? "(none)" : (try; string(sec.name); catch; string(sec); end)
-                println("      hub $lab  ", nm)
-            end
-        end
     end
     function accept_state(k)
         fresh = solved[k]

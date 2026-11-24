@@ -174,6 +174,53 @@ General across element types — the orbit / class machinery is element-agnostic
 
 ## 7. Validation
 
+### 7.0 Automorphism-proposer corpus scan (done)
+
+`scripts/runners/plan_symmetry_scan.jl` prototypes the geometric proposer
+read-only (no analysis, no sizing): for every SDF plan it computes the finite
+isometry automorphism group of the labeled framing graph (vertices + beam lines
++ column nodes) and the resulting beam-line orbits. Full corpus (164 plans,
+`grid`/`nova`/`special`/`star`/`topology`), runs in seconds including the
+985-node / 2136-line `s6-6_drawn`:
+
+| set       | plans | with symmetry | groups                | mean collapse |
+|-----------|-------|---------------|-----------------------|---------------|
+| grid      | 36    | 36            | D2:36                 | 3.45×         |
+| nova      | 36    | 36            | D2:36                 | 3.90×         |
+| special   | 19    | 12            | D2:12, C1:7           | 2.61×         |
+| star      | 37    | 37            | D2:37                 | 3.65×         |
+| topology  | 36    | 36            | D2:34, D1:2           | 3.47×         |
+| **total** | 164   | **157 (96%)** | —                     | **~3.5×**     |
+
+Findings:
+
+- **96% of plans carry exploitable symmetry**, with a ~3.5× mean reduction in
+  distinct beam-sizing problems (orbits vs lines) — this is the speed-win proxy.
+- **Max group is D2** (order 4: two mirrors + rot180). No `C4`/`D4` appears
+  because the footprints are rectangular (non-square), so 90° rotation is not a
+  symmetry. The `C2`/`C4` non-axial cases in `architecture.md` §7 are latent, not
+  present in this corpus.
+- **`star/e0c0` resolves to D2** including its column set — confirming the
+  observed converged chirality is a genuine symmetry *break* (path-dependence),
+  not an inherent geometric asymmetry. This is the premise the whole policy rests
+  on.
+- **The 7 asymmetric (`C1`) plans are all the named real-world layouts**
+  (`school`, `weber_1*`, `tan_121_seaport`, `topopt_test2`); the proposer
+  correctly finds no symmetry and the policy must fall back to per-member sizing
+  there (the no-op guarantee).
+- **`topology/r8c1`, `r8c3` are only `D1`** (a single mirror, collapse ~1.9×) —
+  useful weird cases that exercise partial symmetry.
+
+Implementation notes for the production detector (ported from the prototype):
+seed candidate isometries from the farthest-vertex orbit (O(n) rotations +
+reflections), verify each by vertex bijection **and** label (line + column)
+preservation, and **normalize signed zero in the match key** — Julia's `Dict`
+treats `-0.0` and `0.0` as distinct (`isequal(-0.0, 0.0) === false`), so a mirror
+that lands a centerline vertex on `-0.0` silently fails the lookup (this bug hid
+every real symmetry until fixed).
+
+### 7.1 Remaining validation
+
 - **Path-independence / symmetry:** symmetric plans produce orbit-identical
   sections; `star/e0c0` chirality is gone; `grid` and `rhombus` unchanged or
   improved.

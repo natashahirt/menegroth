@@ -109,8 +109,9 @@ optimality-criteria resizing, catalog snapping, and re-solving. `model` is a
 solved-capable Asap model.
 
 Keyword arguments:
-- `sized_elements` — indices (into `model.elements`) of members to size
-  (default: all). Members outside this set are treated as fixed background.
+- `sized_elements` — indices (into the model's frame elements: `model.elements`
+  for a `FrameModel`, `model.frame_elements` for a unified `Model`) of members to
+  size (default: all). Members outside this set are treated as fixed background.
 - `weight`   — marginal weight-per-stiffness per sized member (length matches
   `sized_elements`).
 - `floor_I`  — a hard strength-floor stiffness per sized member (absolute lower
@@ -144,7 +145,7 @@ stops when both are satisfied. The optional accelerator only pre-floors against
 does not change the design the loop converges to.
 """
 function resize_for_drift!(model, constraints::AbstractVector{DriftConstraint};
-                           sized_elements::AbstractVector{<:Integer} = collect(1:length(model.elements)),
+                           sized_elements::AbstractVector{<:Integer} = collect(1:length(Asap._frame_elements(model))),
                            weight::AbstractVector{<:Real},
                            floor_I::AbstractVector{<:Real},
                            floor_I_fn::Union{Nothing,Function} = nothing,
@@ -158,6 +159,10 @@ function resize_for_drift!(model, constraints::AbstractVector{DriftConstraint};
     m = length(constraints)
     length(weight) == ns || throw(ArgumentError("resize_for_drift!: weight must match sized_elements ($ns)."))
     length(floor_I) == ns || throw(ArgumentError("resize_for_drift!: floor_I must match sized_elements ($ns)."))
+
+    # Frame elements in participation order (model.elements for a FrameModel,
+    # model.frame_elements for a unified Model) — sized_elements index into this.
+    felems = Asap._frame_elements(model)
 
     drift_of(con) = sum(con.coeffs[i] * model.u[con.dofs[i]] for i in eachindex(con.dofs))
     # Route the solve through the reduced system when the model has a rigid
@@ -185,7 +190,7 @@ function resize_for_drift!(model, constraints::AbstractVector{DriftConstraint};
         K_save = Vector{Matrix{Float64}}(undef, ns)
         K_new = Vector{Matrix{Float64}}(undef, ns)
         @inbounds for (i, e) in enumerate(sized_elements)
-            el = model.elements[e]
+            el = felems[e]
             I_old = current_I(el)
             K_save[i] = copy(el.K)
             apply_I!(el, target[i])              # trial section
@@ -196,11 +201,11 @@ function resize_for_drift!(model, constraints::AbstractVector{DriftConstraint};
         end
         u_pred = model.u .+ Asap.linear_response(model, f; links = links)
         @inbounds for (i, e) in enumerate(sized_elements)   # el.K ← target
-            copyto!(model.elements[e].K, K_new[i])
+            copyto!(felems[e].K, K_new[i])
         end
         fl = strength_floor(u_pred)
         @inbounds for (i, e) in enumerate(sized_elements)   # el.K ← original
-            copyto!(model.elements[e].K, K_save[i])
+            copyto!(felems[e].K, K_save[i])
         end
         return fl
     end
@@ -214,7 +219,7 @@ function resize_for_drift!(model, constraints::AbstractVector{DriftConstraint};
         end
     end
 
-    sizes = Float64[current_I(model.elements[e]) for e in sized_elements]
+    sizes = Float64[current_I(felems[e]) for e in sized_elements]
     status = :max_iters
     outer_done = 0
     for outer in 1:max_outer
@@ -251,7 +256,7 @@ function resize_for_drift!(model, constraints::AbstractVector{DriftConstraint};
             break
         end
 
-        s = Float64[current_I(model.elements[e]) for e in sized_elements]
+        s = Float64[current_I(felems[e]) for e in sized_elements]
         res = drift_optimality_resize_multi(C, s, weight, floor_now, δ_eff; resize_kwargs...)
         drift_target = Float64[max(res.sizes[i], floor_now[i]) for i in 1:ns]
 
@@ -278,7 +283,7 @@ function resize_for_drift!(model, constraints::AbstractVector{DriftConstraint};
         @inbounds for i in 1:ns
             t = max(drift_target[i], floor_ref[i])
             v = catalog === nothing ? t : snap_up(t, catalog)
-            apply_I!(model.elements[sized_elements[i]], v)
+            apply_I!(felems[sized_elements[i]], v)
             sizes[i] = v
         end
         Asap.update!(model; values_only = true)

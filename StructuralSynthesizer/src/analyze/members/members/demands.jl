@@ -1314,7 +1314,54 @@ function member_group_demands(struc::BuildingStructure;
         push!(Ky_govs, par_Ky[g])
     end
 
+    # DEBUG (e0c0 chirality, ENV-gated, revert): per-call dump of the four hub
+    # girder groups' demands + installed sections, to pin the pass where the two
+    # mirror diagonals first diverge. Hub girders are found by geometry.
+    if member_type === :beams && get(ENV, "SS_TRACE_HUB_DEMANDS", "") == "1"
+        _trace_hub_demands(struc, all_group_ids, par_has, par_Mux_pos,
+                           par_Mux_neg, par_Vus)
+    end
+
     return group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs
+end
+
+const _HUB_DEMAND_CALL = Ref(0)
+
+"""DEBUG (e0c0 chirality, revert): dump hub-girder group demands + sections."""
+function _trace_hub_demands(struc, all_group_ids, par_has, par_Mux_pos,
+                            par_Mux_neg, par_Vus)
+    skel = struc.skeleton
+    hub = (12.0, 10.0)
+    far = ("NE" => (18.0, 15.0), "NW" => (6.0, 15.0),
+           "SE" => (18.0, 5.0), "SW" => (6.0, 5.0))
+    near(p, q) = hypot(p[1] - q[1], p[2] - q[2]) <= 1e-3
+    _HUB_DEMAND_CALL[] += 1
+    call = _HUB_DEMAND_CALL[]
+    for (lab, f) in far
+        bi = 0
+        for (i, b) in enumerate(struc.beams)
+            edges = [struc.segments[si].edge_idx for si in segment_indices(b)]
+            isempty(edges) && continue
+            vs = _ordered_chain_vertices(skel, edges)
+            (isempty(vs) || length(vs) < 2) && continue
+            p = _vertex_xy_m(skel, vs[1]); q = _vertex_xy_m(skel, vs[end])
+            if (near(p, hub) && near(q, f)) || (near(q, hub) && near(p, f))
+                bi = i; break
+            end
+        end
+        bi == 0 && continue
+        gi = findfirst(g -> par_has[g] &&
+            bi in struc.member_groups[all_group_ids[g]].member_indices,
+            eachindex(all_group_ids))
+        gi === nothing && continue
+        sec = _story_beam_section(struc, struc.beams[bi])
+        nm = sec === nothing ? "(none)" :
+             (hasproperty(sec, :name) ? string(sec.name) : string(sec))
+        # NB: @printf lives in the Printf stdlib, not Base; a plain println keeps
+        # this debug dump self-contained (no module-level import needed).
+        println("HUBDEMAND call=$call $lab  Mu+=$(round(par_Mux_pos[gi]; digits=3)) ",
+                "Mu-=$(round(par_Mux_neg[gi]; digits=3)) Vu=$(round(par_Vus[gi]; digits=3)) sec=$nm")
+    end
 end
 
 """

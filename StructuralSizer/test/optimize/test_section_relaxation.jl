@@ -93,6 +93,38 @@ using Unitful
         @test_throws ArgumentError fit_section_scaling_law([1.0e-4, -2.0e-4], [1.0, 2.0]) # non-positive I
     end
 
+    @testset "warm start maps sorted projection back to catalog order" begin
+        # Catalog deliberately OUT OF ORDER in I, to exercise the permutation.
+        #   catalog idx:   1      2      3      4
+        #   I (m⁴):      4e-4   1e-4   8e-4   2e-4
+        I_cat = [4.0e-4, 1.0e-4, 8.0e-4, 2.0e-4]
+        A_cat = 3.0 .* sqrt.(I_cat)
+        # Two groups: target between 1e-4 and 2e-4 ⇒ catalog idx 4 (I=2e-4);
+        #             target just above 4e-4       ⇒ catalog idx 3 (I=8e-4).
+        ws = relaxation_warm_start(I_cat, A_cat, [1.5e-4, 4.1e-4]; k = 1)
+        @test ws.mip_start == [4, 3]
+        @test I_cat[ws.mip_start[1]] ≥ 1.5e-4
+        @test I_cat[ws.mip_start[2]] ≥ 4.1e-4
+        # The projected index is always inside its own band.
+        @test ws.mip_start[1] ∈ ws.band[1]
+        @test ws.mip_start[2] ∈ ws.band[2]
+        # Band around catalog idx 4 (I=2e-4, sorted rank 2) spans sorted ranks 1..3
+        # = I ∈ {1e-4, 2e-4, 4e-4} = catalog idx {2, 4, 1}, returned sorted.
+        @test ws.band[1] == [1, 2, 4]
+        @test all(ws.gap .≥ -1e-12)
+        @test !any(ws.grown)
+    end
+
+    @testset "warm start flags targets beyond the catalog" begin
+        I_cat = [1.0e-4, 2.0e-4, 4.0e-4]
+        A_cat = 3.0 .* sqrt.(I_cat)
+        ws = relaxation_warm_start(I_cat, A_cat, [10.0]; k = 1)   # unreachable target
+        @test ws.grown == [true]
+        @test ws.mip_start == [3]                                # clamped to stiffest
+        @test_throws ArgumentError relaxation_warm_start(I_cat, A_cat, [0.0])  # non-positive target
+        @test_throws ArgumentError relaxation_warm_start(I_cat, A_cat[1:2], [1.0e-4]) # length mismatch
+    end
+
     @testset "real RC-column catalog smoke test" begin
         cat = rc_column_catalog(:rect, :standard)
         @test length(cat) ≥ 2

@@ -216,3 +216,96 @@ function projection_gap(law::SectionScalingLaw, I_target::Real, idx::Integer)
     Ac = continuous_area(law, I_target)
     return (law.A[idx] - Ac) / Ac
 end
+
+# ==============================================================================
+# Discrete warm start: continuous targets → catalog-order MIP seeds + bands
+# ==============================================================================
+#
+# `optimize_discrete` already exposes the two hooks a relaxation-guided warm start
+# needs, both byte-identical when left at `nothing`:
+#   • `mip_start` — a per-group prior catalog index, seeded onto the branch-and-
+#     bound incumbent. A pure HINT: it cannot change the feasible region or the
+#     optimum, only shorten the solve.
+#   • `feasible`  — a per-group vector of ALLOWED catalog indices, INTERSECTED with
+#     the internal capacity screening (never a substitute for it). It can only
+#     REMOVE candidates, so capacity is always still certified by the checker; it
+#     narrows the search to the band around the continuous projection.
+#
+# This routine turns R.1's continuous projection into those two parameters. It is
+# pure index arithmetic over number tables (catalog-order `I`/`A`), so it stays in
+# this pre-`sections` layer. The crucial bookkeeping: [`project_to_catalog`] and
+# [`candidate_band`] index the law's *I-sorted* table, while the MIP expects
+# *catalog-order* indices — the sort permutation maps between them here.
+
+"""
+    RelaxationWarmStart
+
+Per-group discrete warm start produced by [`relaxation_warm_start`](@ref), with
+all indices in the caller's **catalog order** (directly usable as
+`optimize_discrete`'s `mip_start` and `feasible` arguments):
+
+- `mip_start` — projected lightest-feasible catalog index per group (a MIP hint).
+- `band`      — sorted `±k` candidate catalog indices per group (a hard, capacity-
+                intersected restriction; the search space for the warm solve).
+- `gap`       — per-group projection area gap (`projection_gap`); a certificate of
+                how close the discrete pick sits to the continuous price.
+- `grown`     — `true` where the continuous target exceeded the catalog's stiffest
+                section, so the projection was clamped to the top (the catalog
+                should be grown for that group).
+"""
+struct RelaxationWarmStart
+    mip_start::Vector{Int}
+    band::Vector{Vector{Int}}
+    gap::Vector{Float64}
+    grown::Vector{Bool}
+end
+
+"""
+    relaxation_warm_start(I_catalog, A_catalog, I_targets; Z_catalog=nothing, k=1)
+        -> RelaxationWarmStart
+
+Map per-group continuous strong-axis stiffness targets `I_targets` (m⁴) onto a
+discrete warm start over a catalog given in catalog order by its second moment of
+area `I_catalog` (m⁴) and area `A_catalog` (m²). A [`SectionScalingLaw`](@ref) is
+fit on the (internally sorted) catalog; each target is projected to the lightest
+catalog section meeting it, with a clamped `±k` candidate band around it. All
+returned indices are in the original catalog order.
+
+A target above the catalog maximum is clamped to the stiffest section and flagged
+in `grown`. `k` is the band half-width (`k=0` ⇒ the single projected section).
+"""
+function relaxation_warm_start(I_catalog::AbstractVector{<:Real}, A_catalog::AbstractVector{<:Real},
+                               I_targets::AbstractVector{<:Real};
+                               Z_catalog::Union{Nothing,AbstractVector{<:Real}} = nothing,
+                               k::Integer = 1)
+    n = length(I_catalog)
+    length(A_catalog) == n || throw(ArgumentError(
+        "relaxation_warm_start: I_catalog and A_catalog must have equal length; got $n and $(length(A_catalog))."))
+    k ≥ 0 || throw(ArgumentError("relaxation_warm_start: band half-width k must be ≥ 0; got $k."))
+    all(>(0), I_targets) || throw(ArgumentError("relaxation_warm_start: all I_targets must be > 0."))
+
+    # Sort the catalog by I; `perm[li]` is the catalog-order index of sorted row `li`.
+    perm = sortperm(float.(collect(I_catalog)))
+    Is = Float64.(collect(I_catalog))[perm]
+    As = Float64.(collect(A_catalog))[perm]
+    Zs = Z_catalog === nothing ? nothing : Float64.(collect(Z_catalog))[perm]
+    law = fit_section_scaling_law(Is, As; Z = Zs)
+
+    m = length(I_targets)
+    mip_start = Vector{Int}(undef, m)
+    band = Vector{Vector{Int}}(undef, m)
+    gap = Vector{Float64}(undef, m)
+    grown = falses(m)
+    for g in 1:m
+        t = float(I_targets[g])
+        li = project_to_catalog(law, t)
+        if li === nothing            # target beyond the catalog: clamp to the stiffest
+            li = length(law.I)
+            grown[g] = true
+        end
+        mip_start[g] = perm[li]
+        band[g] = sort(perm[collect(candidate_band(law, li, k))])
+        gap[g] = projection_gap(law, t, li)
+    end
+    return RelaxationWarmStart(mip_start, band, gap, grown)
+end

@@ -137,3 +137,31 @@ function _apply_mip_start!(x, feasible::Vector{Vector{Int}}, mip_start::Vector{I
     return nothing
 end
 
+"""
+    _apply_mip_start!(x, z, feasible, mip_start, n_sections)
+
+Coupled warm start for the section-count-capped MIP (`n_max_sections > 0`): seed
+the assignment binaries `x` as above AND the section-usage binaries `z`, so the
+hint is consistent with the coupling constraints `Σ_i x[i,j] ≤ n_groups·z[j]` and
+`Σ_j z[j] ≤ n_max_sections`. `z[j]` is started at `1.0` for every section used by
+the (feasible) seeded assignments and `0.0` otherwise.
+
+This remains a pure solver hint — `set_start_value` only — so it can never add a
+constraint or change the optimum. If the seed uses more than `n_max_sections`
+distinct sections the start is infeasible and the solver simply discards it (a
+no-op), so an over-rich seed is safe; it just provides no acceleration.
+"""
+function _apply_mip_start!(x, z, feasible::Vector{Vector{Int}}, mip_start::Vector{Int},
+                           n_sections::Integer)
+    _apply_mip_start!(x, feasible, mip_start)
+    used = falses(n_sections)
+    for i in eachindex(feasible)
+        prior = mip_start[i]
+        prior in feasible[i] && (used[prior] = true)
+    end
+    for j in 1:n_sections
+        JuMP.set_start_value(z[j], used[j] ? 1.0 : 0.0)
+    end
+    return nothing
+end
+

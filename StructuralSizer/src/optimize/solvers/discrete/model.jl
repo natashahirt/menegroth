@@ -96,7 +96,10 @@ implements the `is_feasible` interface for the specific design code.
   tie-break used below), the chosen sections are identical to a cold solve. A prior
   index that is no longer feasible for its group is silently skipped (a partial
   warm start is valid). `nothing` (default) reproduces prior behavior byte-for-byte.
-  NOT applied when `n_max_sections > 0` (the coupling `z` variables are not seeded).
+  With `n_max_sections > 0` the coupling `z` (section-usage) binaries are seeded
+  consistently with the capped `x`, so the hint stays valid; it preserves the
+  optimal objective but — unlike the separable `n_max_sections == 0` case — need
+  not reproduce the exact assignment when several section sets are equally optimal.
 
 # Returns
 Named tuple: `(; section_indices, sections, status, objective_value)`
@@ -306,10 +309,14 @@ function optimize_discrete(
             for i in 1:n_groups))
 
     # Optional MIP warm start (hint only — no constraint, cannot alter the feasible
-    # region or the optimum). Skipped when n_max_sections > 0 (the `z` coupling
-    # variables are not seeded, so a partial `x` start could be inconsistent).
-    if mip_start !== nothing && n_max_sections == 0
-        _apply_mip_start!(x, feasible, mip_start)
+    # region or the optimum). With a section-count cap the coupling `z` binaries are
+    # seeded too (consistent with the capped `x`), so the start remains valid.
+    if mip_start !== nothing
+        if n_max_sections == 0
+            _apply_mip_start!(x, feasible, mip_start)
+        else
+            _apply_mip_start!(x, z, feasible, mip_start, n_sections)
+        end
     end
 
     JuMP.optimize!(m)

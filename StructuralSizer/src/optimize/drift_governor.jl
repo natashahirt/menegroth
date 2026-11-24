@@ -63,7 +63,8 @@ interstory_drift_constraint(top_dof::Integer, bottom_dof::Integer, δ_allow::Rea
 
 Outcome of [`resize_for_drift!`](@ref):
 
-- `converged` — every limit met on the re-solved discrete structure.
+- `converged` — every drift limit (and, with `floor_I_fn`, the strength floor)
+                met on the re-solved discrete structure.
 - `status`    — `:converged`, `:max_iters`, or `:background_infeasible`
                 (non-sized members alone exceed a limit).
 - `outer_iterations` — resize/re-solve passes taken.
@@ -112,20 +113,42 @@ Keyword arguments:
   (default: all). Members outside this set are treated as fixed background.
 - `weight`   — marginal weight-per-stiffness per sized member (length matches
   `sized_elements`).
-- `floor_I`  — strength-floor stiffness per sized member.
+- `floor_I`  — a hard strength-floor stiffness per sized member (absolute lower
+  bound, held across the whole loop).
+- `floor_I_fn` — optional callback `(model, u::Vector) -> Vector{Float64}`
+  (length `sized_elements`) giving the strength-governed stiffness floor at a
+  displacement `u`. Supplied, the **strength↔drift coupling** is folded into the
+  loop: the floor is recomputed each outer iteration from the just-solved
+  (exact) forces, and (with `accelerate`) *predicted* at the proposed sizes via
+  one cached-factor back-substitution so redistribution is anticipated before
+  the next re-solve. Must be a pure function of `(model, u)`. Convergence then
+  requires both drift and strength to be met.
+- `accelerate` (default `true`) — use the first-order `linear_response`
+  predictor to pre-floor against redistributed demands (no effect without
+  `floor_I_fn`). `accel_trust` (default `0.3`) is the step trust region: the
+  predictor is used only when the proposed relative stiffness change is below it,
+  since first-order prediction is unreliable for large jumps.
 - `catalog`  — discrete stiffness values to snap to, or `nothing` for continuous.
 - `current_I`, `apply_I!` — read/write the member's stiffness variable on an
   `Asap` element: `current_I(el)::Float64` and `apply_I!(el, I)`.
 - `links` — the model's rigid links for a rigid-diaphragm model (default
-  `nothing`). When given, the re-solve and the participation query both run on
-  the reduced master/slave system.
+  `nothing`). When given, the re-solve, the participation query, and the
+  predictor all run on the reduced master/slave system.
 - `max_outer` (default 10), `tol` (default 1e-2 on `drift/δ_allow`).
 - `resize_kwargs` — forwarded to `drift_optimality_resize_multi`.
+
+Each iteration sizes every member to the larger of its drift target and its
+strength floor, recomputed from the current exact solve, and re-solves; the loop
+stops when both are satisfied. The optional accelerator only pre-floors against
+*predicted* redistribution to reach that joint fixpoint in fewer iterations — it
+does not change the design the loop converges to.
 """
 function resize_for_drift!(model, constraints::AbstractVector{DriftConstraint};
                            sized_elements::AbstractVector{<:Integer} = collect(1:length(model.elements)),
                            weight::AbstractVector{<:Real},
                            floor_I::AbstractVector{<:Real},
+                           floor_I_fn::Union{Nothing,Function} = nothing,
+                           accelerate::Bool = true, accel_trust::Real = 0.3,
                            catalog::Union{Nothing,AbstractVector{<:Real}} = nothing,
                            current_I::Function, apply_I!::Function,
                            links::Union{Nothing,AbstractVector} = nothing,
@@ -140,6 +163,47 @@ function resize_for_drift!(model, constraints::AbstractVector{DriftConstraint};
     # Route the solve through the reduced system when the model has a rigid
     # diaphragm, so model.u and the cached factor match the participation query.
     dosolve!() = links === nothing ? Asap.solve!(model) : Asap.solve!(model, links)
+
+    # Strength floor at a displacement field (hard floor_I ∨ the callback).
+    strength_floor(u) = floor_I_fn === nothing ? Float64.(floor_I) :
+                        max.(Float64.(floor_I), Float64.(floor_I_fn(model, u)))
+
+    # First-order predictor (optimality accelerator): the strength floor the next
+    # re-solve will see at `target` sizes, WITHOUT a fresh factorization.
+    #   1. Δu ≈ −K⁻¹(ΔK u) from one cached-factor back-substitution, where ΔK_e
+    #      is the element stiffness delta at the trial section (Asap's
+    #      non-mutating `global_K`).
+    #   2. evaluate `floor_I_fn` at the predicted displacement AND the target
+    #      element stiffnesses, so member demands are consistent with where the
+    #      resize is going; `el.K`/`el.section` and `model.S`/the factor are all
+    #      restored, so this never perturbs the real state.
+    # The prediction only informs this iteration's target; the next exact solve
+    # corrects any first-order error, so it changes convergence speed, not the
+    # design it converges to.
+    predict_floor(target) = begin
+        f = zeros(model.nDOFs)
+        K_save = Vector{Matrix{Float64}}(undef, ns)
+        K_new = Vector{Matrix{Float64}}(undef, ns)
+        @inbounds for (i, e) in enumerate(sized_elements)
+            el = model.elements[e]
+            I_old = current_I(el)
+            K_save[i] = copy(el.K)
+            apply_I!(el, target[i])              # trial section
+            K_new[i] = Asap.global_K(el)         # target global stiffness
+            apply_I!(el, I_old)                   # restore section (el.K intact)
+            g = el.globalID
+            f[g] .-= (K_new[i] .- K_save[i]) * view(model.u, g)   # −ΔK u
+        end
+        u_pred = model.u .+ Asap.linear_response(model, f; links = links)
+        @inbounds for (i, e) in enumerate(sized_elements)   # el.K ← target
+            copyto!(model.elements[e].K, K_new[i])
+        end
+        fl = strength_floor(u_pred)
+        @inbounds for (i, e) in enumerate(sized_elements)   # el.K ← original
+            copyto!(model.elements[e].K, K_save[i])
+        end
+        return fl
+    end
 
     # One virtual-load column per constraint: V[:, j] = Σ_i coeffs[i]·e_{dofs[i]}.
     # (Built once — the DOFs and coefficients are fixed across outer iterations.)
@@ -156,9 +220,13 @@ function resize_for_drift!(model, constraints::AbstractVector{DriftConstraint};
     for outer in 1:max_outer
         outer_done = outer
         dosolve!()
+        floor_now = strength_floor(model.u)      # exact strength floor this solve
 
-        # Feasible already (within tolerance) → done, members untouched.
-        if maximum(drift_of(con) / con.δ_allow for con in constraints) ≤ 1 + tol
+        # Converged when BOTH drift and strength are satisfied at the current
+        # (discrete) sizes.
+        drift_ok = maximum(drift_of(con) / con.δ_allow for con in constraints) ≤ 1 + tol
+        strength_ok = all(sizes[i] ≥ floor_now[i] * (1 - 1e-9) for i in 1:ns)
+        if drift_ok && strength_ok
             status = :converged
             break
         end
@@ -184,10 +252,31 @@ function resize_for_drift!(model, constraints::AbstractVector{DriftConstraint};
         end
 
         s = Float64[current_I(model.elements[e]) for e in sized_elements]
-        res = drift_optimality_resize_multi(C, s, weight, floor_I, δ_eff; resize_kwargs...)
+        res = drift_optimality_resize_multi(C, s, weight, floor_now, δ_eff; resize_kwargs...)
+        drift_target = Float64[max(res.sizes[i], floor_now[i]) for i in 1:ns]
 
+        # Accelerator: predict the redistributed demands at the drift target and
+        # pre-floor against them, so the next re-solve finds strength already met
+        # (folds the strength↔drift coupling into this iteration). The first-order
+        # prediction is only trusted within a step trust region — a large
+        # stiffness jump makes Δu ≈ −K⁻¹(ΔK u) unreliable (it overshoots), so on
+        # the big early steps the exact `floor_now` is used and the predictor
+        # refines only the small steps near convergence (where it is accurate and
+        # cannot lock in an overshoot, since slack members are never shrunk).
+        floor_ref = floor_now
+        if accelerate && floor_I_fn !== nothing
+            rel_step = maximum(abs(drift_target[i] - s[i]) / s[i] for i in 1:ns)
+            if rel_step ≤ accel_trust
+                floor_ref = max.(floor_now, predict_floor(drift_target))
+            end
+        end
+
+        # Size each member to the larger of its drift target and strength floor,
+        # recomputed fresh each iteration (no ratchet): a first-order prediction
+        # overshoot is corrected by the next exact solve, so the accelerator
+        # changes convergence speed, not the converged design.
         @inbounds for i in 1:ns
-            t = max(res.sizes[i], Float64(floor_I[i]))
+            t = max(drift_target[i], floor_ref[i])
             v = catalog === nothing ? t : snap_up(t, catalog)
             apply_I!(model.elements[sized_elements[i]], v)
             sizes[i] = v

@@ -121,6 +121,43 @@ end
         @test res_incl.ratio[1] ≤ 1 + 1e-2
     end
 
+    @testset "coupled strength↔drift floor: converges with both met" begin
+        # A displacement-dependent strength floor (∝ each element's peak end-force
+        # demand) recomputed from every solve — exercises floor_I_fn, monotone
+        # flooring, and the convergence test that now requires strength too.
+        sized = collect(1:_NST)
+        kdem = 2.0e-9
+        floorfn = (mdl, u) -> Float64[kdem * maximum(abs, mdl.elements[e].K *
+                                       view(u, mdl.elements[e].globalID)) for e in sized]
+        run_case(accel) = begin
+            model, dofs = _build_stick()
+            solve!(model)
+            δ_allow = 0.6 .* _story_drifts(model, dofs)
+            cons = _story_constraints(dofs, δ_allow)
+            res = resize_for_drift!(model, cons;
+                                    sized_elements = sized,
+                                    weight = [ustrip(u"m", el.length) for el in model.elements],
+                                    floor_I = fill(_I0, _NST), floor_I_fn = floorfn,
+                                    accelerate = accel, catalog = nothing,
+                                    current_I = _cur_I, apply_I! = _apply_I!,
+                                    max_outer = 25, tol = 1e-2)
+            return model, res
+        end
+
+        model_a, res_a = run_case(true)
+        @test res_a.converged
+        @test all(res_a.ratio .≤ 1 + 1e-2)                 # drift met
+        floor_final = floorfn(model_a, model_a.u)
+        @test all(res_a.sizes[i] ≥ floor_final[i] * (1 - 1e-6) for i in 1:_NST)  # strength met
+
+        # The accelerator pre-floors against redistribution ⇒ no more outer
+        # iterations than without it, and the same monotone fixpoint.
+        _, res_n = run_case(false)
+        @test res_n.converged
+        @test res_a.outer_iterations ≤ res_n.outer_iterations
+        @test res_a.sizes ≈ res_n.sizes rtol = 1e-6
+    end
+
     @testset "rigid diaphragm: governor sizes columns on the reduced system" begin
         # Two columns tied to a diaphragm master; the drift constraint and the
         # participation both live on the reduced master/slave system (links set).

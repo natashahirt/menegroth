@@ -6,11 +6,19 @@
 # the sizer pick the other. When the loop returns to a section state it already
 # left, each state in that cycle is re-analyzed and checked with the sizer's
 # own checker. A state is kept only when every beam group and every column
-# group passes that state's demands. Among those, the cheapest is installed.
-# Otherwise each group keeps the cheapest section that passed in some state, or
-# the costliest section if it passed in none, and that mix is checked the same
-# way. Groups that still fail are sized again. A state already checked is not
-# installed again.
+# group passes that state's demands.
+#
+# Among the states that pass, the installed design is the per-group cheapest-
+# passing MIX (each group takes the cheapest section it passed with in any
+# state), re-checked the same way. The mix is never costlier than any single
+# fully-passing state and is reflection-covariant: on a non-chiral plan the
+# mirror-symmetric groups are handed identical sections, because equal-cost ties
+# resolve by a canonical section key (`_section_tiebreak_key`), not by cycle-
+# state index. Only if that mix fails its coupled re-check do we fall back to
+# the cheapest single fully-passing state. If no state passes at all, groups
+# still take the cheapest-passing mix (or the costliest section where a group
+# passed in none), and groups that keep failing are sized again. A state
+# already checked is not installed again.
 #
 # The story-shell rounds use the same rule at their boundary. The first round
 # may free-pick. A later round solves the shell on the sections already in the
@@ -47,19 +55,40 @@ function _infeasible_group_indices(err)
 end
 
 """
+    _section_tiebreak_key(sec) -> String
+
+A canonical, member-independent identity for a candidate section, used to break
+EQUAL-cost ties deterministically. The key depends only on the section itself —
+never on the member index, group id, or the order the section was encountered —
+so two mirror-symmetric groups presented with the same two equal-cost sections
+resolve the tie to the *same* section. Breaking ties by encounter/state order
+instead would be reflection-odd (left and right pick opposite sections of a
+mirror pair) and seed a chiral design on an otherwise non-chiral plan.
+"""
+_section_tiebreak_key(sec) =
+    sec === nothing ? "" :
+    (hasproperty(sec, :name) && getproperty(sec, :name) !== nothing ?
+        string(getproperty(sec, :name)) : string(sec))
+
+"""
 `(section, passed)` for one group. A section that passed in any state is
 eligible, and the cheapest of those wins. A group that passed in none keeps
-the costliest of its sections.
+the costliest of its sections. EQUAL-cost ties are broken by
+[`_section_tiebreak_key`](@ref) (a canonical, reflection-invariant key) rather
+than by encounter order, so symmetric groups make symmetric choices.
 """
 function _pick_group_section(choices)
-    best_pass, best_pass_cost = nothing, Inf
-    best_any, best_any_cost = nothing, -Inf
+    best_pass, best_pass_cost, best_pass_key = nothing, Inf, ""
+    best_any, best_any_cost, best_any_key = nothing, -Inf, ""
     for (sec, passed, cost) in choices
-        if passed && cost < best_pass_cost
-            best_pass, best_pass_cost = sec, cost
+        key = _section_tiebreak_key(sec)
+        if passed && (cost < best_pass_cost ||
+                      (cost == best_pass_cost && best_pass !== nothing && key < best_pass_key))
+            best_pass, best_pass_cost, best_pass_key = sec, cost, key
         end
-        if cost >= best_any_cost
-            best_any, best_any_cost = sec, cost
+        if best_any === nothing || cost > best_any_cost ||
+           (cost == best_any_cost && key < best_any_key)
+            best_any, best_any_cost, best_any_key = sec, cost, key
         end
     end
     return (section = best_pass === nothing ? best_any : best_pass,
@@ -508,6 +537,25 @@ function _check_settle!(struc, states::Vector{_MemberState}, params, beam_opts, 
     full = [k for k in eachindex(states)
             if _all_passed(beam_passed[k]) && _all_passed(column_passed[k])]
     if !isempty(full)
+        # Reflection-covariant preference: settle on the per-group cheapest-
+        # passing MIX rather than a single cycle state. When two cycle states are
+        # mirror images with equal cost, `_cheapest_index` would break the tie by
+        # state index — a left/right-odd choice that seeds a chiral design on a
+        # non-chiral plan. The mix hands symmetric groups identical sections and
+        # is never costlier than any single fully-passing state. Fall back to the
+        # cheapest single state only if the mix fails its own coupled re-check.
+        mix = _mixed_state(struc, states, beam_passed, column_passed, beam_opts, column_opts)
+        _install_state!(struc, mix, beam_opts, column_opts, params)
+        mix_beams = _beam_group_report(struc, beam_opts; shell_demands, shell_spans, resolution = 200)
+        mix_cols = _column_group_report(struc, column_opts; resolution = 200)
+        if mix_beams !== nothing && mix_cols !== nothing &&
+           _all_passed(mix_beams.passed) && _all_passed(mix_cols)
+            _record_beam_checks!(struc, mix_beams.explanations, mix_beams.hogging)
+            @info "Beam and column loop settled on a checked mix of the cycle"
+            StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
+                                  outcome = "check_settle_mix")
+            return true
+        end
         k = _cheapest_index(costs, full)
         _install_state!(struc, states[k], beam_opts, column_opts, params)
         _record_beam_checks!(struc, beam_expl[k], beam_hog[k])
@@ -707,6 +755,28 @@ function _check_shell_settle!(run, states, service_on, regions, pass, service_co
     end
     full = [k for k in eachindex(states) if accept_state(k)]
     if !isempty(full)
+        # Reflection-covariant preference: settle on the per-group cheapest-
+        # passing MIX rather than a single cycle state (see `_check_settle!`).
+        # A single-state pick breaks mirror-image ties by state index and seeds
+        # a chiral design; the mix is symmetric and never costlier. Fall back to
+        # the cheapest single state only if the mix fails its own re-check.
+        mix = _mixed_beams(struc, states, passed, opts)
+        _install_beam_sections!(struc, mix, opts, I_factor)
+        mix_fresh = _gather_shell_demands!(run; service_on, regions)
+        mix_spans = service_on ? mix_fresh.spans : nothing
+        mix_report = _beam_group_report(struc, opts; shell_demands = mix_fresh.demands,
+                                        shell_spans = mix_spans, resolution = resolution)
+        if mix_report !== nothing && _all_passed(mix_report.passed) &&
+           all(<=(run.region_tol), values(mix_fresh.shifts)) &&
+           (!service_on || mix_fresh.service_converged)
+            _record_beam_checks!(struc, mix_report.explanations, mix_report.hogging)
+            @info "Story shell settled on a checked mix of the cycle"
+            return _shell_pass_result(; converged = true, passes = pass,
+                                      demands = mix_fresh.demands, spans = mix_fresh.spans,
+                                      regions = mix_fresh.regions, service_on,
+                                      service_converged = service_converged && mix_fresh.service_converged,
+                                      shifts = mix_fresh.shifts)
+        end
         k = _cheapest_index(costs, full)
         _install_beam_sections!(struc, states[k], opts, I_factor)
         _record_beam_checks!(struc, expl[k], hog[k])

@@ -120,4 +120,42 @@ end
         @test res_incl.converged
         @test res_incl.ratio[1] ≤ 1 + 1e-2
     end
+
+    @testset "rigid diaphragm: governor sizes columns on the reduced system" begin
+        # Two columns tied to a diaphragm master; the drift constraint and the
+        # participation both live on the reduced master/slave system (links set).
+        E = 200.0e9; Gs = 80.0e9; H = 4.0; A = 1.0e-2; J = 1.0e-6
+        b = 1.5; I0 = 4.0e-4; P = 6.0e4
+        mksec(I) = Section(A * u"m^2", E * u"Pa", Gs * u"Pa",
+                           I * u"m^4", I * u"m^4", J * u"m^4")
+        base1 = Node([0.0u"m",  b * 1.0u"m", 0.0u"m"], :fixed)
+        base2 = Node([0.0u"m", -b * 1.0u"m", 0.0u"m"], :fixed)
+        top1  = Node([0.0u"m",  b * 1.0u"m", H * 1.0u"m"], :free)
+        top2  = Node([0.0u"m", -b * 1.0u"m", H * 1.0u"m"], :free)
+        master = Node([0.0u"m", 0.0u"m", H * 1.0u"m"], :free)
+        c1 = Element(base1, top1, mksec(I0)); c2 = Element(base2, top2, mksec(I0))
+        model = FrameModel([base1, base2, top1, top2, master], [c1, c2],
+                           [NodeForce(master, [P * u"N", 0.0u"N", 0.0u"N"])])
+        links = [RigidLink(master, top1), RigidLink(master, top2)]
+        solve!(model, links)
+
+        d0 = model.u[master.globalID[1]]            # current story drift at the master
+        con = total_drift_constraint(master.globalID[1], 0.5 * d0)   # halve it
+        curI(el) = ustrip(u"m^4", el.section.Ix)
+        appI!(el, I) = (el.section = mksec(I))
+
+        res = resize_for_drift!(model, [con];
+                                sized_elements = [1, 2],
+                                weight = [ustrip(u"m", c1.length), ustrip(u"m", c2.length)],
+                                floor_I = [I0, I0],
+                                catalog = nothing,
+                                current_I = curI, apply_I! = appI!,
+                                links = links, max_outer = 12, tol = 1e-2)
+        @test res.converged
+        @test res.status == :converged
+        @test res.ratio[1] ≤ 1 + 1e-2
+        @test all(res.sizes .≥ I0 - 1e-12)
+        @test all(res.sizes .> I0)                  # columns had to grow to halve δ
+        @test res.sizes[1] ≈ res.sizes[2] rtol = 1e-6   # symmetric columns size equally
+    end
 end

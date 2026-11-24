@@ -7,7 +7,9 @@
 # until every drift limit is met on the actual (discrete) structure:
 #
 #   1. solve the model and measure the current drifts;
-#   2. query member participation c_{e,j} for each limit and assemble C;
+#   2. assemble each limit's virtual-load column (a linear functional on the
+#      DOFs) and query every limit's member participation c_{e,j} in ONE batched
+#      multi-RHS solve (`drift_participation(model, V; links)`);
 #   3. subtract the drift carried by *non-sized* members (a concrete core, say)
 #      so the sized frame members are held to the remaining budget;
 #   4. run `drift_optimality_resize_multi` for continuous target stiffnesses;
@@ -20,6 +22,11 @@
 # columns; wiring it to a specific lateral system and its strength checks is the
 # caller's job. Snapping *up* keeps the discrete structure on the safe side of
 # the continuous optimum (never softer than the sizing target).
+#
+# Rigid-diaphragm models: pass `links` (the model's rigid links). Both the
+# re-solve and the batched participation query then run on the reduced
+# master/slave system, so the diaphragm-master story DOFs the drift constraints
+# reference stay consistent between the solve and the sensitivity.
 
 """
     DriftConstraint(dofs, coeffs, δ_allow)
@@ -109,6 +116,9 @@ Keyword arguments:
 - `catalog`  — discrete stiffness values to snap to, or `nothing` for continuous.
 - `current_I`, `apply_I!` — read/write the member's stiffness variable on an
   `Asap` element: `current_I(el)::Float64` and `apply_I!(el, I)`.
+- `links` — the model's rigid links for a rigid-diaphragm model (default
+  `nothing`). When given, the re-solve and the participation query both run on
+  the reduced master/slave system.
 - `max_outer` (default 10), `tol` (default 1e-2 on `drift/δ_allow`).
 - `resize_kwargs` — forwarded to `drift_optimality_resize_multi`.
 """
@@ -118,6 +128,7 @@ function resize_for_drift!(model, constraints::AbstractVector{DriftConstraint};
                            floor_I::AbstractVector{<:Real},
                            catalog::Union{Nothing,AbstractVector{<:Real}} = nothing,
                            current_I::Function, apply_I!::Function,
+                           links::Union{Nothing,AbstractVector} = nothing,
                            max_outer::Integer = 10, tol::Real = 1e-2,
                            resize_kwargs = (;))
     ns = length(sized_elements)
@@ -126,13 +137,25 @@ function resize_for_drift!(model, constraints::AbstractVector{DriftConstraint};
     length(floor_I) == ns || throw(ArgumentError("resize_for_drift!: floor_I must match sized_elements ($ns)."))
 
     drift_of(con) = sum(con.coeffs[i] * model.u[con.dofs[i]] for i in eachindex(con.dofs))
+    # Route the solve through the reduced system when the model has a rigid
+    # diaphragm, so model.u and the cached factor match the participation query.
+    dosolve!() = links === nothing ? Asap.solve!(model) : Asap.solve!(model, links)
+
+    # One virtual-load column per constraint: V[:, j] = Σ_i coeffs[i]·e_{dofs[i]}.
+    # (Built once — the DOFs and coefficients are fixed across outer iterations.)
+    V = zeros(model.nDOFs, m)
+    @inbounds for (j, con) in enumerate(constraints)
+        for i in eachindex(con.dofs)
+            V[con.dofs[i], j] += con.coeffs[i]
+        end
+    end
 
     sizes = Float64[current_I(model.elements[e]) for e in sized_elements]
     status = :max_iters
     outer_done = 0
     for outer in 1:max_outer
         outer_done = outer
-        Asap.solve!(model)
+        dosolve!()
 
         # Feasible already (within tolerance) → done, members untouched.
         if maximum(drift_of(con) / con.δ_allow for con in constraints) ≤ 1 + tol
@@ -140,22 +163,19 @@ function resize_for_drift!(model, constraints::AbstractVector{DriftConstraint};
             break
         end
 
-        # Assemble participation columns; subtract the non-sized background.
-        cache = Dict{Int,Vector{Float64}}()
-        getc(d) = get!(() -> Asap.drift_participation(model, d).c, cache, d)
+        # Every limit's member participation from ONE batched multi-RHS solve on
+        # the (reduced, if rigid-link) cached factor; then subtract the non-sized
+        # background so the sized members own only the remaining budget.
+        bdp = Asap.drift_participation(model, V; links = links)
         C = zeros(ns, m)
         δ_eff = zeros(m)
         background_infeasible = false
-        for (j, con) in enumerate(constraints)
-            cfull = zeros(length(model.elements))
-            for i in eachindex(con.dofs)
-                cfull .+= con.coeffs[i] .* getc(con.dofs[i])
+        @inbounds for j in 1:m
+            for (i, e) in enumerate(sized_elements)
+                C[i, j] = bdp.c[e, j]
             end
-            @inbounds for (i, e) in enumerate(sized_elements)
-                C[i, j] = cfull[e]
-            end
-            background = drift_of(con) - sum(@view C[:, j])
-            δ_eff[j] = con.δ_allow - background
+            background = drift_of(constraints[j]) - sum(@view C[:, j])
+            δ_eff[j] = constraints[j].δ_allow - background
             δ_eff[j] ≤ 0 && (background_infeasible = true)
         end
         if background_infeasible
@@ -175,7 +195,7 @@ function resize_for_drift!(model, constraints::AbstractVector{DriftConstraint};
         Asap.update!(model; values_only = true)
     end
 
-    Asap.solve!(model)   # reflect the last applied sizes
+    dosolve!()   # reflect the last applied sizes
     drift = Float64[drift_of(con) for con in constraints]
     ratio = Float64[drift[j] / constraints[j].δ_allow for j in 1:m]
     return DriftGovernorResult(status == :converged, status, outer_done, drift, ratio, sizes)

@@ -313,6 +313,92 @@ function relaxation_warm_start(I_catalog::AbstractVector{<:Real}, A_catalog::Abs
 end
 
 """
+    continuation_seed(section_idx, coeffs, lengths, n_max) -> Vector{Int}
+
+Build a strong, feasible warm-start assignment for the section-count-capped MIP
+(`n_max_sections = n_max`) from a separable per-group optimum `section_idx` (one
+catalog index per group — e.g. the lightest-feasible pick from
+[`optimize_binary_search`](@ref)), its per-group objective coefficients `coeffs`
+(a monotone size proxy — larger ⇒ stiffer/heavier) and member `lengths`.
+
+Returns a new per-group catalog-index vector using at most `n_max` DISTINCT
+sections. Groups are ordered by `coeffs` and the ascending chain is split into
+`≤ n_max` contiguous buckets, each group adopting its bucket's largest (last)
+section. Minimising the seed's total weight
+`Σ_buckets coeffs[last] · Σ lengths` over all contiguous `≤ n_max`-way partitions
+is an `O(n_max · n²)` dynamic program (`n` = number of groups).
+
+This is a far better incumbent than inheriting the `n_max − 1` design: it is the
+EXACT part-count optimum under the monotone assumption that a larger section
+covers a smaller demand (so every in-bucket up-assignment stays feasible). Where
+that assumption slips on a mixed-shape catalog the seed is still only a MIP hint —
+`optimize_discrete` re-screens every group and silently drops any seeded index
+that is not actually feasible — so correctness never depends on monotonicity.
+"""
+function continuation_seed(section_idx::AbstractVector{<:Integer},
+                           coeffs::AbstractVector{<:Real},
+                           lengths::AbstractVector{<:Real},
+                           n_max::Integer)
+    n = length(section_idx)
+    (length(coeffs) == n && length(lengths) == n) || throw(ArgumentError(
+        "continuation_seed: section_idx, coeffs and lengths must have equal length; got " *
+        "$n, $(length(coeffs)) and $(length(lengths))."))
+    n_max ≥ 1 || throw(ArgumentError("continuation_seed: n_max must be ≥ 1; got $n_max."))
+    n == 0 && return Int[]
+
+    order = sortperm(collect(float.(coeffs)))         # groups ascending in size
+    c = Float64[float(coeffs[order[i]]) for i in 1:n]
+    L = Float64[float(lengths[order[i]]) for i in 1:n]
+    k = min(n_max, n)
+
+    pL = zeros(Float64, n + 1)                         # prefix sums of length
+    @inbounds for i in 1:n
+        pL[i + 1] = pL[i] + L[i]
+    end
+    # Cost of one bucket spanning sorted positions a:b — all adopt the largest
+    # (last) section `c[b]`, so weight is c[b] · Σ_{a..b} L.
+    bucket_cost(a, b) = c[b] * (pL[b + 1] - pL[a])
+
+    # dp[t, b] = min seed weight for the first b groups in exactly t buckets;
+    # bp[t, b] = index of the last group of bucket t−1 (0 when t == 1).
+    dp = fill(Inf, k, n)
+    bp = zeros(Int, k, n)
+    @inbounds for b in 1:n
+        dp[1, b] = bucket_cost(1, b)
+    end
+    @inbounds for t in 2:k, b in t:n
+        best = Inf
+        arg = 0
+        for a in t:b                                   # last bucket = a:b
+            prev = dp[t - 1, a - 1]
+            prev == Inf && continue
+            v = prev + bucket_cost(a, b)
+            if v < best
+                best = v
+                arg = a - 1
+            end
+        end
+        dp[t, b] = best
+        bp[t, b] = arg
+    end
+
+    best_t = argmin(@inbounds [dp[t, n] for t in 1:k])  # fewest buckets among ties
+    seed = Vector{Int}(undef, n)
+    b = n
+    t = best_t
+    @inbounds while b > 0
+        a = bp[t, b] + 1
+        rep = section_idx[order[b]]                    # bucket's largest section
+        for i in a:b
+            seed[order[i]] = rep
+        end
+        b = bp[t, b]
+        t -= 1
+    end
+    return seed
+end
+
+"""
     _lower_hull_indices(I, A) -> Vector{Int}
 
 Indices of the **lower convex hull** of the points `(I, A)` (given ascending in

@@ -125,6 +125,38 @@ function optimize_binary_search(
 end
 
 """
+    separable_lower_bound(checker, demands, geometries, catalog, material;
+                          objective=MinVolume(), cache=nothing) -> Float64
+
+Certified lower bound on the discrete sizing optimum for ANY problem that adds
+only COUPLING constraints on top of per-group feasibility — an `n_max_sections`
+part-count cap, a shared-section requirement, an inventory limit, and the like.
+Relaxing every such constraint leaves the separable problem, whose optimum is
+`Σ_g (lightest feasible coeff)_g · L_g`; dropping constraints can only lower the
+minimum, so this value never exceeds the constrained optimum.
+
+It is the SAME quantity [`optimize_binary_search`](@ref) returns, exposed as a
+bound: cheap (per-group binary search, no MIP) and far TIGHTER than the
+continuous convex-hull envelope ([`relaxation_lower_bound`](@ref)) because it uses
+the actual lightest feasible catalog section per group rather than a smooth
+idealisation. Pair it with [`optimality_gap`](@ref) to certify how close a
+coupling-constrained design (e.g. a part-count-capped solve) sits to the global
+catalog optimum without enumerating the catalog.
+"""
+function separable_lower_bound(
+    checker::AbstractCapacityChecker,
+    demands::AbstractVector{<:AbstractDemand},
+    geometries::AbstractVector{<:AbstractMemberGeometry},
+    catalog::AbstractVector{<:AbstractSection},
+    material::AbstractMaterial;
+    objective::AbstractObjective = MinVolume(),
+    cache::Union{Nothing, AbstractCapacityCache} = nothing,
+)
+    return optimize_binary_search(checker, demands, geometries, catalog, material;
+                                  objective = objective, cache = cache).objective_value
+end
+
+"""
 Binary search for the lightest feasible section in a weight-sorted catalog.
 
 Returns the original catalog index of the lightest feasible section,

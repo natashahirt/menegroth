@@ -15,8 +15,22 @@ both ends, and must be at least 2.
 
 Positions are meters relative to the minimum node coordinate. The structural
 axis Z is up.
+
+`resolve` (default `true`) controls the `:solved` stage: when `true` the model is
+re-solved (a plain linkless solve) before the deflected buffers are read. Pass
+`resolve = false` to visualize a solution the caller already produced — a
+rigid-diaphragm (`solve!(model, links)`) solve, or a specific load case — whose
+nodal displacements are already on the nodes; the builder then skips its own
+solve and uses them as-is. (A rigid-diaphragm model *must* use `resolve = false`,
+since a linkless re-solve of its master nodes is singular.)
+
+`include_shells` (default `false`) appends shell (wall/slab) triangle geometry
+for a hand-built model that carries `model.shell_elements` — the bare path
+otherwise draws only frame centerlines. Off by default so the design-pipeline
+scene builders (which add shells themselves) and existing callers are unchanged.
 """
-function build_scene(model::Asap.Model; stages = SCENE_STAGES, stations::Int = 9)
+function build_scene(model::Asap.Model; stages = SCENE_STAGES, stations::Int = 9,
+                     resolve::Bool = true, include_shells::Bool = false)
     stage_list = Symbol[Symbol(s) for s in stages]
     for s in stage_list
         s in SCENE_STAGES || error(
@@ -25,7 +39,7 @@ function build_scene(model::Asap.Model; stages = SCENE_STAGES, stations::Int = 9
     stations >= 2 || error("scene: stations must be >= 2 (got $stations)")
 
     need_solved = :solved in stage_list
-    _prepare_model!(model; solve = need_solved)
+    _prepare_model!(model; solve = need_solved, resolve = resolve)
 
     elements = model.frame_elements
     nodes = model.nodes
@@ -58,10 +72,28 @@ function build_scene(model::Asap.Model; stages = SCENE_STAGES, stations::Int = 9
         push!(buffers, SceneBuffer("element_axial", axial))
     end
 
+    # Hand-built models carry their shells here (the design-pipeline builders add
+    # these in `_with_building_buffers`, so this is opt-in to avoid double-emit).
+    n_shell_tri = 0
+    if include_shells && !isempty(model.shell_elements)
+        faces, kinds, thickness, surf_stress, shell_axial = _shell_faces(model)
+        if !isempty(faces)
+            push!(buffers, SceneBuffer("shell_faces", faces))
+            push!(buffers, SceneBuffer("shell_kind", kinds))
+            push!(buffers, SceneBuffer("shell_thickness", thickness))
+            length(surf_stress) == length(kinds) && !isempty(surf_stress) &&
+                push!(buffers, SceneBuffer("shell_surface_stress", surf_stress))
+            length(shell_axial) == length(kinds) && !isempty(shell_axial) &&
+                push!(buffers, SceneBuffer("shell_axial", shell_axial))
+            n_shell_tri = length(kinds)
+        end
+    end
+
     meta = Dict{String, Any}(
         "counts" => Dict{String, Any}(
             "nodes" => length(nodes),
             "elements" => length(elements),
+            "shell_triangles" => n_shell_tri,
             "stations" => need_solved ? stations : 0,
         ),
         "stations" => need_solved ? stations : 0,
@@ -863,15 +895,23 @@ function _footing_arrays(model::Asap.Model, struc::BuildingStructure, footings, 
     return centers, sizes, support_nodes, support_counts, kinds
 end
 
-function _prepare_model!(model::Asap.Model; solve::Bool)
+function _prepare_model!(model::Asap.Model; solve::Bool, resolve::Bool = true)
     model.processed || Asap.process!(model)
     # process! allocates a zero displacement vector, so `isempty(model.u)` is not
     # a signal that the model has been solved. The solved stage always solves,
-    # then copies joint results onto the nodes.
-    if solve
+    # then copies joint results onto the nodes — unless `resolve = false`, where
+    # the caller has already produced the displacements it wants drawn (a
+    # rigid-diaphragm `solve!(model, links)` or a specific load case) and a plain
+    # re-solve would discard them (or be singular for a master/slave model).
+    if solve && resolve
         Asap.solve!(model)
         Asap.post_process!(model)
-        _displacements_ready(model) || error("scene: post_process! did not fill nodal displacements")
+    end
+    if solve
+        _displacements_ready(model) || error(
+            resolve ? "scene: post_process! did not fill nodal displacements" :
+                      "scene: resolve=false but the model has no solved nodal " *
+                      "displacements; solve!(model[, links]) + post_process!(model) first")
     end
     return model
 end

@@ -588,3 +588,50 @@ end
     walls = Asap.Model([base, n1, n2], Asap.Element[beam], Asap.ShellElement[wall], Asap.AbstractLoad[])
     @test StructuralSynthesizer._shell_thickness_near(walls, p1, p2, (0.0, 0.0, 0.0)) === nothing
 end
+
+"""A concrete wall panel (two :wall triangles) beside one loaded steel column."""
+function _wall_and_column()
+    m = u"m"
+    steel = Asap.Section(4.0e-3u"m^2", 200e9u"Pa", 77e9u"Pa",
+                         4.0e-5u"m^4", 4.0e-5u"m^4", 8.0e-7u"m^4", 7850.0u"kg/m^3")
+    b0 = Asap.Node([0.0m, 0.0m, 0.0m], :fixed)
+    b1 = Asap.Node([3.0m, 0.0m, 0.0m], :fixed)
+    t0 = Asap.Node([0.0m, 0.0m, 3.0m], :free)
+    t1 = Asap.Node([3.0m, 0.0m, 3.0m], :free)
+    cbase = Asap.Node([6.0m, 0.0m, 0.0m], :fixed)
+    ctop = Asap.Node([6.0m, 0.0m, 3.0m], :free)
+    col = Asap.Element(cbase, ctop, steel, :column)
+    w1 = Asap.ShellTri3((b0, b1, t1), 0.30m, 25e9u"Pa", 0.2; id = :wall, ρ = 2400.0)
+    w2 = Asap.ShellTri3((b0, t1, t0), 0.30m, 25e9u"Pa", 0.2; id = :wall, ρ = 2400.0)
+    loads = Asap.AbstractLoad[Asap.NodeForce(ctop, [5.0e4u"N", 0.0u"N", 0.0u"N"]),
+                              Asap.NodeForce(t1, [5.0e4u"N", 0.0u"N", 0.0u"N"])]
+    return Asap.Model([b0, b1, t0, t1, cbase, ctop], Asap.Element[col],
+                      Asap.ShellElement[w1, w2], loads)
+end
+
+@testset "include_shells draws wall/slab geometry on the bare path" begin
+    model = _wall_and_column()
+    off = build_scene(model)                         # default: frame only
+    @test !any(b -> b.name == "shell_faces", off.buffers)
+
+    on = build_scene(model; include_shells = true)
+    @test scene_u32(on, "shell_faces") == UInt32[0, 1, 3, 0, 3, 2]   # 2 triangles
+    @test scene_u8(on, "shell_kind") == UInt8[0x01, 0x01]            # both :wall
+    @test length(scene_f32(on, "shell_thickness")) == 2
+    @test on.meta["counts"]["shell_triangles"] == 2
+
+    io = IOBuffer(); write_scene(io, on); seekstart(io)              # round-trips
+    @test scene_u32(read_scene(io), "shell_faces") == scene_u32(on, "shell_faces")
+end
+
+@testset "resolve=false draws the caller's own solution" begin
+    model = _cantilever()
+    build_scene(model)                               # solves + fills node.displacement
+    for n in model.nodes                             # tamper with the stored solution
+        n.displacement[3] = -0.321u"m"
+    end
+    kept = build_scene(model; resolve = false)       # must draw the tampered state
+    @test any(≈(-0.321f0), scene_f32(kept, "node_displacement"))
+    fresh = build_scene(model; resolve = true)       # re-solves back to the real (small) uz
+    @test !any(≈(-0.321f0), scene_f32(fresh, "node_displacement"))
+end

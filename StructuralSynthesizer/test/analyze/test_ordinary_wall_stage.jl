@@ -422,7 +422,7 @@ end
     @test length(result.pdelta_multipliers) == length(result.drift)
     @test isfinite(result.max_story_stability) && result.max_story_stability ≥ 0.0
     @test haskey(struc.stage_diagnostics, :dual)
-    @test length(result.pending) == 2
+    @test length(result.pending) == 1
     # Increment (2): steel frame members checked as AISC App. 8 beam-columns.
     @test result.frame_members isa Vector{StructuralSynthesizer.FrameMemberCheck}
     @test !isempty(result.frame_members)
@@ -430,6 +430,15 @@ end
     # Every checked member gets a finite governing demand/capacity ratio.
     @test all(c -> isfinite(c.governing_ratio), result.frame_members)
     @test occursin("AISC App. 8", struc.stage_diagnostics[:dual])
+    # Increment (1): §12.2.5.1 25% story-shear-share proxy on the combined model.
+    @test result.frame_shares isa Vector{StructuralSynthesizer.FrameShareCheck}
+    @test !isempty(result.frame_shares)
+    @test all(c -> c isa StructuralSynthesizer.FrameShareCheck, result.frame_shares)
+    # A share is a fraction of the story shear: finite and in (0, 1].
+    @test all(c -> isfinite(c.share) && 0.0 <= c.share <= 1.0 + 1e-9, result.frame_shares)
+    @test all(c -> c.total_shear_N > 0.0, result.frame_shares)
+    @test all(c -> c.passed == (c.share >= 0.25 - 1e-9), result.frame_shares)
+    @test occursin("frame share", struc.stage_diagnostics[:dual])
 end
 
 @testset "Ordinary wall stage" begin

@@ -7,11 +7,11 @@
 # stage, which refuses non-wall systems). It reuses the shared ELF, wind,
 # gravity, and design-drift plumbing; the core reuses the wall FEM. The analysis
 # backbone (this file) produces the solved cases, the design story drift, and the
-# moment-frame designation. The three dual-specific checks are wired in follow-on
-# increments and, until then, are named in `struc.stage_diagnostics[:dual]`:
-#   1. §12.2.5.1 story-shear-share proxy (needs the per-story frame/wall split),
-#   2. frame-member strength with second-order (B1/B2) demands for steel/RC,
-#   3. the separate frame-only capability gate at 25% of the base shear.
+# moment-frame designation, then runs the dual-specific checks:
+#   1. §12.2.5.1 story-shear-share proxy — in-loop, from the combined model (done),
+#   2. frame-member strength with second-order (B1/B2) demands, steel (done; RC pending),
+#   3. the separate frame-only capability gate at 25% of the base shear (pending).
+# The pending check is named in `struc.stage_diagnostics[:dual]`.
 
 """Analysis backbone of one dual-system run: drift, θ, and the moment frame."""
 struct DualSystemResult
@@ -25,6 +25,8 @@ struct DualSystemResult
     moment_frame::@NamedTuple{beams::Vector{Int}, columns::Vector{Int}, source::Symbol}
     "Steel frame-member strength checks (AISC 360-16 App. 8 B1/B2) under the combined-system seismic demands; one entry per checked steel member."
     frame_members::Vector{FrameMemberCheck}
+    "§12.2.5.1 25% story-shear-share proxy (in-loop): the moment frame's governing share of each story shear in the combined model, one entry per (story, direction)."
+    frame_shares::Vector{FrameShareCheck}
     "Table 12.2-1 dual row used on the X plan axis."
     row_x::Symbol
     "Table 12.2-1 dual row used on the Y plan axis."
@@ -48,11 +50,12 @@ frame and the core/walls. A building with no walls returns without a result, the
 same convention as the ordinary-wall stage.
 
 This backbone solves the gravity, wind, and ELF cases, measures the design story
-drift (with the §12.8.7 P-delta multiplier), and records the moment-frame member
-designation (user override or auto; see [`moment_frame_members`](@ref)). The
-§12.2.5.1 share check, the frame-member strength checks, and the frame-only
-capability gate are recorded as pending in `struc.stage_diagnostics[:dual]` until
-their increments land.
+drift (with the §12.8.7 P-delta multiplier), records the moment-frame member
+designation (user override or auto; see [`moment_frame_members`](@ref)), runs the
+§12.2.5.1 in-loop share proxy ([`dual_frame_shear_shares`](@ref)) and the steel
+frame-member strength checks ([`dual_frame_member_checks`](@ref)). The frame-only
+capability gate and the RC frame-member path are recorded as pending in
+`struc.stage_diagnostics[:dual]` until their increments land.
 
 # Citation
 ASCE 7-22 §12.2.5.1 (corpus: asce-7-22, PDF page 177) and Table 12.2-1 Sections
@@ -146,22 +149,32 @@ function design_dual_system!(struc::BuildingStructure, params::DesignParameters;
         risk_category=inputs.risk_category, system=inputs.drift_system, orthogonal)
     θmax = _max_drift_theta(elf)
 
+    # Increments (1) and (2) read the same first-order full-model solve; build it
+    # once (D, L, roof, every wind case, every seismic effect) and share it.
+    set = first(values(_build_first_order(struc, basic; wind, elf, effects)))
+
     # Increment (2): steel frame-member strength under the combined-system seismic
     # demands with AISC 360-16 Appendix 8 B1/B2 amplification (deci-93f9b5ce).
-    frame_members, skipped = dual_frame_member_checks(struc, basic, wind, elf, effects, inputs, mf)
+    frame_members, skipped = dual_frame_member_checks(struc, set, basic, elf, effects, inputs, mf)
     failed = count(c -> !c.passed, frame_members)
 
+    # Increment (1): §12.2.5.1 25% story-shear-share proxy — the moment frame's
+    # share of each story shear in the combined model (deci-7d2c3467, in-loop).
+    frame_shares = dual_frame_shear_shares(struc, set, elf, effects, mf)
+    short = count(c -> !c.passed, frame_shares)
+
     pending = [
-        "§12.2.5.1 25% story-shear-share proxy (per-story frame/wall split)",
         "separate frame-only capability gate at 25% of the design base shear",
     ]
     frame_note = "Steel frame-member strength (AISC App. 8 B1/B2): " *
         "$(length(frame_members)) checked, $failed failing" *
-        (skipped > 0 ? ", $skipped non-steel member(s) skipped (RC path pending)" : "") * "."
+        (skipped > 0 ? ", $skipped non-steel member(s) skipped (RC path pending)" : "") * ". "
+    share_note = "§12.2.5.1 frame share (in-loop proxy): $(length(frame_shares)) " *
+        "story-direction(s) checked, $short below 25%."
     struc.stage_diagnostics[:dual] =
         "Dual-system analysis backbone ran (drift + θ + moment-frame designation). " *
-        frame_note * " Pending dual-specific checks: " * join(pending, "; ") * "."
+        frame_note * share_note * " Pending dual-specific checks: " * join(pending, "; ") * "."
 
-    return DualSystemResult(drift, θmax, pdelta_multipliers, mf, frame_members,
+    return DualSystemResult(drift, θmax, pdelta_multipliers, mf, frame_members, frame_shares,
                             table_12_2_1_row(sx), table_12_2_1_row(sy), pending)
 end

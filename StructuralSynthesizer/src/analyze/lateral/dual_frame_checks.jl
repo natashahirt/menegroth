@@ -238,7 +238,7 @@ function _steel_member_report(kind, index, section, material, geometry, rows, st
 end
 
 """
-    dual_frame_member_checks(struc, basic, wind, elf, effects, inputs, mf)
+    dual_frame_member_checks(struc, set, basic, elf, effects, inputs, mf)
         -> (checks::Vector{FrameMemberCheck}, skipped::Int)
 
 Steel frame-member strength check for the dual-system stage (increment 2). Each
@@ -247,9 +247,12 @@ Steel frame-member strength check for the dual-system stage (increment 2). Each
 combined-system seismic demands with Appendix 8 `B1`/`B2` amplification (see the
 file header). Non-steel frame members are skipped and counted (the RC path owns
 them); the count is reported by the caller.
+
+`set` is a first-order `StorySecondOrderSet` from `_build_first_order` on the
+full frame+core model (`set.u = [D, L, roof, wind…, qe…]`); the caller builds it
+once and shares it with the §12.2.5.1 share proxy.
 """
-function dual_frame_member_checks(struc, basic, wind, elf, effects, inputs, mf)
-    set = first(values(_build_first_order(struc, basic; wind, elf, effects)))
+function dual_frame_member_checks(struc, set, basic, elf, effects, inputs, mf)
     by_story = _dual_story_b2_records(elf)
     checks = FrameMemberCheck[]
     skipped = 0
@@ -276,4 +279,130 @@ function dual_frame_member_checks(struc, basic, wind, elf, effects, inputs, mf)
         end
     end
     return checks, skipped
+end
+
+# ==============================================================================
+# Increment (1): §12.2.5.1 25% story-shear-share proxy (in-loop, no extra solve)
+# ==============================================================================
+#
+# ASCE 7-22 §12.2.5.1 (corpus: asce-7-22, PDF page 177) requires the moment
+# frame of a dual system to be *capable* of resisting at least 25% of the design
+# seismic force. The authoritative test is the separate frame-only capability
+# gate (increment 3, a bare-frame solve). This cheap proxy — decision
+# deci-7d2c3467 — steers the sizing loop in between: from the already-solved
+# COMBINED model it measures the moment frame's share of each story shear and
+# flags any story below 25%. It is necessary but not sufficient (a 25% *share*
+# in the combined model is not the same as independent 25% *capability*), so it
+# never replaces the gate.
+
+# ASCE 7-22 §12.2.5.1 (corpus: asce-7-22, PDF page 177): the moment frames shall
+# be capable of resisting at least 25% of the design seismic forces.
+const _DUAL_FRAME_SHARE_MIN = 0.25
+
+"""
+One story and one plan direction of the §12.2.5.1 share proxy.
+
+`frame_shear_N` is the horizontal shear the designated moment-frame columns
+carry across the story-bottom cut, projected on the loading axis; `total_shear_N`
+is that of every lateral element at the cut (frame columns + core piers), so
+`share = frame_shear_N / total_shear_N` is the frame's fraction of the story
+shear in the combined model. Both are newtons. `share` is the governing
+(smallest) value over the seismic effects of that direction.
+"""
+struct FrameShareCheck
+    story::Int
+    direction::Symbol
+    frame_shear_N::Float64
+    total_shear_N::Float64
+    share::Float64
+    passed::Bool
+end
+
+"""Asap frame-element IDs of the designated moment-frame columns (`mf.columns`)."""
+function _mf_column_element_ids(struc, mf)
+    ids = Set{Int}()
+    for i in mf.columns
+        for el in _member_frame_elements(struc, struc.columns[i])
+            push!(ids, el.elementID)
+        end
+    end
+    return ids
+end
+
+"""
+    _dual_cut_shears(struc, u, z, dir, mf_ids) -> (frame_mf, total)
+
+Horizontal story shear at the cut `z`, projected on the unit plan axis `dir`,
+for displacement `u` on the combined frame+core model. `frame_mf` is the sum
+over moment-frame columns (whose element IDs are in `mf_ids`); `total` adds
+every other frame column and every core pier crossing the cut. By equilibrium
+`total` is the applied story shear above the cut for this case, so
+`frame_mf / total` is the moment frame's share.
+"""
+function _dual_cut_shears(struc, u::AbstractVector{<:Real}, z::Float64,
+                          dir::NTuple{2, Float64}, mf_ids::Set{Int})
+    model = struc.asap_model
+    frame_mf = 0.0
+    total = 0.0
+    for el in _frame_elements(model)
+        za = _node_xyz(el.nodeStart)[3]
+        zb = _node_xyz(el.nodeEnd)[3]
+        if abs(za - z) <= WALL_CUT_ZTOL_M && zb > z + WALL_CUT_ZTOL_M
+            nd, i0 = el.nodeStart, 0
+        elseif abs(zb - z) <= WALL_CUT_ZTOL_M && za > z + WALL_CUT_ZTOL_M
+            nd, i0 = el.nodeEnd, 6
+        else
+            continue
+        end
+        Q = _case_fixed_end(el, nothing)
+        f = _element_nodal_force(el, u; Qfixed=Q)
+        fx, fy, _fz, _mx, _my, _mz = _interface_at_cut_node(f, Q, i0)
+        h = fx * dir[1] + fy * dir[2]
+        total += h
+        el.elementID in mf_ids && (frame_mf += h)
+    end
+    for pier in struc.wall_mesh.piers
+        isempty(pier.shells) && continue
+        abs(_pier_bottom(pier) - z) <= WALL_CUT_ZTOL_M || continue
+        for c in _cut_contributions(pier.shells, u, z)
+            total += c.fx * dir[1] + c.fy * dir[2]
+        end
+    end
+    return frame_mf, total
+end
+
+"""
+    dual_frame_shear_shares(struc, set, elf, effects, mf) -> Vector{FrameShareCheck}
+
+§12.2.5.1 25% story-shear-share proxy (increment 1). For every seismic effect
+and every story, measure the moment frame's share of the story shear in the
+already-solved COMBINED model (`set.u`), and keep the governing (smallest) share
+per `(story, direction)`. A story whose frame share drops below 25% fails.
+
+No extra solve: the effect displacements are the ones `_build_first_order`
+already produced for the member checks. This is a sizing-loop steering signal,
+not the authoritative capability test (that is the frame-only gate, increment 3).
+"""
+function dual_frame_shear_shares(struc, set, elf, effects, mf)
+    mf_ids = _mf_column_element_ids(struc, mf)
+    nwind = set.nwind
+    best = Dict{Tuple{Int, Symbol}, FrameShareCheck}()
+    for (k, effect) in enumerate(effects)
+        u = set.u[3 + nwind + k]
+        dir = elf_direction_vector(elf, effect.direction)
+        for lv in elf.levels
+            z = lv.elevation_m - lv.story_height_m
+            frame_mf, total = _dual_cut_shears(struc, u, z, dir, mf_ids)
+            # A story cut with no shear in this case carries no share information.
+            abs(total) < 1.0 && continue
+            share = abs(frame_mf) / abs(total)
+            key = (lv.story, effect.direction)
+            cur = get(best, key, nothing)
+            (cur === nothing || share < cur.share) || continue
+            # ASCE 7-22 §12.2.5.1 (corpus: asce-7-22, PDF page 177).
+            best[key] = FrameShareCheck(lv.story, effect.direction, abs(frame_mf),
+                abs(total), share, share >= _DUAL_FRAME_SHARE_MIN - 1e-9)
+        end
+    end
+    return sort!(collect(values(best)); by = c -> (c.story, c.direction))
 end

@@ -198,6 +198,9 @@ export SpecialConcreteShearWallSystem, concrete_shear_wall_system
 export DualSeismicSystem, dual_seismic_system
 export drift_optimality_resize, DriftOptimalityResult
 export drift_optimality_resize_multi, MultiDriftOptimalityResult
+export SectionScalingLaw, fit_section_scaling_law
+export continuous_area, marginal_area, continuous_modulus
+export project_to_catalog, candidate_band, projection_gap
 export resize_for_drift!, DriftConstraint, DriftGovernorResult, snap_up
 export total_drift_constraint, interstory_drift_constraint
 

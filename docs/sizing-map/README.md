@@ -6,7 +6,8 @@ each other's checks. Use it to find where a size is decided before reading
 code, and to judge whether a change can move final sizes.
 
 Target design: [`architecture.md`](architecture.md) (where sizing is headed).
-Roadmap: [`plan.md`](plan.md).
+Roadmap: [`plan.md`](plan.md). Optimization control layer (relaxation bounds,
+Pareto fronts, cost-aware fidelity): [`optimization-architecture.md`](optimization-architecture.md).
 
 Detail lives in four raw reports (one record per loop, file:line cited):
 
@@ -37,27 +38,26 @@ Re-audited 2026-11-23 (two-way slabs, lateral sway):
   the earlier "two-way thickness stays fixed once the beams are in the shell"
   decision. `Ib` is the beam stem only; §9.5.3.4 computed-deflection thinning
   stays out.
-- **Lateral sway: the second-order bridge is built and unit-tested but not yet
-  wired into `design_building`.** `StoryStability` (`SS/members/codes/shared/story_stability.jl`)
+- **Lateral sway: the second-order bridge is built; checker-side consumption
+  has landed, pipeline hand-off is the remaining piece** (active LFRS program,
+  see memory `chec-ae00f62d`). `StoryStability` (`SS/members/codes/shared/story_stability.jl`)
   carries one first-order story record onto both ACI §10.10.7 `δs` and AISC
   App.8 `B2`; `design_column_moments` (`SS/members/codes/shared/column_moments.jl`)
-  returns `Mns + δs·Ms` (RC, Eq. 10-18) or `B1·Mnt + B2·Mlt` (steel, Eq. A-8-1)
-  and no-ops on a non-sway story. These and the `LateralTranslation` demand
-  split are **not called anywhere in production `src/`** — only defined and
-  tested — so `demand.lt` is always `nothing` today. `compute_story_properties!`
-  is **not called in the pipeline** (only inside `p_delta_iterate!`, which the
-  pipeline does not call), so flat-plate columns take their sway designation
-  from the wall-presence proxy, not a real `Q`. Flat-plate columns still use
-  k = 1 both ways (the core takes sidesway; `SS/.../utils/column_bracing.jl`),
-  so the classification only sets `braced` / raises a lateral-inadequacy error.
-  Steel's array sizing path still warns "B2 amplification not implemented" for
-  `braced = false` (`SS/members/codes/aisc/checker/steel_feasibility.jl:52-59`).
-  The sway build is proceeding in stages: the shared bridge (Stages A–C), the
-  `story_stability_records` ELF→`StoryStability` adapter keyed by (story,
-  direction) (`SY/analyze/lateral/story_demands.jl:372-437`, Stage D), and
-  `seismic_design_category` (ASCE 7-22 §11.6, Stage E) are all built and
-  tested. The missing piece is consumption: nothing calls
-  `design_column_moments` with a populated `story`/`lt` during member sizing.
+  returns `Mns + δs·Ms` (RC, Eq. 10-18) or `B1·Mnt + B2·Mlt` (steel, Eq. A-8-1).
+  **The steel checker now consumes it:** `is_feasible(::AISCChecker)` takes an
+  optional `story` and the `demand.lt` (Mnt/Mlt) split and amplifies through a
+  shared core `_aisc_amplified_forces` (`SS/members/codes/aisc/checker/steel_feasibility.jl:88-125`),
+  the **same path RC columns use** — one unified RC/steel sway solver. The old
+  "B2 not implemented" warning is gone; it now fires only when `braced=false`
+  **and** no `story` is supplied. Stages D/E (the `story_stability_records`
+  ELF→`StoryStability` adapter, `SY/analyze/lateral/story_demands.jl:372-437`;
+  `seismic_design_category`, ASCE 7-22 §11.6) are built. **Remaining
+  (pipeline-side):** the Synthesizer member stage must feed `story=` and a
+  per-column `lt` (the "colsplit" extraction from the lateral cases) into the
+  checker; until then `demand.lt` is empty in production and
+  `compute_story_properties!` is not called in the pipeline, so flat-plate
+  columns still take their sway designation from the wall-presence proxy and
+  use k = 1 both ways (`SS/.../utils/column_bracing.jl`).
 - **Rebar now counts in the flat-plate column objective** (rank 11 partially
   resolved — WP 2.5). `_column_cache_material` wraps the column's concrete and
   rebar grades in a `ReinforcedConcreteMaterial`, so `obj_coeffs` include rebar
@@ -152,12 +152,14 @@ by how blocking each is (roadmap anchors in brackets):
    behavior, EBF links) [Phase H1]; moment frames (rigid connections,
    **panel-zone** shear per AISC J10.6, doubler/continuity plates, member P-M
    under combined actions) [Phase H2].
-2. **Wire the sway / second-order machinery (currently built, not consumed).**
-   Moment frames are drift- and stability-governed; the `StoryStability` /
-   `B2` / `design_column_moments` bridge exists and is tested but nothing in
-   the pipeline calls it, and steel still warns "B2 not implemented." Columns
-   must be designed as sway members with amplified demands [Phase A5/H2, and
-   the sway-wiring gap in the 2026-11-23 audit note].
+2. **Wire the sway / second-order machinery (in progress).** Moment frames are
+   drift- and stability-governed. **Checker-side is done:** the steel
+   `is_feasible` now amplifies `Mr = B1·Mnt + B2·Mlt` / `Pr = Pnt + B2·Plt`
+   through the shared `_aisc_amplified_forces` core — the same unified RC/steel
+   path as `design_column_moments`. **Remaining:** the pipeline must feed
+   `story=` (from `story_stability_records`) and a per-column `lt` split into
+   the member stage (the "colsplit" extraction) [Phase A5/H2; LFRS program
+   `chec-ae00f62d`].
 3. **Drift control as a sizing driver.** Today drift drives wall thickness;
    a steel frame needs drift to drive beam/column *stiffness* (an owner that
    sizes for inter-story drift limits), plus integrated stability/drift

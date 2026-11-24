@@ -1,7 +1,10 @@
 # Sizing architecture: lightest code-compliant structure
 
 Status: draft for discussion (2026-11-11). Companion to [`plan.md`](plan.md)
-(phases) and [`README.md`](README.md) (current state).
+(phases) and [`README.md`](README.md) (current state). The control layer that
+drives the owners/round-controller — continuous-relaxation bounds, multi-objective
+Pareto fronts, and a cost-aware fidelity scheduler — is specified in
+[`optimization-architecture.md`](optimization-architecture.md).
 
 ## 1. The problem, stated plainly
 

@@ -79,25 +79,33 @@ return is always a typed quantity (`kg` for [`MinWeight`](@ref), `m^3` for
 """
 function objective_value end
 
-"""Objective value for MinWeight: A × L × ρ, with A from [`self_weight_area`](@ref)."""
+# Each method `uconvert`s to the canonical unit promised by the `objective_value`
+# contract (kg / m³ / kgCO₂e). This is a no-op for SI-defined materials (the factor
+# is exactly 1), but it is essential for materials whose properties carry US units
+# — e.g. A992 steel with ρ in lb/ft³ — where the bare product would otherwise be a
+# compound unit (m³·lb/ft³·…). Without it the stored objective coefficient is off by
+# the lb/ft³→kg/m³ factor (~16×) AND two materials on different unit systems (A992 in
+# US, S355 in SI) would be compared on incompatible scales inside one MIP.
+
+"""Objective value for MinWeight: `A × L × ρ`, canonicalized to `kg`."""
 function objective_value(::MinWeight, s::AbstractSection, mat::AbstractMaterial, L)
-    self_weight_area(s) * L * mat.ρ
+    uconvert(u"kg", self_weight_area(s) * L * mat.ρ)
 end
 
-"""Objective value for MinVolume (without material): A × L."""
+"""Objective value for MinVolume (without material): `A × L`, canonicalized to `m³`."""
 function objective_value(::MinVolume, s::AbstractSection, L)
-    self_weight_area(s) * L
+    uconvert(u"m^3", self_weight_area(s) * L)
 end
 
 """Objective value for MinVolume (material ignored): A × L."""
 objective_value(::MinVolume, s::AbstractSection, ::AbstractMaterial, L) = objective_value(MinVolume(), s, L)
 
-"""Objective value for MinCost with a numeric unit cost: A × L × ρ × cost."""
+"""Objective value for MinCost with a numeric unit cost: `(A × L × ρ → kg) × cost`."""
 function objective_value(obj::MinCost{<:Real}, s::AbstractSection, mat::AbstractMaterial, L)
     cost = isnan(obj.unit_cost) ? mat.cost : obj.unit_cost
     isnan(cost) && error("MinCost requires material.cost to be set (material has cost=NaN). " *
                          "Either set cost on your material or use MinCost(unit_cost_per_kg).")
-    self_weight_area(s) * L * mat.ρ * cost
+    uconvert(u"kg", self_weight_area(s) * L * mat.ρ) * cost
 end
 
 """Objective value for MinCost with a custom function: f(section, material) × L."""
@@ -105,9 +113,9 @@ function objective_value(obj::MinCost{<:Function}, s::AbstractSection, mat::Abst
     obj.unit_cost(s, mat) * L
 end
 
-"""Objective value for MinCarbon: A × L × ρ × ecc."""
+"""Objective value for MinCarbon: `A × L × ρ × ecc`, canonicalized to `kgCO₂e`."""
 function objective_value(::MinCarbon, s::AbstractSection, mat::AbstractMaterial, L)
-    self_weight_area(s) * L * mat.ρ * mat.ecc
+    uconvert(u"kgCO2e", self_weight_area(s) * L * mat.ρ * mat.ecc)
 end
 
 """

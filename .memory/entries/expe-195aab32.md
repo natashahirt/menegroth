@@ -7,12 +7,12 @@ title: Dense waffle passes after discrete sizing requires As,min
 node_label: Dense waffle passes; Beam 1144 cleared
 tags: waffle,grid/x1y1,min-reinforcement,aci-318-11
 status: active
-open_threads: 0
+open_threads: 1
 success: 'true'
 files: ''
 session_id: sess-f69b61ca
 created_at: '2026-11-25T16:29:21.722782+00:00'
-updated_at: '2026-11-25T16:29:21.722782+00:00'
+updated_at: '2026-11-25T16:29:51.100402+00:00'
 has_child_rationale: The building check that chec-f5532534 left open.
 invalidates: expe-007fc1db
 ---

@@ -7,12 +7,12 @@ title: 'Next: apply cladding weight, then bring wind and seismic into the footin
 node_label: 'Next: apply cladding weight, then bring wind and s'
 tags: sizing,cladding,foundations,wind,seismic,todo,next
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-df7afd0f
 created_at: '2026-11-25T16:32:39.243830+00:00'
-updated_at: '2026-11-25T16:32:39.243830+00:00'
+updated_at: '2026-11-25T16:37:19.892778+00:00'
 ---
 Do these two unconservative gaps next, before any further column cleanup.
 

@@ -443,7 +443,12 @@ function _design_flat_plate_members!(struc::BuildingStructure, params::DesignPar
         _apply_support_envelope!(struc, outcomes)
         _raise_column_floors!(floors, before, struc)
         refresh_flat_plate_analysis!(struc, params)
-        _reconcile_columns!(struc, params; tc, floors)
+        # #18: `refresh_flat_plate_analysis!` just solved the current state, and
+        # nothing mutates the model before the reconcile below, so its column-frame
+        # install may skip its re-solve when it changes no section. The ENV gate
+        # exists only for the equivalence harness (default: optimization on).
+        _reconcile_columns!(struc, params; tc, floors,
+                            model_current = !haskey(ENV, "SS_DISABLE_MEMBER_RESOLVE_SKIP"))
         _harmonize_columns!(struc, params)
         # The search can grow a column the slab commit did not. That size
         # failed at the smaller plan, so the next round does not go under it.

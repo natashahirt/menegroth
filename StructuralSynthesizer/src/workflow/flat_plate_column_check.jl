@@ -1149,19 +1149,81 @@ Returns `nothing` when no group passes.
 end
 
 """
-    _fit_flat_plate_columns!(struc, params, column_opts, checks; floors) -> (changed, unresolved)
+    _select_column_section(struc, params, column_opts, col, check, floor) -> section or nothing
 
-Install, on every checked column, the lightest catalog section that passes
-the column's full-load strength, its §10.12 joint sections, and punching at
-that plan size.
+The lightest catalog section that passes this column's full-load strength,
+its §10.12 joint sections, and punching at that plan size.
+
+This is the only flat-plate column choice. Callers install the section; they
+do not walk the catalog themselves.
 
 Punching is [`check_punching_for_column`](@ref) at the trial plan size, using
 the shear and unbalanced moments of the slab analysis already stored. That
 analysis was run at the installed size. Its moment is kept for the trial: a
 smaller column takes less of the unbalanced moment, so the stored moment is
 the heavier demand. A column with no stored punching analysis is not made
-smaller. `floors` holds a plan size the slab commit or an earlier section
-search grew the column to; the search does not go under it.
+smaller. `floor` is a plan size `(c1, c2)` the search does not go under, or
+`nothing`.
+
+`nothing` when no section within the flat-plate cap passes. The column is
+left unchanged.
+"""
+@noinline function _select_column_section(struc, params, column_opts, col, check, floor)
+    @nospecialize struc params column_opts col check floor
+    sec0 = section(col)
+    (sec0 isa StructuralSizer.RCColumnSection ||
+        sec0 isa StructuralSizer.RCCircularSection) || return nothing
+    demands = _column_punching_demands(struc, col)
+    known = !isempty(demands)
+    shrink = params.uniform_column_sizing === :off
+    if !shrink || !known
+        f1 = floor === nothing ? col.c1 : max(floor[1], col.c1)
+        f2 = floor === nothing ? col.c2 : max(floor[2], col.c2)
+        floor = (f1, f2)
+    end
+    checker = _aci_column_checker(column_opts)
+    jchecker = _joint_checker(column_opts)
+    catalog = _memo_column_catalog(column_opts)
+    mat = _column_cache_material(col, column_opts)
+    cache = _memo_capacity_cache(checker, catalog, mat, column_opts.objective)
+    groups = _memo_plan_groups(catalog, cache, _flat_plate_column_cap(params))
+    orient = _rc_demand_orientations(check.demand, column_opts.βdns)
+    punch = Dict{Tuple{Float64, Float64}, Union{Bool, Nothing}}()
+    lo = _lightest_passing_group(
+        groups, catalog, floor, punch, struc, params, col, demands,
+        checker, cache, mat, orient, check.geometry, jchecker, column_opts, check.joint)
+    lo === nothing && return nothing
+    pick = _lightest_in_group(
+        groups[lo], catalog, checker, cache, mat, orient, check.geometry,
+        jchecker, col, column_opts, check.joint)
+    pick === nothing && return nothing
+    return catalog[pick]
+end
+
+"""
+    _install_column_section!(struc, params, col, sec) -> Bool
+
+Put `sec` on `col` and on its frame elements. Returns whether the section
+replaced the one already there.
+"""
+function _install_column_section!(struc, params, col, sec)
+    _installed_section(col, sec) && return false
+    bb = StructuralSizer.bounding_box(sec)
+    col.c1 = bb.width
+    col.c2 = bb.depth
+    set_section!(col, sec)
+    _set_rc_column_volumes!(col,
+        something(col.concrete, column_concrete(params)),
+        column_rebar(params))
+    _install_column_frame_section!(struc, col, _rc_column_frame_section(col, params))
+    return true
+end
+
+"""
+    _fit_flat_plate_columns!(struc, params, column_opts, checks; floors) -> (changed, unresolved)
+
+Install, on every checked column, the section [`_select_column_section`](@ref)
+chose. `floors` is keyed by column index.
 
 `changed` lists columns whose section was replaced. `unresolved` lists
 columns no section within the cap passes; they keep their section.
@@ -1169,51 +1231,16 @@ columns no section within the cap passes; they keep their section.
 @noinline function _fit_flat_plate_columns!(struc, params, column_opts, checks; floors = Dict{Int, Tuple}())
     @nospecialize struc params column_opts checks floors
     isempty(checks) && return (Int[], Int[])
-    checker = _aci_column_checker(column_opts)
-    jchecker = _joint_checker(column_opts)
-    catalog = _memo_column_catalog(column_opts)
-    cap = _flat_plate_column_cap(params)
     changed, unresolved = Int[], Int[]
-    shrink = params.uniform_column_sizing === :off
     for i in sort!(collect(keys(checks)))
         col = struc.columns[i]
         sec0 = section(col)
         (sec0 isa StructuralSizer.RCColumnSection ||
             sec0 isa StructuralSizer.RCCircularSection) || continue
-        demands = _column_punching_demands(struc, col)
-        known = !isempty(demands)
-        floor = get(floors, i, nothing)
-        if !shrink || !known
-            f1 = floor === nothing ? col.c1 : max(floor[1], col.c1)
-            f2 = floor === nothing ? col.c2 : max(floor[2], col.c2)
-            floor = (f1, f2)
-        end
-        mat = _column_cache_material(col, column_opts)
-        cache = _memo_capacity_cache(checker, catalog, mat, column_opts.objective)
-        groups = _memo_plan_groups(catalog, cache, cap)
-        orient = _rc_demand_orientations(checks[i].demand, column_opts.βdns)
-        geom = checks[i].geometry
-        joint = checks[i].joint
-        punch = Dict{Tuple{Float64, Float64}, Union{Bool, Nothing}}()
-        lo = _lightest_passing_group(
-            groups, catalog, floor, punch, struc, params, col, demands,
-            checker, cache, mat, orient, geom, jchecker, column_opts, joint)
-        lo === nothing && (push!(unresolved, i); continue)
-        pick = _lightest_in_group(
-            groups[lo], catalog, checker, cache, mat, orient, geom,
-            jchecker, col, column_opts, joint)
-        pick === nothing && (push!(unresolved, i); continue)
-        sec = catalog[pick]
-        _installed_section(col, sec) && continue
-        bb = StructuralSizer.bounding_box(sec)
-        col.c1 = bb.width
-        col.c2 = bb.depth
-        set_section!(col, sec)
-        _set_rc_column_volumes!(col,
-            something(col.concrete, column_concrete(params)),
-            column_rebar(params))
-        _install_column_frame_section!(struc, col, _rc_column_frame_section(col, params))
-        push!(changed, i)
+        sec = _select_column_section(struc, params, column_opts, col, checks[i],
+                                     get(floors, i, nothing))
+        sec === nothing && (push!(unresolved, i); continue)
+        _install_column_section!(struc, params, col, sec) && push!(changed, i)
     end
     return (changed, unresolved)
 end

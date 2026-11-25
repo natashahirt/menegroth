@@ -95,7 +95,8 @@ function size_columns!(
     I_factor::Real = 0.70,
     tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
     # Group id → `(section, exact)`. Each group keeps that section or a heavier
-    # one (see `_narrow_to_section_floor`). Discrete steel columns only.
+    # one. Discrete steel uses `_narrow_to_section_floor`. Discrete concrete
+    # uses the same rule through `frame_section_floors` for this call only.
     section_floor = nothing,
 )
     # NOTE: as of this writing `BuildingStructure` has NO `design_parameters` field
@@ -121,8 +122,11 @@ function size_columns!(
         group_collinear_members!(struc; member_type=:columns)
     end
     
-    section_floor === nothing || effective_opts isa StructuralSizer.SteelColumnOptions ||
-        throw(ArgumentError("column section_floor applies to steel columns only"))
+    section_floor === nothing ||
+        effective_opts isa StructuralSizer.SteelColumnOptions ||
+        effective_opts isa StructuralSizer.ConcreteColumnOptions ||
+        throw(ArgumentError(
+            "column section_floor applies to discrete steel and concrete columns only"))
     floor_kw = section_floor === nothing ? (;) : (; section_floor)
     result = _size_columns_impl!(struc, effective_opts; resolution, reanalyze, gravity_factor,
                                  I_factor, floor_kw...)
@@ -252,6 +256,7 @@ function _size_columns_impl!(
     # ACI 318-11 §10.10.4.1 — cracked-stiffness reduction for concrete column sections,
     # threaded from params.column_I_factor (default 0.70).
     I_factor::Real = 0.70,
+    section_floor = nothing,
 )
     skel = struc.skeleton
     member_edge_group = :columns
@@ -283,6 +288,10 @@ function _size_columns_impl!(
     # including the NLP path (see `_rc_column_demand_sets`).
     rc_demands = _rc_column_demand_sets(opts, demands, case_rows)
 
+    # Iteration floors live only for this call. A group that already has a
+    # row F floor keeps that floor.
+    pinned = _pin_column_section_floors!(struc, opts, section_floor)
+    try
     if opts.sizing_strategy === :nlp
         # NLP has no catalog: stored row F rows become constraints. They are
         # already in kip, and magnification stays off on them: the forces
@@ -324,8 +333,7 @@ function _size_columns_impl!(
                 grown = tier isa Symbol ?
                     StructuralSizer.grow_rc_column_catalog(cat, opts.section_shape, tier) :
                     nothing
-                (grown !== nothing && e isa ArgumentError &&
-                    startswith(e.msg, "No feasible sections for group")) || rethrow()
+                (grown !== nothing && _column_catalog_can_grow(e)) || rethrow()
                 cat, nxt = grown
                 depth_in = round(Int, maximum(s -> s isa StructuralSizer.RCCircularSection ?
                     ustrip(u"inch", s.D) : ustrip(u"inch", max(s.b, s.h)), cat))
@@ -343,9 +351,49 @@ function _size_columns_impl!(
         Asap.process!(struc.asap_model)
         _solve_struc_model!(struc)
     end
+    finally
+        for gid in pinned
+            delete!(struc.frame_section_floors, gid)
+        end
+    end
 
     @info "Sized $(length(group_ids)) column groups" material=StructuralSizer.material_name(opts.material)
     return struc
+end
+
+"""
+A concrete column catalog can take one more tier.
+
+`No feasible sections` means nothing currently allowed passes. The floor
+message means the installed section itself is larger than this tier, which
+happens after an earlier pass already grew the catalog.
+"""
+_column_catalog_can_grow(e::ArgumentError) =
+    startswith(e.msg, "No feasible sections for group") ||
+    occursin("the row F floor is not in it", e.msg)
+_column_catalog_can_grow(::Any) = false
+
+"""
+Add `section_floor` entries that this call does not already have.
+
+Returns the group ids added here. The caller removes them when sizing
+returns, so an iteration floor does not stay on the building. A group that
+already has a row F floor is left as it is.
+"""
+function _pin_column_section_floors!(struc, opts, section_floor)
+    added = UInt64[]
+    section_floor === nothing && return added
+    (opts.sizing_strategy === :discrete && opts.n_max_sections == 0 &&
+        opts.materials === nothing) || throw(ArgumentError(
+        "column section_floor needs discrete sizing, one material, and n_max_sections = 0"))
+    for (gid, fl) in section_floor
+        haskey(struc.frame_section_floors, gid) && continue
+        sec = fl isa NamedTuple ? fl.section : fl
+        sec === nothing && continue
+        struc.frame_section_floors[gid] = sec
+        push!(added, gid)
+    end
+    return added
 end
 
 """Append stored row F column rows onto each group's NLP demand set.

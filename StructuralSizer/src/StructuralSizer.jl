@@ -158,7 +158,7 @@ export serialize_trace_event, build_stage_timeline, filter_trace
 export AbstractMaterial, AbstractDesignCode, AbstractSection
 export AbstractStructuralSynthesizer, AbstractBuildingSkeleton, AbstractBuildingStructure
 export AbstractDemand, MemberDemand, AbstractMemberGeometry
-export AbstractObjective, MinWeight, MinVolume, MinCost, MinCarbon
+export AbstractObjective, MinWeight, MinVolume, MinCost, MinCarbon, ParetoScalarization
 export objective_value, total_objective
 export Constants
 

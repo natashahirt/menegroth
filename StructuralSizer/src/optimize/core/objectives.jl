@@ -34,6 +34,42 @@ MinCost() = MinCost(NaN)
 struct MinCarbon <: AbstractObjective end
 
 """
+    ParetoScalarization(o1, o2, w, ref1, ref2) <: AbstractObjective
+
+Weighted-sum scalarization of two objectives, for tracing a Pareto front by
+continuation. Minimises the DIMENSIONLESS convex combination
+
+    w · (o1 / ref1)  +  (1 − w) · (o2 / ref2),    w ∈ [0, 1]
+
+where `ref1`, `ref2` are fixed positive reference quantities carrying the same
+units as `o1`, `o2` respectively. They render each term dimensionless and O(1) so
+two incommensurable metrics — e.g. structural volume (m³) and embodied carbon
+(kgCO₂e) — can be combined on one axis. Sweeping `w` from 1 → 0 walks the
+*supported* Pareto points from the `o1`-optimum to the `o2`-optimum; setting each
+`ref` to the corresponding single-objective optimum normalises both anchors to 1.
+
+Because it delegates to each component's own [`objective_value`](@ref), it
+inherits their exact semantics — including the RC concrete/rebar carbon split —
+and works unchanged under every checker whose cache precomputes `objective_value`
+(AISC steel, ACI columns/beams). Precompute keyword args (`rebar`, `transverse`)
+are forwarded verbatim to the components, so the RC path is handled correctly.
+"""
+struct ParetoScalarization{O1<:AbstractObjective, O2<:AbstractObjective, R1, R2} <: AbstractObjective
+    o1::O1
+    o2::O2
+    w::Float64
+    ref1::R1
+    ref2::R2
+    function ParetoScalarization(o1::AbstractObjective, o2::AbstractObjective,
+                                 w::Real, ref1, ref2)
+        0 ≤ w ≤ 1 || throw(ArgumentError("ParetoScalarization: w must be in [0,1]; got $w."))
+        (ustrip(ref1) > 0 && ustrip(ref2) > 0) ||
+            throw(ArgumentError("ParetoScalarization: ref1 and ref2 must be positive."))
+        new{typeof(o1), typeof(o2), typeof(ref1), typeof(ref2)}(o1, o2, Float64(w), ref1, ref2)
+    end
+end
+
+"""
     objective_value(obj::AbstractObjective, section, material, L) -> Unitful.Quantity
 
 Compute the objective function value for a single section of length `L`. The
@@ -72,6 +108,21 @@ end
 """Objective value for MinCarbon: A × L × ρ × ecc."""
 function objective_value(::MinCarbon, s::AbstractSection, mat::AbstractMaterial, L)
     self_weight_area(s) * L * mat.ρ * mat.ecc
+end
+
+"""
+Objective value for a [`ParetoScalarization`](@ref): the dimensionless weighted
+sum `w·(o1/ref1) + (1−w)·(o2/ref2)`. Delegates to each component's
+`objective_value`, forwarding any precompute keyword args (`rebar`, `transverse`)
+so the RC concrete/rebar split is applied correctly. Each `vᵢ/refᵢ` must be
+dimensionless (matching units), which `ustrip(NoUnits, …)` enforces.
+"""
+function objective_value(obj::ParetoScalarization, s::AbstractSection,
+                         mat::AbstractMaterial, L; kwargs...)
+    v1 = objective_value(obj.o1, s, mat, L; kwargs...)
+    v2 = objective_value(obj.o2, s, mat, L; kwargs...)
+    return obj.w * ustrip(Unitful.NoUnits, v1 / obj.ref1) +
+           (1 - obj.w) * ustrip(Unitful.NoUnits, v2 / obj.ref2)
 end
 
 """

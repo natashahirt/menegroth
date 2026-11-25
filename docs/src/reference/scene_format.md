@@ -66,6 +66,9 @@ Glyphs only. Member loads that are not in this list still affect the solved stag
 | `node_moment` | f32 | × 3 | Global moment, N·m |
 | `line_load_element` | u32 | | 0-based element (`LineLoad` and `GravityLoad`) |
 | `line_load` | f32 | × 3 | Global force per length, N/m |
+| `tributary_load_element` | u32 | breakpoints | 0-based element. One run per element, in file order. Omitted when the model has no `TributaryLoad` |
+| `tributary_load_position` | f32 | breakpoints | Parameter along that element, 0–1 |
+| `tributary_load` | f32 | breakpoints × 3 | Global force per length, N/m. Width times pressure, summed when dead and live are separate loads. Linear between breakpoints; outside them the viewer draws nothing |
 | `point_load_element` | u32 | | |
 | `point_load_position` | f32 | | Fraction along the element, 0–1 |
 | `point_load` | f32 | × 3 | Global force, newtons |

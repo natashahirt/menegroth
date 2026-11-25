@@ -649,6 +649,39 @@ end
     @test scene_u32(read_scene(io), "member_solid_faces") == scene_u32(on, "member_solid_faces")
 end
 
+@testset "tributary loads draw as force per length" begin
+    E = 200e9u"Pa"
+    G = 77e9u"Pa"
+    ρ = 7850.0u"kg/m^3"
+    sec = Asap.Section(4.0e-3u"m^2", E, G, 4.0e-5u"m^4", 1.2e-5u"m^4", 8.0e-7u"m^4", ρ)
+    n1 = Asap.Node([0.0u"m", 0.0u"m", 0.0u"m"], :fixed)
+    n2 = Asap.Node([4.0u"m", 0.0u"m", 0.0u"m"], :pinned)
+    n3 = Asap.Node([4.0u"m", 4.0u"m", 0.0u"m"], :pinned)
+    rib = Asap.Element(n1, n2, sec, :beam)
+    taper = Asap.Element(n2, n3, sec, :beam)
+    # 2 m × 1000 Pa and 1 m × 500 Pa share the first rib: 2500 N/m downward.
+    dead = Asap.TributaryLoad(rib, [0.0, 1.0], [2.0u"m", 2.0u"m"], 1000.0u"Pa")
+    live = Asap.TributaryLoad(rib, [0.0, 0.5, 1.0], [1.0u"m", 1.0u"m", 1.0u"m"], 500.0u"Pa")
+    # The second rib fades from 2 m to nothing, so its far end stays in the run at zero.
+    fade = Asap.TributaryLoad(taper, [0.0, 1.0], [2.0u"m", 0.0u"m"], 1000.0u"Pa")
+    model = Asap.Model([n1, n2, n3], Asap.Element[rib, taper], Asap.AbstractLoad[dead, live, fade])
+    packet = build_scene(model; stations = 5)
+    @test scene_u32(packet, "tributary_load_element") == UInt32[0, 0, 0, 1, 1]
+    @test scene_f32(packet, "tributary_load_position") ≈ Float32[0, 0.5, 1, 0, 1]
+    val = scene_f32(packet, "tributary_load")
+    for i in 1:3
+        @test val[3i - 2] ≈ 0 atol = 1e-2
+        @test val[3i - 1] ≈ 0 atol = 1e-2
+        @test val[3i] ≈ -2500 atol = 1e-2
+    end
+    @test val[10:12] ≈ Float32[0, 0, -2000] atol = 1e-2
+    @test val[13:15] ≈ Float32[0, 0, 0] atol = 1e-3
+    @test Asap.intensities(dead) ≈ [2000.0, 2000.0]
+
+    plain = build_scene(_cantilever())
+    @test !any(b -> b.name == "tributary_load_element", plain.buffers)
+end
+
 @testset "resolve=false draws the caller's own solution" begin
     model = _cantilever()
     build_scene(model)                               # solves + fills node.displacement

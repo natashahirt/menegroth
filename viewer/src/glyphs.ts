@@ -6,6 +6,8 @@ import theme from "./theme.json"
  * application and the shaft trails back along the force. Area and line loads
  * are a field: the same arrow, repeated, with the spacing following the zoom
  * so a close view reads as pressure and a far view stays quiet.
+ * A rib tributary load is the same kind of arrow: its length is the force
+ * per length, and it can change along the rib.
  */
 
 const CELL_M = 2
@@ -68,6 +70,9 @@ export function buildGlyphs(input: {
   nodeMoment: Float32Array
   lineLoadElement: Uint32Array
   lineLoad: Float32Array
+  tributaryLoadElement: Uint32Array
+  tributaryLoadPosition: Float32Array
+  tributaryLoad: Float32Array
   pointLoadElement: Uint32Array
   pointLoadPosition: Float32Array
   pointLoad: Float32Array
@@ -85,7 +90,13 @@ export function buildGlyphs(input: {
   const points = scaledArrows(pointArrows(
     input.position, input.elementNodes, input.pointLoadElement, input.pointLoadPosition, input.pointLoad,
   ), reach)
-  const lines = lineSpans(input.position, input.elementNodes, input.lineLoadElement, input.lineLoad, reach)
+  const lines = lineSpans(input.position, input.elementNodes, input.lineLoadElement, input.lineLoad)
+  const ribs = tributaryProfiles(
+    input.position, input.elementNodes, input.tributaryLoadElement,
+    input.tributaryLoadPosition, input.tributaryLoad,
+  )
+  const distributedScale = sharedScale(lines, ribs, reach)
+  for (const span of lines) span.length *= distributedScale
   const areaDir = meanDirection(input.loadArrowDir)
   const floors = areaDir ? floorIndex(input.position, input.shellFaces, input.shellKinds) : new Map<number, FloorTri[]>()
   const areaLength = reach
@@ -110,7 +121,7 @@ export function buildGlyphs(input: {
       const key = cameraKey(camera)
       if (Math.abs(spacing - builtSpacing) / Math.max(builtSpacing, 1e-6) > 0.12 || builtSpacing < 0) {
         builtSpacing = spacing
-        distributed = sampleLines(lines, spacing)
+        distributed = sampleLines(lines, spacing).concat(sampleTributary(ribs, spacing, distributedScale))
         area = areaDir ? sampleArea(floors, areaDir, areaLength, spacing) : []
         lastKey = ""
       }
@@ -194,15 +205,26 @@ function scaledArrows(raw: Rec[], reach: number): Rec[] {
   return raw.map((arrow) => ({ ...arrow, length: reach * (arrow.length / maxMag) }))
 }
 
+interface TribProfile {
+  ax: number
+  ay: number
+  az: number
+  bx: number
+  by: number
+  bz: number
+  t: number[]
+  vx: number[]
+  vy: number[]
+  vz: number[]
+}
+
 function lineSpans(
   position: Float32Array,
   pairs: Uint32Array,
   elements: Uint32Array,
   value: Float32Array,
-  reach: number,
 ): LineSpan[] {
   const raw: LineSpan[] = []
-  let maxMag = 0
   for (let i = 0; i < elements.length; i++) {
     const e = elements[i]
     if (e * 2 + 1 >= pairs.length) continue
@@ -213,7 +235,6 @@ function lineSpans(
     const dz = value[i * 3 + 2]
     const mag = Math.hypot(dx, dy, dz)
     if (mag < 1e-9) continue
-    maxMag = Math.max(maxMag, mag)
     raw.push({
       ax: position[a], ay: position[a + 1], az: position[a + 2],
       bx: position[b], by: position[b + 1], bz: position[b + 2],
@@ -221,9 +242,96 @@ function lineSpans(
       length: mag,
     })
   }
-  if (maxMag < 1e-9) return []
-  for (const span of raw) span.length = reach * (span.length / maxMag)
   return raw
+}
+
+/** One piecewise profile per element. Records for an element are consecutive. */
+function tributaryProfiles(
+  position: Float32Array,
+  pairs: Uint32Array,
+  elements: Uint32Array,
+  station: Float32Array,
+  value: Float32Array,
+): TribProfile[] {
+  const out: TribProfile[] = []
+  let i = 0
+  while (i < elements.length) {
+    const e = elements[i]
+    let j = i + 1
+    while (j < elements.length && elements[j] === e) j++
+    const count = j - i
+    if (count >= 2 && e * 2 + 1 < pairs.length) {
+      const a = pairs[e * 2] * 3
+      const b = pairs[e * 2 + 1] * 3
+      const t: number[] = []
+      const vx: number[] = []
+      const vy: number[] = []
+      const vz: number[] = []
+      for (let k = i; k < j; k++) {
+        t.push(station[k] ?? 0)
+        vx.push(value[k * 3] ?? 0)
+        vy.push(value[k * 3 + 1] ?? 0)
+        vz.push(value[k * 3 + 2] ?? 0)
+      }
+      out.push({
+        ax: position[a], ay: position[a + 1], az: position[a + 2],
+        bx: position[b], by: position[b + 1], bz: position[b + 2],
+        t, vx, vy, vz,
+      })
+    }
+    i = j
+  }
+  return out
+}
+
+/** Line loads and rib tributary loads share one scale. Both are force per length. */
+function sharedScale(lines: LineSpan[], ribs: TribProfile[], reach: number): number {
+  let maxMag = 0
+  for (const span of lines) maxMag = Math.max(maxMag, span.length)
+  for (const rib of ribs) {
+    for (let i = 0; i < rib.t.length; i++) {
+      maxMag = Math.max(maxMag, Math.hypot(rib.vx[i], rib.vy[i], rib.vz[i]))
+    }
+  }
+  return maxMag < 1e-9 ? 0 : reach / maxMag
+}
+
+function tributaryAt(rib: TribProfile, t: number): [number, number, number] {
+  const n = rib.t.length
+  if (n === 0 || t < rib.t[0] - 1e-6 || t > rib.t[n - 1] + 1e-6) return [0, 0, 0]
+  let i = 0
+  while (i + 1 < n && rib.t[i + 1] < t) i++
+  if (i + 1 >= n) return [rib.vx[n - 1], rib.vy[n - 1], rib.vz[n - 1]]
+  const span = rib.t[i + 1] - rib.t[i]
+  const a = span < 1e-9 ? 0 : (t - rib.t[i]) / span
+  return [
+    rib.vx[i] + (rib.vx[i + 1] - rib.vx[i]) * a,
+    rib.vy[i] + (rib.vy[i + 1] - rib.vy[i]) * a,
+    rib.vz[i] + (rib.vz[i + 1] - rib.vz[i]) * a,
+  ]
+}
+
+function sampleTributary(ribs: TribProfile[], spacing: number, scale: number): Rec[] {
+  if (scale === 0) return []
+  const out: Rec[] = []
+  for (const rib of ribs) {
+    const len = Math.hypot(rib.bx - rib.ax, rib.by - rib.ay, rib.bz - rib.az)
+    const n = Math.max(1, Math.round(len / spacing))
+    for (let i = 0; i < n; i++) {
+      const t = (i + 0.5) / n
+      const [x, y, z] = tributaryAt(rib, t)
+      const mag = Math.hypot(x, y, z)
+      if (mag < 1e-3) continue
+      out.push({
+        x: rib.ax + (rib.bx - rib.ax) * t,
+        y: rib.ay + (rib.by - rib.ay) * t,
+        z: rib.az + (rib.bz - rib.az) * t,
+        dx: x / mag, dy: y / mag, dz: z / mag,
+        length: mag * scale,
+      })
+    }
+  }
+  return out
 }
 
 function sampleLines(spans: LineSpan[], spacing: number): Rec[] {

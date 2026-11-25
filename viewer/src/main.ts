@@ -172,6 +172,7 @@ let tributaryKind = new Uint8Array()
 let tributaryElement = new Uint32Array()
 let tributaryCell = new Uint32Array()
 let tributaryPresent = false
+let ribLoadCount = 0
 let localDof = new Float32Array()
 let elementLcs = new Float32Array()
 let loadElementIndex = new Uint32Array()
@@ -539,6 +540,7 @@ function setOrbitDetail(orbiting: boolean) {
 }
 
 function clearModel() {
+  ribLoadCount = 0
   closeDetail()
   sceneSerial += 1
   cutLineKey = ""
@@ -666,9 +668,10 @@ function show(decoded: DecodedScene, refit = true) {
   const nodeMoment = typed(decoded.arrays, "node_moment", "f32") as Float32Array
   const lineLoad = typed(decoded.arrays, "line_load", "f32") as Float32Array
   const pointLoad = typed(decoded.arrays, "point_load", "f32") as Float32Array
+  const tributaryLoad = typed(decoded.arrays, "tributary_load", "f32") as Float32Array
   const loadArrowAt = typed(decoded.arrays, "load_arrow_position", "f32") as Float32Array
   const loadArrowDir = typed(decoded.arrays, "load_arrow_vector", "f32") as Float32Array
-  for (const values of [position, displacement, rotation, lcs, nodeForce, nodeMoment, lineLoad, pointLoad, loadArrowAt, loadArrowDir]) {
+  for (const values of [position, displacement, rotation, lcs, nodeForce, nodeMoment, lineLoad, pointLoad, tributaryLoad, loadArrowAt, loadArrowDir]) {
     swapYZ(values, values === lcs ? 9 : 3)
   }
 
@@ -736,6 +739,9 @@ function show(decoded: DecodedScene, refit = true) {
     nodeMoment,
     lineLoadElement: typed(decoded.arrays, "line_load_element", "u32") as Uint32Array,
     lineLoad,
+    tributaryLoadElement: typed(decoded.arrays, "tributary_load_element", "u32") as Uint32Array,
+    tributaryLoadPosition: typed(decoded.arrays, "tributary_load_position", "f32") as Float32Array,
+    tributaryLoad,
     pointLoadElement: typed(decoded.arrays, "point_load_element", "u32") as Uint32Array,
     pointLoadPosition: typed(decoded.arrays, "point_load_position", "f32") as Float32Array,
     pointLoad,
@@ -747,6 +753,7 @@ function show(decoded: DecodedScene, refit = true) {
   })
   glyphGroup = glyphs.group
   scene.add(glyphGroup)
+  ribLoadCount = (typed(decoded.arrays, "tributary_load_element", "u32") as Uint32Array).length
 
   footingCenter = typed(decoded.arrays, "footing_center", "f32") as Float32Array<ArrayBuffer>
   footingSize = typed(decoded.arrays, "footing_size", "f32") as Float32Array<ArrayBuffer>
@@ -1252,6 +1259,7 @@ function applyView() {
   const note = absent ?? (
     tributaryOn ? "Each outline is one assigned area. Column areas are cerulean. Wall areas are iris. Beam areas are gold."
     : categories ? CATEGORY_NOTE
+    : ribLoadCount > 0 && loadsInput.checked ? "Arrows along a member are its tributary load, force per length."
     : ""
   )
   fieldNote.hidden = note === ""

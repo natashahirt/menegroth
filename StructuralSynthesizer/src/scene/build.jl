@@ -1161,7 +1161,7 @@ function _load_buffers(model, nodes, elements, node_of, origin)
     end
 
     arrow_at, arrow_dir = _area_load_arrows(model, origin)
-    return SceneBuffer[
+    buffers = SceneBuffer[
         SceneBuffer("support_index", support_index),
         SceneBuffer("support_fixity", support_fixity),
         SceneBuffer("node_force_index", force_index),
@@ -1176,6 +1176,105 @@ function _load_buffers(model, nodes, elements, node_of, origin)
         SceneBuffer("load_arrow_position", arrow_at),
         SceneBuffer("load_arrow_vector", arrow_dir),
     ]
+    trib_elem, trib_pos, trib_val = _tributary_load_samples(model, drawn)
+    if !isempty(trib_elem)
+        push!(buffers, SceneBuffer("tributary_load_element", trib_elem))
+        push!(buffers, SceneBuffer("tributary_load_position", trib_pos))
+        push!(buffers, SceneBuffer("tributary_load", trib_val))
+    end
+    return buffers
+end
+
+"""
+Breakpoints of every `TributaryLoad`, one run per element.
+
+The stored intensity is width times pressure, in N/m, along the load
+direction. That is `Asap.intensities` at a breakpoint, and the linear
+interpolation between breakpoints that the load itself uses. Several loads
+on one element are summed, so a factored dead load and a factored live load
+draw as the total force on the rib. A station no load covers is zero.
+Drawing-only frame elements are left out.
+"""
+function _tributary_load_samples(model, drawn)
+    groups = Dict{Int, Vector{Asap.TributaryLoad}}()
+    order = Int[]
+    elem_of = Dict{UInt, Int}(objectid(elem) => e for (e, elem) in enumerate(model.frame_elements))
+    for load in model.loads
+        load isa Asap.TributaryLoad || continue
+        e = get(elem_of, objectid(load.element), 0)
+        e == 0 && error("scene: TributaryLoad references an element that is not in the model")
+        drawn !== nothing && e in drawn.frames && continue
+        if !haskey(groups, e)
+            groups[e] = Asap.TributaryLoad[]
+            push!(order, e)
+        end
+        push!(groups[e], load)
+    end
+    elem = UInt32[]
+    pos = Float32[]
+    val = Float32[]
+    for e in order
+        loads = groups[e]
+        stations = _tributary_stations(loads)
+        samples = NTuple{4, Float64}[]
+        live = false
+        for t in stations
+            ix, iy, iz = _tributary_intensity(loads, t)
+            live |= abs(ix) + abs(iy) + abs(iz) > 1e-6
+            push!(samples, (t, ix, iy, iz))
+        end
+        live || continue
+        for (t, ix, iy, iz) in samples
+            push!(elem, UInt32(e - 1))
+            push!(pos, Float32(t))
+            push!(val, Float32(ix), Float32(iy), Float32(iz))
+        end
+    end
+    return elem, pos, val
+end
+
+"""Sorted parameter stations covered by `loads`, duplicates collapsed."""
+function _tributary_stations(loads)
+    raw = Float64[]
+    for load in loads
+        append!(raw, load.positions)
+    end
+    sort!(raw)
+    out = Float64[]
+    for t in raw
+        isempty(out) || t > out[end] + 1e-9 || continue
+        push!(out, t)
+    end
+    return out
+end
+
+"""Width, metres, of one tributary load at parameter `t`. Zero outside its stations."""
+function _tributary_width_m(load::Asap.TributaryLoad, t::Float64)
+    pos = load.positions
+    (t < pos[1] - 1e-12 || t > pos[end] + 1e-12) && return 0.0
+    i = searchsortedlast(pos, t)
+    i < 1 && return 0.0
+    i >= length(pos) && return ustrip(u"m", load.widths[end])
+    span = pos[i + 1] - pos[i]
+    w0 = ustrip(u"m", load.widths[i])
+    span <= 1e-12 && return w0
+    α = (t - pos[i]) / span
+    return w0 + α * (ustrip(u"m", load.widths[i + 1]) - w0)
+end
+
+"""Summed force per length, N/m, of `loads` at parameter `t`."""
+function _tributary_intensity(loads, t::Float64)
+    x = 0.0
+    y = 0.0
+    z = 0.0
+    for load in loads
+        s = _tributary_width_m(load, t) * ustrip(u"Pa", load.pressure)
+        d = load.direction
+        x += s * d[1]
+        y += s * d[2]
+        z += s * d[3]
+    end
+    return x, y, z
 end
 
 """

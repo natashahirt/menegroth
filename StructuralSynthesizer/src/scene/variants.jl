@@ -671,10 +671,11 @@ function variant_parts(packet::ScenePacket)
         _index_part(packet, "loads",
             ("support_index", "node_force_index", "node_moment_index"), node_of),
         _index_part(packet, "loads",
-            ("line_load_element", "point_load_element", "load_element"), element_of),
+            ("line_load_element", "point_load_element", "load_element", "tributary_load_element"), element_of),
         _value_part(packet, (
             "support_fixity", "node_force", "node_moment", "line_load",
             "point_load_position", "point_load", "load_particular",
+            "tributary_load_position", "tributary_load",
         )),
     )
     arrows = _value_part(packet, ("load_arrow_position", "load_arrow_vector"))

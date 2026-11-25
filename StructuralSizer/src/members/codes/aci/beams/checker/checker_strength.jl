@@ -127,6 +127,37 @@ function _min_steel_check(As_in::Float64, As_min::Float64, As_req::Float64)
 end
 
 """
+    _sizing_requires_as_min(checker, As_in, As_min, As_req) -> Bool
+
+`true` when discrete sizing must reject this steel.
+
+ACI 318-11 §10.5.1 Eq. (10-3) (corpus: aci-318-11, page 144) is `As,min`.
+§10.5.3 (page 145) waives it when the provided steel is at least one-third
+greater than the steel required by analysis. [`_min_steel_check`](@ref) keeps
+that waiver for the published check.
+
+ENGINEERING JUDGMENT: `checker.size_to_as_min` declines the waiver while a
+section is being chosen. The moment of this pass is not the final moment, and
+a later pass can raise it until §10.5.3 no longer applies. Analysis that
+requires no tension steel (`As_req ≤ 0`) does not call for `As,min`.
+"""
+function _sizing_requires_as_min(checker::ACIBeamChecker, As_in::Float64, As_min::Float64,
+                                 As_req::Float64)
+    checker.size_to_as_min || return false
+    As_req > 0 || return false
+    return As_in + 1e-9 < As_min
+end
+
+"""The published minimum-steel result, tightened when sizing requires `As,min`."""
+function _sizing_min_steel(checker::ACIBeamChecker, As_in::Float64, As_min::Float64,
+                           As_req::Float64)
+    steel = _min_steel_check(As_in, As_min, As_req)
+    _sizing_requires_as_min(checker, As_in, As_min, As_req) || return steel
+    return (passed = false, ratio = As_min / max(As_in, 1e-10),
+            clause = "sizing requires As,min")
+end
+
+"""
 Iterate candidate single-layer top-bar arrangements that satisfy
 ACI 318-11 §10.3.5 (εt ≥ 0.004, page 142) and §10.5.1 (As ≥ As,min, page 144).
 Yields NamedTuples `(bar_size, n_bars, As, φMn, εt, d_top)`.
@@ -376,7 +407,7 @@ function is_feasible(
     As_in  = ustrip(u"inch^2", section.As)
     As_min = _as_min_aci_1051(b_in, d_in, fc_psi, fy_psi)
     As_req = _rect_as_required_in2(to_kipft(demand.Mu), section.b, section.d, fc_psi, fy_psi)
-    _min_steel_check(As_in, As_min, As_req).passed || return false
+    _sizing_min_steel(checker, As_in, As_min, As_req).passed || return false
 
     # 6. Service deflection (ACI 318-11 §9.5.2). w_dead_kplf = 0 skips it.
     if checker.w_dead_kplf > 0

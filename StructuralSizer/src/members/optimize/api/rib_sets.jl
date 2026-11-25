@@ -162,7 +162,8 @@ function size_rib_set(
             w_dead = nothing, w_live = nothing, defl_support = :simply_supported,
             defl_ξ = 2.0, sustained_live_fraction = opts.sustained_live_fraction,
             shell_spans = nothing, joist_spacing = joist_spacing,
-            joist_direction = :one_way, stirrup_shear = flag)
+            joist_direction = :one_way, stirrup_shear = flag,
+            size_to_as_min = true)
         checkers[flag] = chk
         for (k, i) in enumerate(idx)
             demands[i] = dem[k]

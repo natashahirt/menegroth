@@ -127,7 +127,7 @@ function size_tbeams(
     checker, demands = _tbeam_checker_and_demands(
         Mu, Vu, opts; Mu_neg, Nu, Tu, w_dead, w_live, defl_support, defl_ξ,
         sustained_live_fraction, shell_spans, joist_spacing, joist_direction,
-        stirrup_shear, shear_cases)
+        stirrup_shear, shear_cases, size_to_as_min = true)
 
     # Longitudinal and transverse rebar enter the discrete objective.
     material = _sizing_material(opts.material, opts.rebar_material, get_transverse_rebar(opts))
@@ -213,8 +213,9 @@ end
 
 """
 The `ACIBeamChecker` and `RCBeamDemand`s that [`size_tbeams`](@ref) checks
-candidates with. [`check_tbeam_section`](@ref) uses the same pair, so a
-section it passes is one the sizer would accept.
+candidates with. [`check_tbeam_section`](@ref) builds the same checker with
+`size_to_as_min` left off, so a section the published check accepts under
+ACI 318-11 §10.5.3 can still be rejected by discrete sizing.
 """
 function _tbeam_checker_and_demands(
     Mu::Vector, Vu::Vector, opts::ConcreteBeamOptions;
@@ -224,6 +225,7 @@ function _tbeam_checker_and_demands(
     joist_spacing, joist_direction::Symbol,
     stirrup_shear::Bool = true,
     shear_cases = nothing,
+    size_to_as_min::Bool = false,
 )
     n = length(Mu)
     Mu_kipft = [to_kipft(m) for m in Mu]
@@ -274,6 +276,7 @@ function _tbeam_checker_and_demands(
         joist_direction = joist_direction,
         stirrup_shear = stirrup_shear,
         shear_cases = _checker_shear_cases(shear_cases, n),
+        size_to_as_min = size_to_as_min,
     )
     return checker, demands
 end

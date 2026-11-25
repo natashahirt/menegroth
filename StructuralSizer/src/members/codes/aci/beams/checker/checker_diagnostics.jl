@@ -73,6 +73,10 @@ function diagnose_infeasibility(
     if !_min_steel_check(As_in, As_min, As_req).passed
         return "As_min: As=$(round(As_in, digits=2)) < As_min=$(round(As_min, digits=2)) in²"
     end
+    if _sizing_requires_as_min(checker, As_in, As_min, As_req)
+        return "As_min: sizing requires As >= $(round(As_min, digits=2)) in²; " *
+               "this section has $(round(As_in, digits=2)) in²"
+    end
     msg = _shell_deflection_message(checker, demand.member_idx, sec)
     msg === nothing || return msg
     return "All checks passed for best section — possible threading/cache inconsistency"
@@ -151,7 +155,7 @@ function explain_feasibility(
     As_in  = ustrip(u"inch^2", section.As)
     As_min = _as_min_aci_1051(b_in, d_in, fc_psi, fy_psi)
     As_req = _rect_as_required_in2(Mu, section.b, section.d, fc_psi, fy_psi)
-    steel = _min_steel_check(As_in, As_min, As_req)
+    steel = _sizing_min_steel(checker, As_in, As_min, As_req)
     push!(checks, CheckResult("min_reinforcement", steel.passed,
           steel.ratio, As_min, As_in, steel.clause))
 

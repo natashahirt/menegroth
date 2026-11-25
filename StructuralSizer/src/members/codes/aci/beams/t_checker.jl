@@ -208,7 +208,8 @@ function is_feasible(
     As_req = ustrip(u"inch^2", tbeam_as_required(
         to_kipft(demand.Mu) * kip * u"ft", section.bw, section.d, section.bf, section.hf,
         fc_psi * u"psi", fy_psi * u"psi"))
-    _min_steel_check(As_in, As_min, float(As_req)).passed || return false
+    # §10.5.3 can waive As,min. Discrete sizing does not take that waiver.
+    _sizing_min_steel(checker, As_in, As_min, float(As_req)).passed || return false
 
     # 6. Deflection check (ACI §24.2) — only when service loads are provided
     if checker.w_dead_kplf > 0
@@ -354,6 +355,18 @@ function diagnose_infeasibility(
         tag = row.Nu_kip < 0 ? "Nu<0" : (row.Nu_kip > 0 ? "Nu>0" : "Nu=0")
         return "Shear ($tag): φVn=$(round(φVn_kip, digits=1)) < Vu=$(round(row.Vu_kip, digits=1)) kip"
     end
+    fc_psi = cache.fc_ksi * 1000.0
+    fy_psi = cache.fy_ksi * 1000.0
+    bw_in = ustrip(u"inch", sec.bw)
+    d_in = ustrip(u"inch", sec.d)
+    As_in = ustrip(u"inch^2", sec.As)
+    As_min = _as_min_aci_1051(bw_in, d_in, fc_psi, fy_psi)
+    As_req = ustrip(u"inch^2", tbeam_as_required(
+        Mu * kip * u"ft", sec.bw, sec.d, sec.bf, sec.hf, fc_psi * u"psi", fy_psi * u"psi"))
+    if _sizing_requires_as_min(checker, As_in, As_min, float(As_req))
+        return "As_min: sizing requires As >= $(round(As_min, digits=2)) in²; " *
+               "this section has $(round(As_in, digits=2)) in²"
+    end
     msg = _shell_deflection_message(checker, demand.member_idx, sec)
     msg === nothing || return msg
     return "All checks passed for best T-beam section — possible threading/cache inconsistency"
@@ -414,7 +427,7 @@ function explain_feasibility(
     As_req = ustrip(u"inch^2", tbeam_as_required(
         Mu * kip * u"ft", section.bw, section.d, section.bf, section.hf,
         fc_psi * u"psi", fy_psi * u"psi"))
-    steel = _min_steel_check(As_in, As_min, float(As_req))
+    steel = _sizing_min_steel(checker, As_in, As_min, float(As_req))
     push!(checks, CheckResult("min_reinforcement", steel.passed,
           steel.ratio, As_min, As_in, steel.clause))
 

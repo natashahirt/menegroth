@@ -162,6 +162,7 @@ function size_beams(
         max_depth = opts.max_depth,
         shell_spans = spans,
         shear_cases = _checker_shear_cases(shear_cases, n),
+        size_to_as_min = true,
     )
 
     # Optimize — multi-material if grades vector is provided

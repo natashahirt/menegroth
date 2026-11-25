@@ -57,6 +57,11 @@ with `optimize_discrete`.
 - `shear_cases`: One list of [`RCBeamShearCase`](@ref) per demand, indexed by
   `member_idx`. Shear and torsion are checked on each concurrent row. Empty
   keeps the demand's own `Vu`, `Nu`, and `Tu`.
+- `size_to_as_min`: when `true`, a candidate that analysis says needs tension
+  steel is rejected unless `As ≥ As,min`. ENGINEERING JUDGMENT: ACI 318-11
+  §10.5.3 permits a lighter count. Discrete sizing sets this so the section
+  does not depend on a moment the next pass can change. The published check
+  leaves it `false`.
 
 # Usage
 ```julia
@@ -96,6 +101,8 @@ struct ACIBeamChecker <: AbstractCapacityChecker
     stirrup_shear::Bool
     # One list per demand, indexed by `member_idx`. Empty keeps the demand envelope.
     shear_cases::Vector{Vector{RCBeamShearCase}}
+    # ENGINEERING JUDGMENT. Discrete sizing requires As,min. See the docstring.
+    size_to_as_min::Bool
 end
 
 function ACIBeamChecker(;
@@ -116,6 +123,7 @@ function ACIBeamChecker(;
     joist_direction::Symbol = :one_way,
     stirrup_shear::Bool = true,
     shear_cases::AbstractVector = Vector{RCBeamShearCase}[],
+    size_to_as_min::Bool = false,
 )
     max_d = isa(max_depth, Length) ? ustrip(u"m", max_depth) : Float64(max_depth)
     (joist_spacing !== nothing && joist_spacing_in > 0) && throw(ArgumentError(
@@ -130,7 +138,8 @@ function ACIBeamChecker(;
                    Vector{RCShellSpan}[collect(RCShellSpan, s) for s in shell_spans],
                    collect(Symbol, shell_limits),
                    s_in, joist_direction, stirrup_shear,
-                   Vector{RCBeamShearCase}[RCBeamShearCase[c for c in rows] for rows in shear_cases])
+                   Vector{RCBeamShearCase}[RCBeamShearCase[c for c in rows] for rows in shear_cases],
+                   size_to_as_min)
 end
 
 """Shear rows for this demand. An empty list keeps the demand's own Vu, Nu, and Tu."""

@@ -1,6 +1,7 @@
 include("discrete/status.jl")
 include("discrete/cache.jl")
 include("discrete/backends.jl")
+include("discrete/coupling.jl")
 include("discrete/model.jl")
 include("discrete/catalog_expansion.jl")
 include("discrete/pareto.jl")

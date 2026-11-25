@@ -115,6 +115,21 @@ implements the `is_feasible` interface for the specific design code.
 - `budget_cache`: Optional precomputed capacity cache for the `budget` secondary
   objective (avoids re-running `precompute_capacities!` for every budget in a
   Pareto sweep). When `nothing`, it is built internally.
+- `coupling`: Optional [`LinearCapacityCoupling`] turning the solve into a single
+  **monolithic coupled MILP** for designs whose demand depends on the sizes. The
+  classic case is self-weight: a column's axial load accumulates the weight of the
+  members it supports, so the load is a LINEAR function of the section choices.
+  Rather than iterating "size ↔ recompute demand" to a fixpoint (which *ratchets*
+  — it only approaches the self-consistent point from one side and never certifies
+  the coupled optimum), this adds one linear constraint per constrained group
+  (`load(x) ≤ capacity_of_chosen_section`) so the solver returns the globally
+  optimal, self-consistent design in ONE pass with a true optimality certificate.
+  The caller passes the x-INDEPENDENT demand (so the feasibility screening still
+  certifies every non-coupled check) plus the per-section loads/capacities; see
+  [`LinearCapacityCoupling`]. If no assignment can carry its own self-consistent
+  load (the catalog is too light), the solve is infeasible and a result with an
+  empty `section_indices` is returned rather than throwing — the same shape the
+  `budget` path uses. `nothing` (default) reproduces prior behavior byte-for-byte.
 
 # Returns
 Named tuple: `(; section_indices, sections, status, objective_value)`
@@ -144,6 +159,7 @@ function optimize_discrete(
     mip_start::Union{Nothing, Vector{Int}} = nothing,
     budget::Union{Nothing, Tuple{AbstractObjective, <:Real}} = nothing,
     budget_cache::Union{Nothing, AbstractCapacityCache} = nothing,
+    coupling::Union{Nothing, LinearCapacityCoupling} = nothing,
     tc::Union{Nothing, TraceCollector} = nothing,
 )
     n_groups = length(demands)
@@ -178,11 +194,14 @@ function optimize_discrete(
             "$n_groups groups)"))
     end
 
-    # A budget (ε-constraint) solve is skipped by the memo: each Pareto-sweep budget
-    # is a distinct problem, so hits would be rare, and gating on `budget === nothing`
-    # keeps the unconstrained path's memo behavior byte-for-byte identical.
+    coupling === nothing || _validate_coupling(coupling, n_groups, n_sections)
+
+    # A budget (ε-constraint) or capacity-coupling solve is skipped by the memo:
+    # each is a distinct, design-dependent problem, so hits would be rare, and
+    # gating on `budget === nothing && coupling === nothing` keeps the unconstrained
+    # path's memo behavior byte-for-byte identical.
     memo_key = nothing
-    if tc === nothing && budget === nothing
+    if tc === nothing && budget === nothing && coupling === nothing
         try
             # The catalog is the object itself. A rebuilt catalog, even one
             # with the same section names and areas, is a miss. Editing a
@@ -353,6 +372,21 @@ function optimize_discrete(
               budget_value=Float64(budget_value))
     end
 
+    # Optional design-dependent capacity coupling: one LINEAR constraint per
+    # constrained group making the load it carries a function of the section
+    # choices (e.g. accumulated self-weight) and requiring the chosen section's
+    # capacity to meet it. Because the load and the capacity are both linear in the
+    # binaries, the coupled sizing stays one MILP and is solved exactly in a single
+    # pass — no demand-fixpoint iteration (see discrete/coupling.jl). The feasibility
+    # screening above still runs against the x-INDEPENDENT demand the caller passed,
+    # so every candidate is capacity-certified for the non-coupled checks; this
+    # constraint adds the coupled (load-dependent) certification on top.
+    if coupling !== nothing
+        _add_capacity_coupling!(m, x, feasible, coupling)
+        emit!(tc, :optimizer, "optimize_discrete", "", :decision;
+              phase="capacity_coupling", n_coupled_groups=length(coupling.groups))
+    end
+
     # Optional MIP warm start (hint only — no constraint, cannot alter the feasible
     # region or the optimum). With a section-count cap the coupling `z` binaries are
     # seeded too (consistent with the capped `x`), so the start remains valid.
@@ -368,12 +402,15 @@ function optimize_discrete(
     
     status = JuMP.termination_status(m)
 
-    # ε-constraint infeasibility (budget tighter than the secondary objective's own
-    # optimum) is an expected, benign outcome of a Pareto budget sweep — not an
-    # error. Return an empty-assignment result with the same shape so the caller can
-    # skip the point. This early return only fires on the budget path; the
-    # unconstrained path keeps its exact prior control flow.
-    if budget !== nothing && JuMP.primal_status(m) != JuMP.MOI.FEASIBLE_POINT
+    # Design-dependent infeasibility is an expected, benign outcome of the two
+    # coupled-solve paths: a `budget` tighter than the secondary objective's own
+    # optimum (a Pareto-sweep point to skip), or a `coupling` whose load exceeds
+    # every section's capacity (the catalog cannot carry the self-consistent demand).
+    # Return an empty-assignment result with the same shape so the caller can detect
+    # it, rather than crashing on solution extraction. This early return only fires
+    # on those paths; the unconstrained path keeps its exact prior control flow.
+    if (budget !== nothing || coupling !== nothing) &&
+       JuMP.primal_status(m) != JuMP.MOI.FEASIBLE_POINT
         emit!(tc, :optimizer, "optimize_discrete", "", :exit;
               status=string(status), objective_value=Inf, infeasible_budget=true)
         return (;

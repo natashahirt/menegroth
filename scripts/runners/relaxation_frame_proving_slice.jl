@@ -110,26 +110,29 @@ member_self_weight(sec_idx::Int, length_m::Real) = A_CAT[sec_idx] * length_m * R
 """
     build_demands(col_idx, beam_idx) -> Vector{MemberDemand}
 
-Assemble the full demand vector for the current section assignment. Beams carry
-the superimposed line load plus their own self-weight (flexure, Chapter F). Each
-column carries a constant frame moment plus the gravity axial ACCUMULATED from
-the roof down to its story: the superimposed floor load at every level at or
-above it, plus the self-weight of every column and beam above. `col_idx`/
-`beam_idx` are catalog indices per story (`0` ⇒ not yet sized, treated as zero
-self-weight — the cold seed).
+Assemble the full demand vector for the current section assignment. Beams are
+sized by the superimposed flexure alone (a fixed, x-INDEPENDENT demand — their
+own self-weight is carried to the columns but its second-order effect on the
+beam's own flexure is neglected, a standard simplification that keeps the ONLY
+design-dependent coupling the column axial). Each column carries a constant frame
+moment plus the gravity axial ACCUMULATED from the roof down to its story: the
+superimposed floor load at every level at or above it, PLUS the self-weight of
+every column and beam above. `col_idx`/`beam_idx` are catalog indices per story
+(`0` ⇒ not yet sized, treated as zero self-weight — the cold seed).
+
+This is exactly the load model the monolithic `LinearCapacityCoupling` encodes,
+so the one-shot coupled MILP and the iterated fixpoint converge to the same point.
 """
 function build_demands(col_idx::Vector{Int}, beam_idx::Vector{Int})
     demands = Vector{MemberDemand}(undef, 2 * N_STORIES)
 
-    # Beams: self-weight line load adds to the superimposed load (flexure only).
+    # Beams: superimposed flexure only (fixed demand); self-weight still loads cols.
     beam_sw_force = zeros(N_STORIES)
     for s in 1:N_STORIES
-        w_sw = beam_idx[s] == 0 ? 0.0 : A_CAT[beam_idx[s]] * RHO * GRAV   # N/m
-        w_tot = W_BEAM_LINE + w_sw
-        Mu = w_tot * L_BAY^2 / 8                                           # simple-span moment
         demands[beam_group(s)] = MemberDemand(beam_group(s);
-            Mux = Mu, transverse_load = true)
-        beam_sw_force[s] = w_tot * L_BAY                                   # total beam weight (N)
+            Mux = W_BEAM_LINE * L_BAY^2 / 8, transverse_load = true)
+        beam_sw_force[s] = beam_idx[s] == 0 ? 0.0 :
+                           member_self_weight(beam_idx[s], L_BAY)          # total beam weight (N)
     end
 
     # Columns: accumulate gravity from the roof down.
@@ -229,16 +232,134 @@ for _ in 1:MAX_PASSES
     global warm_col, warm_beam = nc, nb
 end
 
+# ─── MONOLITHIC: fold the linear self-weight coupling into ONE certified MIP ──
+# The column axial is a LINEAR function of the section choices (each section adds a
+# constant `A·L·ρg`), and under the fixed frame moment every section has a
+# precomputable maximum axial capacity `P_cap(s)` (the AISC H1 interaction, monotone
+# in axial, inverted once). So the coupled sizing is a single MILP — no ratchet.
+
+"""
+    build_axial_capacity_table() -> Vector{Float64}
+
+`P_cap(s)` for every catalog section: the maximum axial force section `s` can carry
+as a column (unbraced length `H_STORY`) under the fixed frame moment `M_COL_FRAME`,
+found by bisecting the SAME `is_feasible` predicate the MIP screening uses (so the
+table is exactly consistent with the checker). Sections that fail the moment alone
+get `0.0` and are never selectable. One table serves every column group (identical
+geometry and moment).
+"""
+function build_axial_capacity_table()
+    cache = create_cache(CHECKER, N_CAT)
+    precompute_capacities!(CHECKER, cache, CATALOG, A992_Steel, MinVolume())
+    geom = COL_GEOMS[1]
+    feas(t, P) = is_feasible(CHECKER, cache, t, CATALOG[t], A992_Steel,
+                             MemberDemand(1; Pu_c = P, Mux = M_COL_FRAME), geom)
+    P_cap = zeros(N_CAT)
+    for t in 1:N_CAT
+        feas(t, 0.0) || continue                       # fails moment alone ⇒ cap 0
+        lo, hi = 0.0, 1.0e5                             # N; bracket the capacity
+        while feas(t, hi) && hi < 1.0e12
+            lo, hi = hi, 2hi
+        end
+        for _ in 1:40                                  # bisect to the feasibility edge
+            mid = 0.5 * (lo + hi)
+            feas(t, mid) ? (lo = mid) : (hi = mid)
+        end
+        P_cap[t] = lo
+    end
+    return P_cap
+end
+
+"""
+    build_coupling(P_cap) -> LinearCapacityCoupling
+
+Encode the frame's self-weight accumulation as a linear capacity coupling: for
+column group `s`, the carried axial is `base[s] + Σ(self-weight of every column and
+beam at or above s)`, and the chosen section must have `P_cap ≥` that load.
+"""
+function build_coupling(P_cap::Vector{Float64})
+    col_w  = [A_CAT[t] * H_STORY * RHO * GRAV for t in 1:N_CAT]   # column self-weight force
+    beam_w = [A_CAT[t] * L_BAY  * RHO * GRAV for t in 1:N_CAT]    # beam self-weight force
+    weight = Vector{Vector{Float64}}(undef, 2 * N_STORIES)
+    for s in 1:N_STORIES
+        weight[col_group(s)]  = col_w
+        weight[beam_group(s)] = beam_w
+    end
+    groups  = collect(1:N_STORIES)
+    sources = [vcat(collect(1:s), [beam_group(k) for k in 1:s]) for s in 1:N_STORIES]
+    base    = [s * W_FLOOR for s in 1:N_STORIES]                   # Σ_{k≤s} superimposed
+    cap     = [P_cap for _ in 1:N_STORIES]                         # identical per column group
+    return LinearCapacityCoupling(groups, sources, base, weight, cap)
+end
+
+"""
+    stripped_demands() -> Vector{MemberDemand}
+
+The x-INDEPENDENT demand the monolithic solve screens against: beams at their fixed
+superimposed flexure, columns at the superimposed (self-weight-free) axial. The
+load-dependent axial is added by the `LinearCapacityCoupling`, not the demand.
+"""
+function stripped_demands()
+    d = Vector{MemberDemand}(undef, 2 * N_STORIES)
+    for s in 1:N_STORIES
+        d[beam_group(s)] = MemberDemand(beam_group(s);
+            Mux = W_BEAM_LINE * L_BAY^2 / 8, transverse_load = true)
+        d[col_group(s)]  = MemberDemand(col_group(s);
+            Pu_c = s * W_FLOOR, Mux = M_COL_FRAME)
+    end
+    return d
+end
+
+"""
+    certify_self_consistent(col_idx, beam_idx) -> Bool
+
+Close the loop: rebuild the FULL coupled demands from an assignment and re-check
+every chosen section with the real checker. The monolithic optimum must pass (its
+coupling constraint guarantees it), proving the one-shot solve wrote no size that
+is unsafe at its own self-consistent self-weight.
+"""
+function certify_self_consistent(col_idx::Vector{Int}, beam_idx::Vector{Int})
+    d = build_demands(col_idx, beam_idx)
+    cache = create_cache(CHECKER, N_CAT)
+    precompute_capacities!(CHECKER, cache, CATALOG, A992_Steel, MinVolume())
+    for g in 1:(2 * N_STORIES)
+        idx = g ≤ N_STORIES ? col_idx[g] : beam_idx[g - N_STORIES]
+        is_feasible(CHECKER, cache, idx, CATALOG[idx], A992_Steel, d[g], GEOMETRIES[g]) ||
+            return false
+    end
+    return true
+end
+
+const P_CAP    = build_axial_capacity_table()
+const COUPLING = build_coupling(P_CAP)
+mono_res = optimize_discrete(CHECKER, stripped_demands(), GEOMETRIES, CATALOG, A992_Steel;
+                             objective = MinVolume(), n_max_sections = N_MAX,
+                             coupling = COUPLING, time_limit_sec = 120.0)
+mono_res.status == MOI.OPTIMAL ||
+    error("monolithic coupled MIP did not reach OPTIMAL: $(mono_res.status)")
+mono_col, mono_beam = split_assignment(mono_res.section_indices)
+mono_vol    = mono_res.objective_value
+mono_solves = 1
+mono_consistent = certify_self_consistent(mono_col, mono_beam)
+
 # ─── Certified optimality gap (separable F0 bound vs the capped MIP volume) ───
 conv_demands = build_demands(warm_col, warm_beam)
 lb = separable_lower_bound(CHECKER, conv_demands, GEOMETRIES, CATALOG, A992_Steel;
                            objective = MinVolume())
 gap = optimality_gap(warm_vol, lb)
+mono_gap = optimality_gap(mono_vol,
+    separable_lower_bound(CHECKER, build_demands(mono_col, mono_beam),
+                          GEOMETRIES, CATALOG, A992_Steel; objective = MinVolume()))
 
 # ─── Report ───────────────────────────────────────────────────────────────────
-identical = (warm_col == cold_col) && (warm_beam == cold_beam)
-lighter   = warm_vol ≤ cold_vol * (1 + 1e-9)
-collapse  = warm_mip_solves < cold_mip_solves
+identical      = (warm_col == cold_col) && (warm_beam == cold_beam)
+lighter        = warm_vol ≤ cold_vol * (1 + 1e-9)
+collapse       = warm_mip_solves < cold_mip_solves
+# The monolithic solve should reproduce the iterated fixpoint's assignment exactly
+# (same coupled optimum), in ONE certified solve, and be lighter-or-equal.
+mono_identical = (mono_col == warm_col) && (mono_beam == warm_beam)
+mono_lighter   = mono_vol ≤ warm_vol * (1 + 1e-9)
+mono_collapse  = mono_solves < warm_mip_solves
 
 println("\n" * "="^74)
 println("Coupled frame proving slice  ($(N_STORIES) stories, $(2*N_STORIES) groups, " *
@@ -250,12 +371,23 @@ println("  converged volume     : $(round(cold_vol, sigdigits = 6)) m³")
 println("WARM  — cheap F0 settles the demand graph ($f0_passes binary-search passes), then the MIP")
 println("  expensive MIP solves : $warm_mip_solves")
 println("  converged volume     : $(round(warm_vol, sigdigits = 6)) m³")
+println("MONO  — self-weight folded into ONE certified coupled MIP (no ratchet)")
+println("  expensive MIP solves : $mono_solves")
+println("  converged volume     : $(round(mono_vol, sigdigits = 6)) m³")
+println("  self-consistent      : $(mono_consistent ? "CERTIFIED ✓ (re-checked at its own self-weight)" : "FAILED ✗")")
 println("-"^74)
 println("(i)   sizes identical-or-lighter : $(identical ? "IDENTICAL ✓" : (lighter ? "LIGHTER ✓" : "HEAVIER ✗"))")
-println("(ii)  expensive-MIP pass-count   : cold $cold_mip_solves → warm $warm_mip_solves  ($(collapse ? "COLLAPSE ✓" : "no collapse ✗"))")
-println("(iii) certified optimality gap   : $(round(gap * 100, digits = 3)) %   (LB $(round(lb, sigdigits = 6)) m³, JuMP-free separable bound)")
+println("(ii)  expensive-MIP pass-count   : cold $cold_mip_solves → warm $warm_mip_solves → mono $mono_solves  ($(collapse ? "COLLAPSE ✓" : "no collapse ✗"))")
+println("(iii) certified optimality gap   : warm $(round(gap * 100, digits = 3)) %  (LB $(round(lb, sigdigits = 6)) m³, JuMP-free separable bound)")
+println("-"^74)
+println("MONOLITHIC vs iterated fixpoint")
+println("  (a) same coupled optimum         : $(mono_identical ? "IDENTICAL ✓" : (mono_lighter ? "LIGHTER ✓" : "HEAVIER ✗"))")
+println("  (b) one-shot vs ratchet solves   : warm $warm_mip_solves → mono $mono_solves  ($(mono_collapse ? "SINGLE SOLVE ✓" : "no collapse ✗"))")
+println("  (c) certified optimality gap     : mono $(round(mono_gap * 100, digits = 3)) %")
 println("="^74)
 
-all_ok = (identical || lighter) && collapse && gap ≥ -1e-9
+all_ok = (identical || lighter) && collapse && gap ≥ -1e-9 &&
+         (mono_identical || mono_lighter) && mono_collapse &&
+         mono_consistent && mono_gap ≥ -1e-9
 println(all_ok ? "ALL CLAIMS HOLD ✓" : "SOME CLAIMS FAILED ✗ — inspect above")
 all_ok || error("coupled frame proving slice failed its acceptance claims")

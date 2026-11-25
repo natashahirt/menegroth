@@ -205,6 +205,7 @@ export RelaxationWarmStart, relaxation_warm_start, continuation_seed
 export relaxation_lower_bound, optimality_gap, catalog_lower_envelope
 export separable_lower_bound
 export pareto_front, ParetoPoint
+export LinearCapacityCoupling
 export resize_for_drift!, DriftConstraint, DriftGovernorResult, snap_up
 export total_drift_constraint, interstory_drift_constraint
 

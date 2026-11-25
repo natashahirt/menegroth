@@ -197,3 +197,58 @@ using Unitful
         end
     end
 end
+
+# ==============================================================================
+# SAFETY CONTRACT (O1): the relaxation only GUIDES — it can never write a final
+# size. Every size the owner returns comes from the checker-certified MIP, so an
+# F0 warm-start hint (`mip_start`) or an infeasible section admitted into the
+# candidate band (`feasible`) can at most SHORTEN the solve; it can never cause an
+# unsafe (under-capacity) section to be selected. This is the invariant that lets
+# the whole relaxation-guided pipeline front-run the expensive solver without
+# compromising the independent full-fidelity verification.
+# ==============================================================================
+@testset "relaxation safety: F0 hints never write an unsafe final size" begin
+    # Deflection-governed single group, so feasibility ⇔ Ix ≥ I_required and the
+    # safe/unsafe boundary is unambiguous (see relaxation_warmstart_benchmark.jl).
+    DEFLECTION_LIMIT = 1 / 360
+    catalog = steel_column_catalog(:w, :all)
+    Ix_cat  = [ustrip(u"m^4", Ix(s)) for s in catalog]
+    L = 8.0
+
+    # Target stiffness at the catalog median; encode it through the L/360 check
+    # (I_ref = 1 ⇒ feasible ⇔ Ix ≥ I_required). A tiny moment keeps strength live.
+    I_required = sort(Ix_cat)[cld(length(Ix_cat), 2)] * 1.0005
+    demand = MemberDemand(1; Mux = 5.0e3,
+                          δ_max_LL = I_required * DEFLECTION_LIMIT * L, I_ref = 1.0)
+    geom = SteelMemberGeometry(L; Lb = L)
+    checker = AISCChecker(; deflection_limit = DEFLECTION_LIMIT)
+    solve(; kw...) = optimize_discrete(checker, [demand], [geom], catalog, A992_Steel;
+                                       objective = MinVolume(), kw...)
+
+    cold = solve()
+    cold_idx = cold.section_indices[1]
+    @test Ix_cat[cold_idx] ≥ I_required                 # the certified pick is safe
+
+    # A deliberately UNSAFE hint: the stiffness-smallest section (Ix ≪ I_required).
+    unsafe_idx = argmin(Ix_cat)
+    @test Ix_cat[unsafe_idx] < I_required               # confirm the seed is infeasible
+
+    # (1) An infeasible `mip_start` is a pure hint: the solver discards it and
+    #     still returns the checker-certified optimum, never the unsafe seed.
+    warm = solve(mip_start = [unsafe_idx])
+    @test warm.section_indices == cold.section_indices
+    @test Ix_cat[warm.section_indices[1]] ≥ I_required
+    @test warm.section_indices[1] != unsafe_idx
+
+    # (2) An infeasible section admitted into the candidate band is screened out by
+    #     the internal capacity check (the band only INTERSECTS screening, never
+    #     substitutes for it): the result is still safe, never the unsafe section.
+    banded = solve(feasible = [[unsafe_idx, cold_idx]])
+    @test banded.section_indices == cold.section_indices
+    @test Ix_cat[banded.section_indices[1]] ≥ I_required
+    @test banded.section_indices[1] != unsafe_idx
+
+    # (3) A band containing ONLY infeasible sections cannot fabricate a feasible
+    #     answer — the owner REFUSES (raises) rather than returning an unsafe size.
+    @test_throws ArgumentError solve(feasible = [[unsafe_idx]])
+end

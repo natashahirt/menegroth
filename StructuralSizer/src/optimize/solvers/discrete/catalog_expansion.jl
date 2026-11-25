@@ -86,6 +86,9 @@ function optimize_discrete(
     time_limit_sec::Real = 30.0,
     feasible::Union{Nothing, Vector{Vector{Int}}} = nothing,
     mip_start::Union{Nothing, Vector{Int}} = nothing,
+    budget::Union{Nothing, Tuple{AbstractObjective, <:Real}} = nothing,
+    budget_caches::Union{Nothing, AbstractVector{<:AbstractCapacityCache}} = nothing,
+    caches::Union{Nothing, AbstractVector{<:AbstractCapacityCache}} = nothing,
     tc::Union{Nothing, TraceCollector} = nothing,
 )
     n_groups = length(demands)
@@ -157,11 +160,21 @@ function optimize_discrete(
     # Extract lengths for objective calculation
     lengths = [g.L isa Length ? ustrip(u"m", g.L) : Float64(g.L) for g in geometries]
 
-    # Precompute one cache per material
-    caches = Vector{AbstractCapacityCache}(undef, n_mat)
-    for mi in 1:n_mat
-        caches[mi] = create_cache(checker, n_sec)
-        precompute_capacities!(checker, caches[mi], catalog, materials[mi], objective)
+    # Precompute one objective cache per material (or reuse caller-supplied caches,
+    # e.g. a Pareto sweep that precomputes once and reuses across every budget).
+    if caches === nothing
+        caches = Vector{AbstractCapacityCache}(undef, n_mat)
+        for mi in 1:n_mat
+            caches[mi] = create_cache(checker, n_sec)
+            precompute_capacities!(checker, caches[mi], catalog, materials[mi], objective)
+        end
+    else
+        length(caches) == n_mat || throw(ArgumentError(
+            "caches must have one objective cache per material (got " *
+            "$(length(caches)) for $n_mat materials)"))
+        for mi in 1:n_mat
+            _require_cache_match(checker, caches[mi], catalog, materials[mi])
+        end
     end
 
     # Filter feasible expanded candidates per group
@@ -239,6 +252,34 @@ function optimize_discrete(
                 for k in feasible[i])
             for i in 1:n_groups))
 
+    # Optional ε-constraint on a secondary objective (same length-weighted total
+    # convention as the primary). Each material gets its own secondary cache so the
+    # constraint uses the exact per-(section, material) coefficient. Sweeping the
+    # budget traces the full cross-material Pareto front (see [`pareto_front`](@ref)).
+    if budget !== nothing
+        budget_obj, budget_value = budget
+        bcaches = budget_caches
+        if bcaches === nothing
+            bcaches = Vector{AbstractCapacityCache}(undef, n_mat)
+            for mi in 1:n_mat
+                bcaches[mi] = create_cache(checker, n_sec)
+                precompute_capacities!(checker, bcaches[mi], catalog, materials[mi], budget_obj)
+            end
+        else
+            length(bcaches) == n_mat || throw(ArgumentError(
+                "budget_caches must have one cache per material (got " *
+                "$(length(bcaches)) for $n_mat materials)"))
+        end
+        JuMP.@constraint(m,
+            sum(sum(x[i,k] * get_objective_coeff(checker, bcaches[mat_idx_map[k]], sec_idx_map[k]) * lengths[i]
+                    for k in feasible[i])
+                for i in 1:n_groups) <= Float64(budget_value))
+        emit!(tc, :optimizer, "optimize_discrete_multi", "", :decision;
+              phase="epsilon_constraint",
+              budget_objective=string(typeof(budget_obj)),
+              budget_value=Float64(budget_value))
+    end
+
     # Optional MIP warm start (hint only; expanded-index space). Skipped when
     # n_max_sections > 0 (unseeded coupling `z` variables).
     if mip_start !== nothing && n_max_sections == 0
@@ -248,6 +289,29 @@ function optimize_discrete(
     JuMP.optimize!(m)
 
     status = JuMP.termination_status(m)
+
+    # ε-constraint infeasibility (budget below the secondary objective's own optimum)
+    # is a benign, expected outcome of a Pareto budget sweep — return an empty result
+    # with the same shape so the caller can skip the point. Budget-path only; the
+    # unconstrained path keeps its exact prior control flow.
+    if budget !== nothing && JuMP.primal_status(m) != JuMP.MOI.FEASIBLE_POINT
+        emit!(tc, :optimizer, "optimize_discrete_multi", "", :exit;
+              status=string(status), objective_value=Inf, infeasible_budget=true)
+        return (;
+            section_indices = Int[],
+            sections = eltype(catalog)[],
+            material_indices = Int[],
+            materials_chosen = eltype(materials)[],
+            status,
+            normalized_status = _normalized_moi_status(status, JuMP.primal_status(m)),
+            objective_value = Inf,
+            objective,
+            backend = :mip,
+            diagnostics = String[],
+            explanations = FeasibilityExplanation[],
+        )
+    end
+
     if status == JuMP.MOI.TIME_LIMIT
         ps = JuMP.primal_status(m)
         ps == JuMP.MOI.FEASIBLE_POINT ||

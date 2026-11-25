@@ -100,6 +100,21 @@ implements the `is_feasible` interface for the specific design code.
   consistently with the capped `x`, so the hint stays valid; it preserves the
   optimal objective but — unlike the separable `n_max_sections == 0` case — need
   not reproduce the exact assignment when several section sets are equally optimal.
+- `budget`: Optional `(secondary_objective, budget_value)` tuple that turns this
+  into an **ε-constraint** solve: `objective` is still minimized, but subject to the
+  total of `secondary_objective` (summed over all groups, same length-weighted
+  convention as the primary objective) being `≤ budget_value`. Sweeping the budget
+  across the secondary objective's range traces the full Pareto front — including
+  non-convex points that a weighted-sum scalarization provably misses (see
+  [`pareto_front`](@ref)). `budget_value` must be expressed in the secondary
+  objective's unit-stripped total (per-unit-length coefficient × length in metres),
+  matching what the MIP sees. When the budget is tighter than the single-objective
+  optimum of `secondary_objective`, the solve is infeasible and a result with an
+  empty `section_indices` (and `objective_value = Inf`) is returned rather than
+  throwing. `nothing` (default) reproduces prior behavior byte-for-byte.
+- `budget_cache`: Optional precomputed capacity cache for the `budget` secondary
+  objective (avoids re-running `precompute_capacities!` for every budget in a
+  Pareto sweep). When `nothing`, it is built internally.
 
 # Returns
 Named tuple: `(; section_indices, sections, status, objective_value)`
@@ -127,6 +142,8 @@ function optimize_discrete(
     cache::Union{Nothing, AbstractCapacityCache} = nothing,
     feasible::Union{Nothing, Vector{Vector{Int}}} = nothing,
     mip_start::Union{Nothing, Vector{Int}} = nothing,
+    budget::Union{Nothing, Tuple{AbstractObjective, <:Real}} = nothing,
+    budget_cache::Union{Nothing, AbstractCapacityCache} = nothing,
     tc::Union{Nothing, TraceCollector} = nothing,
 )
     n_groups = length(demands)
@@ -161,8 +178,11 @@ function optimize_discrete(
             "$n_groups groups)"))
     end
 
+    # A budget (ε-constraint) solve is skipped by the memo: each Pareto-sweep budget
+    # is a distinct problem, so hits would be rare, and gating on `budget === nothing`
+    # keeps the unconstrained path's memo behavior byte-for-byte identical.
     memo_key = nothing
-    if tc === nothing
+    if tc === nothing && budget === nothing
         try
             # The catalog is the object itself. A rebuilt catalog, even one
             # with the same section names and areas, is a miss. Editing a
@@ -308,6 +328,31 @@ function optimize_discrete(
                 for j in feasible[i]) 
             for i in 1:n_groups))
 
+    # Optional ε-constraint: bound the TOTAL of a secondary objective (same
+    # length-weighted convention as the primary) by `budget_value`. Minimizing the
+    # primary objective across a sweep of budgets traces the full Pareto front,
+    # including non-convex points a weighted-sum scalarization cannot reach. The
+    # secondary coefficients come from their own precomputed cache so the constraint
+    # uses the exact per-section values the primary objective would (rebar split etc.).
+    if budget !== nothing
+        budget_obj, budget_value = budget
+        bcache = budget_cache
+        if bcache === nothing
+            bcache = create_cache(checker, n_sections)
+            precompute_capacities!(checker, bcache, catalog, material, budget_obj)
+        else
+            _require_cache_match(checker, bcache, catalog, material)
+        end
+        JuMP.@constraint(m,
+            sum(sum(x[i,j] * get_objective_coeff(checker, bcache, j) * lengths[i]
+                    for j in feasible[i])
+                for i in 1:n_groups) <= Float64(budget_value))
+        emit!(tc, :optimizer, "optimize_discrete", "", :decision;
+              phase="epsilon_constraint",
+              budget_objective=string(typeof(budget_obj)),
+              budget_value=Float64(budget_value))
+    end
+
     # Optional MIP warm start (hint only — no constraint, cannot alter the feasible
     # region or the optimum). With a section-count cap the coupling `z` binaries are
     # seeded too (consistent with the capped `x`), so the start remains valid.
@@ -322,6 +367,28 @@ function optimize_discrete(
     JuMP.optimize!(m)
     
     status = JuMP.termination_status(m)
+
+    # ε-constraint infeasibility (budget tighter than the secondary objective's own
+    # optimum) is an expected, benign outcome of a Pareto budget sweep — not an
+    # error. Return an empty-assignment result with the same shape so the caller can
+    # skip the point. This early return only fires on the budget path; the
+    # unconstrained path keeps its exact prior control flow.
+    if budget !== nothing && JuMP.primal_status(m) != JuMP.MOI.FEASIBLE_POINT
+        emit!(tc, :optimizer, "optimize_discrete", "", :exit;
+              status=string(status), objective_value=Inf, infeasible_budget=true)
+        return (;
+            section_indices = Int[],
+            sections = eltype(catalog)[],
+            status,
+            normalized_status = _normalized_moi_status(status, JuMP.primal_status(m)),
+            objective_value = Inf,
+            objective,
+            backend = :mip,
+            diagnostics = String[],
+            explanations = FeasibilityExplanation[],
+        )
+    end
+
     if status == JuMP.MOI.TIME_LIMIT
         ps = JuMP.primal_status(m)
         ps == JuMP.MOI.FEASIBLE_POINT ||

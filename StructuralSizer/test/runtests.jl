@@ -228,6 +228,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("optimize/test_section_relaxation.jl")
         include("optimize/test_coupled_warm_start.jl")
         include("optimize/test_pareto_scalarization.jl")
+        include("optimize/test_epsilon_pareto.jl")
         include("optimize/test_drift_optimality.jl")
         include("optimize/test_drift_governor.jl")
     end

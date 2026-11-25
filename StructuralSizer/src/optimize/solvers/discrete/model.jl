@@ -130,6 +130,16 @@ implements the `is_feasible` interface for the specific design code.
   load (the catalog is too light), the solve is infeasible and a result with an
   empty `section_indices` is returned rather than throwing — the same shape the
   `budget` path uses. `nothing` (default) reproduces prior behavior byte-for-byte.
+- `linear_constraints`: Optional vector of [`LinearSelectionConstraint`], each a
+  global linear inequality `Σ coeff[i][s]·x[i,s] (≤/≥) rhs` over the selection
+  binaries. The headline use is a **DRIFT limit** folded into the member MILP:
+  for a lateral system under a fixed force distribution, drift is linear in the
+  section choices (`coeff[e][t] = γ_e/I_t`), so one certified solve sizes every
+  group for strength AND drift jointly — per-group optimal — instead of the
+  uniform grow-only drift jump loop. Several constraints may be supplied (e.g.
+  per-story inter-story drift plus a wind cap). Generalizes `budget`. An
+  unreachable limit yields an empty-`section_indices` result rather than throwing.
+  `nothing` (default) reproduces prior behavior byte-for-byte.
 
 # Returns
 Named tuple: `(; section_indices, sections, status, objective_value)`
@@ -160,6 +170,7 @@ function optimize_discrete(
     budget::Union{Nothing, Tuple{AbstractObjective, <:Real}} = nothing,
     budget_cache::Union{Nothing, AbstractCapacityCache} = nothing,
     coupling::Union{Nothing, LinearCapacityCoupling} = nothing,
+    linear_constraints::Union{Nothing, Vector{LinearSelectionConstraint}} = nothing,
     tc::Union{Nothing, TraceCollector} = nothing,
 )
     n_groups = length(demands)
@@ -195,13 +206,16 @@ function optimize_discrete(
     end
 
     coupling === nothing || _validate_coupling(coupling, n_groups, n_sections)
+    linear_constraints === nothing ||
+        _validate_linear_constraints(linear_constraints, n_groups, n_sections)
 
-    # A budget (ε-constraint) or capacity-coupling solve is skipped by the memo:
-    # each is a distinct, design-dependent problem, so hits would be rare, and
-    # gating on `budget === nothing && coupling === nothing` keeps the unconstrained
+    # A budget (ε-constraint), capacity-coupling, or extra-linear-constraint solve
+    # is skipped by the memo: each is a distinct, design-dependent problem, so hits
+    # would be rare, and gating on all three being absent keeps the unconstrained
     # path's memo behavior byte-for-byte identical.
     memo_key = nothing
-    if tc === nothing && budget === nothing && coupling === nothing
+    if tc === nothing && budget === nothing && coupling === nothing &&
+       linear_constraints === nothing
         try
             # The catalog is the object itself. A rebuilt catalog, even one
             # with the same section names and areas, is a miss. Editing a
@@ -387,6 +401,17 @@ function optimize_discrete(
               phase="capacity_coupling", n_coupled_groups=length(coupling.groups))
     end
 
+    # Optional general linear constraints over the selection binaries (e.g. a DRIFT
+    # limit: Σ (γ_e/I_t)·x[e,t] ≤ δ_allow). Linear in x, so the coupled strength +
+    # drift sizing stays one certified MILP (see discrete/coupling.jl). Like the
+    # coupling, these are exact in-MILP constraints layered on the per-group
+    # feasibility screening, which still certifies every candidate's local checks.
+    if linear_constraints !== nothing
+        _add_linear_selection_constraints!(m, x, feasible, linear_constraints)
+        emit!(tc, :optimizer, "optimize_discrete", "", :decision;
+              phase="linear_selection_constraints", n_constraints=length(linear_constraints))
+    end
+
     # Optional MIP warm start (hint only — no constraint, cannot alter the feasible
     # region or the optimum). With a section-count cap the coupling `z` binaries are
     # seeded too (consistent with the capped `x`), so the start remains valid.
@@ -402,14 +427,16 @@ function optimize_discrete(
     
     status = JuMP.termination_status(m)
 
-    # Design-dependent infeasibility is an expected, benign outcome of the two
-    # coupled-solve paths: a `budget` tighter than the secondary objective's own
-    # optimum (a Pareto-sweep point to skip), or a `coupling` whose load exceeds
-    # every section's capacity (the catalog cannot carry the self-consistent demand).
-    # Return an empty-assignment result with the same shape so the caller can detect
-    # it, rather than crashing on solution extraction. This early return only fires
-    # on those paths; the unconstrained path keeps its exact prior control flow.
-    if (budget !== nothing || coupling !== nothing) &&
+    # Design-dependent infeasibility is an expected, benign outcome of the coupled-
+    # solve paths: a `budget` tighter than the secondary objective's own optimum (a
+    # Pareto-sweep point to skip), a `coupling` whose load exceeds every section's
+    # capacity (the catalog cannot carry the self-consistent demand), or a
+    # `linear_constraints` limit no assignment can meet (e.g. drift unreachable
+    # within the catalog). Return an empty-assignment result with the same shape so
+    # the caller can detect it, rather than crashing on solution extraction. This
+    # early return only fires on those paths; the unconstrained path keeps its exact
+    # prior control flow.
+    if (budget !== nothing || coupling !== nothing || linear_constraints !== nothing) &&
        JuMP.primal_status(m) != JuMP.MOI.FEASIBLE_POINT
         emit!(tc, :optimizer, "optimize_discrete", "", :exit;
               status=string(status), objective_value=Inf, infeasible_budget=true)

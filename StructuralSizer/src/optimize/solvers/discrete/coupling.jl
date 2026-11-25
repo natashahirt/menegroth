@@ -130,3 +130,97 @@ function _add_capacity_coupling!(m, x, feasible::Vector{Vector{Int}},
     end
     return nothing
 end
+
+# -----------------------------------------------------------------------------
+# General linear constraint over the selection binaries
+# -----------------------------------------------------------------------------
+#
+# Some global design limits are LINEAR in the section choices even though the
+# underlying physics is not. The headline case is DRIFT: for a lateral system
+# under a fixed force distribution, the drift at a controlled DOF is separable,
+#
+#     δ(s) = Σ_e γ_e / s_e,   γ_e = c_e·s_e  (virtual-work participation, frozen),
+#
+# so each candidate section `t` for group `e` contributes a precomputable constant
+# `γ_e / I_t` to the drift. The limit `δ ≤ δ_allow` is then LINEAR in the
+# selection binaries — `Σ_e Σ_t (γ_e/I_t)·x[e,t] ≤ δ_allow` — and folds into the
+# member MILP as one constraint. The stiffness nonlinearity (I ∝ tⁿ) is absorbed
+# into the per-candidate coefficient; only linearity in the BINARY is required.
+# The solver then sizes every group for strength AND drift jointly, per-group
+# optimal (material where participation-per-weight is highest), in one certified
+# solve — replacing the uniform grow-only drift jump loop. For a statically
+# determinate lateral system (forces independent of stiffness) the drift is EXACT,
+# so the discrete optimum is truly certified; for an indeterminate frame `γ` is a
+# first-order freeze and one outer correction restores exactness (the drift
+# governor's trust region). This also generalizes the `budget` ε-constraint, which
+# is the special case `coeff[i][s] = objective_coeff(s)·length[i]`.
+
+"""
+    LinearSelectionConstraint
+
+A single global LINEAR inequality over [`optimize_discrete`]'s selection binaries:
+
+    Σ_i Σ_s coeff[i][s]·x[i,s]   (≤ or ≥)   rhs
+
+with `sense ∈ (:leq, :geq)`. `coeff` has one entry per group (`length n_groups`),
+each a per-catalog-section coefficient vector (`length n_sections`). Use it for
+any design limit that is linear in the section choices — most importantly a DRIFT
+limit, where `coeff[e][t] = γ_e / I_t` (see this file's section header) so the
+solver sizes a lateral system for strength and drift jointly in one certified
+solve. Several constraints may be supplied at once (e.g. inter-story drift per
+story plus a wind serviceability cap). `nothing` (default) changes nothing.
+"""
+struct LinearSelectionConstraint
+    coeff::Vector{Vector{Float64}}
+    sense::Symbol
+    rhs::Float64
+end
+
+"""
+    _validate_linear_constraints(constraints, n_groups, n_sections)
+
+Throw an `ArgumentError` if any `LinearSelectionConstraint` is dimensionally
+inconsistent with an `n_groups`×`n_sections` problem, or has an unknown `sense`.
+"""
+function _validate_linear_constraints(constraints::AbstractVector{LinearSelectionConstraint},
+                                      n_groups::Int, n_sections::Int)
+    for (k, lc) in enumerate(constraints)
+        (lc.sense === :leq || lc.sense === :geq) || throw(ArgumentError(
+            "LinearSelectionConstraint[$k]: sense must be :leq or :geq (got $(lc.sense))"))
+        length(lc.coeff) == n_groups || throw(ArgumentError(
+            "LinearSelectionConstraint[$k]: coeff must have one entry per group " *
+            "(got $(length(lc.coeff)) for $n_groups groups)"))
+        for (i, ci) in enumerate(lc.coeff)
+            length(ci) == n_sections || throw(ArgumentError(
+                "LinearSelectionConstraint[$k]: coeff[$i] must span the catalog " *
+                "(got $(length(ci)) for $n_sections sections)"))
+        end
+    end
+    return nothing
+end
+
+"""
+    _add_linear_selection_constraints!(m, x, feasible, constraints)
+
+Add each [`LinearSelectionConstraint`] to the JuMP model `m` over the per-group
+selection binaries `x[i, j in feasible[i]]`. Only feasibility-screened candidates
+appear in the sum, consistent with the model's variable set. Returns nothing.
+"""
+function _add_linear_selection_constraints!(m, x, feasible::Vector{Vector{Int}},
+                                            constraints::AbstractVector{LinearSelectionConstraint})
+    for lc in constraints
+        expr = JuMP.AffExpr(0.0)
+        for i in 1:length(lc.coeff)
+            ci = lc.coeff[i]
+            for s in feasible[i]
+                JuMP.add_to_expression!(expr, ci[s], x[i, s])
+            end
+        end
+        if lc.sense === :leq
+            JuMP.@constraint(m, expr <= lc.rhs)
+        else
+            JuMP.@constraint(m, expr >= lc.rhs)
+        end
+    end
+    return nothing
+end

@@ -117,3 +117,126 @@ end
     @test_throws ArgumentError optimize_discrete(_CHK, _DEM, _GEO, _CAT, A992_Steel;
         coupling = LinearCapacityCoupling([2], [[99]], [0.0], [copy(_A), Float64[]], [0.5 .* _A]))
 end
+
+# -----------------------------------------------------------------------------
+# LinearSelectionConstraint: a global linear limit over the selection binaries.
+# The headline use is DRIFT: for a lateral system under a fixed force
+# distribution, the drift is Σ_e γ_e/I_e, so each candidate section t contributes
+# a constant γ_e/I_t — a LINEAR term in x[e,t]. Folding `δ ≤ δ_allow` into the MILP
+# sizes every group for strength AND drift jointly, per-group optimal, in ONE
+# certified solve (replacing the uniform grow-only drift jump loop).
+# -----------------------------------------------------------------------------
+
+const _IX = [ustrip(u"m^4", Ix(s)) for s in _CAT]   # strong-axis I per catalog section
+
+@testset "linear constraint: flag-off is byte-identical" begin
+    base = optimize_discrete(_CHK, _DEM, _GEO, _CAT, A992_Steel; objective = MinVolume())
+    off  = optimize_discrete(_CHK, _DEM, _GEO, _CAT, A992_Steel;
+                             objective = MinVolume(), linear_constraints = nothing)
+    @test off.section_indices == base.section_indices
+    @test off.objective_value == base.objective_value
+end
+
+@testset "linear (drift) constraint: single group picks the lightest stiff-enough section" begin
+    # One cantilever group. Drift δ = Γ/I_chosen ≤ δ_allow ⇒ I_chosen ≥ Γ/δ_allow.
+    # The MILP must pick the LIGHTEST feasible section meeting that stiffness floor.
+    dem = [MemberDemand(1; Mux = 50.0e3)]
+    geo = [SteelMemberGeometry(4.0; Lb = 4.0)]
+
+    base = optimize_discrete(_CHK, dem, geo, _CAT, A992_Steel; objective = MinVolume())
+    m0 = base.section_indices[1]
+    # Choose δ_allow so the stiffness floor lands well above the strength pick.
+    Γ = 10.0                                   # drift "participation" (γ·?) in SI
+    I_needed = 3 * _IX[m0]                      # demand 3× the strength pick's stiffness
+    δ_allow = Γ / I_needed
+    coeff = [[Γ / _IX[s] for s in 1:_N]]       # coeff[group][section] = Γ/I_t
+
+    res = optimize_discrete(_CHK, dem, geo, _CAT, A992_Steel; objective = MinVolume(),
+        linear_constraints = [LinearSelectionConstraint(coeff, :leq, δ_allow)])
+    @test res.status == MOI.OPTIMAL
+    c = res.section_indices[1]
+    @test _IX[c] ≥ I_needed - 1e-12                         # drift limit met
+    @test coeff[1][c] ≤ δ_allow + 1e-12
+
+    # Optimality: the lightest feasible section with I ≥ I_needed.
+    cache = create_cache(_CHK, _N)
+    precompute_capacities!(_CHK, cache, _CAT, A992_Steel, MinVolume())
+    best = Inf
+    for s in 1:_N
+        is_feasible(_CHK, cache, s, _CAT[s], A992_Steel, dem[1], geo[1]) || continue
+        _IX[s] ≥ I_needed || continue
+        best = min(best, get_objective_coeff(_CHK, cache, s))
+    end
+    @test get_objective_coeff(_CHK, cache, c) ≈ best rtol = 1e-9
+end
+
+@testset "linear (drift) constraint: per-group allocation beats uniform scaling" begin
+    # Two cantilever groups with DIFFERENT participation: group 1 contributes far
+    # more drift per unit stiffness than group 2. The optimal response puts most of
+    # the added material in group 1 (where γ/weight is highest) — strictly lighter
+    # than the uniform jump loop, which scales both groups to the same stiff section.
+    dem = [MemberDemand(1; Mux = 50.0e3), MemberDemand(2; Mux = 50.0e3)]
+    geo = [SteelMemberGeometry(4.0; Lb = 4.0), SteelMemberGeometry(4.0; Lb = 4.0)]
+    base = optimize_discrete(_CHK, dem, geo, _CAT, A992_Steel; objective = MinVolume())
+    m1, m2 = base.section_indices
+    Γ1, Γ2 = 20.0, 1.0                          # group 1 dominates the drift
+    δ_now = Γ1 / _IX[m1] + Γ2 / _IX[m2]
+    δ_allow = δ_now / 3                         # require a 3× drift reduction
+    coeff = [[Γ1 / _IX[s] for s in 1:_N], [Γ2 / _IX[s] for s in 1:_N]]
+
+    res = optimize_discrete(_CHK, dem, geo, _CAT, A992_Steel; objective = MinVolume(),
+        linear_constraints = [LinearSelectionConstraint(coeff, :leq, δ_allow)])
+    @test res.status == MOI.OPTIMAL
+    c1, c2 = res.section_indices
+    @test Γ1 / _IX[c1] + Γ2 / _IX[c2] ≤ δ_allow + 1e-12    # drift met
+    @test res.objective_value ≥ base.objective_value - 1e-9 # adding drift can only add weight
+    @test _IX[c1] > _IX[m1]                                 # group 1 (dominant) stiffened
+
+    # Uniform baseline: force BOTH groups to the lightest single section meeting the
+    # whole limit alone. The per-group optimum must be ≤ that.
+    uni = Inf
+    for s in 1:_N
+        (Γ1 + Γ2) / _IX[s] ≤ δ_allow || continue
+        uni = min(uni, _A[s])
+    end
+    @test !isinf(uni)
+    @test _A[c1] + _A[c2] ≤ 2 * uni + 1e-9                  # per-group ≤ uniform
+end
+
+@testset "linear constraint: :geq sense and n_max + infeasible" begin
+    dem = [MemberDemand(1; Mux = 50.0e3)]
+    geo = [SteelMemberGeometry(4.0; Lb = 4.0)]
+    # :geq — require the chosen section's area to be at least some floor.
+    area_floor = 3 * minimum(_A)
+    cgeq = [LinearSelectionConstraint([copy(_A)], :geq, area_floor)]
+    rgeq = optimize_discrete(_CHK, dem, geo, _CAT, A992_Steel; objective = MinVolume(),
+                             linear_constraints = cgeq)
+    @test rgeq.status == MOI.OPTIMAL
+    @test _A[rgeq.section_indices[1]] ≥ area_floor - 1e-12
+
+    # Works with a section cap.
+    rcap = optimize_discrete(_CHK, _DEM, _GEO, _CAT, A992_Steel; objective = MinVolume(),
+        n_max_sections = 1,
+        linear_constraints = [LinearSelectionConstraint([copy(_A), copy(_A)], :geq, area_floor)])
+    @test rcap.status == MOI.OPTIMAL
+    @test length(unique(rcap.section_indices)) ≤ 1
+
+    # Impossible drift limit ⇒ graceful empty result, not a crash.
+    tiny = [LinearSelectionConstraint([[1.0 / _IX[s] for s in 1:_N]], :leq, 1e-30)]
+    rinf = optimize_discrete(_CHK, dem, geo, _CAT, A992_Steel; objective = MinVolume(),
+                             linear_constraints = tiny)
+    @test rinf.status != MOI.OPTIMAL
+    @test isempty(rinf.section_indices)
+end
+
+@testset "linear constraint: dimension/sense validation" begin
+    # coeff not one-per-group.
+    @test_throws ArgumentError optimize_discrete(_CHK, _DEM, _GEO, _CAT, A992_Steel;
+        linear_constraints = [LinearSelectionConstraint([copy(_A)], :leq, 1.0)])
+    # coeff row not spanning the catalog.
+    @test_throws ArgumentError optimize_discrete(_CHK, _DEM, _GEO, _CAT, A992_Steel;
+        linear_constraints = [LinearSelectionConstraint([copy(_A), [1.0]], :leq, 1.0)])
+    # unknown sense.
+    @test_throws ArgumentError optimize_discrete(_CHK, _DEM, _GEO, _CAT, A992_Steel;
+        linear_constraints = [LinearSelectionConstraint([copy(_A), copy(_A)], :eq, 1.0)])
+end

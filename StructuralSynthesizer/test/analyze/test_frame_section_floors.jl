@@ -25,7 +25,10 @@ end
     struc = _floor_frame()
     opts = ConcreteColumnOptions(material = RC_4000_60.concrete, rebar_material = Rebar_60)
     cat = _FZ.rc_column_catalog(opts.section_shape, opts.catalog)
-    obj = s -> _FZ.objective_value(opts.objective, s, opts.material, 1.0u"m")
+    # Same objective the row F walk uses: concrete plus longitudinal and tie steel.
+    obj = s -> _FZ.objective_value(opts.objective, s, opts.material, 1.0u"m";
+                                   rebar = opts.rebar_material,
+                                   transverse = _FZ.get_transverse_rebar(opts))
     light = cat[argmin(obj.(cat))]
     foreach(c -> c.base.section = light, struc.columns)
 

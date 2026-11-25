@@ -22,6 +22,22 @@ const SY = StructuralSynthesizer
     @test names(feas[2], c) == Set(["W6X15"])
     @test names(feas[3], c) == Set(s.name for s in cat)
 
+    # An installed W shape carries the grade. The catalog row does not.
+    # The floor still keeps that shape, and drops a lighter one.
+    graded = deepcopy(W("W16X36"))
+    graded.material = A992_Steel
+    graded_cat = [W("W16X26"), W("W16X36"), W("W21X44")]
+    _, feas_g = SY._apply_section_floor(
+        SteelBeamOptions(custom_catalog = graded_cat), UInt64[1], graded_cat, nothing,
+        Dict(UInt64(1) => (section = graded, exact = false)))
+    @test names(feas_g[1], graded_cat) == Set(["W16X36", "W21X44"])
+
+    @test SY._column_floor_supported(SteelColumnOptions())
+    @test SY._column_floor_supported(ConcreteColumnOptions())
+    @test !SY._column_floor_supported(SteelColumnOptions(n_max_sections = 2))
+    @test !SY._column_floor_supported(ConcreteColumnOptions(sizing_strategy = :nlp))
+    @test !SY._column_floor_supported(ConcreteColumnOptions(materials = [NWC_4000, NWC_5000]))
+
     # An existing per-group mask is narrowed, never widened.
     _, feas2 = SY._apply_section_floor(opts, gids, cat, [[1, 2], [4], [3]], floors)
     @test names(feas2[1], cat) == Set(["W4X13"])
@@ -83,6 +99,11 @@ end
 
     @test SY._shell_ratchet_ok(struc, ConcreteBeamOptions())
     @test SY._shell_ratchet_ok(struc, SteelBeamOptions())
+    @test SY._member_trim_ok(struc, SteelBeamOptions(), (;), SteelColumnOptions())
+    @test SY._member_trim_ok(struc, ConcreteBeamOptions(include_flange = true), (;),
+                             ConcreteColumnOptions())
+    @test !SY._member_trim_ok(struc, ConcreteBeamOptions(include_flange = true), (;),
+                              ConcreteColumnOptions(sizing_strategy = :nlp))
     @test !SY._shell_ratchet_ok(struc, ConcreteBeamOptions(include_flange = true))
     @test !SY._shell_ratchet_ok(struc, ConcreteBeamOptions(n_max_sections = 2))
     @test !SY._shell_ratchet_ok(struc, ConcreteBeamOptions(materials = [NWC_4000, NWC_5000]))
@@ -125,6 +146,4 @@ end
 
     @test_throws ArgumentError size_columns!(
         struc, SteelColumnOptions(n_max_sections = 1); section_floor = floors)
-    @test_throws ArgumentError size_columns!(
-        struc, ConcreteColumnOptions(); section_floor = floors)
 end

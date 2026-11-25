@@ -374,6 +374,29 @@ _column_catalog_can_grow(e::ArgumentError) =
 _column_catalog_can_grow(::Any) = false
 
 """
+    submit_column_section_floor!(struc, opts, gid, sec) -> Bool
+
+Record `sec` as a persistent lower bound on column group `gid`.
+
+This is the column owner's write into `frame_section_floors`. A neighbor that
+found `sec` failing its own check submits that section and does not assign a
+replacement. Later discrete sizing keeps `sec` or a heavier one. A floor
+already at least this heavy is left alone, and a section the catalog does
+not contain is refused. Returns whether the stored floor changed.
+"""
+function submit_column_section_floor!(struc, opts, gid, sec)
+    (gid === nothing || sec === nothing) && return false
+    any(s -> _sections_identical(s, sec), _column_catalog(opts)) || return false
+    prev = get(struc.frame_section_floors, gid, nothing)
+    if prev !== nothing
+        obj = s -> StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
+        obj(sec) > obj(prev) * (1 + 1e-9) || return false
+    end
+    struc.frame_section_floors[gid] = sec
+    return true
+end
+
+"""
 Add `section_floor` entries that this call does not already have.
 
 Returns the group ids added here. The caller removes them when sizing

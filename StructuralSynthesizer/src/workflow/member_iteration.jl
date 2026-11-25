@@ -304,22 +304,9 @@ function _size_beams_columns!(struc::BuildingStructure, params::DesignParameters
         @warn "Skipping beam sizing: no beam edges in geometry. Sizing columns only."
         StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
                               outcome="skipped_beams", reason="no_beam_edges")
-        # Self-weight, coating, and stiffness follow the section, so columns
-        # are re-sized until a pass changes none of them.
-        converged = false
-        for _ in 1:max(1, params.max_iterations)
-            before = [section(c) for c in struc.columns]
-            size_columns!(struc, column_opts; reanalyze=false, tc=tc,
-                          I_factor=params.column_I_factor,  # ACI 318-11 §10.10.4.1
-                          gravity_factor=member_self_weight_acceleration(params))
-            _harmonize_columns!(struc, params)
-            _sync_fire_coating_loads!(struc, params)
-            update_analysis!(struc, :stiffness; tc)
-            if all(_sections_identical(a, section(c)) for (a, c) in zip(before, struc.columns))
-                converged = true
-                break
-            end
-        end
+        # Same round as the beam-and-column loop, with no beams to size:
+        # free passes, then a floor, then one trim kept only when it is lighter.
+        converged, = _iterate_columns_only!(struc, params, column_opts; tc = tc)
         _record_member_convergence!(struc, converged)
         StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :exit;
                               outcome="columns_only", converged=converged)
@@ -434,9 +421,10 @@ lightest heavier section that does.
 
 When that search converges and `trim` is set, [`_trim_member_loop!`](@ref)
 tries one lighter design and keeps it only when that design also converges
-with a smaller sizing objective. `upward_only` skips the trim: the story
-shell trims its own beams, and a trim's upward-only follow-up must not trim
-again.
+with a smaller sizing objective. `upward_only` skips that trim: the story
+shell trims its own beams, and [`_trim_story_shell_columns!`](@ref) trims
+the columns once after the shell has settled. A trim's follow-up must not
+trim again.
 """
 function _iterate_beams_columns!(struc, params, beam_opts, column_opts, beam_kwargs;
                                  tc = nothing, shell_demands = nothing,
@@ -653,6 +641,202 @@ function _iteration_column_floor(struc, column_opts, floor_now)
 end
 
 """
+Size columns, then uniform column sizing and fire coating, and re-solve.
+
+Returns whether every column section is the one this pass started with.
+`floor_now` holds each group at its current section or a heavier one.
+"""
+function _column_only_pass!(struc, params, column_opts; tc, floor_now::Bool)
+    before = [section(c) for c in struc.columns]
+    size_columns!(struc, column_opts; reanalyze = false, tc = tc,
+                  I_factor = params.column_I_factor,  # ACI 318-11 §10.10.4.1
+                  gravity_factor = member_self_weight_acceleration(params),
+                  section_floor = _iteration_column_floor(struc, column_opts, floor_now))
+    _harmonize_columns!(struc, params)
+    _sync_fire_coating_loads!(struc, params)
+    update_analysis!(struc, :stiffness; tc)
+    return length(before) == length(struc.columns) &&
+           all(_sections_identical(a, section(c)) for (a, c) in zip(before, struc.columns))
+end
+
+"""
+Column sizing when the floor has no beams.
+
+The first [`_MEMBER_FREE_PASSES`](@ref) passes pick freely. Later passes floor
+each group at its current section. When that search holds and the column
+options can take a floor, one trim tries a lighter design and keeps it only
+when the grow-only follow-up converges with a smaller column objective.
+`ratchet_from` overrides the free passes, for that follow-up. Returns
+`(converged, iterations)`.
+"""
+function _iterate_columns_only!(struc, params, column_opts; tc = nothing,
+                                trim::Bool = true,
+                                ratchet_from::Union{Nothing, Int} = nothing)
+    max_iter = max(1, params.max_iterations)
+    floor_after = something(ratchet_from, _MEMBER_FREE_PASSES)
+    history = Vector{Vector{Any}}()
+    for iter in 1:max_iter
+        held = _column_only_pass!(struc, params, column_opts; tc,
+                                  floor_now = iter > floor_after)
+        state = [section(c) for c in struc.columns]
+        if held
+            StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
+                                  outcome = "columns_only_converged", iterations = iter)
+            trim && _column_floor_supported(column_opts) || return (true, iter)
+            return _trim_columns_only!(struc, params, column_opts; tc, iterations = iter)
+        end
+        earlier = findfirst(s -> length(s) == length(state) &&
+                                  all(_sections_identical(a, b) for (a, b) in zip(s, state)),
+                            history)
+        push!(history, state)
+        if earlier !== nothing
+            StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
+                                  outcome = "columns_only_cycled", iterations = iter)
+            return (false, iter)
+        end
+    end
+    StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
+                          outcome = "columns_only_max_iterations", iterations = max_iter)
+    return (false, max_iter)
+end
+
+"""
+One lighter column design after a beamless floor has converged.
+
+A free pick, then grow-only passes from whatever that pick installed. Kept
+only when those passes converge and the column objective is strictly smaller.
+Otherwise the converged sections go back on.
+"""
+function _trim_columns_only!(struc, params, column_opts; tc, iterations::Int)
+    kept = [section(c) for c in struc.columns]
+    obj_kept = _columns_only_objective(struc, column_opts)
+    tracing = get(ENV, "SS_TRACE_SHELL_PASSES", "") == "1"
+    tracing && println("—— column trim: free pick on the converged model ——")
+    _column_only_pass!(struc, params, column_opts; tc, floor_now = false)
+    if length(kept) == length(struc.columns) &&
+       all(_sections_identical(a, section(c)) for (a, c) in zip(kept, struc.columns))
+        tracing && println("—— column trim unchanged ——")
+        return (true, iterations)
+    end
+    converged, n = _iterate_columns_only!(struc, params, column_opts; tc,
+                                          trim = false, ratchet_from = 0)
+    obj_trim = _columns_only_objective(struc, column_opts)
+    counts_ok = length(struc.columns) == length(kept)
+    if converged && counts_ok && obj_trim < obj_kept
+        tracing && println("—— column trim kept: objective $(obj_trim) < $(obj_kept) ——")
+        StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
+                              outcome = "column_trim_kept", iterations = iterations + 1 + n)
+        return (true, iterations + 1 + n)
+    end
+    tracing && println("—— column trim dropped (converged=$(converged), " *
+                       "objective $(obj_trim) vs $(obj_kept)) ——")
+    StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
+                          outcome = "column_trim_dropped", iterations = iterations + 1 + n)
+    counts_ok || return (converged, iterations + 1 + n)
+    _restore_columns!(struc, kept, column_opts, params)
+    return (true, iterations + 1 + n)
+end
+
+"""Put `sections` back on the columns, in member order, and re-solve."""
+function _restore_columns!(struc, sections, column_opts, params)
+    length(struc.columns) == length(sections) || return struc
+    edges = _edge_ids(struc, (:columns,))
+    rebar = column_opts isa StructuralSizer.ConcreteColumnOptions ?
+        column_opts.rebar_material : nothing
+    for (m, sec) in zip(struc.columns, sections)
+        sec === nothing && continue
+        _install_member_section!(struc, m, sec, edges, column_opts.material,
+                                 params.column_I_factor, rebar)
+    end
+    _sync_fire_coating_loads!(struc, params)
+    _reanalyze_after_section_change!(struc)
+    return struc
+end
+
+"""
+One lighter set of columns after the story shell has settled.
+
+The member loop was upward-only, so it did not trim. Beams stay at the
+sections the shell trim left. One free column pick, then grow-only passes
+from that pick. The result is kept only when those passes converge, every
+beam and column passes the shell of the new columns, and the column
+objective is strictly smaller. Otherwise the settled sections go back on
+and the shell is solved again on them.
+"""
+function _trim_story_shell_columns!(struc, params, beam_opts, column_opts, beam_kwargs,
+                                    levels, shells; shell_kwargs, seed_regions, tc)
+    kept = _member_state(struc)
+    obj_kept = _columns_only_objective(struc, column_opts)
+    tracing = get(ENV, "SS_TRACE_SHELL_PASSES", "") == "1"
+    tracing && println("—— story-shell column trim: free pick ——")
+    _column_only_pass!(struc, params, column_opts; tc, floor_now = false)
+    if _member_state_identical(kept, _member_state(struc))
+        tracing && println("—— story-shell column trim unchanged ——")
+        return struc
+    end
+    converged, = _iterate_columns_only!(struc, params, column_opts; tc,
+                                        trim = false, ratchet_from = 0)
+    beams_held = length(struc.beams) == length(kept.beams) &&
+                 length(struc.columns) == length(kept.columns) &&
+                 all(_sections_identical(a, _story_beam_section(struc, b))
+                     for (a, b) in zip(kept.beams, struc.beams))
+    # The shell solve writes onto the slabs. A rejected trim solves it again
+    # on the sections that were put back.
+    checked = converged && beams_held
+    passes = checked &&
+             _story_shell_frame_passes(struc, beam_opts, column_opts, beam_kwargs,
+                                       levels, shells; shell_kwargs,
+                                       seed_regions = seed_regions)
+    obj_trim = _columns_only_objective(struc, column_opts)
+    if passes && obj_trim < obj_kept
+        tracing && println("—— story-shell column trim kept: objective " *
+                           "$(obj_trim) < $(obj_kept) ——")
+        StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
+                              outcome = "story_shell_column_trim_kept")
+        return struc
+    end
+    tracing && println("—— story-shell column trim dropped (converged=$(converged), " *
+                       "objective $(obj_trim) vs $(obj_kept)) ——")
+    StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
+                          outcome = "story_shell_column_trim_dropped")
+    # A pass that added or removed a member has no index to put the saved
+    # section back on. The column pass does not add members; this is the
+    # same guard as the member-loop trim.
+    if length(struc.beams) != length(kept.beams) ||
+       length(struc.columns) != length(kept.columns)
+        return struc
+    end
+    _install_state!(struc, kept, beam_opts, column_opts, params)
+    checked && _story_shell_frame_passes(struc, beam_opts, column_opts, beam_kwargs,
+                                         levels, shells; shell_kwargs,
+                                         seed_regions = seed_regions)
+    return struc
+end
+
+"""
+True when the shell of the installed sections and the frame of those sections
+both pass. Solving the shell writes its results onto the slabs.
+"""
+function _story_shell_frame_passes(struc, beam_opts, column_opts, beam_kwargs,
+                                   levels, shells; shell_kwargs, seed_regions,
+                                   region_tol::Real = 0.05)
+    build_kwargs, solve_kwargs, want_service = _split_shell_kwargs(shell_kwargs)
+    run = (struc = struc, opts = beam_opts, levels = levels, shells = shells,
+           build_kwargs = build_kwargs, solve_kwargs = solve_kwargs,
+           want_service = want_service, region_tol = region_tol,
+           kwargs = beam_kwargs, history = nothing)
+    regions = seed_regions === nothing ? Dict{Int, Vector{NamedTuple}}() :
+              Dict{Int, Vector{NamedTuple}}(seed_regions)
+    fresh = _gather_shell_demands!(run; service_on = want_service, regions = regions)
+    resolution = get(beam_kwargs, :resolution, 200)
+    spans = want_service ? fresh.spans : nothing
+    beams = _beam_group_report(struc, beam_opts; shell_demands = fresh.demands,
+                               shell_spans = spans, resolution = resolution)
+    columns = _column_group_report(struc, column_opts; resolution = resolution)
+    return _shell_frame_accept(fresh, beams, columns, want_service, region_tol)
+end
+
+"""
 Beam and column sizing for the stories in `levels`, which the story shell
 designs (see [`_story_shell_design_levels`](@ref)).
 
@@ -669,8 +853,12 @@ it. A passing group keeps its section. Each story is meshed once.
 
 With steel discrete beams, rounds after the first start upward-only from the
 sections before them. When those rounds settle, one more round runs the
-story-shell trim (a lighter design is kept only when it converges lighter),
-with up to `max_rounds` further rounds to settle again.
+story-shell beam trim (a lighter design is kept only when it converges
+lighter), with up to `max_rounds` further rounds to settle again. The
+member loop does not trim while it is upward-only. After the shell of the
+installed sections has settled, [`_trim_story_shell_columns!`](@ref) tries
+one lighter set of columns and keeps it only when the shell of those
+columns still passes and the column objective is smaller.
 
 When the rounds settle, the slab bars on each story come from a shell solve
 with the final beam and column sections. Each slab on those stories records
@@ -685,6 +873,7 @@ function _size_with_story_shell!(struc, params, beam_opts, column_opts, beam_kwa
                     column_concrete = column_concrete(params),
                     rebar = resolve_slab_rebar(params.materials))
     seed = (demands = nothing, spans = nothing, regions = nothing)
+    settled_regions = nothing
     converged, iters = false, 0
     held = false
     # Discrete steel and rectangular concrete beams only move up once the first
@@ -744,10 +933,12 @@ function _size_with_story_shell!(struc, params, beam_opts, column_opts, beam_kwa
                               shell_converged = sb.converged, beams_held = beams_held,
                               columns_held = columns_held)
         if held
+            settled_regions = sb.regions
             (tried_trim || floor === nothing) && break
             # Rounds after the first started upward-only from the round before,
-            # so sections never came down. Try the trim once on the settled
-            # demands, with its own round budget.
+            # so sections never came down. Try the beam trim once on the settled
+            # demands, with its own round budget. Columns trim after the shell
+            # has settled, so this round does not free-pick them.
             tried_trim = true
             trim_now = true
             limit = round + max_rounds
@@ -764,9 +955,14 @@ function _size_with_story_shell!(struc, params, beam_opts, column_opts, beam_kwa
                                          levels, shells; shell_kwargs = shell_kwargs,
                                          seed_regions = seed.regions)
         iters += closed.attempts
-        closed.held && (converged = true; held = true)
+        closed.held && (converged = true; held = true; settled_regions = closed.regions)
         get(ENV, "SS_TRACE_SHELL_PASSES", "") == "1" &&
             println("story-shell reconcile held=$(closed.held)  attempts=$(closed.attempts)")
+    end
+    if held && upward_only && _column_floor_supported(column_opts)
+        _trim_story_shell_columns!(struc, params, beam_opts, column_opts, beam_kwargs,
+                                   levels, shells; shell_kwargs = shell_kwargs,
+                                   seed_regions = settled_regions, tc = tc)
     end
     held || @warn "Story-shell sizing did not settle after $round rounds" levels
     _record_story_shell_wall_axials!(struc, shells)

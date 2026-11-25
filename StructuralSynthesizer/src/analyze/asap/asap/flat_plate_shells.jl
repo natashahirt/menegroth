@@ -66,6 +66,8 @@ mutable struct FlatPlateShellLayout
     params::DesignParameters
 end
 
+# Keyed by the model object. A deepcopy (the incremental engine's snapshot)
+# has the triangles and not this entry, so the copy must be meshed again.
 const _FLAT_PLATE_SHELLS = WeakKeyDict{Asap.Model, FlatPlateShellLayout}()
 
 """The flat-plate shell layout of `struc.asap_model`, or `nothing` when it has none."""
@@ -73,6 +75,25 @@ function flat_plate_shell_layout(struc::BuildingStructure)
     model = struc.asap_model
     model === nothing && return nothing
     return get(_FLAT_PLATE_SHELLS, model, nothing)
+end
+
+"""
+True when this building's flat-plate floors belong in the shell model and
+this model has no layout registered.
+
+`to_asap!` stores the layout in [`_FLAT_PLATE_SHELLS`](@ref), keyed by the
+model object. A copied model is absent from that map. Treating the absence
+as "nothing to update" leaves the copied shells at the thickness and column
+patches they were meshed with.
+"""
+function _flat_plate_layout_lost(struc::BuildingStructure, params::DesignParameters)
+    flat_plate_shell_layout(struc) !== nothing && return false
+    model = struc.asap_model
+    (model === nothing || !hasproperty(model, :shell_elements) ||
+        isempty(model.shell_elements)) && return false
+    mode = params.diaphragm_mode
+    mode == :auto && (mode = resolve_auto_diaphragm(struc, params))
+    return !isempty(_flat_plate_building_cells(struc, params, mode))
 end
 
 """
@@ -477,11 +498,12 @@ end
     refresh_flat_plate_analysis!(struc, params)
 
 Re-solve the building after a flat-plate stage. A column whose footprint
-changed needs a new patch, so the model is rebuilt; otherwise this is
-[`sync_asap!`](@ref).
+changed, or a copied model whose layout map was not copied with it, needs
+a new mesh. Otherwise this is [`sync_asap!`](@ref).
 """
 function refresh_flat_plate_analysis!(struc::BuildingStructure, params::DesignParameters)
-    _flat_plate_mesh_stale(struc) && return update_analysis!(struc, :geometry; params)
+    (_flat_plate_layout_lost(struc, params) || _flat_plate_mesh_stale(struc)) &&
+        return update_analysis!(struc, :geometry; params)
     return sync_asap!(struc; params)
 end
 

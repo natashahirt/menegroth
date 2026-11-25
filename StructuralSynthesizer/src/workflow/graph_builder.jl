@@ -352,25 +352,6 @@ StructuralSizer.TRACE_REGISTRY[(:_design_flat_plate_members!, :workflow)] =
         @__LINE__,
     )
 
-"""
-    _design_flat_plate_members!(struc, params; tc=nothing) -> NamedTuple
-
-Member stage of a flat-plate or flat-slab building.
-
-[`_reconcile_columns!`](@ref) gives each column the lightest section that
-passes its full-load strength and punching, then uniform column sizing
-promotes each group to its largest member when that option is on. A column
-whose plan size changed was not the column the slab was checked at
-([`_slab_checked_at_installed_columns`](@ref)), so that slab is designed
-again. The slab commit may grow a column, and the section search may grow
-one too. Either growth is a floor under the next search
-([`_raise_column_floors!`](@ref)), so a column that failed at a smaller
-plan size is not selected again. Rounds repeat until every slab was checked
-at its installed columns.
-
-Returns `(passes, redesigned)`: the rounds run, including the last one that
-found nothing stale, and the slabs designed again.
-"""
 # --- Debug helpers for SS_DEBUG_MEMBER_SETTLE (no behavior change) ---
 """Compact `idx=>c1xc2 in` signature of a column plan-size dict, sorted by idx."""
 function _fp_plan_sig(d)
@@ -401,6 +382,30 @@ function _fp_stale_reason(struc, sidx)
     return isempty(diffs) ? "match?" : join(diffs, ", ")
 end
 
+"""
+    _design_flat_plate_members!(struc, params; tc=nothing) -> NamedTuple
+
+Member stage of a flat-plate or flat-slab building.
+
+[`_reconcile_columns!`](@ref) gives each column the lightest section that
+passes its full-load strength and punching, then uniform column sizing
+promotes each group to its largest member when that option is on. A column
+whose plan size changed was not the column the slab was checked at
+([`_slab_checked_at_installed_columns`](@ref)), so that slab is designed
+again. The slab commit may grow a column, and the section search may grow
+one too. Either growth is a floor under the next search
+([`_raise_column_floors!`](@ref)), so a column that failed at a smaller
+plan size is not selected again. Rounds repeat until every slab was checked
+at its installed columns.
+
+After that grow-only settle converges, [`_trim_flat_plate_members!`](@ref)
+tries one lighter design. It is kept only when that second settle converges,
+every column found a section, the column objective is strictly smaller, and
+no slab got thicker.
+
+Returns `(passes, redesigned)`: the rounds of the design that was kept,
+including the last one that found nothing stale, and the slabs designed again.
+"""
 function _design_flat_plate_members!(struc::BuildingStructure, params::DesignParameters;
                                      tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing)
     StructuralSizer.emit!(tc, :workflow, "_design_flat_plate_members!", "", :enter;
@@ -420,8 +425,27 @@ function _design_flat_plate_members!(struc::BuildingStructure, params::DesignPar
     floor_opts = resolve_floor_options(params)
     column_opts = _get_column_opts(params)
     redesigned = Set{Int}()
+    run = _settle_flat_plate_members!(
+        struc, params, floors, floor_opts, column_opts, redesigned; tc)
+    trim = "skipped"
+    if run.converged
+        run, trim = _trim_flat_plate_members!(
+            struc, params, floor_opts, column_opts, redesigned, run; tc)
+    end
+    StructuralSizer.emit!(tc, :workflow, "_design_flat_plate_members!", "", :decision;
+                          passes = run.steps, stop = string(run.stop),
+                          n_redesigned = length(redesigned), trim = trim)
+    run.converged || _flat_plate_members_unsettled(struc, run)
+    StructuralSizer.emit!(tc, :workflow, "_design_flat_plate_members!", "", :exit;
+                          n_redesigned = length(redesigned))
+    return (passes = run.steps, redesigned = sort!(collect(redesigned)))
+end
+
+"""Grow-only slab and column rounds. `floors` is pinned at the sizes already reached."""
+function _settle_flat_plate_members!(struc, params, floors, floor_opts, column_opts, redesigned;
+                                     tc = nothing)
     dbg = haskey(ENV, "SS_DEBUG_MEMBER_SETTLE")
-    run = StructuralSizer.settle!(;
+    return StructuralSizer.settle!(;
             budget = StructuralSizer.monotone_budget(params.max_iterations, 48)) do step
         stale = _stale_flat_plate_slabs(struc)
         if dbg
@@ -459,16 +483,138 @@ function _design_flat_plate_members!(struc::BuildingStructure, params::DesignPar
         end
         return true
     end
-    StructuralSizer.emit!(tc, :workflow, "_design_flat_plate_members!", "", :decision;
-                          passes = run.steps, stop = string(run.stop),
-                          n_redesigned = length(redesigned))
-    run.converged || error(
-        "flat-plate member stage did not settle: after $(run.steps) rounds, slabs " *
-        "$(_stale_flat_plate_slabs(struc)) were still checked at smaller columns " *
-        "than are installed")
-    StructuralSizer.emit!(tc, :workflow, "_design_flat_plate_members!", "", :exit;
-                          n_redesigned = length(redesigned))
-    return (passes = run.steps, redesigned = sort!(collect(redesigned)))
+end
+
+_flat_plate_members_unsettled(struc, run) = error(
+    "flat-plate member stage did not settle: after $(run.steps) rounds, slabs " *
+    "$(_stale_flat_plate_slabs(struc)) were still checked at smaller columns " *
+    "than are installed")
+
+"""
+    _trim_flat_plate_members!(struc, params, floor_opts, column_opts, redesigned, kept_run; tc) -> (run, outcome)
+
+One lighter attempt after the grow-only flat-plate settle has converged.
+
+A free column pick runs with no plan floor. If any section moves, the same
+grow-only settle runs from those sizes. The attempt is kept when it
+converges, no column is left without a passing section, the column sizing
+objective is strictly smaller, and no slab thickness increased. Otherwise
+the converged design is restored and re-solved.
+
+Returns the run of the design that stands, and `"unchanged"`, `"kept"`, or
+`"dropped"`.
+"""
+function _trim_flat_plate_members!(struc, params, floor_opts, column_opts, redesigned, kept_run;
+                                   tc = nothing)
+    shapes = [deepcopy(col.shape) for col in struc.columns]
+    sections = [section(col) for col in struc.columns]
+    plans = _column_plan_sizes(struc)
+    counts = (length(struc.beams), length(struc.columns), length(struc.slabs))
+    obj_kept = _columns_only_objective(struc, column_opts)
+    thick = _flat_plate_thicknesses(struc)
+    snapshot!(struc, :flat_plate_trim_kept)
+    tracing = get(ENV, "SS_TRACE_SHELL_PASSES", "") == "1"
+    tracing && println("—— flat-plate trim: free pick on the converged model ——")
+    full = check_flat_plate_columns!(struc, params; tc, floors = Dict{Int, Tuple}())
+    if _flat_plate_columns_held(struc, plans, sections)
+        tracing && println("—— flat-plate trim unchanged ——")
+        delete!(struc._snapshots, :flat_plate_trim_kept)
+        return (kept_run, "unchanged")
+    end
+    floors = Dict{Int, Tuple}()
+    _floor_columns_at_installed!(floors, struc)
+    trim_redesigned = Set{Int}()
+    run = _settle_flat_plate_members!(
+        struc, params, floors, floor_opts, column_opts, trim_redesigned; tc)
+    counts_ok = (length(struc.beams), length(struc.columns), length(struc.slabs)) == counts
+    obj_trim = _columns_only_objective(struc, column_opts)
+    keep = full.converged && isempty(full.unresolved) && run.converged &&
+           !haskey(struc.stage_diagnostics, :flat_plate_columns) &&
+           obj_trim < obj_kept && !_flat_plate_slab_thickened(thick, struc)
+    if keep
+        tracing && println("—— flat-plate trim kept: objective $(obj_trim) < $(obj_kept) ——")
+        union!(redesigned, trim_redesigned)
+        delete!(struc._snapshots, :flat_plate_trim_kept)
+        return (run, "kept")
+    end
+    tracing && println("—— flat-plate trim dropped (converged=$(run.converged), " *
+                       "objective $(obj_trim) vs $(obj_kept)) ——")
+    # A head that grew during the trim changed the member lists, so the saved
+    # sections have nowhere to go. A converged trim is still a finished design.
+    if !counts_ok
+        delete!(struc._snapshots, :flat_plate_trim_kept)
+        run.converged || _flat_plate_members_unsettled(struc, run)
+        union!(redesigned, trim_redesigned)
+        return (run, "dropped")
+    end
+    _restore_flat_plate_trim!(struc, params, shapes)
+    return (kept_run, "dropped")
+end
+
+"""Put back the design saved at the start of the flat-plate trim and re-solve it."""
+function _restore_flat_plate_trim!(struc, params, shapes)
+    restore!(struc, :flat_plate_trim_kept;
+             geometry_is_centerline = params.geometry_is_centerline)
+    for (col, shape) in zip(struc.columns, shapes)
+        col.shape = shape
+    end
+    concrete_fallback = column_concrete(params)
+    rebar = column_rebar(params)
+    for col in struc.columns
+        section(col) === nothing && continue
+        _set_rc_column_volumes!(col, something(col.concrete, concrete_fallback), rebar)
+        _install_column_frame_section!(struc, col, _rc_column_frame_section(col, params))
+    end
+    refresh_flat_plate_analysis!(struc, params)
+    delete!(struc._snapshots, :flat_plate_trim_kept)
+    return struc
+end
+
+"""True when every column still has the plan size and section from before the free pick."""
+function _flat_plate_columns_held(struc, plans, sections)
+    length(struc.columns) == length(sections) || return false
+    tol = 0.05u"inch"
+    for (i, col) in enumerate(struc.columns)
+        _sections_identical(section(col), sections[i]) || return false
+        haskey(plans, i) || continue
+        (col.c1 === nothing || col.c2 === nothing) && return false
+        b1, b2 = plans[i]
+        (abs(col.c1 - b1) <= tol && abs(col.c2 - b2) <= tol) || return false
+    end
+    return true
+end
+
+"""Column sizing objective: section objective per length times length."""
+function _columns_only_objective(struc, column_opts)
+    total = 0.0
+    for col in struc.columns
+        sec = section(col)
+        sec === nothing && continue
+        total += _member_section_objective(column_opts, sec, col)
+    end
+    return total
+end
+
+"""Installed slab thickness, or `nothing` when the slab has no result yet."""
+function _flat_plate_thickness(slab)
+    result = slab.result
+    result === nothing && return nothing
+    hasproperty(result, :thickness) && return result.thickness
+    return StructuralSizer.total_depth(result)
+end
+
+_flat_plate_thicknesses(struc) = [_flat_plate_thickness(slab) for slab in struc.slabs]
+
+"""True when any slab is more than 0.05 in thicker than `before`."""
+function _flat_plate_slab_thickened(before, struc)
+    length(before) == length(struc.slabs) || return true
+    tol = 0.05u"inch"
+    for (h0, slab) in zip(before, struc.slabs)
+        h1 = _flat_plate_thickness(slab)
+        (h0 === nothing || h1 === nothing) && continue
+        h1 > h0 + tol && return true
+    end
+    return false
 end
 
 """Plan size `(c1, c2)` of each column that already has one."""

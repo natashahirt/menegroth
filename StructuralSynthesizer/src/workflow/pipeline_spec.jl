@@ -208,16 +208,18 @@ function _walls_with_member_recheck!(struc::BuildingStructure, params::DesignPar
 end
 
 """
-Floor each RC frame column that fails P–M on the solved model, at its current
-section, and return whether any column failed.
+Submit a floor for each RC frame column that fails P–M, and return whether
+any column failed.
 
-The floor is a lower bound: discrete sizing keeps that section or a heavier
-one. A floor already at least that heavy is left alone. The caller still
-sizes once; if the section does not change, that round is the last.
-Flat-plate columns are judged by the slab check, not these frame forces.
-Steel columns are left to their own sizer. A column option set that cannot
-keep a catalog floor still counts as overstressed, so the members are sized
-once on the wall solution.
+The floor is the section that just failed. [`submit_column_section_floor!`](@ref)
+records it; this function does not choose a replacement. Discrete sizing then
+keeps that section or a heavier one. A floor already at least that heavy is
+left alone. The caller still sizes once; if the section does not change, that
+round is the last. The floor is not trimmed: the section already failed this
+check. Flat-plate columns are judged by the slab check, not these frame
+forces. Steel columns are left to their own sizer. A column option set that
+cannot keep a catalog floor still counts as overstressed, so the members are
+sized once on the wall solution.
 """
 function _floor_overstressed_frame_columns!(struc::BuildingStructure, params::DesignParameters)
     opts = params.columns
@@ -227,9 +229,6 @@ function _floor_overstressed_frame_columns!(struc::BuildingStructure, params::De
     supported = flat_plate_supported_columns(struc)
     can_floor = opts.sizing_strategy !== :nlp && opts.materials === nothing &&
                 opts.n_max_sections == 0
-    obj = can_floor ?
-        (s -> StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")) :
-        nothing
     overstressed = false
     for (i, col) in enumerate(struc.columns)
         i in supported && continue
@@ -238,15 +237,7 @@ function _floor_overstressed_frame_columns!(struc::BuildingStructure, params::De
         (checked === nothing || checked.passed) && continue
         overstressed = true
         can_floor || continue
-        gid = group_id(col)
-        gid === nothing && continue
-        sec = section(col)
-        # The mask refuses a floor the catalog does not contain.
-        any(s -> _sections_identical(s, sec), _column_catalog(opts)) || continue
-        prev = get(struc.frame_section_floors, gid, nothing)
-        if prev === nothing || obj(sec) > obj(prev) * (1 + 1e-9)
-            struc.frame_section_floors[gid] = sec
-        end
+        submit_column_section_floor!(struc, opts, group_id(col), section(col))
     end
     return overstressed
 end

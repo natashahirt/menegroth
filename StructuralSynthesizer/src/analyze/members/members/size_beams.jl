@@ -1102,7 +1102,7 @@ function _narrow_to_section_floor(opts, group_ids, cat, feasible, floors)
         fl === nothing && continue
         o_floor = _section_objective(opts, fl.section)
         filter!(out[i]) do j
-            _sections_identical(cat[j], fl.section) ||
+            _section_same_shape(cat[j], fl.section) ||
                 (!fl.exact && obj[j] > o_floor * (1 + 1e-9))
         end
     end
@@ -1192,7 +1192,7 @@ greater. Refuses when the floor is not in `catalog`.
 """
 function _floor_or_heavier(struc, gid, fl, catalog, obj, objective_of)
     o_floor = objective_of(fl)
-    same = [j for j in eachindex(catalog) if _sections_identical(catalog[j], fl)]
+    same = [j for j in eachindex(catalog) if _section_same_shape(catalog[j], fl)]
     if isempty(same)
         _refuse_frame_floors(struc, [gid],
             "this sizing catalog (the row F floor is not in it)")
@@ -1404,6 +1404,25 @@ function _sections_identical(a, b)
     a === b && return true
     typeof(a) === typeof(b) || return false
     for f in fieldnames(typeof(a))
+        _field_identical(getfield(a, f), getfield(b, f)) || return false
+    end
+    return true
+end
+
+"""
+Same catalog shape as `b`.
+
+An installed steel section carries the grade on `material`. The catalog row
+it was copied from leaves `material` unset. Those two are the same shape:
+every other field matches. A section of the same name with a different area
+or inertia is not.
+"""
+function _section_same_shape(a, b)
+    _sections_identical(a, b) && return true
+    typeof(a) === typeof(b) || return false
+    hasproperty(a, :material) || return false
+    for f in fieldnames(typeof(a))
+        f === :material && continue
         _field_identical(getfield(a, f), getfield(b, f)) || return false
     end
     return true

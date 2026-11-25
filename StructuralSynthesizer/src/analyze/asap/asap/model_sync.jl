@@ -120,6 +120,11 @@ See also: [`to_asap!`](@ref), [`snapshot!`](@ref), [`restore!`](@ref)
 function sync_asap!(struc::BuildingStructure;
                     params::DesignParameters=DesignParameters(),
                     loads_only::Bool=false)
+    # A copied model still has its triangles and has lost the layout map, so
+    # a load-only update would solve the mesh those triangles were built for.
+    if _flat_plate_layout_lost(struc, params)
+        return update_analysis!(struc, :geometry; params)
+    end
     # 1. Push current slab self-weights into cells
     for slab in struc.slabs
         sw = StructuralSizer.self_weight(slab.result)

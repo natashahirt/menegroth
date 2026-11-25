@@ -87,6 +87,24 @@ end
         @test t < 5.0
     end
 
+    @testset "a copied model is meshed again" begin
+        # The layout map is keyed by the model object. The incremental
+        # engine's snapshot is a deepcopy, so the copy has the triangles
+        # and not the map. The next sync has to mesh it for the copy's columns.
+        copy = _SS_FPB.capture_node_state(struc)
+        @test _SS_FPB.flat_plate_shell_layout(copy) === nothing
+        col = copy.columns[findfirst(c -> c.c1 !== nothing, copy.columns)]
+        col.c1 += 4.0u"inch"
+        _SS_FPB.sync_asap!(copy; params)
+        layout2 = _SS_FPB.flat_plate_shell_layout(copy)
+        @test layout2 !== nothing
+        si = first(keys(layout2.thickness))
+        @test layout2.columns_key ==
+              _SS_FPB._flat_plate_columns_key(copy, keys(layout2.thickness))
+        h = Float64(ustrip(u"m", _SS_FPB.thickness(copy.slabs[si])))
+        @test layout2.thickness[si] ≈ h
+    end
+
     @testset ":options keeps floors off the building model" begin
         s2, _ = _fpb_building(:options)
         @test _SS_FPB.flat_plate_shell_layout(s2) === nothing

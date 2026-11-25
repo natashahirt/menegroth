@@ -425,52 +425,43 @@ sizer's checks on the final analysis. A loop that returns to a section state
 it already left is settled by [`_check_settle!`](@ref): a design is kept only
 when every group passes the analysis of those sections. A loop that reaches
 `max_iterations` without a repeat returns `converged = false`.
+
+`upward_only` floors beams and columns on every pass. Otherwise the first
+[`_MEMBER_FREE_PASSES`](@ref) passes pick freely, and later passes floor each
+group at its current section when that member's options can take a floor.
+A floored group keeps its section while it passes and otherwise takes the
+lightest heavier section that does.
+
+When that search converges and `trim` is set, [`_trim_member_loop!`](@ref)
+tries one lighter design and keeps it only when that design also converges
+with a smaller sizing objective. `upward_only` skips the trim: the story
+shell trims its own beams, and a trim's upward-only follow-up must not trim
+again.
 """
 function _iterate_beams_columns!(struc, params, beam_opts, column_opts, beam_kwargs;
                                  tc = nothing, shell_demands = nothing,
-                                 shell_spans = nothing, upward_only::Bool = false)
+                                 shell_spans = nothing, upward_only::Bool = false,
+                                 trim::Bool = true,
+                                 ratchet_from::Union{Nothing, Int} = nothing)
     max_iter = params.max_iterations
+    # `upward_only` starts the floor immediately. A plain loop waits out the
+    # free passes. `ratchet_from` overrides both, for the trim's follow-up.
+    floor_after = something(ratchet_from, upward_only ? 0 : _MEMBER_FREE_PASSES)
     history = _MemberState[]
     for iter in 1:max_iter
-        beams_before = [_story_beam_section(struc, b) for b in struc.beams]
-        columns_before = [section(c) for c in struc.columns]
-        _member_timed(:size_beams) do
-            size_beams!(struc, beam_opts; shell_demands = shell_demands,
-                        shell_spans = shell_spans,
-                        section_floor = upward_only ? _section_floors(struc) : nothing,
-                        beam_kwargs...)
-        end
-        # The solid head is the bays around each column. A failing check grows
-        # those bays, which adds beams, so the next pass sizes against them.
-        _member_timed(() -> grow_building_solid_heads!(struc, params; fallback = beam_opts),
-                      :grow_heads)
-        _sync_fire_coating_loads!(struc, params)
-        _member_timed(() -> update_analysis!(struc, :stiffness; tc), :update_stiffness)
-        _member_timed(:size_columns) do
-            size_columns!(struc, column_opts; reanalyze=false, tc=tc,
-                          I_factor=params.column_I_factor,
-                          gravity_factor=member_self_weight_acceleration(params))
-        end
-        _harmonize_columns!(struc, params)
-        _sync_fire_coating_loads!(struc, params)
-        _member_timed(() -> update_analysis!(struc, :stiffness; tc), :update_stiffness)
-        held = length(beams_before) == length(struc.beams) &&
-               all(_sections_identical(a, _story_beam_section(struc, b))
-                   for (a, b) in zip(beams_before, struc.beams)) &&
-               all(_sections_identical(a, section(c))
-                   for (a, c) in zip(columns_before, struc.columns))
-        if get(ENV, "SS_TRACE_SHELL_PASSES", "") == "1" && !held
-            for (k, (a, b)) in enumerate(zip(beams_before, struc.beams))
-                s = _story_beam_section(struc, b)
-                _sections_identical(a, s) ||
-                    println("  pass $iter  beam $k  $(_section_tag(a)) → $(_section_tag(s))")
-            end
-        end
+        floor_now = iter > floor_after
+        held = _member_iteration_pass!(struc, params, beam_opts, column_opts, beam_kwargs;
+                                       tc, shell_demands, shell_spans, floor_now, upward_only,
+                                       iter)
         state = _member_state(struc)
         if held
             StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
                                   outcome="converged", iterations=iter)
-            return (true, iter)
+            trim && !upward_only &&
+                _member_trim_ok(struc, beam_opts, beam_kwargs, column_opts) ||
+                return (true, iter)
+            return _trim_member_loop!(struc, params, beam_opts, column_opts, beam_kwargs;
+                                      tc, shell_demands, shell_spans, iterations = iter)
         end
         earlier = findfirst(s -> _member_state_identical(s, state), history)
         push!(history, state)
@@ -487,6 +478,178 @@ function _iterate_beams_columns!(struc, params, beam_opts, column_opts, beam_kwa
     StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
                           outcome="max_iterations", iterations=max_iter)
     return (false, max_iter)
+end
+
+"""
+One beam-and-column sizing pass. Returns whether no section changed.
+
+`floor_now` holds each group at its current section or a heavier one.
+`upward_only` forces that floor for beams even when a framing level would
+otherwise refuse it; the story shell only sets it after the beam options
+have already been checked.
+"""
+function _member_iteration_pass!(struc, params, beam_opts, column_opts, beam_kwargs;
+                                 tc, shell_demands, shell_spans, floor_now, upward_only, iter)
+    beams_before = [_story_beam_section(struc, b) for b in struc.beams]
+    columns_before = [section(c) for c in struc.columns]
+    _member_timed(:size_beams) do
+        size_beams!(struc, beam_opts; shell_demands = shell_demands,
+                    shell_spans = shell_spans,
+                    section_floor = _iteration_beam_floor(struc, beam_opts, beam_kwargs,
+                                                          floor_now, upward_only),
+                    beam_kwargs...)
+    end
+    # The solid head is the bays around each column. A failing check grows
+    # those bays, which adds beams, so the next pass sizes against them.
+    _member_timed(() -> grow_building_solid_heads!(struc, params; fallback = beam_opts),
+                  :grow_heads)
+    _sync_fire_coating_loads!(struc, params)
+    _member_timed(() -> update_analysis!(struc, :stiffness; tc), :update_stiffness)
+    _member_timed(:size_columns) do
+        size_columns!(struc, column_opts; reanalyze=false, tc=tc,
+                      I_factor=params.column_I_factor,
+                      gravity_factor=member_self_weight_acceleration(params),
+                      section_floor = _iteration_column_floor(struc, column_opts, floor_now))
+    end
+    _harmonize_columns!(struc, params)
+    _sync_fire_coating_loads!(struc, params)
+    _member_timed(() -> update_analysis!(struc, :stiffness; tc), :update_stiffness)
+    held = length(beams_before) == length(struc.beams) &&
+           all(_sections_identical(a, _story_beam_section(struc, b))
+               for (a, b) in zip(beams_before, struc.beams)) &&
+           all(_sections_identical(a, section(c))
+               for (a, c) in zip(columns_before, struc.columns))
+    if get(ENV, "SS_TRACE_SHELL_PASSES", "") == "1" && !held
+        for (k, (a, b)) in enumerate(zip(beams_before, struc.beams))
+            s = _story_beam_section(struc, b)
+            _sections_identical(a, s) ||
+                println("  pass $iter  beam $k  $(_section_tag(a)) → $(_section_tag(s))")
+        end
+    end
+    return held
+end
+
+"""
+Try a lighter design after the member loop has converged.
+
+Same three steps as [`_trim_story_shell!`](@ref). One free pass on the
+converged model, then upward-only passes from whatever that pass installed.
+The result is kept only when it converges and its sizing objective is smaller.
+Otherwise the converged sections go back on and upward-only passes check them
+on a fresh analysis.
+"""
+function _trim_member_loop!(struc, params, beam_opts, column_opts, beam_kwargs;
+                            tc, shell_demands, shell_spans, iterations::Int)
+    kept = _member_state(struc)
+    obj_kept = _members_objective(struc, beam_opts, column_opts)
+    tracing = get(ENV, "SS_TRACE_SHELL_PASSES", "") == "1"
+    tracing && println("—— member trim: free pick on the converged model ——")
+    _member_iteration_pass!(struc, params, beam_opts, column_opts, beam_kwargs;
+                            tc, shell_demands, shell_spans,
+                            floor_now = false, upward_only = false, iter = iterations)
+    if _member_state_identical(kept, _member_state(struc))
+        tracing && println("—— member trim unchanged ——")
+        return (true, iterations)
+    end
+    converged, n = _iterate_beams_columns!(struc, params, beam_opts, column_opts, beam_kwargs;
+                                           tc, shell_demands, shell_spans,
+                                           upward_only = false, trim = false, ratchet_from = 0)
+    obj_trim = _members_objective(struc, beam_opts, column_opts)
+    counts_ok = length(struc.beams) == length(kept.beams) &&
+                length(struc.columns) == length(kept.columns)
+    if converged && obj_trim < obj_kept
+        tracing && println("—— member trim kept: objective $(obj_trim) < $(obj_kept) ——")
+        StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
+                              outcome = "trim_kept", iterations = iterations + 1 + n)
+        return (true, iterations + 1 + n)
+    end
+    tracing && println("—— member trim dropped (converged=$(converged), " *
+                       "objective $(obj_trim) vs $(obj_kept)) ——")
+    StructuralSizer.emit!(tc, :workflow, "_size_beams_columns!", "", :decision;
+                          outcome = "trim_dropped", iterations = iterations + 1 + n)
+    # A head that grew during the trim changed the beam list, so the saved
+    # sections have nowhere to go. A converged trim is still a finished design.
+    counts_ok || return (converged, iterations + 1 + n)
+    _install_state!(struc, kept, beam_opts, column_opts, params)
+    converged2, n2 = _iterate_beams_columns!(struc, params, beam_opts, column_opts, beam_kwargs;
+                                             tc, shell_demands, shell_spans,
+                                             upward_only = false, trim = false, ratchet_from = 0)
+    return (converged2, iterations + 1 + n + n2)
+end
+
+"""True when a converged member loop can try a lighter design."""
+function _member_trim_ok(struc, beam_opts, beam_kwargs, column_opts)
+    return _shell_ratchet_ok(struc, beam_opts, beam_kwargs) ||
+           _column_floor_supported(column_opts)
+end
+
+"""Sizing objective of every beam and column: section objective per length × length."""
+function _members_objective(struc, beam_opts, column_opts)
+    total = 0.0
+    opts_of = _beam_opts_by_group(struc, beam_opts)
+    for b in struc.beams
+        s = _story_beam_section(struc, b)
+        s === nothing && continue
+        total += _member_section_objective(get(opts_of, group_id(b), beam_opts), s, b)
+    end
+    for c in struc.columns
+        s = section(c)
+        s === nothing && continue
+        total += _member_section_objective(column_opts, s, c)
+    end
+    return total
+end
+
+function _member_section_objective(opts, section, member)
+    hasproperty(opts, :objective) && hasproperty(opts, :material) || return 0.0
+    L = member_length(member)
+    L_m = L isa Unitful.Quantity ? ustrip(u"m", L) : Float64(L)
+    return ustrip(_section_objective(opts, section)) * L_m
+end
+
+"""Free sizing passes before a group may only keep its section or a heavier one."""
+const _MEMBER_FREE_PASSES = 2
+
+"""
+Beam floor for one member-loop pass.
+
+`upward_only` floors every pass: the story shell already settled the free
+picks. A plain loop floors once `floor_now` is set, and only when every
+framing level can take a per-group floor.
+"""
+function _iteration_beam_floor(struc, beam_opts, beam_kwargs, floor_now, upward_only)
+    floor_now || return nothing
+    upward_only && return _section_floors(struc)
+    _shell_ratchet_ok(struc, beam_opts, beam_kwargs) || return nothing
+    return _section_floors(struc)
+end
+
+"""Discrete steel or concrete columns, one material, no shared-section cap."""
+function _column_floor_supported(opts)
+    opts isa StructuralSizer.SteelColumnOptions ||
+        opts isa StructuralSizer.ConcreteColumnOptions || return false
+    return opts.sizing_strategy === :discrete && opts.n_max_sections == 0 &&
+           opts.materials === nothing
+end
+
+"""
+Column floor for one member-loop pass.
+
+`nothing` when this pass is still free, or the column options cannot take a
+per-group floor. Otherwise each sized column group keeps its current section
+or a heavier one.
+"""
+function _iteration_column_floor(struc, column_opts, floor_now)
+    floor_now && _column_floor_supported(column_opts) || return nothing
+    floors = Dict{UInt64, @NamedTuple{section::Any, exact::Bool}}()
+    for c in struc.columns
+        gid = group_id(c)
+        gid === nothing && continue
+        s = section(c)
+        s === nothing && continue
+        floors[gid] = (section = s, exact = false)
+    end
+    return isempty(floors) ? nothing : floors
 end
 
 """

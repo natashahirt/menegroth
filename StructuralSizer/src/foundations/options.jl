@@ -94,6 +94,57 @@ Base.@kwdef struct WinklerFEA <: AbstractMatMethod
 end
 
 # =============================================================================
+# Global Stability Options (sliding / overturning / uplift)
+# =============================================================================
+
+"""
+    StabilityParams
+
+Knobs for the ASCE 7-22 global-stability checks (sliding, overturning, net
+uplift) of a shallow footing. Supplying one to a footing param block turns
+the checks on; leaving the footing param block's `stability` field `nothing`
+(the default) reproduces the pre-stability behaviour exactly.
+
+# Demand basis
+The checks run over the **allowable-stress (service)** combinations, which
+include the counteracting combinations that govern stability:
+ASCE 7-22 §2.4.1 comb. 7a `0.6D + 0.6(W or WT)` and §2.4.5 comb. 10
+`0.6D − 0.7Ev + 0.7Eh` (corpus: asce-7-22, PDF pages 69–70). No separate
+factor of safety is applied — the `0.6D` dead-load reduction is the margin.
+The worst combination governs each check. IBC 1807.2.3 (the 1.5-factor
+basis) is intentionally not used: it is not in the corpus.
+
+# Resistance basis (Bowles 5e Eq. (4-3) and Table 4-5; corpus:
+# textbook-bowles-foundation-analysis-design-5e, PDF pages 252–253, 268)
+Sliding resistance = `V·tanδ + cₐ·A + Pp`, where `δ` is the base–soil
+friction angle and `cₐ` the base adhesion. Uplift is resisted by the
+factored footing self-weight.
+
+# Fields
+- `delta_ratio`: `δ = delta_ratio · φ`. Bowles Table 4-5 gives the range
+  `0.5φ ≤ δ ≤ φ`; the default `0.5` is the conservative low end of that
+  cited range (ENGINEERING JUDGMENT — a defensible default, not a code value).
+- `ca_ratio`: `cₐ = ca_ratio · c`. Bowles Table 4-5 Note 3 gives
+  `cₐ ≈ 0.6c … 1.0c`; the default `0.6` is the conservative low end
+  (ENGINEERING JUDGMENT).
+- `include_passive`: include the passive-pressure term `Pp` on the embedded
+  face (Bowles Eq. (4-3)). Requires intimate base–soil contact (Bowles p.269).
+  Default `true` (the user-selected resistance set).
+- `concrete_unit_weight`: unit weight of the footing concrete for the uplift
+  self-weight resistance. Default `23.6 kN/m³` (≈150 pcf, standard normal-
+  weight reinforced concrete — ENGINEERING JUDGMENT, not a code value).
+- `dead_counteracting_factor`: factor applied to the stabilizing footing
+  self-weight, matching the `0.6D` of ASCE 7-22 comb. 7a. Default `0.6`.
+"""
+Base.@kwdef struct StabilityParams
+    delta_ratio::Float64 = 0.5
+    ca_ratio::Float64    = 0.6
+    include_passive::Bool = true
+    concrete_unit_weight::Union{Unitful.Quantity, Nothing} = 23.6u"kN/m^3"
+    dead_counteracting_factor::Float64 = 0.6
+end
+
+# =============================================================================
 # Spread Footing Options
 # =============================================================================
 
@@ -138,6 +189,9 @@ Base.@kwdef struct SpreadParams
     check_bearing::Bool      = true              # ACI 22.8 bearing at column-footing joint
     check_dowels::Bool       = true              # Design dowel reinforcement
     check_development::Bool  = true              # ACI 318-11 §12.2 / §15.6.3
+
+    # Global stability (sliding/overturning/uplift). `nothing` → skip (legacy).
+    stability::Union{Nothing, StabilityParams} = nothing
 
     # Objective for optimization
     objective::AbstractObjective = MinVolume()
@@ -199,6 +253,9 @@ Base.@kwdef struct StripParams
     merge_gap_factor::Float64    = 2.5           # Merge when gap < factor × D_max
     eccentricity_limit::Float64  = 0.15          # Merge when e/L > limit
 
+    # Global stability (sliding/overturning/uplift). `nothing` → skip (legacy).
+    stability::Union{Nothing, StabilityParams} = nothing
+
     # Objective
     objective::AbstractObjective = MinVolume()
 end
@@ -237,6 +294,9 @@ Base.@kwdef struct MatParams
     ϕ_flexure::Float64       = 0.90
     ϕ_shear::Float64         = 0.75
     λ::Union{Float64, Nothing} = nothing
+
+    # Global stability (sliding/overturning/uplift). `nothing` → skip (legacy).
+    stability::Union{Nothing, StabilityParams} = nothing
 
     # Objective
     objective::AbstractObjective = MinVolume()

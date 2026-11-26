@@ -212,6 +212,7 @@ using Asap  # custom units (kip, ksi, ksf, psf, etc.)
         include("foundations/test_no_tension_springs.jl")
         include("foundations/test_types_load.jl")
         include("foundations/test_foundation_safety_9_15.jl")
+        include("foundations/test_stability.jl")
     end
 
     # ─── Optimization ────────────────────────────────────────────────────

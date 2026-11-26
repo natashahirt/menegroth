@@ -792,6 +792,7 @@ export concrete_volume, steel_volume, footprint_area, footing_length, footing_wi
 # Foundation options
 export SpreadParams, StripParams, MatParams, FoundationOptions
 export AbstractMatMethod, RigidMat, ShuklaAFM, WinklerFEA
+export StabilityParams, footing_stability_utils
 
 # Design functions
 export design_footing

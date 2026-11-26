@@ -766,6 +766,16 @@ function design_footing(::SpreadFooting,
     si = opts.size_increment
     # Minimum projection each side (6")
     min_B = max(c1, c2) + 2 * 6.0u"inch"
+    # Global-stability floor on the plan. The counteracting ASCE 7-22
+    # combinations live on the allowable-stress (service) actions; raise the
+    # minimum square side so sliding/overturning/uplift pass at the minimum
+    # thickness, then let the bearing/shear sizing (which only grows the plan
+    # and thickness) keep them satisfied. Skipped when stability is off or
+    # there are no service actions carrying horizontal shear / uplift.
+    if opts.stability !== nothing && !isempty(service_actions)
+        min_B = _stability_min_square_side(service_actions, soil, opts.stability,
+                                           opts.min_depth, min_B, si)
+    end
     P_abs = abs(Pu)
     action_cases = nothing
     if isempty(service_actions)
@@ -994,6 +1004,16 @@ function design_footing(::SpreadFooting,
     end
     utilization  = max(punch.utilization, util_bearing)
 
+    # Global stability (sliding/overturning/uplift) over the ASCE 7-22
+    # allowable-stress actions, on the final plan (B, Lf, h). Folded into the
+    # governing utilization so a stability-controlled footing reports > 1.
+    stab_utils = (sliding = NaN, overturning = NaN, uplift = NaN)
+    if opts.stability !== nothing && !isempty(service_actions)
+        stab_utils = footing_stability_utils(service_actions, B, Lf, h, soil, opts.stability)
+        utilization = max(utilization, stab_utils.sliding,
+                          stab_utils.overturning, stab_utils.uplift)
+    end
+
     # =====================================================================
     # Result (SI output)
     # =====================================================================
@@ -1015,7 +1035,10 @@ function design_footing(::SpreadFooting,
         V_steel,
         utilization,
         FoundationUtilizations(; bearing = Float64(util_bearing),
-                               punching = Float64(punch.utilization)),
+                               punching = Float64(punch.utilization),
+                               sliding = stab_utils.sliding,
+                               overturning = stab_utils.overturning,
+                               uplift = stab_utils.uplift),
     )
     StructuralSizer.emit!(tc, :checker, "design_footing_spread_aci", "foundation_group_$(demand.group_idx)", :exit;
                           B_m=Float64(ustrip(u"m", result.B)),

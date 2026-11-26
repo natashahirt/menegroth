@@ -173,7 +173,8 @@ const hard_clay = Soil(
 abstract type AbstractFoundationResult end
 
 """
-    FoundationUtilizations(; bearing=NaN, punching=NaN, one_way_shear=NaN)
+    FoundationUtilizations(; bearing=NaN, punching=NaN, one_way_shear=NaN,
+                             sliding=NaN, overturning=NaN, uplift=NaN)
 
 The per-check utilizations behind a footing's governing `utilization`.
 `NaN` means the routine did not compute that check.
@@ -182,11 +183,22 @@ The per-check utilizations behind a footing's governing `utilization`.
 - `punching`: two-way shear Vu/φVc, worst column. A mat with walls also
   includes the wall-cantilever shear here.
 - `one_way_shear`: Vu/φVc on the critical section (wall footings).
+- `sliding`: global horizontal-sliding demand/resistance, worst ASCE 7-22
+  counteracting combination (friction + adhesion + passive; Bowles 5e).
+- `overturning`: resultant-eccentricity demand/limit (e / (base/2)), worst
+  compression combination.
+- `uplift`: net factored tension / stabilizing self-weight, worst combination.
+
+The three stability checks are `NaN` unless a `StabilityParams` is supplied
+and the loads carry horizontal shear or net uplift.
 """
 Base.@kwdef struct FoundationUtilizations
     bearing::Float64 = NaN
     punching::Float64 = NaN
     one_way_shear::Float64 = NaN
+    sliding::Float64 = NaN
+    overturning::Float64 = NaN
+    uplift::Float64 = NaN
 end
 
 """

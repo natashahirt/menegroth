@@ -327,6 +327,53 @@ end
 # Shukla design driver
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Per-combination strength envelope (shared by the flexible mat methods)
+# ─────────────────────────────────────────────────────────────────────────────
+
+"""
+    _demand_with_action(d, a) → FoundationDemand
+
+Copy of `d` whose factored demands (`Pu`, `Mux`, `Muy`) are replaced by one
+strength combination's `FootingAction` `a` (SI floats: N, N·m). Column geometry,
+shape, and the service load `Ps` are preserved. A net-tension action marks the
+column as uplift.
+"""
+_demand_with_action(d::FoundationDemand, a) = FoundationDemand(d.group_idx;
+    Pu = a.P * u"N", Mux = a.Mx * u"N*m", Muy = a.My * u"N*m",
+    Vux = d.Vux, Vuy = d.Vuy, Ps = d.Ps, c1 = d.c1, c2 = d.c2,
+    shape = d.shape, uplift = a.P < 0)
+
+"""
+    _mat_strength_sets(demands, column_strength) → Vector{Vector{FoundationDemand}}
+
+One factored column-demand vector per strength combination. With no combinations
+the base `demands` is the single set, so the flexible mat methods reproduce their
+pre-envelope single-load behaviour exactly. Each combination `k` takes every
+column's factored demand from `column_strength[j][k]`.
+
+The flexible mat flexural/punching section is designed to the face-by-face
+envelope of these sets (ACI 336.2R-88 §6.1.2 Step 4 run per ASCE 7 strength
+combination), so no single combination controls a thinner mat or lighter steel
+than another needs.
+"""
+function _mat_strength_sets(demands, column_strength)
+    isempty(column_strength) && return [collect(demands)]
+    K = length(first(column_strength))
+    return [[_demand_with_action(demands[j], column_strength[j][k])
+             for j in eachindex(demands)]
+            for k in 1:K]
+end
+
+"""
+    _envelope_flexure_pairs(acc, pk) → Vector{(Mu, b)}
+
+Face-by-face envelope of two `(Mu, b)` flexure-pair collections: keeps the larger
+design moment `Mu` per face (the width `b` is identical across combinations).
+"""
+_envelope_flexure_pairs(acc, pk) =
+    [(max(acc[i][1], pk[i][1]), acc[i][2]) for i in eachindex(acc)]
+
 """
     _design_mat_shukla(demands, positions, soil, method; opts) → MatFootingResult
 
@@ -349,9 +396,16 @@ function _design_mat_shukla(
     positions::Vector{<:NTuple{2, <:Length}},
     soil::Soil,
     method::ShuklaAFM;
-    opts::MatParams = MatParams()
+    opts::MatParams = MatParams(),
+    column_strength::Vector{Vector{FootingAction}} = Vector{FootingAction}[],
 )
     N = length(demands)
+
+    # One factored column-demand set per ASCE 7 strength combination. The
+    # flexural/punching section is enveloped over all of them (ACI 336.2R-88
+    # §6.1.2 Step 4 per combination). With no combinations, `demands` is the
+    # sole set and the single-load result is unchanged.
+    strength_sets = _mat_strength_sets(demands, column_strength)
 
     # Material / options
     fc    = opts.material.concrete.fc′
@@ -412,13 +466,16 @@ function _design_mat_shukla(
     ]
     mat_center = (plan.x_left + B / 2, plan.y_bot + Lm / 2)
 
-    local M_x_f, M_y_f, q_f  # saved for flexure + equilibrium steps
+    local M_x_f, M_y_f, q_f  # base (gravity) field, saved for equilibrium
+    local env_pairs          # strength-enveloped flexure pairs at the final h
+    local env_util_p         # strength-enveloped punching utilization at final h
 
     for iter in 1:80
         d_eff = h - cover - db_eff
         d_eff < 6.0u"inch" && (h += h_incr; continue)
 
-        # Run Shukla analysis for this thickness
+        # Base field from the representative gravity-factored demands — drives
+        # the bearing guard and the equilibrium diagnostic below.
         M_x_f, M_y_f, _, _, q_f, Leff = _shukla_analysis(
             h, positions, demands, Ec_c, μ, ks)
 
@@ -439,13 +496,20 @@ function _design_mat_shukla(
             end
         end
 
-        # ── Punching shear check (reuse shared util with corner detection) ──
-        qu_punch = sum(d.Pu for d in demands) / (B * Lm)
-        util_p = _mat_punching_util(demands, plan, qu_punch, d_eff, fc, λ, ϕv)
-        punch_ok = util_p ≤ 1.0
-
-        flex_ok = _footing_flexure_ok(_shukla_flexure_pairs(M_x_f, M_y_f, plan, demands),
-                                      d_eff, fc, fy, ϕf)
+        # ── Strength envelope: flexure pairs + punching over every combination ──
+        # Shukla is linear in the column loads, so each combination is a fresh
+        # analytic field; the section is designed to the face-by-face maximum.
+        env_pairs = nothing
+        env_util_p = 0.0
+        for dk in strength_sets
+            Mxk, Myk, _, _, _, _ = _shukla_analysis(h, positions, dk, Ec_c, μ, ks)
+            pk = _shukla_flexure_pairs(Mxk, Myk, plan, dk)
+            env_pairs = env_pairs === nothing ? collect(pk) : _envelope_flexure_pairs(env_pairs, pk)
+            quk = sum(d.Pu for d in dk) / (B * Lm)
+            env_util_p = max(env_util_p, _mat_punching_util(dk, plan, quk, d_eff, fc, λ, ϕv))
+        end
+        punch_ok = env_util_p ≤ 1.0
+        flex_ok = _footing_flexure_ok(Tuple(env_pairs), d_eff, fc, fy, ϕf)
 
         (bearing_ok && punch_ok && flex_ok) && break
         h += h_incr
@@ -479,19 +543,18 @@ function _design_mat_shukla(
         "Shukla equilibrium: only $(round(100*eq_ratio, digits=1))% of total load " *
         "captured by soil pressure over mat (infinite-plate effect)")
 
-    # ── Step 5: Reinforcement from the Shukla / rigid-strip envelope ──
+    # ── Step 5: Reinforcement from the strength-enveloped Shukla / rigid-strip
+    #    flexure pairs (face-by-face max over every combination). ──
     As_x_bot, As_x_top, As_y_bot, As_y_top =
         (max(_flexural_steel_footing(Mu, b, d_eff, fc, fy, ϕf), _min_steel_footing(b, h, fy))
-         for (Mu, b) in _shukla_flexure_pairs(M_x_f, M_y_f, plan, demands))
+         for (Mu, b) in env_pairs)
 
-    # ── Utilization ──
-    qu_final = sum(d.Pu for d in demands) / (B * Lm)
-    util_punch = _mat_punching_util(demands, plan, qu_final, d_eff, fc, λ, ϕv)
-    utilization = max(util_bearing, util_punch)
+    # ── Utilization (punching enveloped over all combinations) ──
+    utilization = max(util_bearing, env_util_p)
 
     return _mat_build_result(plan, demands, opts, h, d_eff,
                              As_x_bot, As_x_top, As_y_bot, As_y_top,
                              utilization; analysis = :shukla,
                              checks = FoundationUtilizations(; bearing = Float64(util_bearing),
-                                                             punching = Float64(util_punch)))
+                                                             punching = Float64(env_util_p)))
 end

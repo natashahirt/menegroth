@@ -600,7 +600,9 @@ function design_footing(::MatFoundation,
                 reason * " Soil.ks is required to redesign the mat as a beam on elastic foundation."))
             @info "Rigid mat not used ($reason). Redesigning with Winkler, ACI 336.2R §6.1.2 Step 4."
             result = _design_mat_winkler_fea(demands, positions, soil, WinklerFEA();
-                                             opts = opts, walls = walls)
+                                             opts = opts, walls = walls,
+                                             column_strength = column_strength,
+                                             wall_strength = wall_strength)
         end
         StructuralSizer.emit!(tc, :checker, "design_footing_mat_aci", "", :exit;
                               status="ok",
@@ -612,7 +614,8 @@ function design_footing(::MatFoundation,
     elseif method isa ShuklaAFM
         isempty(walls) || throw(ArgumentError(
             "Shukla's column formula does not take a wall line. Choose the rigid method or Winkler."))
-        result = _design_mat_shukla(demands, positions, soil, method; opts = opts)
+        result = _design_mat_shukla(demands, positions, soil, method; opts = opts,
+                                    column_strength = column_strength)
         StructuralSizer.emit!(tc, :checker, "design_footing_mat_aci", "", :exit;
                               status="ok",
                               B_m=Float64(ustrip(u"m", result.B)),
@@ -621,7 +624,9 @@ function design_footing(::MatFoundation,
                               utilization=Float64(result.utilization))
         return result
     elseif method isa WinklerFEA
-        result = _design_mat_winkler_fea(demands, positions, soil, method; opts = opts, walls = walls)
+        result = _design_mat_winkler_fea(demands, positions, soil, method; opts = opts, walls = walls,
+                                         column_strength = column_strength,
+                                         wall_strength = wall_strength)
         StructuralSizer.emit!(tc, :checker, "design_footing_mat_aci", "", :exit;
                               status="ok",
                               B_m=Float64(ustrip(u"m", result.B)),

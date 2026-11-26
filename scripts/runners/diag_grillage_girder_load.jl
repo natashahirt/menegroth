@@ -132,6 +132,44 @@ function main_diag()
         k = nameof(typeof(ld))
         kinds[k] = get(kinds, k, 0.0) + 1
     end
+    # Authoritative geometric area: sum TributaryLoad plan-area over the WHOLE
+    # model (pressure-independent). If this equals the 480 m^2 floor, there is no
+    # leak and the 4612 kN is purely the load factor x pressure.
+    model_area = 0.0
+    n_dead = 0; n_live = 0; n_other = 0
+    for ld in struc.asap_model.loads
+        ld isa Asap.TributaryLoad || continue
+        p1 = ld.element.nodeStart.position; p2 = ld.element.nodeEnd.position
+        L = hypot(_as(p2[1] - p1[1], u"m"), _as(p2[2] - p1[2], u"m"), _as(p2[3] - p1[3], u"m"))
+        pos = ld.positions; w = ld._widths_m
+        a = 0.0
+        for i in 1:(length(pos) - 1)
+            a += 0.5 * (w[i] + w[i + 1]) * (pos[i + 1] - pos[i]) * L
+        end
+        model_area += a
+    end
+    cell0 = first(c for c in struc.cells if c.floor_type != :grade)
+    comb_p = _as(SS.envelope_pressure(params.load_combinations,
+                 cell0.sdl + cell0.self_weight, cell0.live_load), u"kN/m^2")
+    @printf("\nTOTAL model TributaryLoad geometric area: %.1f m^2  (floor = %.1f m^2, ratio %.3f)\n",
+            model_area, net_area, model_area / net_area)
+    @printf("factored envelope pressure (cell0): %.2f kPa ; area x that = %.1f kN vs applied %.1f kN\n",
+            comb_p, model_area * comb_p, applied / 1e3)
+
+    # Account the 15.8 m^2 gap: slab-edge strips (slab past the column
+    # centerlines out to the column faces + conservative re-entrant corner excess).
+    es = SS.slab_edge_strips(struc)
+    es_area = 0.0; es_corner = 0.0
+    for s in es
+        L = hypot(s.b[1] - s.a[1], s.b[2] - s.a[2])
+        es_area += s.width * L
+        es_corner += s.corner_start + s.corner_end
+    end
+    @printf("\nslab-edge strips: %d strips  run-area %.2f m^2  corner-excess %.2f m^2  total %.2f m^2\n",
+            length(es), es_area, es_corner, es_area + es_corner)
+    @printf("  (floor %.1f + edge %.2f = %.1f vs model tributary %.1f m^2)\n",
+            net_area, es_area + es_corner, net_area + es_area + es_corner, model_area)
+
     @printf("\napplied load by element role (kN):\n")
     for (r, f) in sort(collect(byrole); by = p -> -p[2])
         @printf("  %-10s %8.1f\n", r, f / 1e3)
@@ -172,6 +210,31 @@ function main_diag()
         flag = abs(app / max(net, 1e-9) - 1.0) > 0.01 ? "  <== LEAK" : ""
         @printf("  slab %-3d  cells %-2d  net %7.1f  applied %7.1f  ratio %.3f%s\n",
                 si, length(cis), net, app, app / max(net, 1e-9), flag)
+    end
+
+    # Per-slab routing-path probe: which path handled each cell, and (for the
+    # polygon-split path) the internal "gross" area the conservation gate checks
+    # against vs the cell's true net area. A gate that passes at ratio ~1 while
+    # the applied area exceeds cell.area means the gate's reference is inflated.
+    skel = struc.skeleton
+    frame_elements = model.frame_elements
+    @printf("\nrouting-path probe per slab:\n")
+    for (si, slab) in enumerate(struc.slabs)
+        ci = first(slab.cell_indices)
+        cell = struc.cells[ci]
+        strips = SS._framed_slab_strip_geometry(struc, slab, frame_elements)
+        poly = SS._drop_collinear_vertices(
+            NTuple{2, Float64}[SS._vertex_xy_m(skel, v)
+                               for v in skel.face_vertex_indices[cell.face_idx]])
+        gross = SS._polygon_area_m2(poly)
+        net = _as(cell.area, u"m^2")
+        split = SS._cell_split_joist_loads(struc, cell, frame_elements)
+        split_area = split === nothing ? 0.0 :
+            sum(SS._tributary_area_m2, split; init = 0.0)
+        path = strips !== nothing ? "STRIP($(length(strips)))" :
+               split !== nothing ? "SPLIT" : "per-cell"
+        @printf("  slab %-3d  %-10s  net %6.2f  gross(drop_collinear) %6.2f  split_area %6.2f  g/net %.3f\n",
+                si, path, net, gross, split_area, gross / max(net, 1e-9))
     end
 
     # Tributary widths per beam.

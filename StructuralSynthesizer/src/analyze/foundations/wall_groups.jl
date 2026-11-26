@@ -633,19 +633,19 @@ function design_grade_wall_foundations(struc, demands, soil, opts)
                 wall_service = Vector{StructuralSizer.WallLineDemand}[]
                 wall_strength = Vector{StructuralSizer.WallLineDemand}[]
             end
+            loads = StructuralSizer.footing_loads(; demands=col_demands, positions=positions,
+                column_service=column_service, column_strength=column_strength,
+                walls=legs, wall_service=wall_service, wall_strength=wall_strength)
             result = StructuralSizer.design_footing(
-                StructuralSizer.MatFoundation(), col_demands, positions, soil;
-                opts = opts.mat_params, walls = legs,
-                column_service = column_service, column_strength = column_strength,
-                wall_service = wall_service, wall_strength = wall_strength)
+                StructuralSizer.MatFoundation(), loads, soil; opts = opts.mat_params)
             idxs = vcat(enclosed, on_wall)
             push!(built, _wall_foundation(idxs, result, :mat, _group_wall_indices(group), mat))
         else
             union!(claimed, on_wall)
+            loads = StructuralSizer.footing_loads(; walls=legs,
+                wall_service=item.service_cases, wall_strength=item.strength_cases)
             result = StructuralSizer.design_footing(
-                StructuralSizer.StripFooting(), legs, soil; opts = opts.strip_params,
-                service_cases = item.service_cases,
-                strength_cases = item.strength_cases)
+                StructuralSizer.StripFooting(), loads, soil; opts = opts.strip_params)
             push!(built, _wall_foundation(on_wall, result, :wall_strip,
                                            _group_wall_indices(group), mat))
         end

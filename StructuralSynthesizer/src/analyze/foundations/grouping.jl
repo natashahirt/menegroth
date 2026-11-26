@@ -353,10 +353,15 @@ function size_foundations_grouped!(
             if opts.code == :aci
                 # Each support's cases stay intact. The component-wise max of
                 # P and M is used only when the wall stage stored no cases.
-                group_results_vec[k] = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(),
-                    gov_demand, soil; opts=opts.spread_params, tc=tc,
-                    service_actions = service_actions,
-                    strength_actions = strength_actions)
+                # One representative footing, so the appended actions are the
+                # single column's combination list. The position is unused by a
+                # spread (it is sized from axial and moment, not location).
+                cs = isempty(service_actions) ? Vector{StructuralSizer.FootingAction}[] : [service_actions]
+                cu = isempty(strength_actions) ? Vector{StructuralSizer.FootingAction}[] : [strength_actions]
+                loads = StructuralSizer.footing_loads(; demands=[gov_demand],
+                    positions=[(0.0u"m", 0.0u"m")], column_service=cs, column_strength=cu)
+                group_results_vec[k] = StructuralSizer.design_footing(
+                    StructuralSizer.SpreadFooting(), loads, soil; opts=opts.spread_params, tc=tc)
             else
                 group_results_vec[k] = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), 
                     gov_demand, soil, concrete, rebar;

@@ -781,6 +781,7 @@ export FoundationUtilizations, utilization_checks
 
 # Foundation demand
 export FoundationDemand, WallLineSample, WallLineDemand
+export FootingLoads, footing_loads
 
 # Type mapping
 export foundation_type, foundation_symbol

@@ -147,19 +147,22 @@ function _size_fnd_aci!(struc, f_idx, fnd, n_supp, demands, soil, opts;
             struc, fnd.support_indices)
         positions = _support_positions_xy(struc, fnd.support_indices)
         framed = _mat_framed_inertia(struc, fnd.support_indices)
-        result = StructuralSizer.design_footing(StructuralSizer.MatFoundation(), 
-            mat_demands, positions, soil; opts=opts.mat_params, tc=tc,
-            framed_I_B = framed.I_B, framed_I_L = framed.I_L,
-            column_service = column_service, column_strength = column_strength)
+        loads = StructuralSizer.footing_loads(; demands=mat_demands, positions=positions,
+            column_service=column_service, column_strength=column_strength)
+        result = StructuralSizer.design_footing(StructuralSizer.MatFoundation(), loads, soil;
+            opts=opts.mat_params, tc=tc, framed_I_B=framed.I_B, framed_I_L=framed.I_L)
         _assign_foundation!(struc, f_idx, fnd, result, :mat, mat)
 
     elseif fnd.foundation_type == :spread && n_supp == 1
         demand = demands[fnd.support_indices[1]]
         actions = foundation_actions_at(struc, demand.group_idx)
-        result = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), demand, soil;
-            opts=opts.spread_params, tc=tc,
-            service_actions = actions === nothing ? StructuralSizer.FootingAction[] : actions.service,
-            strength_actions = actions === nothing ? StructuralSizer.FootingAction[] : actions.strength)
+        cs = actions === nothing ? Vector{StructuralSizer.FootingAction}[] : [actions.service]
+        cu = actions === nothing ? Vector{StructuralSizer.FootingAction}[] : [actions.strength]
+        positions = _support_positions_xy(struc, [fnd.support_indices[1]])
+        loads = StructuralSizer.footing_loads(; demands=[demand], positions=positions,
+            column_service=cs, column_strength=cu)
+        result = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), loads, soil;
+            opts=opts.spread_params, tc=tc)
         _assign_foundation!(struc, f_idx, fnd, result, :spread, mat)
 
     elseif fnd.foundation_type in (:combined, :strip) || n_supp > 1
@@ -174,10 +177,10 @@ function _size_fnd_aci!(struc, f_idx, fnd, n_supp, demands, soil, opts;
         axes = _support_strip_axes(struc, fnd.support_indices)
         results = map(axes) do axis
             positions = _support_positions_along_axis(struc, fnd.support_indices, axis)
-            StructuralSizer.design_footing(StructuralSizer.StripFooting(),
-                strip_demands, positions, soil; opts=opts.strip_params, tc=tc,
-                strip_axis=axis,
+            loads = StructuralSizer.footing_loads(; demands=strip_demands, positions=positions,
                 column_service=column_service, column_strength=column_strength)
+            StructuralSizer.design_footing(StructuralSizer.StripFooting(), loads, soil;
+                opts=opts.strip_params, tc=tc, strip_axis=axis)
         end
         result = _governing_strip_result(results)
         if _mixed_sign_Pu(demands, fnd.support_indices)

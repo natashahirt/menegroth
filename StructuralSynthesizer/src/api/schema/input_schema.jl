@@ -128,7 +128,7 @@ function api_input_schema()
                     "strategy" => "$(join(API_FOUNDATION_STRATEGIES, " | ")). Default: auto.",
                     "mat_coverage_threshold" => "Switch to mat when coverage ratio exceeds this (0–1). Default: 0.5.",
                     "spread_params" => "Optional. cover_in, min_depth_in, bar_size, depth_increment_in, size_increment_in (inches).",
-                    "strip_params" => "Optional. cover_in, min_depth_in, bar_size_long, bar_size_trans, width_increment_in, max_depth_ratio, merge_gap_factor, eccentricity_limit.",
+                    "strip_params" => "Optional. cover_in, min_depth_in, bar_size_long, bar_size_trans, width_increment_in, max_depth_ratio, merge_gap_factor, eccentricity_limit, analysis_method ($(join(API_STRIP_ANALYSIS_METHODS, " | "))).",
                     "mat_params" => "Optional. cover_in, min_depth_in, bar_size_x, bar_size_y, depth_increment_in, edge_overhang_in, analysis_method ($(join(API_MAT_ANALYSIS_METHODS, " | "))).",
                 ),
             ),

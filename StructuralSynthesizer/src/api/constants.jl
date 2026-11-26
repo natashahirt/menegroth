@@ -61,6 +61,9 @@ const API_FOUNDATION_STRATEGIES = ("auto", "auto_strip_spread", "all_spread", "a
 """Accepted foundation mat analysis method strings."""
 const API_MAT_ANALYSIS_METHODS = ("rigid", "shukla", "winkler")
 
+"""Accepted strip/wall footing analysis method strings (Shukla is mat-only)."""
+const API_STRIP_ANALYSIS_METHODS = ("rigid", "winkler")
+
 """Accepted API unit_system strings."""
 const API_UNIT_SYSTEMS = ("imperial", "metric")
 

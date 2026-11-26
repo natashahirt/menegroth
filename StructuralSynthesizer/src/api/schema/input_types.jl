@@ -92,6 +92,7 @@ Base.@kwdef mutable struct APIStripParams
     bar_size_trans::Union{Int, Nothing} = nothing
     width_increment_in::Union{Float64, Nothing} = nothing
     max_depth_ratio::Union{Float64, Nothing} = nothing
+    analysis_method::Union{String, Nothing} = nothing  # "rigid" | "winkler"
     merge_gap_factor::Union{Float64, Nothing} = nothing
     eccentricity_limit::Union{Float64, Nothing} = nothing
 end

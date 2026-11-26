@@ -44,18 +44,26 @@ function design_footing(::StripFooting,
     StructuralSizer.emit!(tc, :checker, "design_footing_wall_aci", "", :enter;
                           n_legs = length(legs),
                           qa_kPa = Float64(ustrip(u"kPa", soil.qa)))
+    method = opts.analysis_method
+    method isa ShuklaAFM && throw(ArgumentError(
+        "ShuklaAFM is a 2-D mat plate method (Shukla 1984 analytical flexible " *
+        "method); a wall is a line footing. Use RigidMat() or WinklerFEA() " *
+        "(ACI 336.2R §5.2/§5.4, corpus: aci-336-combined-footings-mats, " *
+        "pages 8–9)."))
     plan = _size_wall_plan(legs, soil; step = opts.width_increment)
     plan = _grow_wall_plan(legs, plan, service_cases, strength_cases, soil,
                            opts.width_increment)
     fc = opts.material.concrete.fc′
     kr = wall_footing_kr(Ec(fc), soil.Es, plan.B * u"m", opts.min_depth, legs)
-    rigid = kr >= 0.5
-    if !rigid
-        result = _wall_not_rigid(legs, soil, opts, plan, kr, tc)
-    else
+    if method isa WinklerFEA
+        # User forces the §5.4 beam-on-elastic model regardless of Kr.
+        result = _design_wall_winkler_forced(legs, soil, opts, plan, kr, tc)
+    elseif kr >= 0.5
         result = _design_wall_rigid(legs, soil, opts, plan, tc;
                                     service_cases = service_cases,
                                     strength_cases = strength_cases)
+    else
+        result = _wall_not_rigid(legs, soil, opts, plan, kr, tc)
     end
     StructuralSizer.emit!(tc, :checker, "design_footing_wall_aci", "", :exit;
                           analysis = String(result.analysis),
@@ -89,6 +97,27 @@ function _wall_not_rigid(legs, soil, opts, plan, kr, tc)
         "needs Soil.ks."))
     StructuralSizer.emit!(tc, :checker, "design_footing_wall_aci", "", :decision;
                           fallback = "winkler", Kr = Float64(kr))
+    return _design_wall_winkler(legs, soil, opts, plan)
+end
+
+"""
+Beam-on-elastic-foundation design forced by `WinklerFEA()`, independent of Kr.
+
+ACI 336.2R §5.4 (corpus: aci-336-combined-footings-mats, page 9) is a line
+model, so it needs a straight wall and `Soil.ks`; a rigid wall (Kr ≥ 0.5) that
+the user still asks to analyze as flexible is allowed — the model is always a
+conservative superset of the rigid line. An L/T corner is refused: §5.4 is not
+a corner, exactly as in the `:fallback` path.
+"""
+function _design_wall_winkler_forced(legs, soil, opts, plan, kr, tc)
+    plan.straight || throw(ArgumentError(
+        "WinklerFEA forces the ACI 336.2R §5.4 beam-on-elastic-foundation model, " *
+        "which is a line footing; an L/T corner cannot use it (corpus: " *
+        "aci-336-combined-footings-mats, page 9). Use RigidMat() for a corner."))
+    soil.ks === nothing && throw(ArgumentError(
+        "WinklerFEA (ACI 336.2R §5.4 beam on elastic foundation) needs Soil.ks."))
+    StructuralSizer.emit!(tc, :checker, "design_footing_wall_aci", "", :decision;
+                          forced = "winkler", Kr = Float64(kr))
     return _design_wall_winkler(legs, soil, opts, plan)
 end
 

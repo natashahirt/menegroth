@@ -167,11 +167,18 @@ Base.@kwdef struct StripParams
     width_increment::Length   = 3.0u"inch"
     max_depth_ratio::Float64  = 0.5              # Widen B if h > ratio × B (typical h/B ≈ 0.3–0.5)
 
-    # Analysis
-    analysis::Symbol         = :rigid            # :rigid (K_r ≥ 0.5) — column strips
-    # A wall footing whose relative stiffness is below 0.5 (ACI 336.2R §5.2)
-    # is redesigned as a beam on elastic foundation (§5.4) when this is
-    # `:fallback`, matching slab `on_inapplicable`. `:error` refuses.
+    # Analysis method — typed, shared with MatParams for one consistent surface.
+    #   RigidMat()   — linear soil pressure, rigid statics. Column strips use
+    #                  this; a wall uses it when Kr ≥ 0.5 (ACI 336.2R §5.2).
+    #   WinklerFEA() — force a straight wall onto the §5.4 beam-on-elastic-
+    #                  foundation model regardless of Kr (needs Soil.ks). Not
+    #                  supported for column strips or corners.
+    #   ShuklaAFM()  — a 2-D mat plate method; rejected for 1-D strips/walls.
+    analysis_method::AbstractMatMethod = RigidMat()
+    # With analysis_method = RigidMat(), a wall whose relative stiffness is
+    # below 0.5 (ACI 336.2R §5.2) is redesigned as a beam on elastic foundation
+    # (§5.4) when this is `:fallback`, matching slab `on_inapplicable`; `:error`
+    # refuses.
     on_inapplicable::Symbol  = :fallback
 
     # Strength reduction

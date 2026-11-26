@@ -115,6 +115,42 @@ end
     @test r.utilization <= 1.0
 end
 
+@testset "analysis_method selects the wall model (Phase C)" begin
+    leg = _uniform_wall()
+    # Default RigidMat is Kr-gated: this stiff-enough wall is rigid.
+    @test design_footing(StripFooting(), leg, soil).analysis == :rigid
+    # WinklerFEA forces the §5.4 beam-on-elastic model even when Kr ≥ 0.5.
+    forced = design_footing(StripFooting(), leg, soil;
+                            opts = StripParams(analysis_method = WinklerFEA()))
+    @test forced.analysis == :winkler
+    @test forced.utilization <= 1.0
+    # Forced Winkler needs ks.
+    no_ks = Soil(2.0u"ksf", 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa")
+    @test_throws ArgumentError design_footing(StripFooting(), leg, no_ks;
+                            opts = StripParams(analysis_method = WinklerFEA()))
+    # Shukla is a 2-D mat method; a line footing refuses it.
+    @test_throws ArgumentError design_footing(StripFooting(), leg, soil;
+                            opts = StripParams(analysis_method = ShuklaAFM()))
+
+    # A corner cannot use the §5.4 line model.
+    corner_leg(idx, p1, p2, stations, Ps) =
+        WallLineDemand(idx, p1, p2, 0.2u"m", 3.0u"m",
+                       [WallLineSample(s, 1.4 * Ps, Ps) for s in stations])
+    long = corner_leg(1, (0.0u"m", 0.0u"m"), (6.0u"m", 0.0u"m"),
+                      (0.0u"m", 3.0u"m", 6.0u"m"), 50.0u"kN")
+    short = corner_leg(2, (0.0u"m", 0.0u"m"), (0.0u"m", 4.0u"m"),
+                       (1.0u"m", 4.0u"m"), 40.0u"kN")
+    @test_throws ArgumentError design_footing(StripFooting(), [long, short], soil;
+                            opts = StripParams(analysis_method = WinklerFEA()))
+
+    # A combined column strip is rigid-only.
+    d1 = FoundationDemand(1; Pu=480.0kip, Ps=350.0kip, c1=24.0u"inch", c2=16.0u"inch")
+    d2 = FoundationDemand(2; Pu=720.0kip, Ps=525.0kip, c1=24.0u"inch", c2=24.0u"inch")
+    @test_throws ArgumentError design_footing(StripFooting(), [d1, d2],
+                            [0.0u"ft", 18.0u"ft"], soil;
+                            opts = StripParams(analysis_method = WinklerFEA()))
+end
+
 @testset "Minimum dowels use the concrete at the base" begin
     # ACI 318-11 §14.3.2 (corpus: aci-318-11, page 264): 0.0012 for No. 5 at
     # fy ≥ 60 ksi, 0.0015 otherwise. §15.8.2.2 (page 275) applies it at the joint.

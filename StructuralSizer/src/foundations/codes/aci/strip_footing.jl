@@ -510,6 +510,11 @@ function design_footing(::StripFooting,
     N ≥ 2 || throw(ArgumentError("Strip footing requires ≥ 2 columns (got $N)"))
     length(positions) == N ||
         throw(DimensionMismatch("positions length must match demands"))
+    opts.analysis_method isa RigidMat || throw(ArgumentError(
+        "A combined column strip is designed as a rigid member (ACI 336.2R " *
+        "§5.2, corpus: aci-336-combined-footings-mats, page 9); " *
+        "$(typeof(opts.analysis_method)) is a mat/wall method. Use RigidMat(), " *
+        "or a mat for a flexible analysis."))
     _strip_validate_actions(column_service, column_strength, N)
 
     strip_edge_par = _strip_free_edge_parallel(strip_axis)

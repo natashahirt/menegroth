@@ -426,6 +426,13 @@ function validate_input(input::APIInput)
                         fo.mat_params.analysis_method, API_MAT_ANALYSIS_METHODS)
                 end
             end
+            if fo.strip_params !== nothing && fo.strip_params.analysis_method !== nothing
+                am = lowercase(strip(fo.strip_params.analysis_method))
+                if !(am in API_STRIP_ANALYSIS_METHODS)
+                    _push_enum!(errors, "foundation_options.strip_params.analysis_method",
+                        fo.strip_params.analysis_method, API_STRIP_ANALYSIS_METHODS)
+                end
+            end
         end
     end
 

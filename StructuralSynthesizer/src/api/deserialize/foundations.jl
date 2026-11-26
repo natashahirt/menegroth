@@ -41,7 +41,8 @@ function _api_to_strip_params(api_st::APIStripParams, rc::StructuralSizer.Reinfo
         depth_increment = def.depth_increment,
         width_increment = api_st.width_increment_in !== nothing ? api_st.width_increment_in * inch : def.width_increment,
         max_depth_ratio = something(api_st.max_depth_ratio, def.max_depth_ratio),
-        analysis = def.analysis,
+        analysis_method = api_st.analysis_method !== nothing ?
+            _resolve_strip_analysis_method(api_st.analysis_method) : def.analysis_method,
         ϕ_flexure = def.ϕ_flexure,
         ϕ_shear = def.ϕ_shear,
         ϕ_bearing = def.ϕ_bearing,
@@ -54,6 +55,15 @@ function _api_to_strip_params(api_st::APIStripParams, rc::StructuralSizer.Reinfo
         eccentricity_limit = something(api_st.eccentricity_limit, def.eccentricity_limit),
         objective = def.objective,
     )
+end
+
+"""Resolve strip/wall analysis_method string to AbstractMatMethod (Shukla is mat-only)."""
+function _resolve_strip_analysis_method(s::String)
+    am = lowercase(strip(s))
+    am == "rigid"   && return StructuralSizer.RigidMat()
+    am == "winkler" && return StructuralSizer.WinklerFEA()
+    @warn "Unsupported strip/wall analysis_method \"$s\" (use rigid or winkler) — defaulting to rigid"
+    return StructuralSizer.RigidMat()
 end
 
 """Resolve mat analysis_method string to AbstractMatMethod."""

@@ -222,6 +222,12 @@ function size_columns(
     catalog::Union{Nothing, AbstractVector} = nothing,
     feasible::Union{Nothing, Vector{Vector{Int}}} = nothing,
     mip_start::Union{Nothing, Vector{Int}} = nothing,
+    # Optional design-dependent capacity coupling (self-weight): makes each group's
+    # axial demand a linear function of the section choices so the coupled column
+    # sizing is one certified MILP instead of a demand-fixpoint ratchet. Forwarded
+    # unchanged to `optimize_discrete`; `nothing` (default) is byte-identical.
+    # Single-material discrete path only (the regime the SS builder guards).
+    coupling::Union{Nothing, LinearCapacityCoupling} = nothing,
     composite::Union{Nothing, Bool, CompositeContext, PerStationComposite, AbstractVector} = nothing,
     shell_spans::Union{Nothing, AbstractVector} = nothing,
     mip_gap::Real = 1e-4,
@@ -342,6 +348,9 @@ function size_columns(
     # `nothing` for every existing caller (byte-identical) and only set by the
     # batched StructuralSynthesizer member_group_overrides path.
     if !isnothing(opts.materials)
+        coupling === nothing || throw(ArgumentError(
+            "size_columns: capacity coupling is not supported with a multi-material " *
+            "catalog (opts.materials); use a single material."))
         result = optimize_discrete(
             checker, demands, steel_geoms, cat, opts.materials;
             objective = opts.objective,
@@ -365,6 +374,7 @@ function size_columns(
             time_limit_sec = opts.time_limit_sec,
             feasible = feasible,
             mip_start = mip_start,
+            coupling = coupling,
             tc = tc,
         )
         # Diagnosis only. SS_TRACE_SHELL_PASSES=1 prints, per group, the

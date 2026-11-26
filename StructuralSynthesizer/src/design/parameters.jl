@@ -214,6 +214,26 @@ Base.@kwdef mutable struct DesignParameters
     # axial/punching capacity vs what was already checked).
     # Not supported for PixelFrame columns (rejected at API validation).
     uniform_column_sizing::Symbol = :off
+
+    # ─── Monolithic column self-weight coupling (default OFF) ───
+    # When true, the STEEL discrete column stage replaces the "size against the
+    # current self-weight → re-solve → re-size" ratchet with ONE certified MILP:
+    # each column group's axial demand is written as a LINEAR function of every
+    # column group's section choice via exact FE self-weight influence
+    # coefficients φ (a column's own weight plus the share of other columns'
+    # weight that redistributes onto it in the indeterminate frame), so the solver
+    # returns the globally self-consistent column design in a single pass. See
+    # `build_column_selfweight_coupling` (analyze/members/members/selfweight_coupling.jl)
+    # and the discrete `LinearCapacityCoupling`. The coupling only GUIDES the
+    # section choice; the surrounding member loop's held-check and
+    # `_verify_installed_design!` still certify every installed column on a fresh
+    # analysis, so an imperfect frozen-stiffness linearization can never pass an
+    # unsafe design — at worst the loop takes one correction pass. Falls back to
+    # the ratchet whenever the exact regime does not hold (non-steel/non-discrete
+    # columns, a section-count cap, a section floor, a multi-material catalog, or
+    # when pattern cases rather than the full-load solve govern the demand).
+    # `false` (default) is byte-identical to the prior behavior.
+    monolithic_column_selfweight::Bool = false
     
     # ─── Design Targets ───
     deflection_limit::Symbol = :L_360        # :L_240, :L_360, :L_480

@@ -6,6 +6,9 @@ include("members/slab_edge.jl")
 include("members/releases.jl")
 include("members/framing_level.jl")
 include("members/demands.jl")
+# Monolithic column self-weight coupling (uses `_element_forces_from_u` from
+# demands.jl; consumed by size_columns.jl). Default-off feature.
+include("members/selfweight_coupling.jl")
 include("members/pinned_joists.jl")
 include("members/grouping.jl")
 include("members/size_beams.jl")
@@ -13,6 +16,7 @@ include("members/size_beams.jl")
 # service widths use the same flange geometry.
 include("members/tbeam_flange.jl")
 include("members/collinear_ribs.jl")
+include("members/symmetry.jl")
 include("members/rib_variation.jl")
 include("members/rib_story.jl")
 include("members/rib_deflection.jl")

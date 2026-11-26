@@ -119,6 +119,82 @@ end
 end
 
 # -----------------------------------------------------------------------------
+# Per-(target, source) INFLUENCE coefficients φ. For a determinate gravity column
+# line every supported member's full weight stacks onto the column (φ ≡ 1), but in
+# an indeterminate frame the column axial is an FE reaction that redistributes, so
+# a unit of a source's self-weight reaches the target scaled by an influence
+# coefficient φ (possibly negative). The coupling folds φ into the same single
+# exact MILP — this block exercises the φ-weighted form.
+# -----------------------------------------------------------------------------
+
+@testset "capacity coupling: influence φ ≡ 1 reproduces the no-influence form" begin
+    weight = Vector{Vector{Float64}}(undef, 2)
+    weight[1] = copy(_A); weight[2] = Float64[]
+    plain = LinearCapacityCoupling([2], [[1]], [0.0], weight, [0.5 .* _A])
+    withφ = LinearCapacityCoupling([2], [[1]], [0.0], weight, [0.5 .* _A], [[1.0]])
+    rp = optimize_discrete(_CHK, _DEM, _GEO, _CAT, A992_Steel; objective = MinVolume(), coupling = plain)
+    rφ = optimize_discrete(_CHK, _DEM, _GEO, _CAT, A992_Steel; objective = MinVolume(), coupling = withφ)
+    @test rφ.section_indices == rp.section_indices
+    @test rφ.objective_value == rp.objective_value
+end
+
+@testset "capacity coupling: the influence coefficient scales the coupled load" begin
+    # weight[1] = area, cap(group 2) = 0.5·area ⇒ constraint is φ·A[c1] ≤ 0.5·A[c2],
+    # i.e. A[c2] ≥ 2φ·A[c1]. Larger φ delivers more of group 1's load to group 2 and
+    # can only grow its required section.
+    weight = Vector{Vector{Float64}}(undef, 2)
+    weight[1] = copy(_A); weight[2] = Float64[]
+    cap = [0.5 .* _A]
+    mk(φ) = LinearCapacityCoupling([2], [[1]], [0.0], weight, cap, [[φ]])
+    r_half = optimize_discrete(_CHK, _DEM, _GEO, _CAT, A992_Steel; objective = MinVolume(), coupling = mk(0.5))
+    r_one  = optimize_discrete(_CHK, _DEM, _GEO, _CAT, A992_Steel; objective = MinVolume(), coupling = mk(1.0))
+    r_two  = optimize_discrete(_CHK, _DEM, _GEO, _CAT, A992_Steel; objective = MinVolume(), coupling = mk(2.0))
+    for r in (r_half, r_one, r_two)
+        @test r.status == MOI.OPTIMAL
+    end
+    # Monotone in φ: more delivered load ⇒ never-smaller target section.
+    @test _A[r_half.section_indices[2]] ≤ _A[r_one.section_indices[2]] + 1e-12
+    @test _A[r_one.section_indices[2]]  ≤ _A[r_two.section_indices[2]] + 1e-12
+    # Exact constraint arithmetic for each φ.
+    for (φ, r) in ((0.5, r_half), (1.0, r_one), (2.0, r_two))
+        c1, c2 = r.section_indices
+        @test φ * weight[1][c1] ≤ 0.5 * _A[c2] + 1e-9
+    end
+end
+
+@testset "capacity coupling: a negative influence unloads the target" begin
+    # φ < 0: the source's weight RELIEVES the target, cancelling part of a big
+    # x-independent base load, so a lighter target section suffices than with φ > 0.
+    weight = Vector{Vector{Float64}}(undef, 2)
+    weight[1] = copy(_A); weight[2] = Float64[]
+    cap = [0.5 .* _A]
+    # Base chosen so BOTH signs stay feasible: φ>0 needs A[c2] ≥ 2(base + A[c1]),
+    # φ<0 needs A[c2] ≥ 2(base − A[c1]); with A[c1] = lightest area these must both
+    # land inside the catalog (max cap 0.5·max(A)). 0.3·max(A) satisfies that.
+    base_load = 0.3 * maximum(_A)
+    pos = LinearCapacityCoupling([2], [[1]], [base_load], weight, cap, [[1.0]])
+    neg = LinearCapacityCoupling([2], [[1]], [base_load], weight, cap, [[-1.0]])
+    rpos = optimize_discrete(_CHK, _DEM, _GEO, _CAT, A992_Steel; objective = MinVolume(), coupling = pos)
+    rneg = optimize_discrete(_CHK, _DEM, _GEO, _CAT, A992_Steel; objective = MinVolume(), coupling = neg)
+    @test rpos.status == MOI.OPTIMAL && rneg.status == MOI.OPTIMAL
+    @test _A[rneg.section_indices[2]] ≤ _A[rpos.section_indices[2]] + 1e-12
+    # Exact: base + φ·A[c1] ≤ 0.5·A[c2] for the realized group-1 section.
+    c1n, c2n = rneg.section_indices
+    @test base_load - weight[1][c1n] ≤ 0.5 * _A[c2n] + 1e-9
+end
+
+@testset "capacity coupling: influence dimension validation" begin
+    weight = [copy(_A), Float64[]]
+    cap = [0.5 .* _A]
+    # influence not aligned with groups (1 constrained group, 2 influence rows).
+    @test_throws ArgumentError optimize_discrete(_CHK, _DEM, _GEO, _CAT, A992_Steel;
+        coupling = LinearCapacityCoupling([2], [[1]], [0.0], weight, cap, [[1.0], [1.0]]))
+    # influence[c] not aligned with sources[c] (1 source, 2 coefficients).
+    @test_throws ArgumentError optimize_discrete(_CHK, _DEM, _GEO, _CAT, A992_Steel;
+        coupling = LinearCapacityCoupling([2], [[1]], [0.0], weight, cap, [[1.0, 2.0]]))
+end
+
+# -----------------------------------------------------------------------------
 # LinearSelectionConstraint: a global linear limit over the selection binaries.
 # The headline use is DRIFT: for a lateral system under a fixed force
 # distribution, the drift is Σ_e γ_e/I_e, so each candidate section t contributes

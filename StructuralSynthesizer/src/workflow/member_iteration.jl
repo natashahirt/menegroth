@@ -497,6 +497,7 @@ function _member_iteration_pass!(struc, params, beam_opts, column_opts, beam_kwa
         size_columns!(struc, column_opts; reanalyze=false, tc=tc,
                       I_factor=params.column_I_factor,
                       gravity_factor=member_self_weight_acceleration(params),
+                      monolithic_selfweight=params.monolithic_column_selfweight,
                       section_floor = _iteration_column_floor(struc, column_opts, floor_now))
     end
     _harmonize_columns!(struc, params)
@@ -651,6 +652,7 @@ function _column_only_pass!(struc, params, column_opts; tc, floor_now::Bool)
     size_columns!(struc, column_opts; reanalyze = false, tc = tc,
                   I_factor = params.column_I_factor,  # ACI 318-11 §10.10.4.1
                   gravity_factor = member_self_weight_acceleration(params),
+                  monolithic_selfweight = params.monolithic_column_selfweight,
                   section_floor = _iteration_column_floor(struc, column_opts, floor_now))
     _harmonize_columns!(struc, params)
     _sync_fire_coating_loads!(struc, params)

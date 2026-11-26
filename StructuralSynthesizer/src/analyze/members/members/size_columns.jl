@@ -98,6 +98,10 @@ function size_columns!(
     # one. Discrete steel uses `_narrow_to_section_floor`. Discrete concrete
     # uses the same rule through `frame_section_floors` for this call only.
     section_floor = nothing,
+    # Default-off monolithic self-weight coupling (steel discrete columns only);
+    # see `DesignParameters.monolithic_column_selfweight` and
+    # `build_column_selfweight_coupling`. Threaded by the member loop from params.
+    monolithic_selfweight::Bool = false,
 )
     # NOTE: as of this writing `BuildingStructure` has NO `design_parameters` field
     # (see building_types/structure.jl), so `hasproperty(...)` is always false and `dp`
@@ -128,8 +132,13 @@ function size_columns!(
         throw(ArgumentError(
             "column section_floor applies to discrete steel and concrete columns only"))
     floor_kw = section_floor === nothing ? (;) : (; section_floor)
+    # The monolithic self-weight coupling is a STEEL discrete-column feature; pass
+    # the flag only to that dispatch so the concrete/PixelFrame paths stay
+    # byte-identical (and never see an unknown kwarg).
+    mono_kw = (monolithic_selfweight && effective_opts isa StructuralSizer.SteelColumnOptions) ?
+        (; monolithic_selfweight = true) : (;)
     result = _size_columns_impl!(struc, effective_opts; resolution, reanalyze, gravity_factor,
-                                 I_factor, floor_kw...)
+                                 I_factor, floor_kw..., mono_kw...)
     StructuralSizer.emit!(tc, :sizing, "size_columns!", "", :exit)
     return result
 end
@@ -147,6 +156,8 @@ function _size_columns_impl!(
     # passes I_factor to to_asap_section).
     I_factor::Real = 0.70,
     section_floor = nothing,
+    # Default-off monolithic self-weight coupling (see build_column_selfweight_coupling).
+    monolithic_selfweight::Bool = false,
 )
     skel = struc.skeleton
     member_edge_group = :columns
@@ -181,6 +192,26 @@ function _size_columns_impl!(
         cat, feasible = _narrow_to_section_floor(opts, group_ids, cat, nothing, section_floor)
         floor_kw = (; catalog = cat, feasible)
     end
+    # Monolithic self-weight coupling (default OFF). Only in the exact regime this
+    # linearization is valid in: discrete, single-material, no section-count cap,
+    # no section floor, and the full-load solve governs (no pattern cases — a live
+    # pattern-solve cache would have enveloped the demand over cases this builder
+    # does not linearize). The builder returns `nothing` if any further guard
+    # (e.g. a group with no current area) fails, in which case the ordinary solve
+    # runs. The outer member loop still verifies every installed column, so this
+    # only ever GUIDES the choice (see build_column_selfweight_coupling).
+    coupling_kw = (;)
+    if monolithic_selfweight && section_floor === nothing &&
+       opts.sizing_strategy === :discrete && opts.n_max_sections == 0 &&
+       opts.materials === nothing && _get_pattern_solve_cache(struc) === nothing
+        cat = isnothing(opts.custom_catalog) ?
+            StructuralSizer.steel_column_catalog(opts.section_type, opts.catalog) :
+            opts.custom_catalog
+        coupling = build_column_selfweight_coupling(struc, opts, group_ids, demands,
+            geometries, cat, opts.material; resolution = resolution)
+        coupling === nothing || (coupling_kw = (; catalog = cat, coupling = coupling))
+    end
+
     # Eq. A-8-4 uses the frame end moments. Dropping them rebuilds each
     # demand at M1 = 0 (Cm = 0.6). AISC 360-16 App. 8 §8.2.1(a)
     # (corpus: aisc-360-16, PDF page 306). The section floor (if any) narrows
@@ -188,7 +219,7 @@ function _size_columns_impl!(
     result = StructuralSizer.size_columns(Pu, Mux, geometries, opts; Muy=Muy, Pu_t=Pu_t,
         M1x=[d.M1x for d in demands], M2x=[d.M2x for d in demands],
         M1y=[d.M1y for d in demands], M2y=[d.M2y for d in demands],
-        floor_kw...)
+        floor_kw..., coupling_kw...)
     
     # Apply results
     _apply_column_results!(struc, result, group_ids, opts.material, :steel, edge_ids_in_group)

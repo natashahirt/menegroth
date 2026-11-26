@@ -39,13 +39,25 @@ For each constrained group `i` (an entry of `groups`), the member must carry a
 load that is a linear function of the section choices and the chosen section must
 have at least that capacity:
 
-    base[c] + Σ_{j ∈ sources[c]} Σ_t weight[j][t]·x[j,t]  ≤  Σ_s cap[c][s]·x[i,s]
+    base[c] + Σ_{j ∈ sources[c]} φ[c][j]·Σ_t weight[j][t]·x[j,t]  ≤  Σ_s cap[c][s]·x[i,s]
 
 where `c` is the position of `i` in `groups`. All indices are the solver's own:
 `i`, `j` are group indices (`1:n_groups`) and `t`, `s` are catalog indices
 (`1:n_sections`). Both sides are linear in the binaries `x`, so the coupled sizing
 stays one MILP and is solved exactly in a single pass (no demand-fixpoint
 iteration). See this file's header for the self-weight motivation.
+
+`φ[c][k]` is the per-source **influence coefficient**: how much of source
+`sources[c][k]`'s self-weight load reaches constrained group `i`. For a pure
+accumulation (every supported member's full weight stacks onto `i`, as in a
+determinate gravity column line) `φ ≡ 1` and may be omitted (`influence = nothing`).
+For a general indeterminate frame the column axial is an FE reaction that
+*redistributes*, and `φ[c][k]` is the exact first-order sensitivity of group `i`'s
+governing axial to a unit of source `k`'s self-weight — a constant of the
+frozen-stiffness model (StructuralSynthesizer computes it from the cached
+factorization via `Asap.linear_response`; it may be negative when a source's weight
+unloads `i`). Folding `φ` into the constraint keeps the whole coupled sizing a
+single exact MILP for an arbitrary frame.
 
 # Fields
 - `groups`  — the constrained group indices `i` (each needs one coupling row).
@@ -57,6 +69,9 @@ iteration). See this file's header for the self-weight motivation.
               `n_sections`; a group that contributes nothing may be left empty).
 - `cap`     — aligned to `groups`: `cap[c]` is the per-catalog-section capacity of
               constrained group `i` against the coupled load (length `n_sections`).
+- `influence` — `nothing` (pure accumulation, `φ ≡ 1`) or, aligned to `groups`,
+              `influence[c]` aligned to `sources[c]`: the per-source influence
+              coefficient `φ[c][k]` on constrained group `i`.
 
 A section whose `cap` is below the minimum achievable load is simply never
 selectable for that group — the capacity screening and this constraint together
@@ -69,7 +84,13 @@ struct LinearCapacityCoupling
     base::Vector{Float64}
     weight::Vector{Vector{Float64}}
     cap::Vector{Vector{Float64}}
+    influence::Union{Nothing, Vector{Vector{Float64}}}
 end
+
+# Backward-compatible constructor: no `influence` ⇒ pure accumulation (φ ≡ 1),
+# byte-identical to the pre-influence behavior.
+LinearCapacityCoupling(groups, sources, base, weight, cap) =
+    LinearCapacityCoupling(groups, sources, base, weight, cap, nothing)
 
 """
     _validate_coupling(coupling, n_groups, n_sections)
@@ -89,12 +110,19 @@ function _validate_coupling(coupling::LinearCapacityCoupling, n_groups::Int, n_s
     length(coupling.weight) == n_groups || throw(ArgumentError(
         "LinearCapacityCoupling: weight must have one entry per group " *
         "(got $(length(coupling.weight)) for $n_groups groups)"))
+    coupling.influence === nothing || length(coupling.influence) == nc || throw(ArgumentError(
+        "LinearCapacityCoupling: influence, when given, must align with groups " *
+        "(got $(length(coupling.influence)) for $nc constrained groups)"))
     for (c, i) in enumerate(coupling.groups)
         (1 ≤ i ≤ n_groups) || throw(ArgumentError(
             "LinearCapacityCoupling: constrained group $i out of range 1:$n_groups"))
         length(coupling.cap[c]) == n_sections || throw(ArgumentError(
             "LinearCapacityCoupling: cap[$c] must span the catalog " *
             "(got $(length(coupling.cap[c])) for $n_sections sections)"))
+        coupling.influence === nothing ||
+            length(coupling.influence[c]) == length(coupling.sources[c]) || throw(ArgumentError(
+            "LinearCapacityCoupling: influence[$c] must align with sources[$c] " *
+            "(got $(length(coupling.influence[c])) for $(length(coupling.sources[c])) sources)"))
         for j in coupling.sources[c]
             (1 ≤ j ≤ n_groups) || throw(ArgumentError(
                 "LinearCapacityCoupling: source group $j (for constrained group " *
@@ -119,10 +147,13 @@ function _add_capacity_coupling!(m, x, feasible::Vector{Vector{Int}},
                                  coupling::LinearCapacityCoupling)
     for (c, i) in enumerate(coupling.groups)
         load = JuMP.AffExpr(coupling.base[c])
-        for j in coupling.sources[c]
+        for (k, j) in enumerate(coupling.sources[c])
+            # φ = 1 for a pure accumulation; the per-(target, source) influence
+            # coefficient for a redistributing frame otherwise.
+            φ = coupling.influence === nothing ? 1.0 : coupling.influence[c][k]
             w = coupling.weight[j]
             for t in feasible[j]
-                JuMP.add_to_expression!(load, w[t], x[j, t])
+                JuMP.add_to_expression!(load, φ * w[t], x[j, t])
             end
         end
         cap_i = coupling.cap[c]

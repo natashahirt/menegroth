@@ -104,6 +104,76 @@ function main_diag()
     @printf("ratio applied/expected:      %.2f  (1.0 = no double path)\n",
             applied / svc_force)
 
+    # Partition applied load by the role of the element it sits on, and count
+    # how many TributaryLoads sit on each element (a double path shows as an
+    # element carrying load from two sources, or joists + perimeter both > 0).
+    model = struc.asap_model
+    e_of_el = IdDict{Any, Int}()
+    for e in eachindex(model.frame_elements)
+        e_of_el[model.frame_elements[e]] = e
+    end
+    roles = Dict{Int, Symbol}()
+    for b in struc.beams, si in SS.segment_indices(b)
+        roles[struc.segments[si].edge_idx] = b.role
+    end
+    byrole = Dict{Symbol, Float64}()
+    loads_per_edge = Dict{Int, Int}()
+    force_per_edge = Dict{Int, Float64}()
+    kinds = Dict{Symbol, Float64}()
+    for ld in model.loads
+        if ld isa Asap.TributaryLoad
+            f = _trib_force_N(ld)
+            e = get(e_of_el, ld.element, 0)
+            r = get(roles, e, :none)
+            byrole[r] = get(byrole, r, 0.0) + f
+            loads_per_edge[e] = get(loads_per_edge, e, 0) + 1
+            force_per_edge[e] = get(force_per_edge, e, 0.0) + f
+        end
+        k = nameof(typeof(ld))
+        kinds[k] = get(kinds, k, 0.0) + 1
+    end
+    @printf("\napplied load by element role (kN):\n")
+    for (r, f) in sort(collect(byrole); by = p -> -p[2])
+        @printf("  %-10s %8.1f\n", r, f / 1e3)
+    end
+    @printf("load objects by type: %s\n", join(["$k=$(Int(v))" for (k, v) in kinds], "  "))
+    multi = sort([(e, n) for (e, n) in loads_per_edge if n > 1]; by = t -> -t[2])
+    @printf("edges carrying >1 TributaryLoad: %d\n", length(multi))
+    for (e, n) in multi[1:min(6, length(multi))]
+        @printf("  edge %-4d  %d loads  %.1f kN  role=%s\n",
+                e, n, force_per_edge[e] / 1e3, get(roles, e, :none))
+    end
+
+    # Per-slab: applied load area (from the cell records to_asap! stored) vs the
+    # net area of the cells the slab represents. Each routing path has a per-cell
+    # conservation gate, so any slab with ratio != 1 localizes the leak.
+    """Plan area (m^2) a TributaryLoad covers: 3D element length x mean width."""
+    function _tl_area(ld)
+        p1 = ld.element.nodeStart.position; p2 = ld.element.nodeEnd.position
+        L = hypot(_as(p2[1] - p1[1], u"m"), _as(p2[2] - p1[2], u"m"),
+                  _as(p2[3] - p1[3], u"m"))
+        pos = ld.positions; w = ld._widths_m
+        a = 0.0
+        for i in 1:(length(pos) - 1)
+            a += 0.5 * (w[i] + w[i + 1]) * (pos[i + 1] - pos[i]) * L
+        end
+        return a
+    end
+    @printf("\nper-slab applied-area vs cell net-area (ratio, should be 1.0):\n")
+    for (si, slab) in enumerate(struc.slabs)
+        cis = slab.cell_indices
+        net = sum(_as(struc.cells[ci].area, u"m^2") for ci in cis; init = 0.0)
+        app = 0.0
+        for ci in cis
+            for ld in get(struc.cell_tributary_loads, ci, Asap.TributaryLoad[])
+                app += _tl_area(ld)
+            end
+        end
+        flag = abs(app / max(net, 1e-9) - 1.0) > 0.01 ? "  <== LEAK" : ""
+        @printf("  slab %-3d  cells %-2d  net %7.1f  applied %7.1f  ratio %.3f%s\n",
+                si, length(cis), net, app, app / max(net, 1e-9), flag)
+    end
+
     # Tributary widths per beam.
     widths = Tuple{Int, Float64, Float64, Symbol}[]  # (beam i, L, trib avg width, role)
     for (i, b) in enumerate(struc.beams)

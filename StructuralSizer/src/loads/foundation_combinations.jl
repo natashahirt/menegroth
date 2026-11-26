@@ -5,7 +5,15 @@
 # A combination scales one dead, one live, one roof companion, and either one
 # wind case or one seismic case. Wind and earthquake are not added together.
 
-"""Vertical force and the two plan moments at one support, for one case."""
+"""
+Vertical force, the two plan moments, and the two horizontal base shears at
+one support, for one case.
+
+`Hx`/`Hy` are the horizontal reactions used by the global-stability (sliding /
+overturning / uplift) checks. Only lateral cases (wind, seismic `Eh`) carry a
+nonzero horizontal shear; gravity cases (dead, live, roof companion) leave it
+at zero. Existing call sites that pass only `(P, Mx, My)` keep a zero shear.
+"""
 struct FootingAction
     label::Symbol
     "Compression-positive vertical force [N]."
@@ -14,12 +22,20 @@ struct FootingAction
     Mx::Float64
     "Moment about the global y-axis [N·m]."
     My::Float64
-    function FootingAction(label, P, Mx, My)
-        new(Symbol(label), Float64(P), Float64(Mx), Float64(My))
+    "Horizontal base shear along x [N]."
+    Hx::Float64
+    "Horizontal base shear along y [N]."
+    Hy::Float64
+    function FootingAction(label, P, Mx, My, Hx, Hy)
+        new(Symbol(label), Float64(P), Float64(Mx), Float64(My),
+            Float64(Hx), Float64(Hy))
     end
 end
 
-FootingAction(label) = FootingAction(label, 0.0, 0.0, 0.0)
+"""Gravity case (no horizontal shear): `Hx = Hy = 0`."""
+FootingAction(label, P, Mx, My) = FootingAction(label, P, Mx, My, 0.0, 0.0)
+
+FootingAction(label) = FootingAction(label, 0.0, 0.0, 0.0, 0.0, 0.0)
 
 """
     combine_foundation_action(combo, roof, D, L, companion; wind, qe, rho, SDS,
@@ -89,7 +105,8 @@ function combine_foundation_action(combo::LoadCombination, roof::Symbol,
     end
     live = use_live ? L : FootingAction(:live)
     wind_a = use_wind ? wind : FootingAction(:wind)
-    eh = use_eh ? FootingAction(:eh, ρ * qe.P, ρ * qe.Mx, ρ * qe.My) :
+    eh = use_eh ? FootingAction(:eh, ρ * qe.P, ρ * qe.Mx, ρ * qe.My,
+                                ρ * qe.Hx, ρ * qe.Hy) :
          FootingAction(:eh)
     P = _foundation_component(combo, roof, D.P, live.P, companion.P,
                               wind_a.P, eh.P, ev_P)
@@ -97,7 +114,14 @@ function combine_foundation_action(combo::LoadCombination, roof::Symbol,
                                wind_a.Mx, eh.Mx, 0.0)
     My = _foundation_component(combo, roof, D.My, live.My, companion.My,
                                wind_a.My, eh.My, 0.0)
-    return FootingAction(combo.name, P, Mx, My)
+    # Horizontal base shear travels with the same combination factors as the
+    # moments. Ev is a vertical seismic effect only (ASCE 7-22 Eq. 12.4-4a,
+    # corpus: asce-7-22, PDF page 183), so it adds no horizontal term.
+    Hx = _foundation_component(combo, roof, D.Hx, live.Hx, companion.Hx,
+                               wind_a.Hx, eh.Hx, 0.0)
+    Hy = _foundation_component(combo, roof, D.Hy, live.Hy, companion.Hy,
+                               wind_a.Hy, eh.Hy, 0.0)
+    return FootingAction(combo.name, P, Mx, My, Hx, Hy)
 end
 
 """

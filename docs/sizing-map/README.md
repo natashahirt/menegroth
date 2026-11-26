@@ -23,6 +23,45 @@ Line numbers are from the working tree on 2026-11-11. Paths: `SS/` =
 
 ### Code audit updates since the 2026-11-11 snapshot
 
+Re-audited 2026-11-26 (sign-off queue `plan-9633da9d` / row-f-nlp merged into
+`integration/2026-11-18`). Several §6 sign-off items and a §4 rank item that the
+2026-11-11/23 text still lists as open are **resolved on the current branch**;
+the per-item entries below carry a `RESOLVED (2026-11-26)` prefix. Summary
+(memory finding `find-be4cf63c`):
+
+- **Sign-off 1 (cladding dead load) — RESOLVED.** `GravityLoads.wall_SDL`
+  (default 10 psf) is now consumed: `_assign_cladding_pressure!` /
+  `append_cladding_loads!` (`SY/analyze/asap/asap/cladding.jl`) place `:cladding`
+  line loads on the carrying perimeter edge (half to each floor), and the same
+  weight enters the unfactored dead case, the service foundation solve, and
+  seismic `W`/`Px` via `_deposit_cladding!`. ASCE 7-22 §3.1.1 / §12.7.2
+  (vertical split is engineering judgment). `wall_SDL = 0` leaves the façade off.
+  (memory `chec-dbb027b0`, `deci-3d324e9c`, `note-e9a2f8ae`.)
+- **Sign-off 3 (steel Cm = 0.6) — RESOLVED.** The steel column caller forwards
+  the signed FEA end moments: `size_columns.jl:219-222` passes
+  `M1x/M2x/M1y/M2y` (from `MemberDemand`, built via `_fem_to_aci_endmoments`),
+  so `compute_Cm = 0.6 − 0.4(M1/M2)` is used instead of the `M1 = 0` ⇒ 0.6
+  stand-in. AISC 360-16 App. 8 §8.2.1, Eq. A-8-4 (corpus: aisc-360-16, p. 306).
+  Unknown-curvature and transversely-loaded members take `Cm = 1.0`.
+- **Sign-off 4 (lateral never reaches foundations) — PARTIALLY RESOLVED
+  (spread footings only).** Isolated spread footings now take wind and seismic:
+  `design_ordinary_walls!` stores `foundation_lateral`, and every ASCE 7-22
+  §2.3 / §2.4 combination is checked. **Still open:** strip and mat footings
+  collapse the combinations into one demand (`_lateral_column_demand`: largest
+  moment with a separate max service P), and grade-wall nodes still read only
+  the gravity reaction. (memory `note-e9a2f8ae`.)
+- **Sign-off 5 (rigid-mat strip moments) — RESOLVED.** `mat_footing.jl`
+  implements rigid-body strip statics per ACI 336.2R §6.1.2 Steps 3–4 (with the
+  §5.2 `Kr` rigidity gate); the ACI 318 §8.3.3 beam-coefficient stand-in and the
+  swapped-face concern are retired.
+- **Rank 11 (RC objectives ignore rebar) — FURTHER RESOLVED: beams now count
+  rebar too.** `size_beams` wraps concrete + rebar in a `ReinforcedConcreteMaterial`
+  (`SS/members/optimize/api/beams.jl:176`, `_sizing_material`), so
+  `precompute_capacities!`'s RC overload threads rebar/transverse into
+  `obj_coeffs`. Flat-plate columns (WP 2.5) and beams now both count rebar
+  carbon; walls pick thinnest-passing (no carbon MIP) and footings remain the
+  last gross-section objective.
+
 Re-audited 2026-11-23 (two-way slabs, lateral sway):
 
 - **Two-way slab with beams now uses the real αfm** (rank 2 / sign-off item 2
@@ -257,11 +296,11 @@ the rest are the raw reports' reading-level findings.
 | 4 | **Flat-plate default punching is greedy** | `:grow_columns` grows columns before considering h or studs; columns grown at a thin h are kept when h rises (`SS/slabs/.../punching_resolution.jl:129-138`, `column_updates.jl:108-109`) | `:joint_search` (built); reset columns on h restart | — |
 | 5 | **Full-load column check must cover the current footprint** | Picks lightest catalog section ≥ current c1 and c2; never trades footprint for steel (`SY/workflow/flat_plate_column_check.jl:461-473, 635-640`) | Choose among sections ≥ the *required* footprint | — |
 | 6 | **Uniform wall drift fix** | Worst story/direction drift ratio still scales every wall group. The default grouping is `:pier`, so a local pier failure thickens that wall only (`SY/design/parameters.jl`, `wall_thickness_jump.jl`) | Per-direction, per-group drift sensitivity (`SS/walls/lateral/sensitivity.jl` exists, unused) | — |
-| 7 | **Mat reinforcement** | Beam coefficients instead of strip statics; faces look swapped; single span uses wL²/2 (`SS/foundations/codes/aci/mat_footing.jl:447-469, 823-830`). Can be both over- and under-sized; see sign-off item 5 | Rigid strip statics per ACI 336.2R §6.1.2 Step 3 | yes |
+| 7 | **RESOLVED (2026-11-26): Mat reinforcement** | Now rigid-body strip statics per ACI 336.2R §6.1.2 Steps 3–4, gated by the §5.2 `Kr` rigidity check (`SS/foundations/codes/aci/mat_footing.jl`). Retired the ACI 318 §8.3.3 beam-coefficient stand-in and the swapped-face concern; see sign-off item 5 | — (resolved) | yes |
 | 8 | **Foundation grouping envelope** | Component-wise max of P, M, V, c over a ±15% cluster whose reference only grows (`SY/analyze/foundations/grouping.jl:144-151, 300-325`) | Sort descending, bound by group min; concurrent demands | — |
 | 9 | **Column stacking and harmonize** | max c1 and max c2 taken independently: 12×20 over 20×12 forces 20×20 (`flat_plate_column_check.jl:492-551`, `member_iteration.jl:72-73`). Both are design policy, not code | Compare by area / allow rotation; joint group sizing in MIP | — |
 | 10 | **Section floors never relax** | Row-F seismic floors and story-shell `section_floor` are objective-sorted masks kept for the run; shell rounds 2–3 skip the trim pass (`interactive_checks.jl:903-920`, `size_beams_story_shell.jl:200-216`) | Store floors as demand rows; trim on the last round | — |
-| 11 | **PARTIAL (2026-11-23): flat-plate columns now count rebar** (WP 2.5); RC beams/walls/footings still gross | Flat-plate column cache routes through `ReinforcedConcreteMaterial` so `obj_coeffs` include rebar carbon (`SY/workflow/flat_plate_column_check.jl:378-407`); picks are objective-ordered. Beams/walls/footings still size on gross section | Add As·ρs·ecc_s to the remaining RC objectives (rest of Phase 2.5) | — |
+| 11 | **PARTIAL (2026-11-26): flat-plate columns AND beams count rebar** (WP 2.5); walls/footings still gross | Flat-plate column cache (`SY/workflow/flat_plate_column_check.jl:378-407`) and `size_beams` (`SS/members/optimize/api/beams.jl:176`, `_sizing_material`) both route through `ReinforcedConcreteMaterial`, so `obj_coeffs` include rebar carbon. Walls pick thinnest-passing (no carbon MIP); footings still size on gross section | Add As·ρs·ecc_s to the footing objective (last gross RC objective) | yes |
 | 12 | **Drop panels, pattern loading, h-dependent edge beams lose scaling and joint search** | Fall back to blind 0.5" steps; drop depth/extent never sized (`thickness_jump.jl:51-57`) | Scale D and L separately; add drop variables to the joint search | — |
 | 13 | **Group envelopes (members)** | Max P paired with max M, longest L, worst Lb/Cb/K across a group (`SY/analyze/members/members/demands.jl:560-723`) | Check each member against the shared section | — |
 | 14 | **Wall out-of-plane moment** | Max slab moment paired with every N, including 0.9D (`ordinary_wall_stage.jl`). The reinforcement ratio is re-picked from the §11.6.2 floor on every call | Concurrent Moop/N | — |
@@ -289,62 +328,56 @@ take the thickest support condition over all cells.
 These change code-derived values or may be unsafe. Per `code-accuracy.mdc`
 and `corpus.mdc`, each needs a corpus check and the user's sign-off.
 
-1. **Cladding dead load is never applied (unconservative).** Corrected
-   2026-11-11: W *does* include column, beam, wall, coating and drop-panel
-   self-weight, split half-story (`elf_story_cases.jl:465-514, 655-671`).
-   The real gap: `GravityLoads.wall_SDL` (cladding, default 10 psf) is
-   accepted from the API and has no consumer anywhere, so façade weight is
-   missing from perimeter-member gravity design, foundations, W and Px.
-   Research in
+1. **RESOLVED (2026-11-26): cladding dead load is now applied.**
+   `GravityLoads.wall_SDL` (default 10 psf) is consumed as `:cladding`
+   perimeter line loads (half of each façade band to the floor at each end)
+   and enters the unfactored dead case, the service foundation solve, and
+   seismic `W`/`Px` (`SY/analyze/asap/asap/cladding.jl`, `_deposit_cladding!`);
+   ASCE 7-22 §3.1.1 / §12.7.2, vertical split is engineering judgment.
+   `wall_SDL = 0` leaves the façade off. Was: `wall_SDL` had no consumer, so
+   façade weight was missing from perimeter-member gravity design, foundations,
+   W and Px. Research in
    [`phase0/seismic-weight-and-foundation-lateral.md`](phase0/seismic-weight-and-foundation-lateral.md)
-   (Issue A). Checked.
+   (Issue A).
 2. **RESOLVED (2026-11-23):** two-way slab thickness now uses the real αfm
    (ranked item 2; landed 2026-11-14). The unknown-αfm bound is only the
    pre-beam seed; `_recheck_two_way_thickness!` recomputes αfm from the sized
    beams and re-runs Eq. (9-12)/(9-13). No open sign-off here.
-3. **Steel Cm = 0.6 for all steel beams and steel columns in compression.**
-   Research in
+3. **RESOLVED (2026-11-26): steel Cm uses the signed frame end moments.**
+   `SY/analyze/members/members/size_columns.jl:219-222` forwards
+   `M1x/M2x/M1y/M2y` (from `MemberDemand`, built via `_fem_to_aci_endmoments`)
+   to the array `size_columns`, so `compute_Cm = 0.6 − 0.4(M1/M2)` is used
+   (AISC 360-16 App. 8 §8.2.1, Eq. A-8-4; corpus aisc-360-16 p. 306).
+   Unknown-curvature and transversely-loaded members take Cm = 1.0. Was: only
+   Pu, Mux, Muy were forwarded, rebuilding `MemberDemand` at M1 = 0 ⇒ Cm = 0.6,
+   under-amplifying moment terms by up to 1.67× (tens of percent on slender
+   gravity columns). Research in
    [`phase0/steel-cm-and-mat-coefficient.md`](phase0/steel-cm-and-mat-coefficient.md)
-   (Issue C). Steel columns: `SY/analyze/members/members/size_columns.jl:157-162`
-   passes only Pu, Mux, Muy to the array `size_columns`, discarding the signed
-   end moments `member_group_demands` computed. Steel beams route through the
-   same array API. It rebuilds `MemberDemand` without M1/M2 or
-   `transverse_load` (`SS/members/optimize/api/columns.jl:241-248`), so
-   `compute_Cm` returns 0.6. AISC 360-16 App. 8 §8.2.1 gives Cm = 1.0 for
-   single curvature and allows 1.0 for transversely loaded members. Moment
-   terms are under-amplified by 1/(1 − αPr/Pe1) up to 1.67×; small for most
-   floor beams, up to tens of percent for slender gravity columns. The
-   `MemberDemand` docstring (`SS/members/types/demands.jl:77-78`) wrongly calls
-   M1 = 0 "conservative single curvature". RC columns are unaffected. Checked.
-4. **Wind and seismic never reach foundation design (unconservative).**
-   Research in
+   (Issue C).
+4. **PARTIALLY RESOLVED (2026-11-26): spread footings now take wind and
+   seismic; strip/mat footings and grade walls do not.** `design_ordinary_walls!`
+   stores `foundation_lateral`, and every ASCE 7-22 §2.3 / §2.4 combination is
+   checked on isolated spread footings. **Still open:** strip and mat footings
+   collapse the combinations into one demand (`_lateral_column_demand`: largest
+   moment with a separate max service P); grade-wall nodes still read only the
+   gravity reaction (`wall_groups.jl:418-424`); sliding is not checked. The
+   §12.13.4 overturning reduction and the Ev = 0 soil-interface permission are
+   not used. Was: footing strength used the last gravity full-load solve's
+   reactions and bearing one unfactored D + L solve, so no lateral reached any
+   footing; a hand calc passed a strip footing at 76 kPa (D + L) that ASD
+   seismic takes to 98 kPa against qa = 80 kPa. Research in
    [`phase0/seismic-weight-and-foundation-lateral.md`](phase0/seismic-weight-and-foundation-lateral.md)
-   (Issue B). Footing strength uses the reactions of the last mutating solve,
-   the gravity full-load case (`SY/analyze/foundations/supports.jl:11-70`);
-   bearing uses one unfactored D + L solve (`demands.jl:57-68`). Lateral and
-   pattern cases are solved without computing reactions, so overturning,
-   uplift and base shear never reach any footing, including grade walls
-   (`wall_groups.jl:418-424`). Sliding is never checked. Bearing eccentricity
-   is taken from factored Mux/Pu (`spread_footing.jl:684-685`), valid only
-   when every load shares one factor. A hand calc in the research note
-   passes a strip footing at 76 kPa (D + L) that ASD seismic takes to 98 kPa
-   against qa = 80 kPa. `FoundationDemand` holds a single (P, M) set, so the
-   fix needs per-combination demands.
-5. **Rigid-mat strip moments (possibly unconservative).** Research in
+   (Issue B).
+5. **RESOLVED (2026-11-26): rigid-mat strip moments use rigid-body statics.**
+   `mat_footing.jl` now implements ACI 336.2R §6.1.2 Steps 3–4 rigid-body strip
+   statics (gated by the §5.2 `Kr` rigidity check), replacing the ACI 318
+   §8.3.3 beam-coefficient stand-in and resolving the swapped-face concern.
+   Was: beam coefficients sent the support coefficient to top steel and the
+   span coefficient to bottom steel (faces looked swapped for upward soil
+   pressure), gave span moments 1.9×–3× low, and dropped overhang cantilever
+   moment. Research in
    [`phase0/steel-cm-and-mat-coefficient.md`](phase0/steel-cm-and-mat-coefficient.md)
-   (Issue D). ACI 336.2R §6.1.2 Step 3 calls for rigid-body strip statics; the
-   code uses ACI 318 §8.3.3 beam coefficients, which need two or more spans and
-   cover beams and one-way slabs only. Three problems:
-   (a) the support coefficient goes to top steel and the span coefficient to
-   bottom steel (`mat_footing.jl:823-830`), while the same file treats
-   bottom as the tension face for wall cantilevers (`:787-790`); for a mat
-   under upward soil pressure the faces look swapped;
-   (b) with equal column loads, strip statics give top-tension span moments
-   1.9× (two spans) to 3× (three spans) the coefficient value;
-   (c) one span uses wL²/2 on top (about 4× statics) and nothing on the
-   bottom, and no-wall overhang cantilevers get no moment. The face
-   assignment is checked; the statics magnitudes are hand-derived and checked
-   by free body.
+   (Issue D).
 
 ## 7. Cross-cutting patterns
 

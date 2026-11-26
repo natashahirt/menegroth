@@ -43,13 +43,22 @@ the per-item entries below carry a `RESOLVED (2026-11-26)` prefix. Summary
   so `compute_Cm = 0.6 − 0.4(M1/M2)` is used instead of the `M1 = 0` ⇒ 0.6
   stand-in. AISC 360-16 App. 8 §8.2.1, Eq. A-8-4 (corpus: aisc-360-16, p. 306).
   Unknown-curvature and transversely-loaded members take `Cm = 1.0`.
-- **Sign-off 4 (lateral never reaches foundations) — PARTIALLY RESOLVED
-  (spread footings only).** Isolated spread footings now take wind and seismic:
-  `design_ordinary_walls!` stores `foundation_lateral`, and every ASCE 7-22
-  §2.3 / §2.4 combination is checked. **Still open:** strip and mat footings
-  collapse the combinations into one demand (`_lateral_column_demand`: largest
-  moment with a separate max service P), and grade-wall nodes still read only
-  the gravity reaction. (memory `note-e9a2f8ae`.)
+- **Sign-off 4 (lateral never reaches foundations) — RESOLVED for spread,
+  strip, and mat; two narrow pieces remain.** `design_ordinary_walls!` stores
+  `foundation_lateral` (rigid-diaphragm masters present), and
+  `foundation_actions_at` serves every ASCE 7-22 §2.3 / §2.4 combination to
+  **all** footing types by support index. Spread checks each combination;
+  strip (`_grow_strip_plan_for_actions`, `_strip_strength_steel`) and mat
+  (`_mat_opts_for_actions`, `_demand_for_action(demands[j], column_strength[j][k])`)
+  grow the plan until every combination is in the kern with `q_max ≤ qa` and
+  design steel per combination (landed 2026-11-26, `chec-4d790ca0`). The
+  `_lateral_column_demand` collapse is only the centroid seed / gravity-only
+  fallback — overridden per combination whenever `column_strength` is populated.
+  **Still open (deferred Phase C/D, needs the held foundation inputs):** the
+  ACI 336.2R 20% column-load-variation rule, per-combination flexible-section
+  (Winkler) envelopes, sliding and net-tension/uplift demands (soil friction /
+  passive inputs), and grade-wall nodes still reading only the gravity
+  reaction. (memory `note-e9a2f8ae`, `chec-4d790ca0`.)
 - **Sign-off 5 (rigid-mat strip moments) — RESOLVED.** `mat_footing.jl`
   implements rigid-body strip statics per ACI 336.2R §6.1.2 Steps 3–4 (with the
   §5.2 `Kr` rigidity gate); the ACI 318 §8.3.3 beam-coefficient stand-in and the
@@ -354,18 +363,27 @@ and `corpus.mdc`, each needs a corpus check and the user's sign-off.
    gravity columns). Research in
    [`phase0/steel-cm-and-mat-coefficient.md`](phase0/steel-cm-and-mat-coefficient.md)
    (Issue C).
-4. **PARTIALLY RESOLVED (2026-11-26): spread footings now take wind and
-   seismic; strip/mat footings and grade walls do not.** `design_ordinary_walls!`
-   stores `foundation_lateral`, and every ASCE 7-22 §2.3 / §2.4 combination is
-   checked on isolated spread footings. **Still open:** strip and mat footings
-   collapse the combinations into one demand (`_lateral_column_demand`: largest
-   moment with a separate max service P); grade-wall nodes still read only the
-   gravity reaction (`wall_groups.jl:418-424`); sliding is not checked. The
-   §12.13.4 overturning reduction and the Ev = 0 soil-interface permission are
-   not used. Was: footing strength used the last gravity full-load solve's
-   reactions and bearing one unfactored D + L solve, so no lateral reached any
-   footing; a hand calc passed a strip footing at 76 kPa (D + L) that ASD
-   seismic takes to 98 kPa against qa = 80 kPa. Research in
+4. **RESOLVED (2026-11-26) for spread, strip, and mat; two narrow pieces
+   remain.** `design_ordinary_walls!` stores `foundation_lateral` (when
+   rigid-diaphragm masters exist), and `foundation_actions_at(struc, idx)`
+   serves every ASCE 7-22 §2.3 / §2.4 combination to **all** footing types by
+   support index — not just spread. Spread checks each combination; strip
+   (`_grow_strip_plan_for_actions`, `_strip_strength_steel`) and mat
+   (`_mat_opts_for_actions`, `_mat_strength_sets`) grow the plan until every
+   combination is in the kern with `q_max ≤ qa` and design steel per
+   combination via `column_strength[j][k]` (foundation Phase A+B, 2026-11-26,
+   `chec-4d790ca0`). `_lateral_column_demand`'s single-demand collapse is only
+   the mat centroid seed and the gravity-only fallback; it is overridden per
+   combination whenever `column_strength` is populated. **Still open** (deferred
+   Phase C/D, gated on the held foundation inputs): the ACI 336.2R 20%
+   column-load-variation rule, per-combination flexible-section (Winkler)
+   envelopes, sliding / net-tension / uplift demands (soil friction and passive
+   inputs), the §12.13.4 overturning reduction, and grade-wall nodes still
+   reading only the gravity reaction (`wall_groups.jl:418-424`). Was: footing
+   strength used the last gravity full-load solve's reactions and bearing one
+   unfactored D + L solve, so no lateral reached any footing; a hand calc passed
+   a strip footing at 76 kPa (D + L) that ASD seismic takes to 98 kPa against
+   qa = 80 kPa. Research in
    [`phase0/seismic-weight-and-foundation-lateral.md`](phase0/seismic-weight-and-foundation-lateral.md)
    (Issue B).
 5. **RESOLVED (2026-11-26): rigid-mat strip moments use rigid-body statics.**

@@ -1,3 +1,4 @@
+include("plan_engine.jl")
 include("spread_footing.jl")
 include("strip_footing.jl")
 include("foundation_stiffness.jl")

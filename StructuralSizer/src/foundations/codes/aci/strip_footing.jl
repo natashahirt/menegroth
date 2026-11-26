@@ -276,25 +276,23 @@ function _grow_strip_plan_for_actions(B, L, x_bar, positions,
     if isempty(column_service)
         return B, L, placed(L)
     end
-    covered = false
-    for _ in 1:80
-        fit = _strip_actions_plan_fit(B, L, x_bar, positions,
+
+    # The strip stays centered on `x_bar`; a failing combination outside the
+    # kern lengthens the strip, one over pressure within the kern widens it.
+    function step((Bv, Lv))
+        fit = _strip_actions_plan_fit(Bv, Lv, x_bar, positions,
                                        column_service, column_strength, qa, strip_axis)
-        if fit == :ok
-            covered = true
-            break
-        elseif fit == :lengthen
-            L = _canonical_ft(L + w_incr)
-        else
-            B = _canonical_inch(B + w_incr)
-        end
+        fit == :ok && return (true, (Bv, Lv))
+        fit == :lengthen && return (false, (Bv, _canonical_ft(Lv + w_incr)))
+        return (false, (_canonical_inch(Bv + w_incr), Lv))
     end
-    covered || error(
+    onfail((Bv, Lv)) = error(
         "Strip footing plan did not keep every ASCE 7-22 combination in the " *
         "ACI 336.2R §3.2.1 kern, with service q_max ≤ qa, after 80 size " *
-        "increments (B=$B, L=$L). Eq. (3-1) is not applied as full contact " *
+        "increments (B=$Bv, L=$Lv). Eq. (3-1) is not applied as full contact " *
         "when q_min < 0 (corpus: aci-336-combined-footings-mats, page 6). " *
         "The centroid stays on the gravity resultant.")
+    B, L = _grow_until_fit((B, L); step = step, onfail = onfail)
     return B, L, placed(L)
 end
 

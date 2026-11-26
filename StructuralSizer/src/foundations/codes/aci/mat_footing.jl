@@ -502,22 +502,26 @@ function _mat_opts_for_actions(positions, opts, demands, soil, walls,
         length(wall_strength) == length(first(column_strength)) || throw(ArgumentError(
             "Wall and column strength combinations are not the same length."))
     end
-    plan = _mat_plan_sizing(positions, opts; demands = demands, soil = soil, walls = walls)
-    oh = plan.overhang
-    step = opts.size_increment
-    for _ in 1:80
+    plan0 = _mat_plan_sizing(positions, opts; demands = demands, soil = soil, walls = walls)
+    incr = opts.size_increment
+
+    # The mat grows a uniform edge overhang; the column box (centroid) is fixed.
+    # State is the overhang; each increment rebuilds the plan around it.
+    function step(oh)
+        plan = oh == plan0.overhang ? plan0 :
+               _mat_plan_sizing(positions, opts; demands = demands, soil = soil,
+                                walls = walls, overhang_override = oh)
         _mat_actions_fit(plan, column_service, column_strength, soil.qa;
                          wall_service = wall_service, wall_strength = wall_strength) &&
-            return _mat_with_overhang(opts, oh)
-        oh = oh + step
-        plan = _mat_plan_sizing(positions, opts; demands = demands, soil = soil,
-                                walls = walls, overhang_override = oh)
+            return (true, _mat_with_overhang(opts, oh))
+        return (false, oh + incr)
     end
-    error(
+    onfail(oh) = error(
         "Mat plan did not keep every ASCE 7-22 combination in the ACI 336.2R " *
         "§3.2.1 kern, with service q_max ≤ qa, after 80 overhang increments " *
         "(overhang=$oh). Eq. (3-1) is not applied as full contact when " *
         "q_min < 0 (corpus: aci-336-combined-footings-mats, page 6).")
+    return _grow_until_fit(plan0.overhang; step = step, onfail = onfail)
 end
 
 """Width-average is `qu`. This is Eq. (3-1) at local `(x, y)` from the corner."""

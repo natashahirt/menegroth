@@ -617,26 +617,24 @@ function _spread_plan_for_actions(service_actions, strength_actions, qa,
     end
     B = ceil(ustrip(u"inch", B) / ustrip(u"inch", si)) * si
     B = max(B, min_B)
-    Lf = B
-    cases = nothing
-    for _ in 1:80
-        built = _spread_action_cases(strength_actions, B, Lf, c1, c2)
-        service_ok = all(_service_action_ok(a, B, Lf, qa) for a in service_actions)
+
+    # A square spread grows one side (B = Lf) per increment. A combination fits
+    # when every compressive strength action stays in the §3.2.1 kern and every
+    # service action is also at most qa.
+    function step(Bv)
+        built = _spread_action_cases(strength_actions, Bv, Bv, c1, c2)
+        service_ok = all(_service_action_ok(a, Bv, Bv, qa) for a in service_actions)
         strength_ok = all(c.in_kern for c in built)
-        if service_ok && strength_ok && !isempty(built)
-            cases = built
-            break
-        end
-        B += si
-        Lf = B
+        (service_ok && strength_ok && !isempty(built)) && return (true, (Bv, Bv, built))
+        return (false, Bv + si)
     end
-    cases === nothing && error(
+    onfail(Bv) = error(
         "Spread footing plan did not keep every ASCE 7-22 combination in the " *
         "ACI 336.2R §3.2.1 kern with service q_max ≤ qa after 80 size " *
-        "increments (B=$B). Eq. (3-1) is not applied as full contact when " *
+        "increments (B=$Bv). Eq. (3-1) is not applied as full contact when " *
         "q_min < 0 (corpus: aci-336-combined-footings-mats, page 6; " *
         "asce-7-22, PDF pages 69–70).")
-    return B, Lf, cases
+    return _grow_until_fit(B; step = step, onfail = onfail)
 end
 
 function _spread_action_cases(actions, B, Lf, c1, c2)

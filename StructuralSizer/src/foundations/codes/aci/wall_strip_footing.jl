@@ -238,35 +238,36 @@ function _grow_wall_plan(legs, plan, service_cases, strength_cases, soil, step)
     step_m = _m(step)
     if plan.straight
         _, sbar = _line_sbar(legs[1], true)
-        B = plan.B
-        Lf = plan.along
-        for _ in 1:80
-            plan = _straight_plan(legs[1], B, Lf, sbar)
-            _wall_cases_fit(plan, service_cases, strength_cases, qa) && return plan
-            if _wall_needs_length(plan, service_cases, strength_cases, qa)
-                Lf += step_m
-            else
-                B += step_m
-            end
+        # A straight wall lengthens equally about `sbar` when a combination
+        # leaves the kern, otherwise widens. State is (B, Lf).
+        function straight_step((B, Lf))
+            p = _straight_plan(legs[1], B, Lf, sbar)
+            _wall_cases_fit(p, service_cases, strength_cases, qa) && return (true, p)
+            _wall_needs_length(p, service_cases, strength_cases, qa) &&
+                return (false, (B, Lf + step_m))
+            return (false, (B + step_m, Lf))
         end
-        error(
+        straight_fail((B, Lf)) = error(
             "Straight wall footing did not keep every combination in the " *
             "ACI 336.2R §3.2.1 kern, with service q_max ≤ qa, after 80 " *
             "increments (B=$B m, L=$Lf m). The centroid stays on the gravity " *
             "resultant (corpus: aci-336-combined-footings-mats, page 6).")
+        return _grow_until_fit((plan.B, plan.along); step = straight_step,
+                               onfail = straight_fail)
     end
-    B = plan.B
-    held = plan
-    for _ in 1:80
-        _wall_cases_fit(held, service_cases, strength_cases, qa) && return held
-        B += step_m
-        held = _corner_plan_at_B(legs, held, B)
+
+    # A corner only widens: extending one free end would walk the centroid off
+    # the gravity resultant. State is the current plan.
+    function corner_step(held)
+        _wall_cases_fit(held, service_cases, strength_cases, qa) && return (true, held)
+        return (false, _corner_plan_at_B(legs, held, held.B + step_m))
     end
-    error(
+    corner_fail(_) = error(
         "Corner wall footing did not keep every combination in compression " *
         "by widening about the gravity plan. Extending one end would move " *
         "the centroid (ACI 336.2R §3.2.1, corpus: aci-336-combined-footings-mats, " *
         "page 6).")
+    return _grow_until_fit(plan; step = corner_step, onfail = corner_fail)
 end
 
 """Drop stations closer than 1 µm, after sorting."""

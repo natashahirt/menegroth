@@ -177,3 +177,41 @@ println("\n=== All strip footing validation tests passed! ===")
     @test !refused.ok
     @test accepted.ok
 end
+
+@testset "lateral combination stays on the gravity resultant" begin
+    # Equal service loads put the centroid 10 ft from the first column.
+    # The second combination moves the resultant to 2 ft. Eq. (3-1) needs
+    # the footing at least 6|e| = 48 ft long, still centered at 10 ft.
+    d1 = FoundationDemand(1; Pu=150.0kip, Ps=100.0kip, c1=12.0u"inch", c2=12.0u"inch")
+    d2 = FoundationDemand(2; Pu=150.0kip, Ps=100.0kip, c1=12.0u"inch", c2=12.0u"inch")
+    positions = [0.0u"ft", 20.0u"ft"]
+    soil = Soil(20.0ksf, 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa")
+    opts = StripParams(
+        material = RC_3000_60,
+        cover = 3.0u"inch",
+        min_depth = 16.0u"inch",
+        depth_increment = 4.0u"inch",
+        width_increment = 6.0u"inch",
+        check_development = false,
+    )
+    plain = design_footing(StripFooting(), [d1, d2], positions, soil; opts)
+    newtons(F) = ustrip(u"N", F)
+    service = [
+        [FootingAction(:g, newtons(100u"kip"), 0.0, 0.0),
+         FootingAction(:lat, newtons(180u"kip"), 0.0, 0.0)],
+        [FootingAction(:g, newtons(100u"kip"), 0.0, 0.0),
+         FootingAction(:lat, newtons(20u"kip"), 0.0, 0.0)],
+    ]
+    strength = [
+        [FootingAction(:gu, newtons(150u"kip"), 0.0, 0.0),
+         FootingAction(:lu, newtons(250u"kip"), 0.0, 0.0)],
+        [FootingAction(:gu, newtons(150u"kip"), 0.0, 0.0),
+         FootingAction(:lu, newtons(30u"kip"), 0.0, 0.0)],
+    ]
+    grown = design_footing(StripFooting(), [d1, d2], positions, soil; opts,
+                           column_service = service, column_strength = strength)
+    @test ustrip(u"ft", plain.L_ftg) < 30
+    @test ustrip(u"ft", grown.L_ftg) ≥ 48
+    e = abs(2.0u"ft" - 10.0u"ft")
+    @test e ≤ grown.L_ftg / 6 + 0.5u"inch"
+end

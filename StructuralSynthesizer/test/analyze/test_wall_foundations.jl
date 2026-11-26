@@ -83,8 +83,9 @@ end
         StructuralSynthesizer.GradeWallNode(UInt64(2), 1, 6.0, 0.0, 40.0, 30.0),
         StructuralSynthesizer.GradeWallNode(UInt64(3), 2, 0.0, 4.0, 20.0, 15.0),
     ]
-    samples, owners = StructuralSynthesizer.assign_grade_wall_nodes(
+    samples, owners, piece_ids = StructuralSynthesizer.assign_grade_wall_nodes(
         pieces, nodes, [0.25, 0.25])
+    @test sum(length, piece_ids) == sum(length, samples)
     @test owners[UInt64(1)][1] == 1
     total = sum(p for piece in samples for (_, p, _) in piece)
     @test total ≈ 160.0

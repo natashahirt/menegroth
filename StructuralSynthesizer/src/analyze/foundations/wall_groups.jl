@@ -342,8 +342,9 @@ end
 Put each node on one piece. A node that lands on two pieces, the shared
 corner, goes to the longer piece so the reaction is not counted twice.
 
-Returns `(samples, owners)`. `samples[k]` is `(station, pu, ps)` in metres
-and newtons. `owners[id]` is the piece index that kept the node.
+Returns `(samples, owners, piece_ids)`. `samples[k]` is `(station, pu, ps)`
+in metres and newtons, and `piece_ids[k]` is the node id of each sample in
+that same order. `owners[id]` is the piece index that kept the node.
 """
 function assign_grade_wall_nodes(pieces::Vector{WallFoundationPiece},
                                  nodes::Vector{GradeWallNode},
@@ -370,10 +371,12 @@ function assign_grade_wall_nodes(pieces::Vector{WallFoundationPiece},
         end
     end
     samples = [Tuple{Float64, Float64, Float64}[] for _ in pieces]
-    for (_, (k, s, pu, ps)) in owners
+    piece_ids = [UInt64[] for _ in pieces]
+    for (id, (k, s, pu, ps)) in owners
         push!(samples[k], (s, pu, ps))
+        push!(piece_ids[k], id)
     end
-    return samples, owners
+    return samples, owners, piece_ids
 end
 
 """
@@ -417,6 +420,7 @@ function collect_grade_wall_groups(struc)
 
     R_s = _service_reactions(struc)
     grade_nodes = GradeWallNode[]
+    nodes_by_id = Dict{UInt64, Asap.Node}()
     for (wi, nodes) in base_of
         for nd in nodes
             id = objectid(nd)
@@ -425,6 +429,7 @@ function collect_grade_wall_groups(struc)
             x = ustrip(u"m", nd.position[1])
             y = ustrip(u"m", nd.position[2])
             push!(grade_nodes, GradeWallNode(id, wi, x, y, pu, ps))
+            nodes_by_id[id] = nd
         end
     end
 
@@ -436,11 +441,14 @@ function collect_grade_wall_groups(struc)
         push!(ranges, a:length(pieces))
     end
     thick = [ustrip(u"m", w.thickness) for w in struc.walls]
-    samples, owners = assign_grade_wall_nodes(pieces, grade_nodes, thick)
+    samples, owners, piece_ids = assign_grade_wall_nodes(pieces, grade_nodes, thick)
     owner_piece = Dict{UInt64, Int}(id => rec[1] for (id, rec) in owners)
+    piece_nodes = [[nodes_by_id[id] for id in ids] for ids in piece_ids]
 
-    out = NamedTuple{(:group, :legs, :support_indices),
-                     Tuple{WallFoundationGroup, Vector{StructuralSizer.WallLineDemand}, Vector{Int}}}[]
+    Leg = StructuralSizer.WallLineDemand
+    out = NamedTuple{(:group, :legs, :support_indices, :service_cases, :strength_cases),
+                     Tuple{WallFoundationGroup, Vector{Leg}, Vector{Int},
+                           Vector{Vector{Leg}}, Vector{Vector{Leg}}}}[]
     for (g, group) in enumerate(groups)
         legs = _legs_from_samples(struc, pieces[ranges[g]], samples[ranges[g]])
         isempty(legs) && continue
@@ -451,7 +459,10 @@ function collect_grade_wall_groups(struc)
             get(owner_piece, id, 0) in owned || continue
             push!(supports, i)
         end
-        push!(out, (group = group, legs = legs, support_indices = supports))
+        service_cases, strength_cases = _wall_combination_cases(
+            struc, pieces[ranges[g]], samples[ranges[g]], piece_nodes[ranges[g]])
+        push!(out, (group = group, legs = legs, support_indices = supports,
+                    service_cases = service_cases, strength_cases = strength_cases))
     end
     return out
 end
@@ -526,6 +537,61 @@ function _legs_from_samples(struc, pieces, samples)
     return legs
 end
 
+"""
+One wall-line demand vector per service combination and per strength combination.
+
+Station order matches the gravity samples. A combination in net uplift is an
+empty vector at that index, so it stays aligned with the column actions.
+Empty when lateral reactions were not stored.
+"""
+function _wall_combination_cases(struc, pieces, samples, nodes)
+    struc.foundation_lateral === nothing && return (
+        Vector{StructuralSizer.WallLineDemand}[],
+        Vector{StructuralSizer.WallLineDemand}[])
+    actions = Tuple[]
+    for nds in nodes
+        for nd in nds
+            a = node_foundation_actions(struc, nd)
+            a === nothing && return (
+                Vector{StructuralSizer.WallLineDemand}[],
+                Vector{StructuralSizer.WallLineDemand}[])
+            push!(actions, a)
+        end
+    end
+    isempty(actions) && return (
+        Vector{StructuralSizer.WallLineDemand}[],
+        Vector{StructuralSizer.WallLineDemand}[])
+    labels(xs) = [x.label for x in xs]
+    for a in actions
+        (length(a.service) == length(actions[1].service) &&
+         length(a.strength) == length(actions[1].strength) &&
+         labels(a.service) == labels(actions[1].service) &&
+         labels(a.strength) == labels(actions[1].strength)) ||
+            throw(ArgumentError(
+                "Grade-wall nodes do not share ASCE 7 combination labels."))
+    end
+    service = [_legs_from_samples(struc, pieces, _samples_at(samples, actions, k, :service))
+               for k in eachindex(actions[1].service)]
+    strength = [_legs_from_samples(struc, pieces, _samples_at(samples, actions, k, :strength))
+                for k in eachindex(actions[1].strength)]
+    return service, strength
+end
+
+"""Sample rows with combination `k`'s vertical force in both `Pu` and `Ps`."""
+function _samples_at(samples, actions, k, kind)
+    idx = 1
+    out = [Tuple{Float64, Float64, Float64}[] for _ in samples]
+    for (piece, rows) in enumerate(samples)
+        for (s, _, _) in rows
+            a = actions[idx]
+            idx += 1
+            P = kind === :service ? a.service[k].P : a.strength[k].P
+            push!(out[piece], (s, P, P))
+        end
+    end
+    return out
+end
+
 _piece_length(piece) = hypot(piece.p2[1] - piece.p1[1], piece.p2[2] - piece.p1[2])
 
 """
@@ -558,15 +624,28 @@ function design_grade_wall_foundations(struc, demands, soil, opts)
             union!(claimed, enclosed, on_wall)
             col_demands = StructuralSizer.FoundationDemand[demands[i] for i in enclosed]
             positions = _support_positions_xy(struc, enclosed)
+            column_service, column_strength = _aligned_column_actions(struc, enclosed)
+            # A column without stored actions would mix its gravity Pu with a
+            # seismic wall line. Keep the gravity mat in that case.
+            wall_service = item.service_cases
+            wall_strength = item.strength_cases
+            if !isempty(enclosed) && isempty(column_service)
+                wall_service = Vector{StructuralSizer.WallLineDemand}[]
+                wall_strength = Vector{StructuralSizer.WallLineDemand}[]
+            end
             result = StructuralSizer.design_footing(
                 StructuralSizer.MatFoundation(), col_demands, positions, soil;
-                opts = opts.mat_params, walls = legs)
+                opts = opts.mat_params, walls = legs,
+                column_service = column_service, column_strength = column_strength,
+                wall_service = wall_service, wall_strength = wall_strength)
             idxs = vcat(enclosed, on_wall)
             push!(built, _wall_foundation(idxs, result, :mat, _group_wall_indices(group), mat))
         else
             union!(claimed, on_wall)
             result = StructuralSizer.design_footing(
-                StructuralSizer.StripFooting(), legs, soil; opts = opts.strip_params)
+                StructuralSizer.StripFooting(), legs, soil; opts = opts.strip_params,
+                service_cases = item.service_cases,
+                strength_cases = item.strength_cases)
             push!(built, _wall_foundation(on_wall, result, :wall_strip,
                                            _group_wall_indices(group), mat))
         end

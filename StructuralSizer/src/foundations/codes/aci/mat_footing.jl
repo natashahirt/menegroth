@@ -191,7 +191,9 @@ Compute the governing punching utilization across all columns.
 Uses per-column dimensions from `demands[j].c1`, `demands[j].c2`, `demands[j].shape`.
 Reused by all mat methods.
 """
-function _mat_punching_util(demands, plan, qu, d_eff, fc, λ, ϕv)
+function _mat_punching_util(demands, plan, qu, d_eff, fc, λ, ϕv;
+                            loads::Union{Nothing,Vector{FootingAction}}=nothing,
+                            q_node::Union{Nothing,Vector}=nothing)
     util = 0.0
     B, Lm = plan.B, plan.Lm
     xs_loc, ys_loc = plan.xs_loc, plan.ys_loc
@@ -245,8 +247,12 @@ function _mat_punching_util(demands, plan, qu, d_eff, fc, λ, ϕv)
         else
             (c1j + d_eff) * (c2j + d_eff)
         end
-        Vu_p = max(uconvert(u"lbf", demands[j].Pu - qu * Ac), 0.0u"lbf")
-        pch = punching_check(Vu_p, demands[j].Mux, demands[j].Muy,
+        Pu = loads === nothing ? demands[j].Pu : loads[j].P * u"N"
+        Mx = loads === nothing ? demands[j].Mux : loads[j].Mx * u"N*m"
+        My = loads === nothing ? demands[j].Muy : loads[j].My * u"N*m"
+        qj = q_node === nothing ? qu : q_node[j]
+        Vu_p = max(uconvert(u"lbf", Pu - qj * Ac), 0.0u"lbf")
+        pch = punching_check(Vu_p, Mx, My,
                               d_eff, fc, c1j, c2j;
                               position = pos_sym, shape = demands[j].shape,
                               λ = λ, ϕ = ϕv,
@@ -352,6 +358,178 @@ end
 # ─────────────────────────────────────────────────────────────────────────────
 
 """
+`(P_N, M_along_x, M_along_y)` of combination `k` about the mat centroid.
+
+`M_along_x` shifts the resultant along x: `Σ P (x − cx) + Σ My`.
+`M_along_y` shifts it along y: `Σ P (y − cy) + Σ Mx`.
+ACI 336.2R §4.1 (corpus: aci-336-combined-footings-mats, page 7).
+"""
+function _mat_combo_moments(column_actions, k, plan)
+    cx = ustrip(u"m", plan.x_left) + ustrip(u"m", plan.B) / 2
+    cy = ustrip(u"m", plan.y_bot) + ustrip(u"m", plan.Lm) / 2
+    P = 0.0
+    Mx = 0.0
+    My = 0.0
+    for (j, col) in enumerate(column_actions)
+        a = col[k]
+        P += a.P
+        Mx += a.P * (ustrip(u"m", plan.xs[j]) - cx) + a.My
+        My += a.P * (ustrip(u"m", plan.ys[j]) - cy) + a.Mx
+    end
+    return P, Mx, My
+end
+
+"""Pressure of one combination. `ex` is along x (`plan.B`); `ey` along y."""
+function _mat_combo_pressure(column_actions, k, plan)
+    P, Mx, My = _mat_combo_moments(column_actions, k, plan)
+    P <= 0 && return nothing
+    # `_eccentric_soil_pressure` divides the first moment by the 5th length
+    # and the second moment by the 4th. x is `plan.B`, y is `plan.Lm`.
+    qe = _eccentric_soil_pressure(P * u"N", Mx * u"N*m", My * u"N*m", plan.Lm, plan.B)
+    return qe
+end
+
+"""`(P, M_along_x, M_along_y)` of one wall line about the mat centroid."""
+function _mat_wall_moments(wall_legs, plan, service::Bool)
+    cx = ustrip(u"m", plan.x_left) + ustrip(u"m", plan.B) / 2
+    cy = ustrip(u"m", plan.y_bot) + ustrip(u"m", plan.Lm) / 2
+    P = Mx = My = 0.0
+    for leg in wall_legs
+        for smp in leg.samples
+            p = ustrip(u"N", service ? smp.Ps : smp.Pu)
+            x, y = _station_xy_m(leg, smp.s)
+            P += p
+            Mx += p * (x - cx)
+            My += p * (y - cy)
+        end
+    end
+    return P, Mx, My
+end
+
+"""
+Pressure of combination `k`.
+
+Column actions and the wall line of the same combination are added.
+Either may be absent. `nothing` when the combination is not in net compression.
+"""
+function _mat_case_pressure(plan, column_actions, k, wall_legs, service::Bool)
+    P = Mx = My = 0.0
+    if column_actions !== nothing && !isempty(column_actions) && k !== nothing
+        Pc, Mcx, Mcy = _mat_combo_moments(column_actions, k, plan)
+        P += Pc
+        Mx += Mcx
+        My += Mcy
+    end
+    if wall_legs !== nothing && !isempty(wall_legs)
+        Pw, Mwx, Mwy = _mat_wall_moments(wall_legs, plan, service)
+        P += Pw
+        Mx += Mwx
+        My += Mwy
+    end
+    P <= 1.0 && return nothing
+    return _eccentric_soil_pressure(P * u"N", Mx * u"N*m", My * u"N*m", plan.Lm, plan.B)
+end
+
+"""One column demand with combination `a` in place of the gravity factored loads."""
+function _demand_for_action(d::FoundationDemand, a::FootingAction)
+    return FoundationDemand(d.group_idx;
+        Pu = a.P * u"N", Ps = d.Ps,
+        Mux = a.Mx * u"N*m", Muy = a.My * u"N*m",
+        Vux = d.Vux, Vuy = d.Vuy,
+        c1 = d.c1, c2 = d.c2, shape = d.shape, uplift = a.P < 0)
+end
+
+function _mat_actions_fit(plan, column_service, column_strength, qa;
+                          wall_service::Vector{Vector{WallLineDemand}} = Vector{WallLineDemand}[],
+                          wall_strength::Vector{Vector{WallLineDemand}} = Vector{WallLineDemand}[])
+    for (actions, walls, service) in (
+            (column_service, wall_service, true),
+            (column_strength, wall_strength, false))
+        n = isempty(actions) ? length(walls) : length(first(actions))
+        n == 0 && continue
+        for k in 1:n
+            w = isempty(walls) ? nothing : walls[k]
+            cols = isempty(actions) ? nothing : actions
+            qe = _mat_case_pressure(plan, cols, cols === nothing ? nothing : k, w, service)
+            qe === nothing && continue
+            _eccentric_in_kern(qe) || return false
+            service && qe.q_max > qa && return false
+        end
+    end
+    return true
+end
+
+function _mat_with_overhang(opts::MatParams, oh::Length)
+    return MatParams(
+        material = opts.material,
+        cover = opts.cover,
+        bar_size_x = opts.bar_size_x,
+        bar_size_y = opts.bar_size_y,
+        min_depth = opts.min_depth,
+        depth_increment = opts.depth_increment,
+        size_increment = opts.size_increment,
+        edge_overhang = oh,
+        check_development = opts.check_development,
+        analysis_method = opts.analysis_method,
+        on_inapplicable = opts.on_inapplicable,
+        ϕ_flexure = opts.ϕ_flexure,
+        ϕ_shear = opts.ϕ_shear,
+        λ = opts.λ,
+        objective = opts.objective,
+    )
+end
+
+"""
+Equal overhang, at least the ordinary plan, large enough that every
+combination stays in the kern and every service combination has
+`q_max ≤ qa`. The centroid stays the center of the column box.
+ACI 336.2R §3.2.1 Eq. (3-1) (corpus: aci-336-combined-footings-mats, page 6).
+"""
+function _mat_opts_for_actions(positions, opts, demands, soil, walls,
+                               column_service, column_strength;
+                               wall_service::Vector{Vector{WallLineDemand}} = Vector{WallLineDemand}[],
+                               wall_strength::Vector{Vector{WallLineDemand}} = Vector{WallLineDemand}[])
+    isempty(column_service) && isempty(wall_service) && return opts
+    if !isempty(walls) && !isempty(column_service) && isempty(wall_service)
+        throw(ArgumentError(
+            "Mat combinations that include a wall line need that combination's " *
+            "wall reactions."))
+    end
+    isempty(column_service) || _strip_validate_actions(column_service, column_strength, length(demands))
+    if !isempty(column_service) && !isempty(wall_service)
+        length(wall_service) == length(first(column_service)) || throw(ArgumentError(
+            "Wall and column service combinations are not the same length."))
+        length(wall_strength) == length(first(column_strength)) || throw(ArgumentError(
+            "Wall and column strength combinations are not the same length."))
+    end
+    plan = _mat_plan_sizing(positions, opts; demands = demands, soil = soil, walls = walls)
+    oh = plan.overhang
+    step = opts.size_increment
+    for _ in 1:80
+        _mat_actions_fit(plan, column_service, column_strength, soil.qa;
+                         wall_service = wall_service, wall_strength = wall_strength) &&
+            return _mat_with_overhang(opts, oh)
+        oh = oh + step
+        plan = _mat_plan_sizing(positions, opts; demands = demands, soil = soil,
+                                walls = walls, overhang_override = oh)
+    end
+    error(
+        "Mat plan did not keep every ASCE 7-22 combination in the ACI 336.2R " *
+        "§3.2.1 kern, with service q_max ≤ qa, after 80 overhang increments " *
+        "(overhang=$oh). Eq. (3-1) is not applied as full contact when " *
+        "q_min < 0 (corpus: aci-336-combined-footings-mats, page 6).")
+end
+
+"""Width-average is `qu`. This is Eq. (3-1) at local `(x, y)` from the corner."""
+function _mat_q_point(qu, ex, ey, Bx, Ly, x, y)
+    Bf = ustrip(u"m", Bx)
+    Lf = ustrip(u"m", Ly)
+    along = Bf == 0 ? 0.0 : 6 * ustrip(u"m", ex) / Bf * (2 * ustrip(u"m", x) / Bf - 1)
+    across = Lf == 0 ? 0.0 : 6 * ustrip(u"m", ey) / Lf * (2 * ustrip(u"m", y) / Lf - 1)
+    return qu * (1 + along + across)
+end
+
+"""
     design_footing(::MatFoundation, demands, positions, soil; opts) → MatFootingResult
 
 Design a mat foundation per ACI 336.2R / ACI 318-11.
@@ -360,6 +538,13 @@ Dispatches on `opts.analysis_method`:
 - `RigidMat()`   — rigid body, strip statics (ACI 336.2R §4.2)
 - `ShuklaAFM()`  — analytical: Shukla + rigid envelope (ACI 336.2R §6.1.2)
 - `WinklerFEA()` — FEA plate on Winkler springs (ACI 336.2R §6.4)
+
+`column_service` and `column_strength` are one action vector per column,
+same combination order. Both empty, or both filled. `wall_service` and
+`wall_strength` are that same combination's wall line. The mat keeps equal
+overhang, so its centroid stays the center of the column and wall box, and
+the overhang grows until every combination is in the kern with service
+`q_max ≤ qa`. ACI 336.2R §3.2.1 Eq. (3-1).
 
 # Arguments
 - `demands::Vector{FoundationDemand}`: Factored & service loads per column.
@@ -379,11 +564,18 @@ function design_footing(::MatFoundation,
     walls::Vector{<:WallLineDemand} = WallLineDemand[],
     framed_I_B = 0.0u"m^4",
     framed_I_L = 0.0u"m^4",
+    column_service::Vector{Vector{FootingAction}} = Vector{FootingAction}[],
+    column_strength::Vector{Vector{FootingAction}} = Vector{FootingAction}[],
+    wall_service::Vector{Vector{WallLineDemand}} = Vector{WallLineDemand}[],
+    wall_strength::Vector{Vector{WallLineDemand}} = Vector{WallLineDemand}[],
 )
     N = length(demands)
     length(positions) == N ||
         throw(DimensionMismatch("positions and demands must match"))
 
+    opts = _mat_opts_for_actions(positions, opts, demands, soil, walls,
+                                 column_service, column_strength;
+                                 wall_service = wall_service, wall_strength = wall_strength)
     method = opts.analysis_method
     StructuralSizer.emit!(tc, :checker, "design_footing_mat_aci", "", :enter;
                           n_columns=N,
@@ -391,7 +583,11 @@ function design_footing(::MatFoundation,
                           qa_kPa=Float64(ustrip(u"kPa", soil.qa)))
     if method isa RigidMat
         _check_on_inapplicable(opts.on_inapplicable)
-        result = _design_mat_rigid(demands, positions, soil; opts = opts, walls = walls, tc = tc)
+        result = _design_mat_rigid(demands, positions, soil; opts = opts, walls = walls, tc = tc,
+                                   column_service = column_service,
+                                   column_strength = column_strength,
+                                   wall_service = wall_service,
+                                   wall_strength = wall_strength)
         reason = _rigid_mat_inapplicable(result, demands, positions, soil, walls, opts;
                                          framed_I_B = framed_I_B, framed_I_L = framed_I_L)
         if reason !== nothing
@@ -500,13 +696,14 @@ mat strip as that combined footing.
 function _rigid_mat_strip_moments(qu::Pressure, length_along::Length,
                                   width_across::Length,
                                   stations::Vector{<:Length},
-                                  loads::Vector{<:Force})
+                                  loads::Vector{<:Force};
+                                  ex::Length = 0.0u"ft")
     z = 0.0 * kip * u"ft"
     length(stations) == length(loads) || throw(ArgumentError(
         "mat strip: $(length(stations)) stations and $(length(loads)) loads."))
     isempty(loads) && return (M_pos = z, M_neg = z)
     diag = _strip_VM_diagram(length_along, width_across, qu, stations, loads;
-                             include_stations=true)
+                             include_stations=true, ex=ex)
     return (
         M_pos = max(maximum(diag.M_kipft), 0.0) * kip * u"ft",
         M_neg = max(-minimum(diag.M_kipft), 0.0) * kip * u"ft",
@@ -764,6 +961,10 @@ function _design_mat_rigid(
     opts::MatParams = MatParams(),
     walls::Vector{<:WallLineDemand} = WallLineDemand[],
     tc::Union{Nothing, TraceCollector} = nothing,
+    column_service::Vector{Vector{FootingAction}} = Vector{FootingAction}[],
+    column_strength::Vector{Vector{FootingAction}} = Vector{FootingAction}[],
+    wall_service::Vector{Vector{WallLineDemand}} = Vector{WallLineDemand}[],
+    wall_strength::Vector{Vector{WallLineDemand}} = Vector{WallLineDemand}[],
 )
     # Material / options. d uses these diameters on every plan attempt.
     # A smaller bar selected below does not raise d: the flexure and shear
@@ -812,6 +1013,32 @@ function _design_mat_rigid(
         x_sta, y_sta, P_sta = _mat_line_loads(plan, demands, walls)
         mom_x = _rigid_mat_strip_moments(qu, B, Lm, x_sta, P_sta)
         mom_y = _rigid_mat_strip_moments(qu, Lm, B, y_sta, P_sta)
+        if isempty(walls) && !isempty(column_strength)
+            for k in eachindex(first(column_strength))
+                qe = _mat_combo_pressure(column_strength, k, plan)
+                qe === nothing && continue
+                loads_k = [col[k].P * u"N" for col in column_strength]
+                mx = _rigid_mat_strip_moments(qe.qu, B, Lm, plan.xs_loc, loads_k; ex = qe.ex)
+                my = _rigid_mat_strip_moments(qe.qu, Lm, B, plan.ys_loc, loads_k; ex = qe.ey)
+                mom_x = (M_pos = max(mom_x.M_pos, mx.M_pos), M_neg = max(mom_x.M_neg, mx.M_neg))
+                mom_y = (M_pos = max(mom_y.M_pos, my.M_pos), M_neg = max(mom_y.M_neg, my.M_neg))
+            end
+        end
+        for k in eachindex(wall_strength)
+            isempty(wall_strength[k]) && continue
+            cols = isempty(column_strength) ? nothing : column_strength
+            qe = _mat_case_pressure(plan, cols, cols === nothing ? nothing : k,
+                                    wall_strength[k], false)
+            qe === nothing && continue
+            dem_k = cols === nothing ? demands : [
+                _demand_for_action(demands[j], column_strength[j][k])
+                for j in eachindex(demands)]
+            xs, ys, Ps = _mat_line_loads(plan, dem_k, wall_strength[k])
+            mx = _rigid_mat_strip_moments(qe.qu, B, Lm, xs, Ps; ex = qe.ex)
+            my = _rigid_mat_strip_moments(qe.qu, Lm, B, ys, Ps; ex = qe.ey)
+            mom_x = (M_pos = max(mom_x.M_pos, mx.M_pos), M_neg = max(mom_x.M_neg, mx.M_neg))
+            mom_y = (M_pos = max(mom_y.M_pos, my.M_pos), M_neg = max(mom_y.M_neg, my.M_neg))
+        end
         flex_pairs = ((mom_x.M_pos, Lm), (mom_x.M_neg, Lm), (mom_y.M_pos, B), (mom_y.M_neg, B))
 
         for iter in 1:60
@@ -819,8 +1046,39 @@ function _design_mat_rigid(
             d_eff < 6.0u"inch" && (h += h_incr; continue)
 
             util_p = _mat_punching_util(demands, plan, qu, d_eff, fc, λ, ϕv)
+            if isempty(walls) && !isempty(column_strength)
+                for k in eachindex(first(column_strength))
+                    qe = _mat_combo_pressure(column_strength, k, plan)
+                    qe === nothing && continue
+                    loads_k = [col[k] for col in column_strength]
+                    q_node = [_mat_q_point(qe.qu, qe.ex, qe.ey, B, Lm,
+                                           plan.xs_loc[j], plan.ys_loc[j])
+                              for j in eachindex(loads_k)]
+                    util_p = max(util_p, _mat_punching_util(
+                        demands, plan, qe.qu, d_eff, fc, λ, ϕv;
+                        loads = loads_k, q_node = q_node))
+                end
+            end
             if !isempty(walls)
                 util_p = max(util_p, _mat_wall_cantilever_util(walls, plan, qu, d_eff, fc, λ, ϕv))
+            end
+            for k in eachindex(wall_strength)
+                isempty(wall_strength[k]) && continue
+                cols = isempty(column_strength) ? nothing : column_strength
+                qe = _mat_case_pressure(plan, cols, cols === nothing ? nothing : k,
+                                        wall_strength[k], false)
+                qe === nothing && continue
+                util_p = max(util_p, _mat_wall_cantilever_util(
+                    wall_strength[k], plan, qe.q_max, d_eff, fc, λ, ϕv))
+                if cols !== nothing
+                    loads_k = [col[k] for col in column_strength]
+                    q_node = [_mat_q_point(qe.qu, qe.ex, qe.ey, B, Lm,
+                                           plan.xs_loc[j], plan.ys_loc[j])
+                              for j in eachindex(loads_k)]
+                    util_p = max(util_p, _mat_punching_util(
+                        demands, plan, qe.qu, d_eff, fc, λ, ϕv;
+                        loads = loads_k, q_node = q_node))
+                end
             end
             embeds = isempty(walls) || _bar_develops_in(
                 opts.bar_size_x, h - cover, fc, fy, λ, cover)
@@ -854,8 +1112,50 @@ function _design_mat_rigid(
 
         # ── Utilization ──
         util_punch = _mat_punching_util(demands, plan, qu, d_eff, fc, λ, ϕv)
+        if !isempty(column_service) || !isempty(wall_service)
+            nserv = isempty(column_service) ? length(wall_service) : length(first(column_service))
+            for k in 1:nserv
+                w = isempty(wall_service) ? nothing : wall_service[k]
+                cols = isempty(column_service) ? nothing : column_service
+                qe = _mat_case_pressure(plan, cols, cols === nothing ? nothing : k, w, true)
+                qe === nothing && continue
+                util_bearing = max(util_bearing,
+                    ustrip(u"kPa", qe.q_max) / ustrip(u"kPa", soil.qa))
+            end
+        end
+        if isempty(walls) && !isempty(column_strength)
+            for k in eachindex(first(column_strength))
+                qe = _mat_combo_pressure(column_strength, k, plan)
+                qe === nothing && continue
+                loads_k = [col[k] for col in column_strength]
+                q_node = [_mat_q_point(qe.qu, qe.ex, qe.ey, B, Lm,
+                                       plan.xs_loc[j], plan.ys_loc[j])
+                          for j in eachindex(loads_k)]
+                util_punch = max(util_punch, _mat_punching_util(
+                    demands, plan, qe.qu, d_eff, fc, λ, ϕv;
+                    loads = loads_k, q_node = q_node))
+            end
+        end
         if !isempty(walls)
             util_punch = max(util_punch, _mat_wall_cantilever_util(walls, plan, qu, d_eff, fc, λ, ϕv))
+        end
+        for k in eachindex(wall_strength)
+            isempty(wall_strength[k]) && continue
+            cols = isempty(column_strength) ? nothing : column_strength
+            qe = _mat_case_pressure(plan, cols, cols === nothing ? nothing : k,
+                                    wall_strength[k], false)
+            qe === nothing && continue
+            util_punch = max(util_punch, _mat_wall_cantilever_util(
+                wall_strength[k], plan, qe.q_max, d_eff, fc, λ, ϕv))
+            if cols !== nothing
+                loads_k = [col[k] for col in column_strength]
+                q_node = [_mat_q_point(qe.qu, qe.ex, qe.ey, B, Lm,
+                                       plan.xs_loc[j], plan.ys_loc[j])
+                          for j in eachindex(loads_k)]
+                util_punch = max(util_punch, _mat_punching_util(
+                    demands, plan, qe.qu, d_eff, fc, λ, ϕv;
+                    loads = loads_k, q_node = q_node))
+            end
         end
         utilization = max(util_bearing, util_punch)
 

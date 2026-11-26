@@ -23,6 +23,12 @@ struct FoundationLateralCases
     rho::Float64
     SDS::Float64
     supports::Vector{SupportFoundationCases}
+    "Unfactored reaction vectors for D, L, and the roof companion."
+    gravity_R::NTuple{3,Vector{Float64}}
+    "One reaction vector per wind case."
+    wind_R::Vector{Vector{Float64}}
+    "One reaction vector per seismic effect, before ρ."
+    qe_R::Vector{Vector{Float64}}
 end
 
 """
@@ -87,7 +93,8 @@ function foundation_lateral_cases(struc::BuildingStructure, basic::GravityBasicC
              for (j, R) in enumerate(qe_R)],
         ))
     end
-    return FoundationLateralCases(roof, Float64(rho), Float64(SDS), supports)
+    return FoundationLateralCases(roof, Float64(rho), Float64(SDS), supports,
+                                 gravity_R, wind_R, qe_R)
 end
 
 """
@@ -120,4 +127,44 @@ Compression is positive, matching `FoundationDemand.Pu`.
 function _support_footing_action(model, R, supp, label)
     gid = model.nodes[supp.node_idx].globalID
     return FootingAction(label, R[gid[3]], R[gid[4]], R[gid[5]])
+end
+
+"""
+Vertical reaction and the two plan moments at one node.
+
+`gid[3]` is the vertical component. A node with fewer than six dofs
+contributes no plan moment.
+"""
+function _node_reaction_action(node, R, label)
+    gid = node.globalID
+    P = R[gid[3]]
+    Mx = length(gid) >= 5 ? R[gid[4]] : 0.0
+    My = length(gid) >= 6 ? R[gid[5]] : 0.0
+    return FootingAction(label, P, Mx, My)
+end
+
+"""
+Service and strength actions at one Asap node.
+
+`nothing` when lateral cases have not been stored. The same combination
+list as [`foundation_actions_at`](@ref), so a wall station and a column
+share combination order.
+"""
+function node_foundation_actions(struc::BuildingStructure, node)
+    lat = struc.foundation_lateral
+    lat === nothing && return nothing
+    D = _node_reaction_action(node, lat.gravity_R[1], :D)
+    L = _node_reaction_action(node, lat.gravity_R[2], :L)
+    companion = _node_reaction_action(node, lat.gravity_R[3], :roof)
+    wind = [_node_reaction_action(node, R, Symbol("W$j"))
+            for (j, R) in enumerate(lat.wind_R)]
+    qe = [_node_reaction_action(node, R, Symbol("QE$j"))
+          for (j, R) in enumerate(lat.qe_R)]
+    service = foundation_combination_actions(
+        asce7_asd_foundation_combinations, D, L, companion, wind, qe;
+        roof=lat.roof, rho=lat.rho, SDS=lat.SDS)
+    strength = foundation_combination_actions(
+        asce7_strength_combinations, D, L, companion, wind, qe;
+        roof=lat.roof, rho=lat.rho, SDS=lat.SDS)
+    return (service = service, strength = strength)
 end

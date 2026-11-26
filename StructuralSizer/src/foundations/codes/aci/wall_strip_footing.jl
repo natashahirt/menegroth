@@ -22,29 +22,40 @@ function _check_on_inapplicable(s::Symbol)
 end
 
 """
-    design_footing(::StripFooting, legs, soil; opts) → StripFootingResult
+    design_footing(::StripFooting, legs, soil; opts, service_cases, strength_cases) → StripFootingResult
 
 Design one wall footing under `legs`. `n_columns` is 0. `B * L_ftg` is the
 contact area. `analysis` is `:rigid` or `:winkler`.
+
+`service_cases` and `strength_cases` are one leg vector per combination, in
+the same station order as `legs`. Both empty leaves the gravity design.
+A straight wall stays centered on the gravity resultant. A corner keeps its
+end overhangs and only widens.
 """
 function design_footing(::StripFooting,
                         legs::Vector{<:WallLineDemand},
                         soil::Soil;
                         opts::StripParams = StripParams(),
-                        tc::Union{Nothing, TraceCollector} = nothing)
+                        tc::Union{Nothing, TraceCollector} = nothing,
+                        service_cases::Vector{Vector{WallLineDemand}} = Vector{WallLineDemand}[],
+                        strength_cases::Vector{Vector{WallLineDemand}} = Vector{WallLineDemand}[])
     _check_on_inapplicable(opts.on_inapplicable)
     _validate_wall_legs(legs)
     StructuralSizer.emit!(tc, :checker, "design_footing_wall_aci", "", :enter;
                           n_legs = length(legs),
                           qa_kPa = Float64(ustrip(u"kPa", soil.qa)))
     plan = _size_wall_plan(legs, soil; step = opts.width_increment)
+    plan = _grow_wall_plan(legs, plan, service_cases, strength_cases, soil,
+                           opts.width_increment)
     fc = opts.material.concrete.fc′
     kr = wall_footing_kr(Ec(fc), soil.Es, plan.B * u"m", opts.min_depth, legs)
     rigid = kr >= 0.5
     if !rigid
         result = _wall_not_rigid(legs, soil, opts, plan, kr, tc)
     else
-        result = _design_wall_rigid(legs, soil, opts, plan, tc)
+        result = _design_wall_rigid(legs, soil, opts, plan, tc;
+                                    service_cases = service_cases,
+                                    strength_cases = strength_cases)
     end
     StructuralSizer.emit!(tc, :checker, "design_footing_wall_aci", "", :exit;
                           analysis = String(result.analysis),
@@ -56,8 +67,11 @@ end
 
 function design_footing(::StripFooting, leg::WallLineDemand, soil::Soil;
                         opts::StripParams = StripParams(),
-                        tc::Union{Nothing, TraceCollector} = nothing)
-    design_footing(StripFooting(), WallLineDemand[leg], soil; opts = opts, tc = tc)
+                        tc::Union{Nothing, TraceCollector} = nothing,
+                        service_cases::Vector{Vector{WallLineDemand}} = Vector{WallLineDemand}[],
+                        strength_cases::Vector{Vector{WallLineDemand}} = Vector{WallLineDemand}[])
+    design_footing(StripFooting(), WallLineDemand[leg], soil; opts = opts, tc = tc,
+                   service_cases = service_cases, strength_cases = strength_cases)
 end
 
 function _wall_not_rigid(legs, soil, opts, plan, kr, tc)
@@ -102,6 +116,157 @@ end
 function _q_bounds(coeff, rects)
     qs = [_q_at(coeff, x, y) for (x, y) in _union_vertices(rects)]
     return extrema(qs)
+end
+
+"""Signed vertical total and its station along one straight leg."""
+function _line_sbar(leg, service::Bool)
+    P = sb = 0.0
+    for smp in leg.samples
+        p = service ? _n(smp.Ps) : _n(smp.Pu)
+        P += p
+        sb += p * _m(smp.s)
+    end
+    return P, P == 0.0 ? 0.0 : sb / P
+end
+
+"""
+Linear pressure of one combination on the current plan.
+
+A straight footing's section is in the local frame: station `s` sits at
+`x0 + s`. A corner's section is in global coordinates. `nothing` when the
+combination is not in net compression.
+"""
+function _wall_case_coeff(plan, legs, service::Bool)
+    isempty(legs) && return nothing
+    if plan.straight
+        P, sbar = _line_sbar(legs[1], service)
+        P <= 1.0 && return nothing
+        return _linear_pressure(P, plan.x0 + sbar, 0.0, plan.section)
+    end
+    if service
+        r = _service_resultant_m(legs)
+        r.Ps <= 1.0 && return nothing
+        return _linear_pressure(r.Ps, r.x, r.y, plan.section)
+    end
+    r = _factored_resultant_m(legs)
+    r.Pu <= 1.0 && return nothing
+    return _linear_pressure(r.Pu, r.x, r.y, plan.section)
+end
+
+function _wall_cases_fit(plan, service_cases, strength_cases, qa)
+    for legs in service_cases
+        coeff = _wall_case_coeff(plan, legs, true)
+        coeff === nothing && continue
+        qmin, qmax = _q_bounds(coeff, plan.rects)
+        (qmin >= -1.0 && qmax <= qa * (1 + 1e-6)) || return false
+    end
+    for legs in strength_cases
+        coeff = _wall_case_coeff(plan, legs, false)
+        coeff === nothing && continue
+        qmin, _ = _q_bounds(coeff, plan.rects)
+        qmin >= -1.0 || return false
+    end
+    return true
+end
+
+"""True when a failing combination is outside the kern along the wall."""
+function _wall_needs_length(plan, service_cases, strength_cases, qa)
+    for (cases, service) in ((service_cases, true), (strength_cases, false))
+        for legs in cases
+            coeff = _wall_case_coeff(plan, legs, service)
+            coeff === nothing && continue
+            qmin, qmax = _q_bounds(coeff, plan.rects)
+            kern_bad = qmin < -1.0
+            pressure_bad = service && qmax > qa * (1 + 1e-6)
+            (kern_bad || pressure_bad) || continue
+            kern_bad && abs(coeff.ex) >= abs(coeff.ey) && return true
+        end
+    end
+    return false
+end
+
+"""Straight plan centered on the gravity station `sbar`."""
+function _straight_plan(leg, B, Lf, sbar)
+    x0 = Lf / 2 - sbar
+    half = B / 2
+    rect = _Aabb(0.0, Lf, -half, half)
+    sec = _union_section([rect])
+    P, _ = _line_sbar(leg, true)
+    coeff = _linear_pressure(max(P, 0.0), Lf / 2, 0.0, sec)
+    return (straight = true, B = B, area = B * Lf, along = Lf, x0 = x0,
+            rects = [rect], section = sec, service = coeff)
+end
+
+"""Overhangs past `p1` and `p2` implied by a leg's current rectangle."""
+function _overhangs_of(leg, rect)
+    x1, y1 = _m(leg.p1[1]), _m(leg.p1[2])
+    x2, y2 = _m(leg.p2[1]), _m(leg.p2[2])
+    if abs(y2 - y1) <= abs(x2 - x1)
+        left = min(x1, x2) - rect.x0
+        right = rect.x1 - max(x1, x2)
+        return x1 <= x2 ? (left, right) : (right, left)
+    end
+    bot = min(y1, y2) - rect.y0
+    top = rect.y1 - max(y1, y2)
+    return y1 <= y2 ? (bot, top) : (top, bot)
+end
+
+"""Same end overhangs, a new width. The along-wall centroid is not chased."""
+function _corner_plan_at_B(legs, plan, B)
+    rects = map(enumerate(legs)) do (i, leg)
+        oh1, oh2 = _overhangs_of(leg, plan.rects[i])
+        _leg_rectangle(leg, B, oh1, oh2)
+    end
+    sec = _union_section(rects)
+    r = _service_resultant_m(legs)
+    coeff = _linear_pressure(r.Ps, r.x, r.y, sec)
+    return (straight = false, B = B, area = sec.A, along = sec.A / B, x0 = 0.0,
+            rects = rects, section = sec, service = coeff)
+end
+
+"""
+Grow the plan until every combination fits, without moving the gravity centroid.
+
+A straight wall lengthens equally about its gravity resultant and widens.
+A corner only widens: extending one free end would walk the centroid off
+the gravity resultant. ACI 336.2R §3.2.1 Eq. (3-1) and §4.2 (corpus:
+aci-336-combined-footings-mats, pages 6–7). Partial contact is not applied.
+"""
+function _grow_wall_plan(legs, plan, service_cases, strength_cases, soil, step)
+    isempty(service_cases) && isempty(strength_cases) && return plan
+    qa = ustrip(u"Pa", soil.qa)
+    step_m = _m(step)
+    if plan.straight
+        _, sbar = _line_sbar(legs[1], true)
+        B = plan.B
+        Lf = plan.along
+        for _ in 1:80
+            plan = _straight_plan(legs[1], B, Lf, sbar)
+            _wall_cases_fit(plan, service_cases, strength_cases, qa) && return plan
+            if _wall_needs_length(plan, service_cases, strength_cases, qa)
+                Lf += step_m
+            else
+                B += step_m
+            end
+        end
+        error(
+            "Straight wall footing did not keep every combination in the " *
+            "ACI 336.2R §3.2.1 kern, with service q_max ≤ qa, after 80 " *
+            "increments (B=$B m, L=$Lf m). The centroid stays on the gravity " *
+            "resultant (corpus: aci-336-combined-footings-mats, page 6).")
+    end
+    B = plan.B
+    held = plan
+    for _ in 1:80
+        _wall_cases_fit(held, service_cases, strength_cases, qa) && return held
+        B += step_m
+        held = _corner_plan_at_B(legs, held, B)
+    end
+    error(
+        "Corner wall footing did not keep every combination in compression " *
+        "by widening about the gravity plan. Extending one end would move " *
+        "the centroid (ACI 336.2R §3.2.1, corpus: aci-336-combined-footings-mats, " *
+        "page 6).")
 end
 
 """Drop stations closer than 1 µm, after sorting."""
@@ -188,18 +353,20 @@ True when some bar from No. 3 up to the longitudinal bar develops inside
 The minimum of §15.8.2.2 is included, so a wall with no tension still has
 to be thick enough for its dowels.
 """
-function _dowels_fit(legs, plan, h, fc, fy, λ, ϕf, ϕb, opts)
+function _dowels_fit(legs, plan, h, fc, fy, λ, ϕf, ϕb, opts, As_extra = 0.0u"m^2")
     opts.check_development || return true
     As_b, _, _ = _wall_bearing(legs, plan, h, fc, fy, ϕb, opts)
     As = max(_wall_tension_steel(legs, ϕf, fy), As_b,
-             _wall_min_dowel(legs, opts.bar_size_long, fy))
+             _wall_min_dowel(legs, opts.bar_size_long, fy), As_extra)
     As <= zero(As) && return true
     return _bar_develops_in(opts.bar_size_long, h - opts.cover, fc, fy, λ, opts.cover)
 end
 
 # ── Rigid design ────────────────────────────────────────────────────────────
 
-function _design_wall_rigid(legs, soil, opts, plan, tc)
+function _design_wall_rigid(legs, soil, opts, plan, tc;
+                           service_cases::Vector{Vector{WallLineDemand}} = Vector{WallLineDemand}[],
+                           strength_cases::Vector{Vector{WallLineDemand}} = Vector{WallLineDemand}[])
     coeff, Pu = _factored_coeff(legs, plan)
     qmin, qmax = _q_bounds(coeff, plan.rects)
     if qmin < -1.0
@@ -224,10 +391,28 @@ function _design_wall_rigid(legs, soil, opts, plan, tc)
 
     h = opts.min_depth
     extremes = _wall_extremes(legs, plan, coeff)
+    q_gov_pa = max(qmax, 0.0)
+    As_tension_env = _wall_tension_steel(legs, ϕf, fy)
+    for case in strength_cases
+        c = _wall_case_coeff(plan, case, false)
+        c === nothing && continue
+        qmin_c, qmax_c = _q_bounds(c, plan.rects)
+        if qmin_c < -1.0
+            throw(ArgumentError(
+                "A strength combination lifts an edge of this wall footing. " *
+                "ACI 336.2R Eq. (3-2) to (3-4) (page 6) are not applied."))
+        end
+        ex = _wall_extremes(case, plan, c)
+        extremes = (Mbot = max(extremes.Mbot, ex.Mbot),
+                    Mtop = max(extremes.Mtop, ex.Mtop),
+                    Vmax = max(extremes.Vmax, ex.Vmax))
+        q_gov_pa = max(q_gov_pa, qmax_c)
+        As_tension_env = max(As_tension_env, _wall_tension_steel(case, ϕf, fy))
+    end
     passed = false
     d = h - cover - db / 2
-    q_gov = max(qmax, 0.0) * u"Pa"
     util_shear = 0.0
+    q_gov = q_gov_pa * u"Pa"
     for _ in 1:60
         d = h - cover - db / 2
         # ACI 318-11 §15.7 (corpus: aci-318-11, page 274): at least 6 in.
@@ -238,7 +423,8 @@ function _design_wall_rigid(legs, soil, opts, plan, tc)
         end
         util_shear, flex_ok = _wall_section_ok(
             legs, plan, extremes, q_gov, d, h, B, fc, fy, λ, ϕf, ϕv)
-        if util_shear <= 1.0 && flex_ok && _dowels_fit(legs, plan, h, fc, fy, λ, ϕf, ϕb, opts)
+        if util_shear <= 1.0 && flex_ok &&
+                _dowels_fit(legs, plan, h, fc, fy, λ, ϕf, ϕb, opts, As_tension_env)
             passed = true
             break
         end
@@ -247,7 +433,8 @@ function _design_wall_rigid(legs, soil, opts, plan, tc)
     passed || @warn("Wall footing thickness did not converge at h = $h")
 
     _wall_finish(legs, soil, opts, plan, extremes, q_gov, qmax, h, d, B,
-                 fc, fy, λ, ϕf, ϕv, ϕb, util_shear, :rigid)
+                 fc, fy, λ, ϕf, ϕv, ϕb, util_shear, :rigid;
+                 service_cases = service_cases, As_tension = As_tension_env)
 end
 
 function _wall_extremes(legs, plan, coeff)
@@ -555,7 +742,9 @@ end
 # ── Steel, dowels, result ───────────────────────────────────────────────────
 
 function _wall_finish(legs, soil, opts, plan, extremes, q_gov, q_service_peak,
-                      h, d, B, fc, fy, λ, ϕf, ϕv, ϕb, util_shear, analysis)
+                      h, d, B, fc, fy, λ, ϕf, ϕv, ϕb, util_shear, analysis;
+                      service_cases::Vector{Vector{WallLineDemand}} = Vector{WallLineDemand}[],
+                      As_tension = nothing)
     As_trans = _wall_transverse_steel(legs, plan, q_gov, h, d, B, fc, fy, ϕf)
 
     As_min_beam = _beam_min_steel(fc, fy, B, d)
@@ -566,7 +755,7 @@ function _wall_finish(legs, soil, opts, plan, extremes, q_gov, q_service_peak,
     As_bot = max(_flexural_steel_footing(Mbot, B, d, fc, fy, ϕf), As_floor)
     As_top = max(_flexural_steel_footing(Mtop, B, d, fc, fy, ϕf), As_floor)
 
-    As_tension = _wall_tension_steel(legs, ϕf, fy)
+    As_tension = something(As_tension, _wall_tension_steel(legs, ϕf, fy))
     As_bearing, Bn, sqA = _wall_bearing(legs, plan, h, fc, fy, ϕb, opts)
     As_dowel = max(As_tension, As_bearing, _wall_min_dowel(legs, opts.bar_size_long, fy))
 
@@ -580,7 +769,7 @@ function _wall_finish(legs, soil, opts, plan, extremes, q_gov, q_service_peak,
     # `q_service_peak` is a Pa float for the Winkler path and a Pa float from
     # `_q_bounds` for the rigid path. Both are service or factored; the rigid
     # caller passes the factored peak, so compare that path on Pu/Ps below.
-    util_q = _service_util(legs, plan, soil)
+    util_q = _service_util(legs, plan, soil, service_cases)
     if analysis === :winkler
         util_q = max(util_q, q_service_peak / ustrip(u"Pa", soil.qa))
     end
@@ -627,10 +816,19 @@ function _wall_transverse_steel(legs, plan, q_gov, h, d, B, fc, fy, ϕf)
     return As_unit * (plan.along * u"m" / bw)
 end
 
-function _service_util(legs, plan, soil)
+function _service_util(legs, plan, soil,
+                      service_cases::Vector{Vector{WallLineDemand}} = Vector{WallLineDemand}[])
     Ps = sum(_n(smp.Ps) for leg in legs for smp in leg.samples)
     q = Ps / plan.area
-    return q / ustrip(u"Pa", soil.qa)
+    qa = ustrip(u"Pa", soil.qa)
+    util = qa > 0 ? q / qa : Inf
+    for case in service_cases
+        coeff = _wall_case_coeff(plan, case, true)
+        coeff === nothing && continue
+        _, qmax = _q_bounds(coeff, plan.rects)
+        util = max(util, qa > 0 ? qmax / qa : Inf)
+    end
+    return util
 end
 
 function _beam_min_steel(fc, fy, B, d)

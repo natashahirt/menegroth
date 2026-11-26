@@ -155,3 +155,55 @@ end
                                                       tail_cover = 2.0u"inch")
     @test ustrip(u"inch", ldh) ≈ 0.7 * 0.02 * 60_000 / sqrt(4000) rtol = 1e-6
 end
+
+@testset "An offset combination lengthens a straight wall about the gravity resultant" begin
+    # Gravity resultant at midspan, so the plain footing is the 20 ft wall.
+    # The second combination's resultant is at 2 ft, 8 ft off center, so
+    # L/6 ≥ 8 ft and L ≥ 48 ft. ACI 336.2R §3.2.1 Eq. (3-1).
+    samples = [
+        WallLineSample(0.0u"ft", 140.0u"kip", 100.0u"kip"),
+        WallLineSample(20.0u"ft", 140.0u"kip", 100.0u"kip"),
+    ]
+    leg = WallLineDemand(1, (0.0u"ft", 0.0u"ft"), (20.0u"ft", 0.0u"ft"),
+                         8.0u"inch", 10.0u"ft", samples)
+    heavy = [
+        WallLineSample(0.0u"ft", 252.0u"kip", 180.0u"kip"),
+        WallLineSample(20.0u"ft", 28.0u"kip", 20.0u"kip"),
+    ]
+    leg2 = WallLineDemand(1, leg.p1, leg.p2, leg.tw, leg.hw, heavy)
+    soil_hi = Soil(20.0u"ksf", 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa";
+                   ks = 25_000.0u"kN/m^3")
+    opts = StripParams(; check_development = false, width_increment = 6.0u"inch",
+                       depth_increment = 3.0u"inch", min_depth = 12.0u"inch")
+    plain = design_footing(StripFooting(), leg, soil_hi; opts = opts)
+    grown = design_footing(StripFooting(), leg, soil_hi; opts = opts,
+                           service_cases = [WallLineDemand[leg2]],
+                           strength_cases = [WallLineDemand[leg2]])
+    @test ustrip(u"ft", plain.L_ftg) < 25
+    @test ustrip(u"ft", grown.L_ftg) >= 48
+    @test grown.analysis == :rigid
+end
+
+@testset "A corner widens and does not extend one end" begin
+    function leg(idx, p1, p2, stations, Ps)
+        samples = [WallLineSample(s, 1.4 * Ps, Ps) for s in stations]
+        WallLineDemand(idx, p1, p2, 8.0u"inch", 10.0u"ft", samples)
+    end
+    long = leg(1, (0.0u"ft", 0.0u"ft"), (20.0u"ft", 0.0u"ft"),
+               (0.0u"ft", 20.0u"ft"), 40.0u"kip")
+    short = leg(2, (0.0u"ft", 0.0u"ft"), (0.0u"ft", 12.0u"ft"),
+                (6.0u"ft", 12.0u"ft"), 40.0u"kip")
+    heavy_long = leg(1, long.p1, long.p2, (0.0u"ft", 20.0u"ft"), 200.0u"kip")
+    heavy_short = leg(2, short.p1, short.p2, (6.0u"ft", 12.0u"ft"), 200.0u"kip")
+    soil_hi = Soil(4.0u"ksf", 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa";
+                   ks = 25_000.0u"kN/m^3")
+    step = 6.0u"inch"
+    plan = StructuralSizer._size_wall_plan([long, short], soil_hi; step = step)
+    grown = StructuralSizer._grow_wall_plan(
+        [long, short], plan, [[heavy_long, heavy_short]], Vector{WallLineDemand}[],
+        soil_hi, step)
+    @test grown.straight == false
+    @test grown.B > plan.B
+    @test grown.rects[1].x1 - grown.rects[1].x0 ≈ plan.rects[1].x1 - plan.rects[1].x0
+    @test grown.rects[2].y1 - grown.rects[2].y0 ≈ plan.rects[2].y1 - plan.rects[2].y0
+end

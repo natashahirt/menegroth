@@ -103,11 +103,15 @@ end
 
 """
 One strength combination's `(Pu, Mux, Muy)` and the heaviest allowable
-vertical force as `Ps`, for a strip or mat that still takes one demand.
+vertical force as `Ps`, for a mat that still takes one demand.
 
 The pair `(Pu, Mux, Muy)` is one strength combination: the compressive
 one with the largest moment. `Ps` is the largest compressive allowable-stress
-vertical force. Spread footings do not use this. They check every combination.
+vertical force. Spread footings do not use this. A column strip stays
+centered on the gravity resultant and checks every combination on its own
+forces. A mat keeps this demand for the section and also checks every
+combination: the plan grows, still centered on the column box, until each
+one is inside the kern.
 
 No stored lateral cases returns `demand` unchanged.
 """
@@ -126,6 +130,38 @@ function _lateral_column_demand(struc::BuildingStructure, demand)
         Muy=uconvert(unit(demand.Muy), gov.My * u"N*m"),
         Vux=demand.Vux, Vuy=demand.Vuy, Ps=Ps,
         c1=demand.c1, c2=demand.c2, shape=demand.shape, uplift=false)
+end
+
+"""
+Service and strength actions for each support in `indices`, one vector per
+support, same combination order.
+
+Empty when any support has no stored lateral cases. Lengths or labels that
+do not match are an error: a strip cannot check a combination that is
+missing at one column.
+"""
+function _aligned_column_actions(struc::BuildingStructure, indices)
+    empty_s = Vector{StructuralSizer.FootingAction}[]
+    lists = NamedTuple[]
+    for i in indices
+        actions = foundation_actions_at(struc, i)
+        actions === nothing && return empty_s, empty_s
+        push!(lists, actions)
+    end
+    isempty(lists) && return empty_s, empty_s
+    slab = [a.label for a in lists[1].service]
+    ulab = [a.label for a in lists[1].strength]
+    for a in lists
+        (length(a.service) == length(slab) &&
+            [x.label for x in a.service] == slab) || throw(ArgumentError(
+            "Foundation actions: service combinations are not the same at " *
+            "every column of this footing."))
+        (length(a.strength) == length(ulab) &&
+            [x.label for x in a.strength] == ulab) || throw(ArgumentError(
+            "Foundation actions: strength combinations are not the same at " *
+            "every column of this footing."))
+    end
+    return [a.service for a in lists], [a.strength for a in lists]
 end
 
 """True when every support in `idxs` has factored uplift."""

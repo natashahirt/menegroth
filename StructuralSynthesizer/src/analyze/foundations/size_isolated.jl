@@ -143,11 +143,14 @@ function _size_fnd_aci!(struc, f_idx, fnd, n_supp, demands, soil, opts;
             "corpus: aci-318-11, page 275).")
         # Mat foundation — all supports in one slab
         mat_demands = [_lateral_column_demand(struc, demands[i]) for i in fnd.support_indices]
+        column_service, column_strength = _aligned_column_actions(
+            struc, fnd.support_indices)
         positions = _support_positions_xy(struc, fnd.support_indices)
         framed = _mat_framed_inertia(struc, fnd.support_indices)
         result = StructuralSizer.design_footing(StructuralSizer.MatFoundation(), 
             mat_demands, positions, soil; opts=opts.mat_params, tc=tc,
-            framed_I_B = framed.I_B, framed_I_L = framed.I_L)
+            framed_I_B = framed.I_B, framed_I_L = framed.I_L,
+            column_service = column_service, column_strength = column_strength)
         _assign_foundation!(struc, f_idx, fnd, result, :mat, mat)
 
     elseif fnd.foundation_type == :spread && n_supp == 1
@@ -163,13 +166,18 @@ function _size_fnd_aci!(struc, f_idx, fnd, n_supp, demands, soil, opts;
         # ACI 318-11 §15.8.1.2(b) (corpus: aci-318-11, page 275): a mixed-sign
         # couple must be a strip so tensile interface steel is designed, not
         # omitted by an isolated spread.
-        strip_demands = [_lateral_column_demand(struc, demands[i]) for i in fnd.support_indices]
+        # Gravity demands keep the centroid on the D+L resultant. The
+        # action lists are the other combinations, each with its own forces.
+        strip_demands = [demands[i] for i in fnd.support_indices]
+        column_service, column_strength = _aligned_column_actions(
+            struc, fnd.support_indices)
         axes = _support_strip_axes(struc, fnd.support_indices)
         results = map(axes) do axis
             positions = _support_positions_along_axis(struc, fnd.support_indices, axis)
             StructuralSizer.design_footing(StructuralSizer.StripFooting(),
                 strip_demands, positions, soil; opts=opts.strip_params, tc=tc,
-                strip_axis=axis)
+                strip_axis=axis,
+                column_service=column_service, column_strength=column_strength)
         end
         result = _governing_strip_result(results)
         if _mixed_sign_Pu(demands, fnd.support_indices)

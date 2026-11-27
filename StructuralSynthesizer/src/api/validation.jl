@@ -433,6 +433,29 @@ function validate_input(input::APIInput)
                         fo.strip_params.analysis_method, API_STRIP_ANALYSIS_METHODS)
                 end
             end
+            if fo.stability !== nothing
+                st = fo.stability
+                # Bowles Table 4-5 ranges (corpus: textbook-bowles-foundation-
+                # analysis-design-5e, PDF pages 252–253): 0.5 ≤ δ/φ ≤ 1 and
+                # 0.6 ≤ cₐ/c ≤ 1. The counteracting dead factor is a fraction.
+                if st.delta_ratio !== nothing && !(0.5 <= st.delta_ratio <= 1.0)
+                    _push_range!(errors, "foundation_options.stability.delta_ratio",
+                        st.delta_ratio, "Must be between 0.5 and 1 (Bowles Table 4-5).")
+                end
+                if st.ca_ratio !== nothing && !(0.6 <= st.ca_ratio <= 1.0)
+                    _push_range!(errors, "foundation_options.stability.ca_ratio",
+                        st.ca_ratio, "Must be between 0.6 and 1 (Bowles Table 4-5 Note 3).")
+                end
+                if st.dead_counteracting_factor !== nothing &&
+                        !(0.0 < st.dead_counteracting_factor <= 1.0)
+                    _push_range!(errors, "foundation_options.stability.dead_counteracting_factor",
+                        st.dead_counteracting_factor, "Must be in (0, 1].")
+                end
+                if st.concrete_unit_weight_pcf !== nothing && st.concrete_unit_weight_pcf <= 0.0
+                    _push_range!(errors, "foundation_options.stability.concrete_unit_weight_pcf",
+                        st.concrete_unit_weight_pcf, "Must be positive.")
+                end
+            end
         end
     end
 

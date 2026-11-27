@@ -125,6 +125,34 @@ Base.@kwdef mutable struct APIMatParams
     analysis_method::Union{String, Nothing} = nothing  # "rigid" | "shukla" | "winkler"
 end
 
+"""
+Optional global-stability (sliding/overturning/uplift) knobs from JSON.
+
+Presence of this block turns the ASCE 7-22 global-stability checks ON for
+every shallow-footing type (spread/strip/mat); omitting it reproduces the
+pre-stability behaviour exactly. Each field is optional and falls back to the
+`StructuralSizer.StabilityParams` default (a flagged engineering-judgment
+value — see that struct's docstring). The soil friction angle `φ`, cohesion
+`c`, and unit weight `γ` come from the named `foundation_soil` preset.
+
+- `delta_ratio`: `δ = delta_ratio·φ` base friction (Bowles Table 4-5,
+  `0.5 ≤ ratio ≤ 1`). Default 0.5.
+- `ca_ratio`: `cₐ = ca_ratio·c` base adhesion (Bowles Table 4-5 Note 3,
+  `0.6 ≤ ratio ≤ 1`). Default 0.6.
+- `include_passive`: include the passive-pressure resistance term. Default true.
+- `concrete_unit_weight_pcf`: footing concrete unit weight for uplift
+  resistance, pounds per cubic foot. Default 150 pcf (≈ 23.6 kN/m³).
+- `dead_counteracting_factor`: factor on the stabilizing self-weight,
+  matching ASCE 7-22 comb. 7a `0.6D`. Default 0.6.
+"""
+Base.@kwdef mutable struct APIStabilityParams
+    delta_ratio::Union{Float64, Nothing} = nothing
+    ca_ratio::Union{Float64, Nothing} = nothing
+    include_passive::Union{Bool, Nothing} = nothing
+    concrete_unit_weight_pcf::Union{Float64, Nothing} = nothing
+    dead_counteracting_factor::Union{Float64, Nothing} = nothing
+end
+
 """Optional foundation options from JSON (strategy + per-type overrides)."""
 Base.@kwdef mutable struct APIFoundationOptions
     strategy::String = "auto"
@@ -132,6 +160,7 @@ Base.@kwdef mutable struct APIFoundationOptions
     spread_params::Union{APISpreadParams, Nothing} = nothing
     strip_params::Union{APIStripParams, Nothing} = nothing
     mat_params::Union{APIMatParams, Nothing} = nothing
+    stability::Union{APIStabilityParams, Nothing} = nothing
 end
 
 """
@@ -270,6 +299,7 @@ StructTypes.StructType(::Type{APIMaterials}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APISpreadParams}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIStripParams}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIMatParams}) = StructTypes.Mutable()
+StructTypes.StructType(::Type{APIStabilityParams}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIFoundationOptions}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIBeamCatalogBounds}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIPixelFrameOptions}) = StructTypes.Mutable()

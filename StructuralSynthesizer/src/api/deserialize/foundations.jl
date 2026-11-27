@@ -99,6 +99,36 @@ function _api_to_mat_params(api_mat::APIMatParams, rc::StructuralSizer.Reinforce
     )
 end
 
+"""
+Resolve the optional API stability block into a `StructuralSizer.StabilityParams`.
+Each field falls back to the StabilityParams default. `concrete_unit_weight_pcf`
+is pounds per cubic foot → `lbf/ft³`; StabilityParams stores it as a unitful
+quantity and converts internally.
+"""
+function _api_to_stability_params(s::APIStabilityParams)
+    def = StructuralSizer.StabilityParams()
+    cuw = s.concrete_unit_weight_pcf !== nothing ?
+        s.concrete_unit_weight_pcf * u"lbf/ft^3" : def.concrete_unit_weight
+    return StructuralSizer.StabilityParams(
+        delta_ratio = something(s.delta_ratio, def.delta_ratio),
+        ca_ratio = something(s.ca_ratio, def.ca_ratio),
+        include_passive = something(s.include_passive, def.include_passive),
+        concrete_unit_weight = cuw,
+        dead_counteracting_factor =
+            something(s.dead_counteracting_factor, def.dead_counteracting_factor),
+    )
+end
+
+"""
+Return a copy of footing-param block `p` with only its `stability` field
+replaced. Uses the struct's positional constructor over `fieldnames`, so every
+other field is preserved exactly (no field is silently reset to a default).
+"""
+function _with_stability(p::T, stab) where {T}
+    vals = map(f -> f === :stability ? stab : getfield(p, f), fieldnames(T))
+    return T(vals...)
+end
+
 """Build FoundationOptions from API params. Uses foundation_concrete + materials.rebar for RC material."""
 function _resolve_foundation_options(api_params::APIParams, fdn_conc::StructuralSizer.Concrete, reb::StructuralSizer.RebarSteel)
     rc = StructuralSizer.ReinforcedConcreteMaterial(fdn_conc, reb)
@@ -108,6 +138,7 @@ function _resolve_foundation_options(api_params::APIParams, fdn_conc::Structural
     spread_params = def_opts.spread_params
     strip_params = def_opts.strip_params
     mat_params = def_opts.mat_params
+    stability = nothing
 
     if api_params.foundation_options !== nothing
         fo = api_params.foundation_options
@@ -125,11 +156,22 @@ function _resolve_foundation_options(api_params::APIParams, fdn_conc::Structural
         if fo.mat_params !== nothing
             mat_params = _api_to_mat_params(fo.mat_params, rc)
         end
+        # Opt-in global-stability checks, applied uniformly to every footing
+        # type (ASCE 7-22 §2.4 counteracting combinations). Absent → unchanged.
+        if fo.stability !== nothing
+            stability = _api_to_stability_params(fo.stability)
+        end
     else
         # Apply top-level foundation_concrete + rebar to default option blocks
         spread_params = StructuralSizer.SpreadParams(material = rc)
         strip_params = StructuralSizer.StripParams(material = rc)
         mat_params = StructuralSizer.MatParams(material = rc)
+    end
+
+    if stability !== nothing
+        spread_params = _with_stability(spread_params, stability)
+        strip_params = _with_stability(strip_params, stability)
+        mat_params = _with_stability(mat_params, stability)
     end
 
     return StructuralSizer.FoundationOptions(

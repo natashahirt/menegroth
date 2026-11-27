@@ -119,28 +119,37 @@ function foundation_actions_at(struc::BuildingStructure, idx::Int)
 end
 
 """
-Vertical reaction and the two plan moments.
+Vertical reaction, the two plan moments, and the two horizontal base shears.
 
-`R[gid[3]]` is the same vertical component `_service_reactions` reads.
-Compression is positive, matching `FoundationDemand.Pu`.
+`R[gid[3]]` is the same vertical component `_service_reactions` reads
+(compression positive, matching `FoundationDemand.Pu`). `R[gid[1]]` and
+`R[gid[2]]` are the horizontal reactions in global x and y — the base shear
+the footing must resist for the global-stability (sliding) check, which uses
+their resultant magnitude. `R[gid[4]]`/`R[gid[5]]` are the plan moments.
 """
 function _support_footing_action(model, R, supp, label)
     gid = model.nodes[supp.node_idx].globalID
-    return FootingAction(label, R[gid[3]], R[gid[4]], R[gid[5]])
+    return FootingAction(label, R[gid[3]], R[gid[4]], R[gid[5]],
+                         R[gid[1]], R[gid[2]])
 end
 
 """
-Vertical reaction and the two plan moments at one node.
+Vertical reaction, the two plan moments, and the two horizontal base shears
+at one node.
 
-`gid[3]` is the vertical component. A node with fewer than six dofs
-contributes no plan moment.
+`gid[3]` is the vertical component; `gid[1]`/`gid[2]` are the horizontal
+base shears (global x/y) the sliding check resists via their resultant. A
+node with fewer than six dofs contributes no plan moment, but a translational
+node (≥ 3 dofs) still carries the horizontal reactions.
 """
 function _node_reaction_action(node, R, label)
     gid = node.globalID
     P = R[gid[3]]
     Mx = length(gid) >= 5 ? R[gid[4]] : 0.0
     My = length(gid) >= 6 ? R[gid[5]] : 0.0
-    return FootingAction(label, P, Mx, My)
+    Hx = R[gid[1]]
+    Hy = R[gid[2]]
+    return FootingAction(label, P, Mx, My, Hx, Hy)
 end
 
 """

@@ -130,6 +130,7 @@ function api_input_schema()
                     "spread_params" => "Optional. cover_in, min_depth_in, bar_size, depth_increment_in, size_increment_in (inches).",
                     "strip_params" => "Optional. cover_in, min_depth_in, bar_size_long, bar_size_trans, width_increment_in, max_depth_ratio, merge_gap_factor, eccentricity_limit, analysis_method ($(join(API_STRIP_ANALYSIS_METHODS, " | "))).",
                     "mat_params" => "Optional. cover_in, min_depth_in, bar_size_x, bar_size_y, depth_increment_in, edge_overhang_in, analysis_method ($(join(API_MAT_ANALYSIS_METHODS, " | "))).",
+                    "stability" => "Optional. Presence turns ON the ASCE 7-22 global-stability checks (sliding/overturning/uplift) for all footing types; uses foundation_soil φ, c, γ. Fields (all optional): delta_ratio (0.5–1), ca_ratio (0.6–1), include_passive (bool), concrete_unit_weight_pcf, dead_counteracting_factor.",
                 ),
             ),
         ),

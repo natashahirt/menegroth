@@ -218,4 +218,69 @@ using Test
         @test res_slide.B ≥ base.B
         @test res_slide.checks.sliding ≤ 1.0 + 1e-6
     end
+
+    @testset "mat integration: aggregates columns, reports checks, grows plan" begin
+        newtons(F) = ustrip(u"N", F)
+        spacing = 20.0u"ft"
+        demands = FoundationDemand[]
+        positions = NTuple{2, typeof(0.0u"ft")}[]
+        for (i, x) in enumerate((0.0u"ft", spacing)), (j, y) in enumerate((0.0u"ft", spacing))
+            push!(demands, FoundationDemand((i - 1) * 2 + j;
+                Pu = 360.0u"kip", Ps = 250.0u"kip", c1 = 18.0u"inch", c2 = 18.0u"inch"))
+            push!(positions, (x, y))
+        end
+        N = length(demands)
+        soilm = Soil(3.0u"ksf", 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa";
+                     ks = 30_000.0u"kN/m^3")
+        mkmat(stability) = MatParams(material = RC_4000_60, bar_size_x = 8,
+            bar_size_y = 8, cover = 3.0u"inch", min_depth = 20.0u"inch",
+            depth_increment = 1.0u"inch", analysis_method = WinklerFEA(),
+            stability = stability)
+
+        # Gravity-only: stability ON vs OFF identical, checks report 0 (ON) or
+        # NaN (OFF). The flexible FEA method is used, but stability is a rigid-
+        # body check applied at the top level regardless of the method.
+        svc = [[FootingAction(:g, newtons(250u"kip"), 0.0, 0.0, 0.0, 0.0)] for _ in 1:N]
+        str = [[FootingAction(:gu, newtons(360u"kip"), 0.0, 0.0, 0.0, 0.0)] for _ in 1:N]
+        off = design_footing(MatFoundation(), demands, positions, soilm;
+            opts = mkmat(nothing), column_service = svc, column_strength = str)
+        on = design_footing(MatFoundation(), demands, positions, soilm;
+            opts = mkmat(StabilityParams()), column_service = svc, column_strength = str)
+        @test on.B ≈ off.B
+        @test on.D ≈ off.D
+        @test on.L_ftg ≈ off.L_ftg
+        @test on.checks.sliding == 0.0
+        @test on.checks.uplift == 0.0
+        @test isnan(off.checks.sliding)
+
+        # Base shear split across all four columns → the aggregate is their sum
+        # (ΣHx = 4·8 = 32 kip), below the friction ceiling. Sliding is finite
+        # and folded into the governing utilization.
+        P_c7a = newtons(0.6 * 150u"kip")
+        svc_h = [[FootingAction(:g, newtons(250u"kip"), 0.0, 0.0, 0.0, 0.0),
+                  FootingAction(:c7a, P_c7a, 0.0, 0.0, newtons(8u"kip"), 0.0)] for _ in 1:N]
+        res_h = design_footing(MatFoundation(), demands, positions, soilm;
+            opts = mkmat(StabilityParams()), column_service = svc_h, column_strength = str)
+        @test isfinite(res_h.checks.sliding)
+        @test res_h.checks.sliding > 0.0
+        @test res_h.checks.sliding ≤ 1.0 + 1e-6
+        @test res_h.utilization ≥ res_h.checks.sliding - 1e-9
+
+        # On clay (φ = 0, no friction) the adhesion resistance cₐ·B·Lm grows
+        # with the mat area, so a large base shear is resolved by growing the
+        # uniform overhang. The stabilized mat is at least as wide as the
+        # gravity baseline, and sliding is driven to ≤ 1.
+        clay = Soil(3.0u"ksf", 18.0u"kN/m^3", 0.0, 50.0u"kPa", 20.0u"MPa";
+                    ks = 30_000.0u"kN/m^3")
+        base = design_footing(MatFoundation(), demands, positions, clay;
+            opts = mkmat(StabilityParams()), column_service = svc, column_strength = str)
+        svc_slide = [[FootingAction(:g, newtons(250u"kip"), 0.0, 0.0, 0.0, 0.0),
+                      FootingAction(:c7a, P_c7a, 0.0, 0.0, newtons(150u"kip"), 0.0)]
+                     for _ in 1:N]
+        res_slide = design_footing(MatFoundation(), demands, positions, clay;
+            opts = mkmat(StabilityParams()), column_service = svc_slide,
+            column_strength = str)
+        @test res_slide.B ≥ base.B
+        @test res_slide.checks.sliding ≤ 1.0 + 1e-6
+    end
 end

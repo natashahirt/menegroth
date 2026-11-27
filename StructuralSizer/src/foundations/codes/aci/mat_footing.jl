@@ -389,6 +389,82 @@ function _mat_combo_pressure(column_actions, k, plan)
     return qe
 end
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Global stability (sliding / overturning / uplift) of the whole mat
+# ─────────────────────────────────────────────────────────────────────────────
+# Opt-in and pure-column only: a wall line on a mat carries no horizontal-shear
+# channel (WallLineDemand.samples are Ps/Pu/s), so sliding cannot be formed for
+# it. Mats with walls leave the stability checks NaN, alongside the deferred
+# wall-footing stability. Demand/resistance basis: see stability.jl.
+
+"""
+    _mat_aggregate_actions(column_actions, plan) -> Vector{FootingAction}
+
+One whole-mat rigid-body action per combination for the global-stability
+checks. [`_mat_combo_moments`](@ref) gives the combination's total vertical
+`ΣP` and the centroid moments `M_along_x` (eccentricity along x → `plan.B`)
+and `M_along_y` (along y → `plan.Lm`). The slots are arranged so that
+`footing_stability_utils(agg, plan.B, plan.Lm, …)` — which pairs its `Mx`
+slot with the `L` argument and its `My` slot with the `B` argument — maps
+`M_along_x` to `plan.B` and `M_along_y` to `plan.Lm`. The horizontal base
+shears sum directly (`ΣHx`, `ΣHy`); sliding uses their resultant magnitude.
+"""
+function _mat_aggregate_actions(column_actions, plan)
+    isempty(column_actions) && return FootingAction[]
+    K = length(first(column_actions))
+    out = Vector{FootingAction}(undef, K)
+    for k in 1:K
+        P, M_along_x, M_along_y = _mat_combo_moments(column_actions, k, plan)
+        Hx = sum(col[k].Hx for col in column_actions)
+        Hy = sum(col[k].Hy for col in column_actions)
+        out[k] = FootingAction(first(column_actions)[k].label,
+                               P, M_along_y, M_along_x, Hx, Hy)
+    end
+    return out
+end
+
+"""
+True when the sliding/uplift stability floor holds for this mat `plan` at the
+minimum thickness, over the pure-column service aggregate. Overturning is left
+to the (stricter) ACI 336.2R kern sizing, matching the strip/spread floors.
+Returns `true` (no constraint) whenever mat stability is inactive.
+"""
+function _mat_stability_floor_ok(plan, soil, opts, walls, column_service, wall_service)
+    (opts.stability === nothing || isempty(column_service) ||
+     !isempty(walls) || !isempty(wall_service)) && return true
+    agg = _mat_aggregate_actions(column_service, plan)
+    u = footing_stability_utils(agg, plan.B, plan.Lm, opts.min_depth, soil, opts.stability)
+    return _stability_floor_ok(u)
+end
+
+"""
+Fold the global-stability checks into a finished mat result. Returns the
+result unchanged (checks left NaN) unless mat stability is active (opt-in,
+pure-column). Rebuilds `plan` from the frozen overhang in `opts` so the
+aggregate matches the plan the result was designed on, evaluates sliding/
+overturning/uplift on the final `(B, Lm, D)`, and folds them into `checks`
+and the governing utilization.
+"""
+function _mat_apply_stability(result, demands, positions, soil, opts, walls,
+                              column_service, wall_service)
+    (opts.stability === nothing || isempty(column_service) ||
+     !isempty(walls) || !isempty(wall_service)) && return result
+    plan = _mat_plan_sizing(positions, opts; demands = demands, soil = soil, walls = walls)
+    agg = _mat_aggregate_actions(column_service, plan)
+    u = footing_stability_utils(agg, result.B, result.L_ftg, result.D, soil, opts.stability)
+    new_checks = FoundationUtilizations(;
+        bearing = result.checks.bearing,
+        punching = result.checks.punching,
+        one_way_shear = result.checks.one_way_shear,
+        sliding = u.sliding, overturning = u.overturning, uplift = u.uplift)
+    new_util = max(result.utilization, u.sliding, u.overturning, u.uplift)
+    R = typeof(result)
+    return R(result.B, result.L_ftg, result.D, result.d,
+             result.As_x_bot, result.As_x_top, result.As_y_bot, result.As_y_top,
+             result.n_columns, result.concrete_volume, result.steel_volume,
+             new_util, result.analysis, new_checks)
+end
+
 """`(P, M_along_x, M_along_y)` of one wall line about the mat centroid."""
 function _mat_wall_moments(wall_legs, plan, service::Bool)
     cx = ustrip(u"m", plan.x_left) + ustrip(u"m", plan.B) / 2
@@ -476,6 +552,7 @@ function _mat_with_overhang(opts::MatParams, oh::Length)
         ϕ_shear = opts.ϕ_shear,
         λ = opts.λ,
         objective = opts.objective,
+        stability = opts.stability,
     )
 end
 
@@ -511,8 +588,14 @@ function _mat_opts_for_actions(positions, opts, demands, soil, walls,
         plan = oh == plan0.overhang ? plan0 :
                _mat_plan_sizing(positions, opts; demands = demands, soil = soil,
                                 walls = walls, overhang_override = oh)
+        # Kern/bearing (ACI 336.2R §3.2.1) and, when active, the global-
+        # stability floor (sliding/uplift at min_depth). A uniform overhang
+        # grows both B and Lm, adding contact area, passive width, and self-
+        # weight, so stability can only improve; the thicker final mat is
+        # strictly more stable. No-op when mat stability is inactive.
         _mat_actions_fit(plan, column_service, column_strength, soil.qa;
                          wall_service = wall_service, wall_strength = wall_strength) &&
+            _mat_stability_floor_ok(plan, soil, opts, walls, column_service, wall_service) &&
             return (true, _mat_with_overhang(opts, oh))
         return (false, oh + incr)
     end
@@ -604,6 +687,8 @@ function design_footing(::MatFoundation,
                                              column_strength = column_strength,
                                              wall_strength = wall_strength)
         end
+        result = _mat_apply_stability(result, demands, positions, soil, opts, walls,
+                                      column_service, wall_service)
         StructuralSizer.emit!(tc, :checker, "design_footing_mat_aci", "", :exit;
                               status="ok",
                               B_m=Float64(ustrip(u"m", result.B)),
@@ -616,6 +701,8 @@ function design_footing(::MatFoundation,
             "Shukla's column formula does not take a wall line. Choose the rigid method or Winkler."))
         result = _design_mat_shukla(demands, positions, soil, method; opts = opts,
                                     column_strength = column_strength)
+        result = _mat_apply_stability(result, demands, positions, soil, opts, walls,
+                                      column_service, wall_service)
         StructuralSizer.emit!(tc, :checker, "design_footing_mat_aci", "", :exit;
                               status="ok",
                               B_m=Float64(ustrip(u"m", result.B)),
@@ -627,6 +714,8 @@ function design_footing(::MatFoundation,
         result = _design_mat_winkler_fea(demands, positions, soil, method; opts = opts, walls = walls,
                                          column_strength = column_strength,
                                          wall_strength = wall_strength)
+        result = _mat_apply_stability(result, demands, positions, soil, opts, walls,
+                                      column_service, wall_service)
         StructuralSizer.emit!(tc, :checker, "design_footing_mat_aci", "", :exit;
                               status="ok",
                               B_m=Float64(ustrip(u"m", result.B)),

@@ -193,6 +193,33 @@ function _strip_combo_moments(column_actions, k, positions, x_center, strip_axis
     return P, M_along, M_across
 end
 
+"""
+    _strip_aggregate_actions(column_actions, positions, x_bar, strip_axis)
+        -> Vector{FootingAction}
+
+One whole-strip rigid-body action per combination for the global-stability
+checks (sliding/overturning/uplift). [`_strip_combo_moments`](@ref) gives the
+combination's total vertical `ΣP` and the moments about the footing centroid:
+`M_along` (eccentricity on the strip axis) goes in the `Mx` slot that
+[`footing_stability_utils`](@ref) pairs with `L`, and `M_across` in the `My`
+slot paired with `B`. The horizontal base shears sum directly (`ΣHx`, `ΣHy`);
+their resultant magnitude is what the sliding check uses, so global x/y axes
+are fine. Returns `[]` when there are no per-column actions.
+"""
+function _strip_aggregate_actions(column_actions, positions, x_bar, strip_axis)
+    isempty(column_actions) && return FootingAction[]
+    K = length(first(column_actions))
+    out = Vector{FootingAction}(undef, K)
+    for k in 1:K
+        P, M_along, M_across = _strip_combo_moments(
+            column_actions, k, positions, x_bar, strip_axis)
+        Hx = sum(col[k].Hx for col in column_actions)
+        Hy = sum(col[k].Hy for col in column_actions)
+        out[k] = FootingAction(first(column_actions)[k].label, P, M_along, M_across, Hx, Hy)
+    end
+    return out
+end
+
 function _strip_validate_actions(column_service, column_strength, n)
     se = isempty(column_service)
     st = isempty(column_strength)
@@ -576,6 +603,13 @@ function design_footing(::StripFooting,
     # Existing strip layout — no new eccentricity formula.
     x_bar = sum(Ps_vec .* positions) / Ps_total
 
+    # Whole-strip rigid-body actions for the global-stability checks, built
+    # once from the service (ASD) combinations about the fixed centroid x_bar.
+    # Opt-in: empty unless `opts.stability` is set and service actions exist.
+    stab_actions = (opts.stability !== nothing && !isempty(column_service)) ?
+        _strip_aggregate_actions(column_service, positions, x_bar, strip_axis) :
+        FootingAction[]
+
     x_min = minimum(positions)
     x_max = maximum(positions)
 
@@ -630,6 +664,16 @@ function design_footing(::StripFooting,
     # max(inch, 2 ft, c_across) would promote through SI; keep B imperial.
     # A later attempt keeps a width already grown for shear or development.
     B_floor = _canonical_inch(max(B_min, 2.0u"ft", c_across_max))
+    # Global-stability width floor (ASCE 7-22 §2.4 counteracting combinations;
+    # Bowles 5e §4.x). Growing B adds adhesion area, passive width, and self-
+    # weight, so sliding/uplift can only improve as the kern sizing then grows
+    # B and L further. Evaluated at min_depth and the current L (both floors):
+    # the final thicker, longer footing is strictly more stable. Overturning
+    # is left to the stricter kern sizing. No-op when stability is off.
+    if !isempty(stab_actions)
+        B_floor = _stability_min_width(stab_actions, soil, opts.stability,
+                                       L, opts.min_depth, B_floor, w_incr)
+    end
     B = dev_attempt == 1 ? B_floor : _canonical_inch(max(B, B_floor))
 
     # =====================================================================
@@ -997,6 +1041,20 @@ function design_footing(::StripFooting,
     utilization = max(util_bearing, util_punch)
 
     # =====================================================================
+    # Global stability (sliding / overturning / uplift) of the whole strip
+    # =====================================================================
+    # Evaluated on the final plan (B, L, h) over the whole-strip ASD actions.
+    # The width floor already keeps sliding/uplift ≤ 1; this reports the
+    # realized values and folds them into the governing utilization. NaN when
+    # stability is off so the fields read "not checked".
+    util_sliding = util_overturning = util_uplift = NaN
+    if !isempty(stab_actions)
+        su = footing_stability_utils(stab_actions, B, L, h, soil, opts.stability)
+        util_sliding, util_overturning, util_uplift = su.sliding, su.overturning, su.uplift
+        utilization = max(utilization, util_sliding, util_overturning, util_uplift)
+    end
+
+    # =====================================================================
     # Result (SI output)
     # =====================================================================
     As_top_m2 = uconvert(u"m^2", As_top)
@@ -1060,7 +1118,10 @@ function design_footing(::StripFooting,
         sqA_gov,
         :rigid,
         FoundationUtilizations(; bearing = Float64(util_bearing),
-                               punching = Float64(util_punch)),
+                               punching = Float64(util_punch),
+                               sliding = Float64(util_sliding),
+                               overturning = Float64(util_overturning),
+                               uplift = Float64(util_uplift)),
     )
     StructuralSizer.emit!(tc, :checker, "design_footing_strip_aci", "", :exit;
                           B_m=Float64(ustrip(u"m", result.B)),

@@ -153,4 +153,69 @@ using Test
         @test res_big.B ≥ res_h.B
         @test res_big.checks.sliding ≤ 1.0 + 1e-6   # grown until it passes
     end
+
+    @testset "strip integration: aggregates columns, reports checks, widens B" begin
+        newtons(F) = ustrip(u"N", F)
+        d1 = FoundationDemand(1; Pu = 150.0u"kip", Ps = 100.0u"kip",
+            c1 = 12.0u"inch", c2 = 12.0u"inch")
+        d2 = FoundationDemand(2; Pu = 150.0u"kip", Ps = 100.0u"kip",
+            c1 = 12.0u"inch", c2 = 12.0u"inch")
+        positions = [0.0u"ft", 10.0u"ft"]
+        soil3 = Soil(20.0u"kip/ft^2", 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa")
+        mkstrip(stability) = StripParams(material = RC_3000_60, cover = 3.0u"inch",
+            min_depth = 16.0u"inch", depth_increment = 4.0u"inch",
+            width_increment = 6.0u"inch", check_development = false,
+            stability = stability)
+
+        # Gravity-only service/strength, stability ON vs OFF: identical plan,
+        # the stability checks report 0 (ON) or NaN (OFF, "not checked").
+        svc = [[FootingAction(:g, newtons(100u"kip"), 0.0, 0.0, 0.0, 0.0)],
+               [FootingAction(:g, newtons(100u"kip"), 0.0, 0.0, 0.0, 0.0)]]
+        str = [[FootingAction(:gu, newtons(150u"kip"), 0.0, 0.0, 0.0, 0.0)],
+               [FootingAction(:gu, newtons(150u"kip"), 0.0, 0.0, 0.0, 0.0)]]
+        off = design_footing(StripFooting(), [d1, d2], positions, soil3;
+            opts = mkstrip(nothing), column_service = svc, column_strength = str)
+        on = design_footing(StripFooting(), [d1, d2], positions, soil3;
+            opts = mkstrip(StabilityParams()), column_service = svc, column_strength = str)
+        @test on.B ≈ off.B
+        @test on.D ≈ off.D
+        @test on.L_ftg ≈ off.L_ftg
+        @test on.checks.sliding == 0.0
+        @test on.checks.uplift == 0.0
+        @test isnan(off.checks.sliding)
+
+        # Base shear split across both columns → the aggregate is their sum
+        # (ΣHx = 10 + 10 = 20 kip), below the friction ceiling. Sliding is
+        # computed, finite, and folded into the governing utilization.
+        P_c7a = newtons(0.6 * 120u"kip")   # 0.6D counteracting action per column
+        svc_h = [[FootingAction(:g, newtons(100u"kip"), 0.0, 0.0, 0.0, 0.0),
+                  FootingAction(:c7a, P_c7a, 0.0, 0.0, newtons(10u"kip"), 0.0)],
+                 [FootingAction(:g, newtons(100u"kip"), 0.0, 0.0, 0.0, 0.0),
+                  FootingAction(:c7a, P_c7a, 0.0, 0.0, newtons(10u"kip"), 0.0)]]
+        res_h = design_footing(StripFooting(), [d1, d2], positions, soil3;
+            opts = mkstrip(StabilityParams()), column_service = svc_h,
+            column_strength = str)
+        @test isfinite(res_h.checks.sliding)
+        @test res_h.checks.sliding > 0.0
+        @test res_h.checks.sliding ≤ 1.0 + 1e-6
+        @test res_h.utilization ≥ res_h.checks.sliding - 1e-9
+
+        # On clay the adhesion resistance cₐ·B·L grows with the plan, so a
+        # large base shear is resolved by widening B (not by the tiny passive
+        # term). The stabilized footing is at least as wide as the baseline,
+        # and sliding is driven to ≤ 1.
+        clay = Soil(20.0u"kip/ft^2", 18.0u"kN/m^3", 0.0, 50.0u"kPa", 20.0u"MPa")
+        base = design_footing(StripFooting(), [d1, d2], positions, clay;
+            opts = mkstrip(StabilityParams()), column_service = svc,
+            column_strength = str)
+        svc_slide = [[FootingAction(:g, newtons(100u"kip"), 0.0, 0.0, 0.0, 0.0),
+                      FootingAction(:c7a, P_c7a, 0.0, 0.0, newtons(30u"kip"), 0.0)],
+                     [FootingAction(:g, newtons(100u"kip"), 0.0, 0.0, 0.0, 0.0),
+                      FootingAction(:c7a, P_c7a, 0.0, 0.0, newtons(30u"kip"), 0.0)]]
+        res_slide = design_footing(StripFooting(), [d1, d2], positions, clay;
+            opts = mkstrip(StabilityParams()), column_service = svc_slide,
+            column_strength = str)
+        @test res_slide.B ≥ base.B
+        @test res_slide.checks.sliding ≤ 1.0 + 1e-6
+    end
 end

@@ -175,17 +175,34 @@ function footing_stability_utils(actions, B::Length, L::Length, h::Length,
     return (sliding = sliding, overturning = overturning, uplift = uplift)
 end
 
+"""`true` when the sliding- and uplift-governed plan-floor gate is satisfied."""
+_stability_floor_ok(u) = u.sliding ≤ 1.0 && u.uplift ≤ 1.0
+
+"""The non-convergence error shared by the plan-floor finders."""
+_stability_floor_error(cap) = ErrorException(
+    "Footing global stability (sliding/uplift) did not converge within $cap " *
+    "size increments. The governing ASCE 7-22 counteracting combination has a " *
+    "horizontal or uplift demand that the mobilizable resistance (friction + " *
+    "adhesion + passive + self-weight) cannot meet. Add passive resistance, " *
+    "embed deeper, add a shear key, or revisit the lateral demands (corpus: " *
+    "asce-7-22 PDF pp.69–70; textbook-bowles-foundation-analysis-design-5e " *
+    "PDF pp.252–253, 268).")
+
 """
     _stability_min_square_side(actions, soil, stab, h_floor, min_B, si; cap=200)
         -> Length
 
 Smallest square side `B = L` (on the `si` grid, at least `min_B`) at which
-every allowable-stress action passes sliding, overturning, and uplift for a
-footing of thickness `h_floor`. Used as a lower bound on the plan before the
-bearing/shear sizing, which only makes the footing larger and thicker and so
-can only improve stability (more contact area, more passive height, more
-self-weight). A thinner `h_floor` (use the minimum depth) keeps the bound
-conservative.
+every allowable-stress action passes **sliding and uplift** for a footing of
+thickness `h_floor`. Used as a lower bound on the plan before the bearing/
+shear sizing, which only makes the footing larger and thicker and so can only
+improve stability (more contact area, more passive height, more self-weight).
+A thinner `h_floor` (use the minimum depth) keeps the bound conservative.
+
+Overturning is deliberately **not** gated here: the ACI 336.2R §3.2.1 kern
+requirement (resultant in the middle third, e ≤ L/6) enforced by the
+bearing/plan sizing is stricter than the overturning limit (e ≤ L/2), so a
+compression combination that passes bearing already passes overturning.
 
 Throws when no size up to `cap` increments resists sliding — this happens
 only when there is a horizontal demand with no mobilizable resistance
@@ -197,16 +214,34 @@ function _stability_min_square_side(actions, soil::Soil, stab::StabilityParams,
     isempty(actions) && return min_B
     B = min_B
     for _ in 0:cap
-        u = footing_stability_utils(actions, B, B, h_floor, soil, stab)
-        (u.sliding ≤ 1.0 && u.overturning ≤ 1.0 && u.uplift ≤ 1.0) && return B
+        _stability_floor_ok(footing_stability_utils(actions, B, B, h_floor, soil, stab)) &&
+            return B
         B += si
     end
-    throw(ErrorException(
-        "Footing global stability (sliding/overturning/uplift) did not " *
-        "converge within $cap size increments. The governing ASCE 7-22 " *
-        "counteracting combination has a horizontal or uplift demand that " *
-        "the mobilizable resistance (friction + adhesion + passive + self-" *
-        "weight) cannot meet. Add passive resistance, embed deeper, or revisit " *
-        "the lateral demands (corpus: asce-7-22 PDF pp.69–70; " *
-        "textbook-bowles-foundation-analysis-design-5e PDF pp.252–253, 268)."))
+    throw(_stability_floor_error(cap))
+end
+
+"""
+    _stability_min_width(actions, soil, stab, L, h_floor, min_B, incr; cap=200)
+        -> Length
+
+Smallest width `B` (fixed length `L`, on the `incr` grid, at least `min_B`) at
+which every allowable-stress action passes **sliding and uplift** for a
+footing of thickness `h_floor`. The strip/mat analogue of
+[`_stability_min_square_side`](@ref): a strip/mat length is fixed by the
+column span, so only the width grows. Growing `B` adds contact area (adhesion),
+passive width, and self-weight, so it can only improve sliding and uplift.
+Overturning is left to the (stricter) kern sizing, as above.
+"""
+function _stability_min_width(actions, soil::Soil, stab::StabilityParams,
+                              L::Length, h_floor::Length, min_B::Length,
+                              incr::Length; cap::Int = 200)
+    isempty(actions) && return min_B
+    B = min_B
+    for _ in 0:cap
+        _stability_floor_ok(footing_stability_utils(actions, B, L, h_floor, soil, stab)) &&
+            return B
+        B += incr
+    end
+    throw(_stability_floor_error(cap))
 end

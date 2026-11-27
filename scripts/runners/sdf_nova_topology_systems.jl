@@ -42,20 +42,44 @@ function nova_system_parameters(plan_name::AbstractString, system::Symbol)
     return params
 end
 
-"""Steel ribs at the waffle module, composite with the two-way concrete slab."""
+"""
+Steel ribs at the waffle module, composite with a SOLID structural concrete
+fill on a steel deck, shored during the pour.
+
+A one-way composite floor (`CompositeDeckOptions`, floor type `:composite_deck`)
+is used deliberately: one-way *and* two-way RC slabs route through the story
+shell (`_story_shell_design_levels`), which meshes the slab as an isotropic
+plate and hangs every joist below it as an offset composite frame. That
+over-stiff two-way grid concentrates girder shear ~3-5x (frame 356 kN vs shell
+1189-1772 kN on topology/r2c1) and never settles — see finding
+`find-e8f16711`. The composite-deck path sizes the ribs on frame/tributary
+demands instead, like `:steel_deck`.
+
+This variant differs from `:steel_deck` by a deeper solid concrete fill
+(`total_depth`), a solid composite flange (`composite_slab_type = :solid`),
+and shored construction (`composite_shored = true`, which drops the pre-cure
+bare-steel check, AISC 360-22 Commentary §I3.1c).
+"""
 function _steel_rib_composite(plan_name::AbstractString)
-    params = system_parameters(plan_name, :two_way)
+    params = system_parameters(plan_name, :deck)
     beams = SR.SteelBeamOptions(
         composite = true,
-        composite_slab_type = :solid,
+        composite_slab_type = :solid,   # solid structural fill, no rib deduction
+        composite_shored = true,         # shored pour: skip the pre-cure steel check
         deflection_limit = 1 / 360,
         total_deflection_limit = 1 / 240,
     )
-    params.floor = SR.TwoWayOptions()
+    params.floor = SR.CompositeDeckOptions(
+        deck_profile = "3VLI",
+        fill_material = DECK_FILL,
+        total_depth = 6.5u"inch",        # 3 in deck + 3.5 in solid fill (tabulated 3VLI depth)
+        live_deflection_limit = 1 / 360,
+        superimposed_deflection_limit = 1 / 240,
+    )
     params.beams = beams
     params.columns = SR.SteelColumnOptions()
     params.materials = MaterialOptions(
-        concrete = SR.NWC_4000,
+        concrete = DECK_FILL,
         rebar = SR.Rebar_60,
         steel = SR.A992_Steel,
     )
@@ -65,7 +89,7 @@ function _steel_rib_composite(plan_name::AbstractString)
         analysis = :grillage,
         beam_options = beams,
     )
-    params.name = "steel ribs, composite concrete deck"
+    params.name = "steel ribs, shored composite solid-fill deck"
     return params
 end
 

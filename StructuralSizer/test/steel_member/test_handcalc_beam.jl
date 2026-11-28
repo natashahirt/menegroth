@@ -88,7 +88,7 @@ end
         w_factored_klf = 2.8
         w_factored_si = uconvert(u"N/m", w_factored_klf * kip/u"ft")
         
-        push!(model.loads, Asap.LineLoad(model.elements[1], [0.0u"N/m", 0.0u"N/m", -w_factored_si]))
+        push!(model.loads, Asap.LineLoad(model.frame_elements[1], [0.0u"N/m", 0.0u"N/m", -w_factored_si]))
         
         Asap.process!(model)
         Asap.solve!(model)

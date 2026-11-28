@@ -8,12 +8,12 @@ title: 'Phase 6 open decision: which diaphragm model governs wall drift (true ri
 node_label: diaphragm governs drift
 tags: ''
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-a0e013ea
 created_at: '2026-10-23T00:33:19.550450+00:00'
-updated_at: '2026-10-23T00:33:19.550450+00:00'
+updated_at: '2026-10-23T00:50:28.204683+00:00'
 has_child_rationale: Surfaced by Phase 5c; must be resolved before ASCE 7 drift checks
 ---
 Surfaced by Phase 5c equivalence (chec-028f596c).

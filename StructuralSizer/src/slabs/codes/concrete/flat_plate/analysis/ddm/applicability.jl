@@ -530,32 +530,243 @@ Continuous spans along `span_axis` and along its perpendicular.
 ACI 318-11 §13.6.1.1 (corpus: aci-318-11, page 252): "There shall be a
 minimum of three continuous spans in each direction."  A span is one step
 from a column to its successive column on the same line
-(`_ddm_column_successors`); the count in a direction is the longest such
-run, not the number of columns.  `nothing` when the skeleton cannot place
-the columns.
+(`_ddm_column_successors`).  A frame is one connected line of those steps.
+The count in a direction is the shortest frame, not the longest run and
+not the number of columns: a long frame does not cover a short one.
+`nothing` when the skeleton cannot place the columns.
 """
-function _ddm_continuous_span_counts(struc, columns, span_axis)::Union{Nothing,NTuple{2,Int}}
+function _ddm_continuous_span_counts(struc, columns, span_axis; slab=nothing)::Union{Nothing,NTuple{2,Int}}
     _eq137_geometry_available(struc) || return nothing
     isempty(columns) && return (0, 0)
     all(c -> col_vertex_idx(c) > 0, columns) || return nothing
     res = _ddm_column_successors(struc, columns, span_axis)
     res === nothing && return nothing
-    function run(succ)::Int
-        best = 0
-        for i in res.ok
-            n = 0
-            v = i
-            seen = Set{Int}()
-            while haskey(succ, v) && !(v in seen)
-                push!(seen, v)
-                v = succ[v][1]
-                n += 1
-            end
-            best = max(best, n)
+    if slab !== nothing
+        for (ax, perp, succ) in res.lines
+            _ddm_add_wall_end_spans!(succ, res.sxy, res.ok, ax, perp, struc, slab, columns)
         end
-        return best
     end
-    return ntuple(k -> run(res.lines[k][3]), 2)
+    return ntuple(k -> _shortest_frame_spans(res.lines[k][3], res.ok), 2)
+end
+
+"""
+Add a span at a wall that crosses a column line.
+
+R13.1 (corpus: aci-318-11, page 243): a wall on the whole panel edge and a
+shorter wall are both supports. A wall between two columns splits that step
+when both pieces lie on the slab. A step that crosses an opening ends at
+the wall instead of being counted across the void. A wall ahead of a line
+end, or behind a line start, adds one span.
+"""
+function _ddm_add_wall_end_spans!(succ, sxy, ok, ax, perp, struc, slab, columns)
+    segs = supporting_wall_segments(struc, slab)
+    isempty(segs) && return succ
+    next_id = 0
+    for seg in segs
+        # A full-edge wall and a shorter wall are both supports. The shorter
+        # one is a column (R13.1); either way the frame gains the span.
+        wx = seg[2][1] - seg[1][1]
+        wy = seg[2][2] - seg[1][2]
+        wlen = hypot(wx, wy)
+        wlen < 1e-3 && continue
+        abs(wx * ax[1] + wy * ax[2]) / wlen > 0.35 && continue
+        t1 = seg[1][1] * perp[1] + seg[1][2] * perp[2]
+        t2 = seg[2][1] * perp[1] + seg[2][2] * perp[2]
+        tlo, thi = minmax(t1, t2)
+        s_wall = 0.5 * ((seg[1][1] + seg[2][1]) * ax[1] + (seg[1][2] + seg[2][2]) * ax[2])
+        for i in ok
+            ti = sxy[i][1] * perp[1] + sxy[i][2] * perp[2]
+            tlo - 0.05 <= ti <= thi + 0.05 || continue
+            si = sxy[i][1] * ax[1] + sxy[i][2] * ax[2]
+            gap = s_wall - si
+            abs(gap) < 0.3 && continue
+            between = false
+            for j in ok
+                j == i && continue
+                tj = sxy[j][1] * perp[1] + sxy[j][2] * perp[2]
+                abs(tj - ti) > 0.5 && continue
+                sj = sxy[j][1] * ax[1] + sxy[j][2] * ax[2]
+                lo, hi = minmax(si, s_wall)
+                if sj > lo + 0.3 && sj < hi - 0.05
+                    between = true
+                    break
+                end
+            end
+            between && continue
+            if gap > 0
+                if haskey(succ, i) && succ[i][1] > 0
+                    j = succ[i][1]
+                    sj = sxy[j][1] * ax[1] + sxy[j][2] * ax[2]
+                    lo, hi = minmax(si, sj)
+                    if lo + 0.3 < s_wall < hi - 0.3
+                        ti = sxy[i][1] * perp[1] + sxy[i][2] * perp[2]
+                        contains = _slab_plan_contains(struc, slab)
+                        at(s) = (s * ax[1] + ti * perp[1], s * ax[2] + ti * perp[2])
+                        near = contains === nothing || contains(at((si + s_wall) / 2))
+                        far = contains === nothing || contains(at((sj + s_wall) / 2))
+                        # Both pieces on the slab: one column step is two spans.
+                        # Only the near piece: the step was crossing an opening,
+                        # so it ends at the wall instead.
+                        if near && far
+                            next_id -= 1
+                            succ[next_id] = (j, abs(sj - s_wall), false)
+                        elseif near && !far
+                            next_id -= 1
+                            succ[i] = (next_id, s_wall - si, false)
+                        end
+                    end
+                    continue
+                end
+                if haskey(succ, i) && succ[i][2] <= gap
+                    continue
+                end
+                next_id -= 1
+                succ[i] = (next_id, gap, false)
+            else
+                started = !any(succ) do (a, spec)
+                    spec[1] == i && a > 0
+                end
+                started || continue
+                dist = -gap
+                farther = Int[]
+                for (a, spec) in succ
+                    a < 0 && spec[1] == i || continue
+                    spec[2] <= dist && (dist = -1.0)
+                    push!(farther, a)
+                end
+                dist < 0 && continue
+                for a in farther
+                    delete!(succ, a)
+                end
+                next_id -= 1
+                succ[next_id] = (i, -gap, false)
+            end
+        end
+    end
+    return succ
+end
+
+"""Fewest successor steps on any one frame. A line with no span counts as 0."""
+function _shortest_frame_spans(succ, members)::Int
+    parent = Dict{Int,Int}()
+    function find(x)
+        haskey(parent, x) || (parent[x] = x)
+        while parent[x] != x
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        end
+        return x
+    end
+    for i in members
+        parent[i] = i
+    end
+    isempty(succ) && return 0
+    for (i, spec) in succ
+        j = spec[1]
+        ri, rj = find(i), find(j)
+        ri != rj && (parent[rj] = ri)
+    end
+    counts = Dict{Int,Int}()
+    for (i, _) in succ
+        r = find(i)
+        counts[r] = get(counts, r, 0) + 1
+    end
+    return minimum(values(counts))
+end
+
+# Same station `_ddm_add_wall_end_spans!` treats as the column itself.
+const _WALL_AT_COLUMN_M = 0.3
+# A column this close to the wall line, measured across the line, is on it.
+const _WALL_ON_LINE_M = 0.05
+
+"""
+Stations of `columns` on the line through `seg`.
+
+`along` is metres from the first end toward the second. `perp` is metres
+to the left of that direction. A column with no vertex is omitted.
+"""
+function _wall_column_stations(struc, columns, seg)
+    dx = seg[2][1] - seg[1][1]
+    dy = seg[2][2] - seg[1][2]
+    L = hypot(dx, dy)
+    L < 1e-3 && return nothing
+    ux, uy = dx / L, dy / L
+    stations = Tuple{Int, Float64, Float64}[]
+    for (i, col) in enumerate(columns)
+        col_vertex_idx(col) > 0 || continue
+        x, y = _eq137_structural_xy(struc, col)
+        rx = x - seg[1][1]
+        ry = y - seg[1][2]
+        push!(stations, (i, rx * ux + ry * uy, -rx * uy + ry * ux))
+    end
+    return (L = L, stations = stations)
+end
+
+"""
+True when `seg` runs from one column to another.
+
+ACI 318-11 R13.1 (aci-318-11, page 243): a wall that supports the entire
+length of a panel edge is a beam of infinite stiffness (§13.2.3). A wall
+shorter than that edge is a column, and §13.6.1.3 then applies to the
+spans on either side. An end within `_WALL_AT_COLUMN_M` of a column
+center, and within `_WALL_ON_LINE_M` of that column's line, is that column.
+"""
+function wall_is_fully_restrained(struc, _slab, seg, columns)
+    frame = _wall_column_stations(struc, columns, seg)
+    frame === nothing && return false
+    at_end(s, target) =
+        abs(s[2] - target) <= _WALL_AT_COLUMN_M && abs(s[3]) <= _WALL_ON_LINE_M
+    ids0 = Int[s[1] for s in frame.stations if at_end(s, 0.0)]
+    idsL = Int[s[1] for s in frame.stations if at_end(s, frame.L)]
+    return !isempty(ids0) && any(i -> i ∉ ids0, idsL)
+end
+
+"""
+Center-to-center distances from a short wall to the nearest column on each side.
+
+The two distances are the successive spans of ACI 318-11 §13.6.1.3
+(aci-318-11, page 252). `nothing` when either side has no column. A column
+on the wall line is an end of the wall, not a span beside it.
+"""
+function _columns_off_wall(struc, columns, seg)
+    frame = _wall_column_stations(struc, columns, seg)
+    frame === nothing && return nothing
+    left = Inf
+    right = Inf
+    for (_, _, perp) in frame.stations
+        abs(perp) <= _WALL_AT_COLUMN_M && continue
+        if perp > 0
+            left = min(left, perp)
+        else
+            right = min(right, -perp)
+        end
+    end
+    (isfinite(left) && isfinite(right)) || return nothing
+    return (pairs = [(left,), (right,)],)
+end
+
+"""
+§13.6.1.3 for a wall shorter than the panel edge. The two center-to-center
+distances from the wall to the columns on either side are successive spans.
+"""
+function _short_wall_span_violations(struc, slab, columns)::Vector{String}
+    out = String[]
+    _eq137_geometry_available(struc) || return out
+    for seg in supporting_wall_segments(struc, slab)
+        wall_is_fully_restrained(struc, slab, seg, columns) && continue
+        sides = _columns_off_wall(struc, columns, seg)
+        sides === nothing && continue
+        length(sides.pairs) < 2 && continue
+        la, lb = sides.pairs[1][1], sides.pairs[2][1]
+        longer = max(la, lb)
+        longer > 0 || continue
+        abs(la - lb) > longer / 3 || continue
+        push!(out,
+            "§13.6.1.3: successive spans on either side of a wall differ by more than " *
+            "one-third of the longer span (corpus: aci-318-11, page 252)")
+        break
+    end
+    return out
 end
 
 """
@@ -660,22 +871,24 @@ function check_ddm_applicability(struc, slab, columns; throw_on_failure::Bool = 
     # D = SDL + self-weight. At this point we don't have the final slab thickness,
     # so we estimate self-weight using the minimum thickness for the longest span.
     # This gives a conservative (lower) estimate of D, making L/D appear higher.
-    cell = struc.cells[first(slab.cell_indices)]
-    qL = cell.live_load
-    
+    # ENGINEERING JUDGMENT: where the slab's cells carry different loads, the
+    # largest cell L/D is checked.
     # Estimate self-weight from ACI minimum thickness (Table 8.3.1.1)
     γ_concrete = ρ_concrete * GRAVITY
     ln_max = max(l1, l2)
     h_min_estimate = min_thickness(FlatPlate(), ln_max)
     sw_estimate = uconvert(psf, h_min_estimate * γ_concrete)
-    
-    qD = cell.sdl + sw_estimate  # Include self-weight estimate
-    
-    if !iszero(qD)
-        LD_ratio = ustrip(psf, qL) / ustrip(psf, qD)
-        if LD_ratio > 2.0
-            push!(violations, "§13.6.1.5: Live/Dead ratio L/D = $(round(LD_ratio, digits=2)) > 2.0 (using estimated h_min for self-weight) (corpus: aci-318-11, page 252)")
-        end
+
+    LD_ratio = 0.0
+    for ci in slab.cell_indices
+        cell = struc.cells[ci]
+        qD = uconvert(psf, cell.sdl + sw_estimate)  # Include self-weight estimate
+        iszero(qD) && continue
+        LD_ratio = max(LD_ratio, ustrip(psf, cell.live_load) / ustrip(psf, qD))
+    end
+
+    if LD_ratio > 2.0
+        push!(violations, "§13.6.1.5: Live/Dead ratio L/D = $(round(LD_ratio, digits=2)) > 2.0 (using estimated h_min for self-weight) (corpus: aci-318-11, page 252)")
     end
     
     # -------------------------------------------------------------------------
@@ -683,12 +896,16 @@ function check_ddm_applicability(struc, slab, columns; throw_on_failure::Bool = 
     # -------------------------------------------------------------------------
     # Count successive columns along a line (`_ddm_continuous_span_counts`),
     # not the number of columns.  Four columns can be one span each way.
-    counts = _ddm_continuous_span_counts(struc, columns, span_axis)
+    counts = _ddm_continuous_span_counts(struc, columns, span_axis; slab=slab)
     if counts === nothing
         push!(violations, "§13.6.1.1: DDM requires a minimum of three continuous spans in each direction; column lines could not be read from this slab (corpus: aci-318-11, page 252)")
     elseif counts[1] < 3 || counts[2] < 3
-        push!(violations, "§13.6.1.1: DDM requires a minimum of three continuous spans in each direction; found $(counts[1]) along the span axis and $(counts[2]) transversely (corpus: aci-318-11, page 252)")
+        push!(violations, "§13.6.1.1: DDM requires a minimum of three continuous spans in each direction, on every frame; the shortest frame has $(counts[1]) spans along the span axis and $(counts[2]) transversely (corpus: aci-318-11, page 252)")
     end
+
+    # A wall shorter than the panel edge is a column (R13.1, page 243).
+    # Its two sides are successive spans when columns stand on both sides.
+    append!(violations, _short_wall_span_violations(struc, slab, columns))
     
     # -------------------------------------------------------------------------
     # §13.6.1.3 — Successive span lengths, center-to-center of supports,

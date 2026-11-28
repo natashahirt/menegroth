@@ -558,6 +558,17 @@ function _eq137_seg_nearest(P, A, B)
     return Q, hypot(P[1] - Q[1], P[2] - Q[2])
 end
 
+"""True when P lies within `tol` meters of an edge of `poly`."""
+function _eq137_on_boundary(P, poly; tol::Float64 = 1e-3)::Bool
+    n = length(poly)
+    n < 2 && return false
+    for i in 1:n
+        _, d = _eq137_seg_nearest(P, poly[i], poly[mod1(i + 1, n)])
+        d <= tol && return true
+    end
+    return false
+end
+
 """True when P lies strictly inside polygon `poly` (crossing-number test)."""
 function _eq137_point_in_poly(P, poly)::Bool
     inside = false

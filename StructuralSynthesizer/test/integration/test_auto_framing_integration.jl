@@ -50,6 +50,36 @@ _level_of(m::AbstractMember) = m isa Beam ? level_of(m) : 0
         @test opts.level_2.count == 3
     end
 
+    @testset "grillage bay counts on the wire" begin
+        raw = StructuralSynthesizer.JSON3.read("""
+            {"floor_type":"two_way","framing_levels":[
+                {"material":"concrete","analysis":"grillage","n_xi":4,"n_eta":2}
+            ]}
+            """, StructuralSynthesizer.APIParams)
+        opts = StructuralSynthesizer.json_to_params(raw, "meters").framing_opts
+        @test opts.n_xi == 4
+        @test opts.n_eta == 2
+        @test opts.analysis == :grillage
+        @test !haskey(opts, :spacing)
+
+        mixed = StructuralSynthesizer.APIParams(
+            framing_levels = [StructuralSynthesizer.APIFramingLevel(
+                material = "concrete", spacing_in = 36.0, n_xi = 2, n_eta = 2)])
+        @test_throws ErrorException StructuralSynthesizer.json_to_params(mixed, "meters")
+
+        one_count = StructuralSynthesizer.APIParams(
+            framing_levels = [StructuralSynthesizer.APIFramingLevel(
+                material = "concrete", n_xi = 2)])
+        @test_throws ErrorException StructuralSynthesizer.json_to_params(one_count, "meters")
+
+        on_a_beam = StructuralSynthesizer.APIParams(
+            framing_levels = [
+                StructuralSynthesizer.APIFramingLevel(material = "concrete", n_xi = 2, n_eta = 2),
+                StructuralSynthesizer.APIFramingLevel(material = "concrete", n_xi = 2, n_eta = 2),
+            ])
+        @test_throws ErrorException StructuralSynthesizer.json_to_params(on_a_beam, "meters")
+    end
+
     # ─── 2. Integration with prepare! ────────────────────────────────────────
     @testset "prepare! auto-generation" begin
         # Baseline: no framing levels. Multi-bay grid (single-bay 1x1 hits a
@@ -106,8 +136,11 @@ _level_of(m::AbstractMember) = m isa Beam ? level_of(m) : 0
 
         final_struc = design.structure
         @test !isempty(filter(is_joist, final_struc.beams))
-        # Level 2 members exist
-        @test !isempty(filter(m -> level_of(m) == 2, final_struc.beams))
+        # The second framing level was materialized. `Beam.level` is the
+        # support rank, so the generation index lives on the FramingLevel.
+        @test any(slab -> any(fl -> fl.level == 2 &&
+                !isempty(StructuralSynthesizer.level_member_indices(final_struc, fl)),
+            slab.framing_levels), final_struc.slabs)
     end
 
     # ─── 4. Critic regression: axis alternation, level-1 params, schema fields ─
@@ -127,24 +160,23 @@ _level_of(m::AbstractMember) = m isa Beam ? level_of(m) : 0
         @test opts_l1.axis == (1.0, 0.0)
         @test opts_l1.count == 5
 
-        # (P1) end_fixity + catalog_override schema fields must plumb through.
+        # (P1) end_fixity must plumb through. A level catalog is beam_options on
+        # the Julia opts, not a wire field.
         api_adv = SS.APIParams(
             floor_type = "one_way",
             framing_levels = [
                 SS.APIFramingLevel(material = "steel"),
                 SS.APIFramingLevel(material = "steel", role = "beam",
-                                   end_fixity = ["pinned", "fixed"],
-                                   catalog_override = "preferred_W"),
+                                   end_fixity = ["pinned", "fixed"]),
             ],
         )
         opts_adv = SS.json_to_params(api_adv).framing_opts
         @test opts_adv.level_2.end_fixity == (:pinned, :fixed)
-        @test opts_adv.level_2.catalog_override == StructuralSizer.preferred_W()
+        @test !haskey(opts_adv.level_2, :catalog_override)
 
-        # Invalid end_fixity / catalog_override names error clearly.
+        # Invalid end_fixity names error clearly.
         @test_throws ErrorException SS._resolve_framing_end_fixity(["welded", "fixed"])
         @test_throws ErrorException SS._resolve_framing_end_fixity(["fixed"])
-        @test_throws ErrorException SS._resolve_framing_catalog_override("bogus_catalog")
 
         # (P0) Level 3+ default axis must alternate (⟂ to the level below), not
         # stay pinned to spans.axis. With no explicit axis on levels 2/3, level 2
@@ -209,7 +241,9 @@ _level_of(m::AbstractMember) = m isa Beam ? level_of(m) : 0
 
         eng_multi = StructuralSynthesizer.prepare_engine(struc, params_multi)
         n_multi = count(m -> level_of(m) >= 1, eng_multi.baseline.beams)
-        @test any(m -> level_of(m) >= 2, eng_multi.baseline.beams)
+        @test any(slab -> any(fl -> fl.level >= 2 &&
+                !isempty(StructuralSynthesizer.level_member_indices(eng_multi.baseline, fl)),
+            slab.framing_levels), eng_multi.baseline.slabs)
         # Caller's struc is untouched by prepare_engine (works on a copy).
         @test isempty(struc.beams)
 

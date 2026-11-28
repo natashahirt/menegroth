@@ -150,7 +150,7 @@ function run_tier_b()
     # ----- mesh the walls (the function under test) -----
     # Production defaults are WALL_MESH_DIV × WALL_MESH_ROWS (8 × 8). Tier A
     # is `mesh_div` columns and a single row, so the comparison uses that split.
-    shells, wall_nodes, _ = SS._mesh_wall_shells(
+    shells, wall_nodes, _, _ = SS._mesh_wall_shells(
         struc, params, Asap.Node[], Asap.ShellTri3[]; mesh_div = NX, mesh_rows = 1)
 
     # Position → node lookup for base-reaction recovery.

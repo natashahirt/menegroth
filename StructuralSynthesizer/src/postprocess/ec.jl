@@ -155,6 +155,9 @@ function takeoff_by_element(struc::BuildingStructure)
     end
     for beam in struc.beams
         beams += material_takeoff(volumes(beam))
+        studs = composite_stud_placement(struc, beam)
+        studs === nothing || (beams += MaterialTakeoff(
+            0.0u"m^3", 0.0u"kg", studs.mass, 0.0u"kgCO2e", 0.0u"kgCO2e", studs.ec))
     end
     for strut in struc.struts
         struts += material_takeoff(volumes(strut))
@@ -177,6 +180,10 @@ function material_ec_total(struc::BuildingStructure)
         for member in m
             push!(sources, volumes(member))
         end
+    end
+    for beam in struc.beams
+        studs = composite_stud_placement(struc, beam)
+        studs === nothing || (steel += studs.ec)
     end
     for f in struc.foundations
         push!(sources, f.volumes)
@@ -284,7 +291,19 @@ function compute_building_ec(struc::BuildingStructure, params::Union{DesignParam
     # Compute member EC for all member types (beams, columns, struts)
     member_results = ElementECResult[]
     for (i, m) in enumerate(struc.beams)
-        !isempty(volumes(m)) && push!(member_results, compute_element_ec_member(m, :beam, i))
+        studs = composite_stud_placement(struc, m)
+        has_studs = studs !== nothing && studs.mass > 0.0u"kg"
+        has_vol = !isempty(volumes(m))
+        has_vol || has_studs || continue
+        r = has_vol ? compute_element_ec_member(m, :beam, i) :
+            ElementECResult(:beam, i, 0.0u"kgCO2e", 0.0u"kgCO2e", 0.0u"kgCO2e",
+                            0.0u"kgCO2e", 0.0u"m^3", 0.0u"kg")
+        if has_studs
+            r = ElementECResult(:beam, i, r.ec + studs.ec, r.concrete_ec, r.rebar_ec,
+                                r.structural_steel_ec + studs.ec, r.volume_total,
+                                r.mass_total + studs.mass)
+        end
+        push!(member_results, r)
     end
     for (i, m) in enumerate(struc.columns)
         !isempty(volumes(m)) && push!(member_results, compute_element_ec_member(m, :column, i))

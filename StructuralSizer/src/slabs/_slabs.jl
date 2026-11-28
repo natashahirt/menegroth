@@ -4,6 +4,9 @@ include("types.jl")
 # User-facing sizing options + guidance
 include("options.jl")
 
+# Immutable package-boundary requests, outcomes, and install proposals
+include("contracts.jl")
+
 # Sizing codes (must come before dispatcher)
 include("codes/_codes.jl")
 

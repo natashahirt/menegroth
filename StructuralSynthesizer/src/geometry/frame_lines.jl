@@ -27,8 +27,9 @@ A line of columns forming an EFM frame strip.
 - `direction::NTuple{2, Float64}`: Unit vector along frame (spans measured here)
 - `columns::Vector{C}`: Columns ordered along direction
 - `tributary_width::T`: l₂ (perpendicular to direction)
-- `span_lengths::Vector{T}`: Clear span lengths (n_cols - 1 values)
+- `span_lengths::Vector{T}`: Face-to-face clear spans (n_cols - 1 values)
 - `joint_positions::Vector{Symbol}`: :exterior or :interior for each joint
+- `center_spans::Vector{T}`: Center-to-center spans, same unit as `span_lengths`
 
 # Notes
 The perpendicular direction (for tributary width) is automatically computed
@@ -40,7 +41,8 @@ struct FrameLine{T, C}
     tributary_width::T
     span_lengths::Vector{T}
     joint_positions::Vector{Symbol}
-    column_projections::Vector{Float64}  # Position along axis (for debugging)
+    column_projections::Vector{T}  # Same unit as span_lengths. Bare numbers share one anonymous unit.
+    center_spans::Vector{T}
 end
 
 """
@@ -108,11 +110,22 @@ function FrameLine(
     dir_norm > 1e-10 || error("Direction vector cannot be zero")
     dir = (direction[1] / dir_norm, direction[2] / dir_norm)
     
-    # Project each column position onto the frame axis
-    projections = map(columns) do col
+    # Project each column position onto the frame axis. A length stays a
+    # length, so the clear-span subtraction is checked by Unitful.
+    projections = T[]
+    for col in columns
         pos = get_position_fn(col)
-        # Scalar projection onto direction: pos · dir
-        Float64(pos[1] * dir[1] + pos[2] * dir[2])
+        s = pos[1] * dir[1] + pos[2] * dir[2]
+        if s isa Length
+            tributary_width isa Length || error(
+                "FrameLine positions are lengths, so tributary_width must be a length too")
+            push!(projections, uconvert(unit(tributary_width), s))
+        elseif tributary_width isa Length
+            error("FrameLine positions are bare numbers and tributary_width is a length. " *
+                  "Return positions as lengths; skeleton coordinates are meters.")
+        else
+            push!(projections, T(Float64(s)))
+        end
     end
     
     # Sort columns by their projection (position along axis)
@@ -120,20 +133,30 @@ function FrameLine(
     sorted_cols = columns[perm]
     sorted_proj = projections[perm]
     
-    # Compute clear spans
+    # Clear and center-to-center spans, in `tributary_width`'s unit.
+    # Length positions and length widths subtract directly. Bare numbers
+    # share one unit and never mix with a length.
     span_lengths = T[]
+    center_spans = T[]
+    u = tributary_width isa Length ? unit(tributary_width) : nothing
     for i in 1:(n-1)
         c_to_c = sorted_proj[i+1] - sorted_proj[i]
-        
-        # Column width in the frame direction
         c_left = get_width_fn(sorted_cols[i], dir)
         c_right = get_width_fn(sorted_cols[i+1], dir)
-        
-        # Clear span = center-to-center - half-widths
-        ln = c_to_c - ustrip(c_left)/2 - ustrip(c_right)/2
-        
-        # Convert back to original unit type
-        push!(span_lengths, T(ln) * oneunit(tributary_width) / oneunit(tributary_width))
+        if c_to_c isa Length
+            (c_left isa Length && c_right isa Length) || error(
+                "FrameLine positions are lengths, so column widths must be lengths too")
+            push!(center_spans, uconvert(u, c_to_c))
+            push!(span_lengths, uconvert(u, c_to_c - c_left / 2 - c_right / 2))
+        else
+            (c_left isa Length || c_right isa Length) && error(
+                "FrameLine column widths are lengths but positions are bare numbers")
+            half_l = ustrip(c_left) / 2
+            half_r = ustrip(c_right) / 2
+            same = oneunit(tributary_width) / oneunit(tributary_width)
+            push!(center_spans, T(c_to_c) * same)
+            push!(span_lengths, T(c_to_c - half_l - half_r) * same)
+        end
     end
     
     # Joint positions: first and last are exterior, middle are interior
@@ -146,8 +169,8 @@ function FrameLine(
         end
     end
     
-    return FrameLine{T, C}(dir, sorted_cols, tributary_width, span_lengths, 
-                           joint_positions, sorted_proj)
+    return FrameLine{T, C}(dir, sorted_cols, tributary_width, span_lengths,
+                           joint_positions, sorted_proj, center_spans)
 end
 
 # =============================================================================

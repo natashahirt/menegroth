@@ -100,7 +100,7 @@ end
 
 @testset "Phase 9a — diaphragm shells contribute to assembled K" begin
     params = DesignParameters(materials =
-        MaterialOptions(steel = A992_Steel, beam = A992_Steel))
+        MaterialOptions(steel = A992_Steel))
 
     # ── Frame-only baseline (no diaphragm) ────────────────────────────────
     struc_frame = build_bay(joists = false)

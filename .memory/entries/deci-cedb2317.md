@@ -7,12 +7,12 @@ title: Frame-only 25% check reuses the unified solve
 node_label: Frame-only 25% check reuses the unified solve
 tags: walls,phase-7,12.2.5.8,asap,frame-only,decision
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-8c698d00
 created_at: '2026-11-02T16:13:28.589126+00:00'
-updated_at: '2026-11-02T16:13:28.589126+00:00'
+updated_at: '2026-11-02T16:14:46.626237+00:00'
 ---
 User choices (2026-11-02):
 - Add an option to Asap's multi-case solve(model, cases, links) that leaves the shells out of the stiffness and holds fixed the degrees of freedom only shells touch. Reason: process! renumbers each node's globalID in place, so a second model sharing nodes would break every stored displacement vector. The existing geometric_stiffness hook cannot subtract the shells because it refuses terms on rigid-link slave degrees of freedom, and wall nodes at floor levels are slaves.

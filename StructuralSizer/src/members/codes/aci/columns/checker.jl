@@ -73,8 +73,9 @@ const PMDiagram = PMInteractionDiagram{<:AbstractSection}
 Caches P-M diagrams and objective coefficients for RC columns.
 Supports both rectangular and circular sections.
 
-For rectangular sections, also caches y-axis (minor axis) diagrams
-to support proper biaxial bending checks when b ≠ h.
+For rectangular sections (square included), also caches y-axis diagrams
+for biaxial bending checks, since the bar layout need not be symmetric
+about both axes even when b = h.
 """
 mutable struct ACIColumnCapacityCache <: AbstractCapacityCache
     diagrams::Vector{PMDiagram}             # P-M diagrams per section (x-axis / strong axis)
@@ -172,7 +173,28 @@ function precompute_capacities!(
     # Build material tuple from RC material
     mat = to_material_tuple(material)
     
-    _precompute_diagrams!(checker, cache, catalog, material.concrete, mat, objective, n)
+    _precompute_diagrams!(checker, cache, catalog, material.concrete, mat, objective, n;
+                          rebar=material.rebar, transverse=material.transverse)
+end
+
+"""
+    cache_matches(checker::ACIColumnChecker, cache::ACIColumnCapacityCache, catalog, material) -> Bool
+
+True when `cache` holds one entry per catalog section, was built from the
+same f′c, fy and Es that `precompute_capacities!` would take from
+`material` and `checker`, and has every weak-axis diagram a biaxial check
+of a rectangular section reads.
+"""
+function cache_matches(checker::ACIColumnChecker, cache::ACIColumnCapacityCache, catalog, material)
+    length(cache.depths) == length(catalog) || return false
+    fy, Es = material isa ReinforcedConcreteMaterial ?
+        (fy_ksi(material), Es_ksi(material)) : (checker.fy_ksi, checker.Es_ksi)
+    same(a, b) = isapprox(a, b; rtol = 1e-9)
+    (same(cache.fc_ksi, fc_ksi(material)) && same(cache.fy_ksi, fy) && same(cache.Es_ksi, Es)) ||
+        return false
+    checker.include_biaxial || return true
+    return all(j -> !(catalog[j] isa RCColumnSection) || cache.diagrams_y[j] !== nothing,
+               eachindex(catalog))
 end
 
 """
@@ -189,10 +211,13 @@ function _precompute_diagrams!(
     concrete::Concrete,  # For objective_value (needs Concrete, not tuple)
     mat::NamedTuple,     # For P-M calculations
     objective::AbstractObjective,
-    n::Int
+    n::Int;
+    rebar=nothing,
+    transverse=nothing,
 )
     # Determine target unit for objective
-    ref_obj = objective_value(objective, catalog[1], concrete, 1.0u"m")
+    ref_obj = objective_value(objective, catalog[1], concrete, 1.0u"m";
+                              rebar=rebar, transverse=transverse)
     ref_unit = unit(ref_obj)
     
     # Thread-safe: each iteration writes to distinct cache indices (no cross-deps)
@@ -211,7 +236,8 @@ function _precompute_diagrams!(
         )
         
         # Objective coefficient (value per meter)
-        val = objective_value(objective, section, concrete, 1.0u"m")
+        val = objective_value(objective, section, concrete, 1.0u"m";
+                              rebar=rebar, transverse=transverse)
         if ref_unit != Unitful.NoUnits
             cache.obj_coeffs[j] = ustrip(ref_unit, val)
         else
@@ -223,8 +249,12 @@ end
 """
     _check_square_and_generate_y_diagram(section::RCColumnSection, mat, include_biaxial) -> Tuple{Bool, Union{PMDiagram, Nothing}}
 
-Return `(is_square, diagram_y)`. For non-square rectangular sections with biaxial
-enabled, a weak-axis P-M diagram is generated; otherwise `nothing`.
+Return `(is_square, diagram_y)`. With biaxial enabled, every rectangular section
+gets a weak-axis P-M diagram — square ones included — because a square section
+is only equally strong about both axes if its bar layout is 90°-symmetric.
+The `:perimeter` layout is not for n_bars = 6, 10, 14, … (the odd interior
+pair goes to the top/bottom faces), so the weak axis must be computed from the
+actual bar positions (ACI 318-19 §22.2.1.1–§22.2.1.2; corpus: aci-318-19, p. 399).
 """
 function _check_square_and_generate_y_diagram(section::RCColumnSection, mat, include_biaxial::Bool)
     b = ustrip(u"inch", section.b)
@@ -233,14 +263,48 @@ function _check_square_and_generate_y_diagram(section::RCColumnSection, mat, inc
     (b > 0 && h > 0) || throw(ArgumentError("Column dimensions b=$b and h=$h must both be positive"))
     is_square = abs(b - h) / max(b, h) < 0.05
     
-    # Generate y-axis diagram for rectangular sections if biaxial is enabled
-    diagram_y = if !is_square && include_biaxial
+    diagram_y = if include_biaxial
         generate_PM_diagram(section, mat, WeakAxis(); n_intermediate=PM_DIAGRAM_N_INTERMEDIATE)
     else
         nothing
     end
     
     return is_square, diagram_y
+end
+
+"""P-M diagram for `axis`. Circular sections use the strong-axis diagram.
+
+A rectangular section whose weak-axis diagram was not precomputed (biaxial
+off) is generated here, so the weak-axis slenderness check does not borrow
+the strong-axis capacity — even for square sections, whose bar layout may
+not be symmetric about both axes.
+"""
+function _column_axis_diagram(cache::ACIColumnCapacityCache, j::Int, section, mat, ::StrongAxis)
+    return cache.diagrams[j]
+end
+function _column_axis_diagram(cache::ACIColumnCapacityCache, j::Int, section::RCColumnSection, mat, ::WeakAxis)
+    isnothing(cache.diagrams_y[j]) || return cache.diagrams_y[j]
+    return generate_PM_diagram(section, mat, WeakAxis(); n_intermediate=PM_DIAGRAM_N_INTERMEDIATE)
+end
+function _column_axis_diagram(cache::ACIColumnCapacityCache, j::Int, ::RCCircularSection, mat, ::WeakAxis)
+    return cache.diagrams[j]
+end
+
+"""Material tuple `(fc, fy, Es, εcu)` in ksi that the cached diagrams were built from."""
+_cache_material(cache::ACIColumnCapacityCache) =
+    (fc = cache.fc_ksi, fy = cache.fy_ksi, Es = cache.Es_ksi, εcu = cache.εcu)
+
+"""
+    _weak_axis_check(cache, j, section, mat, Pu, Muy) -> CheckResult
+
+Uniaxial P-M check about the weak axis (ACI 318-19 §22.4), used when the
+weak-axis moment is not part of a Bresler combination.
+"""
+function _weak_axis_check(cache::ACIColumnCapacityCache, j::Int, section, mat, Pu, Muy)
+    diagram_y = _column_axis_diagram(cache, j, section, mat, WeakAxis())
+    c = check_PM_capacity(diagram_y, Pu, Muy)
+    ratio = c.adequate ? (c.φMn_at_Pu > 0 ? Muy / c.φMn_at_Pu : 0.0) : Inf
+    return CheckResult("pm_interaction_y", c.adequate, ratio, Muy, c.φMn_at_Pu, "ACI 318-19 22.4")
 end
 
 """Circular sections are axisymmetric; always returns `(true, nothing)`."""
@@ -296,6 +360,41 @@ function is_feasible(
 end
 
 """
+    is_feasible(checker::ACIColumnChecker, cache, j, section, material, demand::RCColumnDemandSet, geometry) -> Bool
+
+True when the section passes every case in the set. Stops at the first case
+that fails.
+"""
+function is_feasible(
+    checker::ACIColumnChecker,
+    cache::ACIColumnCapacityCache,
+    j::Int,
+    section::Union{RCColumnSection, RCCircularSection},
+    material::Concrete,
+    demand::RCColumnDemandSet,
+    geometry::ConcreteMemberGeometry
+)::Bool
+    for case in demand.cases
+        _is_feasible_rc_column(checker, cache, j, section, material, case, geometry) ||
+            return false
+    end
+    return true
+end
+
+"""Strength checks use the concrete. The rebar on a reinforced-concrete material is for the objective."""
+function is_feasible(
+    checker::ACIColumnChecker,
+    cache::ACIColumnCapacityCache,
+    j::Int,
+    section::Union{RCColumnSection, RCCircularSection},
+    material::ReinforcedConcreteMaterial,
+    demand::Union{RCColumnDemand, RCColumnDemandSet},
+    geometry::ConcreteMemberGeometry,
+)
+    is_feasible(checker, cache, j, section, material.concrete, demand, geometry)
+end
+
+"""
     _is_feasible_rc_column(checker, cache, j, section, material, demand, geometry) -> Bool
 
 Shared implementation for rectangular and circular columns. Checks:
@@ -312,10 +411,12 @@ function _is_feasible_rc_column(
     demand::RCColumnDemand,
     geometry::ConcreteMemberGeometry
 )::Bool
-    # Extract demand values in kip and kip-ft
+    # Extract demand values in kip and kip-ft. Moments are magnitudes; a
+    # signed or non-finite Muy must not skip the biaxial check.
     Pu = to_kip(demand.Pu)
-    Mux = to_kipft(demand.Mux)
-    Muy = to_kipft(demand.Muy)
+    Mux = abs(to_kipft(demand.Mux))
+    Muy = abs(to_kipft(demand.Muy))
+    isfinite(Pu) && isfinite(Mux) && isfinite(Muy) || return false
     βdns = Float64(demand.βdns)
     
     # --- Depth Check ---
@@ -334,30 +435,41 @@ function _is_feasible_rc_column(
         
         transverse_load = demand.transverse_load
 
-        # Magnify moment if slender — strong-axis (bending about x).
-        # Uses geometry.kx, r ≈ 0.3·h, Ig = b·h³/12.
+        # Same nonsway procedure on both axes. ACI 318-19 §6.2.5.3
+        # (corpus: aci-318-19, printed page 70) rejects a magnifier result
+        # whose δns exceeds 1.4, before the section is checked for strength.
         result = magnify_moment_nonsway(
             section, mat, geometry,
             Pu, M1x, M2x, StrongAxis();
             βdns = βdns,
             transverse_load = transverse_load,
         )
-        Mux = result.Mc
+        result.permitted || return false
+        # Mc magnifies the end moments M1/M2. The design demand can exceed M2
+        # when the end moments were not filled in, so it is never reduced.
+        Mux = max(Mux, result.Mc)
 
-        # Also magnify Muy if biaxial — weak-axis (bending about y).
-        # WeakAxis() forces the slenderness path to use geometry.ky,
-        # r ≈ 0.3·b, and Ig = h·b³/12, which differs from the strong axis
-        # for non-square columns (e.g., a 16×32 column non-slender about
-        # x can still be slender about y).
+        # Weak axis uses geometry.ky, r ≈ 0.3·b, Ig = h·b³/12. A column
+        # that is stocky about x can still be past the §6.2.5.3 cap about y.
+        result_y = magnify_moment_nonsway(
+            section, mat, geometry,
+            Pu, M1y, M2y, WeakAxis();
+            βdns = βdns,
+            transverse_load = transverse_load,
+        )
+        result_y.permitted || return false
+        Mcy = max(Muy, result_y.Mc)
         if Muy > 0 && checker.include_biaxial
-            result_y = magnify_moment_nonsway(
-                section, mat, geometry,
-                Pu, M1y, M2y, WeakAxis();
-                βdns = βdns,
-                transverse_load = transverse_load,
-            )
-            Muy = result_y.Mc
+            Muy = Mcy
+        elseif result_y.slender || Muy > 0
+            # Uniaxial check of the weak-axis design moment. R6.6.4.5.4:
+            # the minimum eccentricity is not applied about both axes at once,
+            # so this moment is not added to the Bresler combination. With
+            # biaxial off, a weak-axis demand is still checked on its own.
+            _weak_axis_check(cache, j, section, mat, Pu, Mcy).passed || return false
         end
+    elseif Muy > 0 && !checker.include_biaxial
+        _weak_axis_check(cache, j, section, _cache_material(cache), Pu, Muy).passed || return false
     end
     
     # --- Get P-M diagram ---
@@ -372,19 +484,21 @@ function _is_feasible_rc_column(
         # Bresler Load Contour: (Mux/φMnx)^α + (Muy/φMny)^α ≤ 1.0
         φMnx = check_x.φMn_at_Pu
         
-        # For rectangular sections (b ≠ h), use y-axis diagram for φMny
-        # For square/circular sections, use same capacity for both axes
-        φMny = if cache.is_square[j] || isnothing(cache.diagrams_y[j])
-            φMnx  # Same for square/circular section
+        # Rectangular sections (square included) carry a weak-axis diagram;
+        # only circular sections reuse the strong-axis capacity.
+        φMny = if isnothing(cache.diagrams_y[j])
+            φMnx
         else
-            # Use y-axis diagram for rectangular sections
             check_y = check_PM_capacity(cache.diagrams_y[j], Pu, Muy)
             check_y.adequate || return false  # Must also pass y-axis check
             check_y.φMn_at_Pu
         end
         
+        # PM_INTERACTION_UTIL_TOL covers interpolation on the discretized
+        # diagram, which φMnx and φMny already went through. The Bresler sum
+        # itself is analytic, so it gets no second allowance.
         util_biaxial = bresler_load_contour(Mux, Muy, φMnx, φMny; α=checker.α_biaxial)
-        util_biaxial <= 1.0 + PM_INTERACTION_UTIL_TOL || return false
+        util_biaxial <= 1.0 || return false
     end
     
     return true
@@ -417,6 +531,17 @@ function get_feasibility_error_msg(
     "Lu=$(geometry.Lu), kx=$(geometry.kx), ky=$(geometry.ky)"
 end
 
+"""Error message for a demand set: the case with the largest moment, and the case count."""
+function get_feasibility_error_msg(
+    checker::ACIColumnChecker,
+    demand::RCColumnDemandSet,
+    geometry::ConcreteMemberGeometry
+)
+    worst = argmax(c -> abs(to_kipft(c.Mux)) + abs(to_kipft(c.Muy)), demand.cases)
+    return get_feasibility_error_msg(checker, worst, geometry) *
+           " (worst of $(length(demand.cases)) load cases)"
+end
+
 # ==============================================================================
 # Objective Value for RC Columns (using existing Concrete type)
 # ==============================================================================
@@ -430,34 +555,44 @@ function objective_value(
     ::MinVolume,
     section::RCColumnSection,
     material::Concrete,
-    length::Length
+    length::Length;
+    rebar=nothing,
+    transverse=nothing,
 )
-    # Cross-sectional area
+    # Member volume. Steel replaces concrete, so it does not add volume.
     Ag = section.b * section.h
-    # Volume = area × length
     return uconvert(u"m^3", Ag * length)
 end
 
-"""Minimum-weight objective for a rectangular RC column (kg)."""
+"""Minimum-weight objective for a rectangular RC column (kg).
+
+With `rebar`, the steel area is weighed at the rebar density and the
+remaining gross area at the concrete density.
+"""
 function objective_value(
     ::MinWeight,
     section::RCColumnSection,
     material::Concrete,
-    length::Length
+    length::Length;
+    rebar=nothing,
+    transverse=nothing,
 )
     Ag = section.b * section.h
-    return uconvert(u"kg", Ag * length * material.ρ)
+    rebar === nothing && return uconvert(u"kg", Ag * length * material.ρ)
+    trans = transverse === nothing ? rebar : transverse
+    return _rc_objective(MinWeight(), Ag, section.As_total, material, rebar, trans, length, section)
 end
 
-"""Minimum-cost objective for a rectangular RC column (m³ volume proxy)."""
+"""Minimum-cost objective for a rectangular RC column: gross volume (m³)."""
 function objective_value(
     ::MinCost,
     section::RCColumnSection,
     material::Concrete,
-    length::Length
+    length::Length;
+    rebar=nothing,
+    transverse=nothing,
 )
-    Ag = section.b * section.h
-    return uconvert(u"m^3", Ag * length)
+    return uconvert(u"m^3", section.b * section.h * length)
 end
 
 """Minimum-volume objective for a circular RC column (m³)."""
@@ -465,7 +600,9 @@ function objective_value(
     ::MinVolume,
     section::RCCircularSection,
     material::Concrete,
-    length::Length
+    length::Length;
+    rebar=nothing,
+    transverse=nothing,
 )
     return uconvert(u"m^3", section.Ag * length)
 end
@@ -475,17 +612,23 @@ function objective_value(
     ::MinWeight,
     section::RCCircularSection,
     material::Concrete,
-    length::Length
+    length::Length;
+    rebar=nothing,
+    transverse=nothing,
 )
-    return uconvert(u"kg", section.Ag * length * material.ρ)
+    rebar === nothing && return uconvert(u"kg", section.Ag * length * material.ρ)
+    trans = transverse === nothing ? rebar : transverse
+    return _rc_objective(MinWeight(), section.Ag, section.As_total, material, rebar, trans, length, section)
 end
 
-"""Minimum-cost objective for a circular RC column (m³ volume proxy)."""
+"""Minimum-cost objective for a circular RC column: gross volume (m³)."""
 function objective_value(
     ::MinCost,
     section::RCCircularSection,
     material::Concrete,
-    length::Length
+    length::Length;
+    rebar=nothing,
+    transverse=nothing,
 )
     return uconvert(u"m^3", section.Ag * length)
 end
@@ -497,11 +640,15 @@ function objective_value(
     ::MinCarbon,
     section::RCColumnSection,
     material::Concrete,
-    length::Length
+    length::Length;
+    rebar=nothing,
+    transverse=nothing,
 )
     Ag = section.b * section.h
-    volume = uconvert(u"m^3", Ag * length)
-    return uconvert(u"kgCO2e", volume * material.ρ * material.ecc)
+    rebar === nothing && return uconvert(u"kgCO2e",
+        uconvert(u"m^3", Ag * length) * material.ρ * material.ecc)
+    trans = transverse === nothing ? rebar : transverse
+    return _rc_objective(MinCarbon(), Ag, section.As_total, material, rebar, trans, length, section)
 end
 
 """Minimum-carbon objective for a circular RC column. Returns a typed
@@ -510,10 +657,14 @@ function objective_value(
     ::MinCarbon,
     section::RCCircularSection,
     material::Concrete,
-    length::Length
+    length::Length;
+    rebar=nothing,
+    transverse=nothing,
 )
-    volume = uconvert(u"m^3", section.Ag * length)
-    return uconvert(u"kgCO2e", volume * material.ρ * material.ecc)
+    rebar === nothing && return uconvert(u"kgCO2e",
+        uconvert(u"m^3", section.Ag * length) * material.ρ * material.ecc)
+    trans = transverse === nothing ? rebar : transverse
+    return _rc_objective(MinCarbon(), section.Ag, section.As_total, material, rebar, trans, length, section)
 end
 
 # ==============================================================================
@@ -539,9 +690,12 @@ function explain_feasibility(
     checks = CheckResult[]
 
     Pu = to_kip(demand.Pu)
-    Mux = to_kipft(demand.Mux)
-    Muy = to_kipft(demand.Muy)
+    Mux = abs(to_kipft(demand.Mux))
+    Muy = abs(to_kipft(demand.Muy))
     βdns = Float64(demand.βdns)
+    finite = isfinite(Pu) && isfinite(Mux) && isfinite(Muy)
+    push!(checks, CheckResult("finite_demand", finite,
+          finite ? 0.0 : Inf, 0.0, 0.0, ""))
 
     # --- Depth Check ---
     d_section = cache.depths[j]
@@ -575,21 +729,37 @@ function explain_feasibility(
                                           StrongAxis();
                                           βdns=βdns,
                                           transverse_load=transverse_load)
-        Mux = result_x.Mc
+        # Keep a finite moment in the strength rows when §6.2.5.3 rejects δns.
+        # The magnified moment never drops below the design demand.
+        Mux = result_x.permitted ? max(Mux, result_x.Mc) : Mux
 
-        if Muy > 0 && checker.include_biaxial
-            # Weak axis (about y): geometry.ky, r ≈ 0.3·b, Ig = h·b³/12.
-            result_y = magnify_moment_nonsway(section, mat, geometry, Pu, M1y, M2y,
-                                              WeakAxis();
-                                              βdns=βdns,
-                                              transverse_load=transverse_load)
-            Muy = result_y.Mc
+        result_y = magnify_moment_nonsway(section, mat, geometry, Pu, M1y, M2y,
+                                          WeakAxis();
+                                          βdns=βdns,
+                                          transverse_load=transverse_load)
+        Mcy = result_y.permitted ? max(Muy, result_y.Mc) : Muy
+        if Muy > 0 && checker.include_biaxial && result_y.permitted
+            Muy = Mcy
+        elseif (result_y.slender || Muy > 0) && result_y.permitted
+            push!(checks, _weak_axis_check(cache, j, section, mat, Pu, Mcy))
         end
 
-        # Report slenderness amplification ratio (Mc/M2)
+        # ACI 318-19 §6.2.5.3. δns / 1.4 on axes where slenderness is not
+        # neglected. This is a strength limit of the magnifier method, so it
+        # stays in the governing set. A non-slender axis contributes 0.
+        δ_gov = max(result_x.slender ? result_x.δns : 0.0,
+                    result_y.slender ? result_y.δns : 0.0)
+        cap = SECOND_ORDER_MOMENT_RATIO_LIMIT
+        push!(checks, CheckResult("second_order_limit",
+              result_x.permitted && result_y.permitted,
+              δ_gov == 0 ? 0.0 : δ_gov / cap, δ_gov, cap, "ACI 318-19 6.2.5.3"))
+
+        # Informational amplification (Mc/M2). Not a demand/capacity ratio.
         slend_ratio = M2x > 0 ? Mux / M2x : 1.0
         push!(checks, CheckResult("slenderness_magnification", true,
               slend_ratio, Mux, M2x > 0 ? M2x : Mux, "ACI 318-19 6.6.4"))
+    elseif Muy > 0 && !checker.include_biaxial
+        push!(checks, _weak_axis_check(cache, j, section, _cache_material(cache), Pu, Muy))
     end
 
     # --- Uniaxial P-M Check (x-axis) — ACI 318-19 §22.4 ---
@@ -603,7 +773,7 @@ function explain_feasibility(
     if checker.include_biaxial && Muy > 0
         φMnx = check_x.φMn_at_Pu
 
-        φMny = if cache.is_square[j] || isnothing(cache.diagrams_y[j])
+        φMny = if isnothing(cache.diagrams_y[j])
             φMnx
         else
             check_y = check_PM_capacity(cache.diagrams_y[j], Pu, Muy)
@@ -637,5 +807,39 @@ function explain_feasibility(
     end
 
     FeasibilityExplanation(all_pass, checks, gov.name, gov.ratio)
+end
+
+"""
+    explain_feasibility(checker::ACIColumnChecker, cache, j, section, material, demand::RCColumnDemandSet, geometry)
+
+The explanation of the governing case: a failing case if any, else the case
+with the highest governing ratio. `passed` is true only when every case passes.
+"""
+function explain_feasibility(
+    checker::ACIColumnChecker,
+    cache::ACIColumnCapacityCache,
+    j::Int,
+    section::Union{RCColumnSection, RCCircularSection},
+    material::Concrete,
+    demand::RCColumnDemandSet,
+    geometry::ConcreteMemberGeometry
+)::FeasibilityExplanation
+    expls = [explain_feasibility(checker, cache, j, section, material, c, geometry)
+             for c in demand.cases]
+    worst = argmax(e -> (!e.passed, e.governing_ratio), expls)
+    return FeasibilityExplanation(all(e -> e.passed, expls), worst.checks,
+                                  worst.governing_check, worst.governing_ratio)
+end
+
+function explain_feasibility(
+    checker::ACIColumnChecker,
+    cache::ACIColumnCapacityCache,
+    j::Int,
+    section::Union{RCColumnSection, RCCircularSection},
+    material::ReinforcedConcreteMaterial,
+    demand::Union{RCColumnDemand, RCColumnDemandSet},
+    geometry::ConcreteMemberGeometry,
+)
+    explain_feasibility(checker, cache, j, section, material.concrete, demand, geometry)
 end
 

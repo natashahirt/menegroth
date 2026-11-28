@@ -158,7 +158,7 @@ function coating_volume(section, coating::SurfaceCoating, L::Unitful.Length;
                         exposure::Symbol=:three_sided)
     coating.thickness_in ≤ 0 && return 0.0u"m^3"
     P_m = exposed_perimeter(section; exposure=exposure)
-    t_m = coating.thickness_in * 0.0254u"m"  # in → m
+    t_m = coating.thickness_in * Asap.IN_TO_M * u"m"
     return P_m * t_m * uconvert(u"m", L)
 end
 

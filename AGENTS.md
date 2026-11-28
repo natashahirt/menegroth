@@ -4,6 +4,8 @@
 
 **Environment / setup issues** (Cursor Cloud, backslash paths in `Project.toml`, submodules, Gurobi license, Slack bot, doc & trace audit workflows, corpus MCP registration): read `docs/agent-setup.md`.
 
+**Sizing loops and element dependencies:** before changing how any element is sized, read `docs/sizing-map/README.md` (stage order, every iterative loop, decision space, ranked size/speed issues, open sign-off items).
+
 ## Running tests
 
 **Use the quiet runner** — it logs full output to `logs/` and prints only the summary and failure excerpts. Prefer targeted test files over the full suite.

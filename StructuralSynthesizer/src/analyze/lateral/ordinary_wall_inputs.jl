@@ -35,6 +35,16 @@ is the caller's statement; a wall on neither plan axis makes it true.
 
 The other Bool fields are the caller's statements for the seismic-provision
 gate. This struct does not decide them.
+
+`flexible_accidental_torsion` puts the §12.8.4.2 accidental moment on a
+flexible diaphragm as a couple between its two farthest wall lines. ASCE 7-22
+§12.8.4.2.1 requires accidental torsion only where diaphragms are not
+flexible, so this is a conservative choice and defaults to `false`.
+
+`wind_gust_site` turns on the §26.11 decision: `(; V_mph, exposure, β)` and
+optionally `n1`, `eR`, and `frequency_system` (see `_wind_site_gust`). A
+direction found flexible uses `Gf` and Eq. 27.3-4; a rigid one keeps `G`.
+`nothing` keeps every direction rigid at `G`, the earlier behavior.
 """
 Base.@kwdef struct OrdinaryWallInputs
     directions::NTuple{2, NTuple{2, Float64}}
@@ -70,4 +80,6 @@ Base.@kwdef struct OrdinaryWallInputs
     Sa::Union{Float64, Nothing} = nothing
     between::Union{Symbol, Nothing} = nothing
     extra_directions::Vector{NTuple{2, Float64}} = NTuple{2, Float64}[]
+    flexible_accidental_torsion::Bool = false
+    wind_gust_site::Union{Nothing, NamedTuple} = nothing
 end

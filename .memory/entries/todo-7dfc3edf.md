@@ -7,12 +7,12 @@ title: Real §I3.1b construction-stage check for composite steel beams
 node_label: Real §I3.1b construction-stage check for composite
 tags: ''
 status: active
-open_threads: 0
+open_threads: 5
 success: 'null'
 files: StructuralSizer/src/members/codes/aisc/checker.jl@bcfe7d3
 session_id: sess-ecae06c6
 created_at: '2026-10-25T13:33:42.190426+00:00'
-updated_at: '2026-10-25T13:33:42.190426+00:00'
+updated_at: '2026-11-05T01:42:41.216740+00:00'
 ---
 Deferred from the composite production-gaps plan (Phase 2).
 

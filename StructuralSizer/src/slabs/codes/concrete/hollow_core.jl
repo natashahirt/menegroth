@@ -20,5 +20,5 @@ Select hollow core profile for given span and load.
 function _size_span_floor(::HollowCore, span::L, sdl::F, live::F;
                     material::Concrete=NWC_4000,
                     fire_rating::Int=2) where {L, F}
-    error("HollowCore sizing not yet implemented")
+    throw(UnsupportedFloorSystemError(HollowCore))
 end

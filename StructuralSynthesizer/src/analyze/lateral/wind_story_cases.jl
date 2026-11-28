@@ -12,10 +12,13 @@
 #
 # Not done here, on purpose:
 # - Wall sizing, Chapter 26 velocity pressure, roof Cp, open-building CN.
-# - The flexible-building eccentricity, Eq. 27.3-4.
 # - A force at the base, or the whole building height dumped on the roof.
 # - Figure 27.3-1 roof Cp. A sloped roof is refused, not returned as a
 #   wall-only case.
+# Eq. 27.3-4 is used when `flexible=true` and `gust` supplies the §26.11
+# terms. A flexible diaphragm is not a flexible building: the rigid 0.15 B
+# eccentricity is still the one applied, and its moment is a couple on the
+# wall lines.
 
 """One level above the base that receives a wind story force."""
 struct WindStoryLevel
@@ -23,7 +26,8 @@ struct WindStoryLevel
     elevation_m::Float64
     "Exposed wall height of this story [m]. The height ELF uses, hsx."
     story_height_m::Float64
-    master::Asap.Node
+    "Rigid-diaphragm master, or `nothing` when the diaphragm has no rigid links."
+    master::Union{Nothing, Asap.Node}
     "Open floor rings [m], from [`story_floor_outline`](@ref)."
     outline::Vector{Vector{NTuple{2, Float64}}}
 end
@@ -52,7 +56,20 @@ end
 struct WindStoryAnalysis
     levels::Vector{WindStoryLevel}
     cases::Vector{WindStoryCase}
+    "Full displacement of each case, same order as `cases`. Empty when no solve was stored."
+    displacements::Vector{Vector{Float64}}
+    "Plan point each level's moment is taken about. Empty on a hand-built analysis."
+    centroids::Vector{NTuple{2,Float64}}
 end
+
+"""
+Two-field analysis for a hand-built case list.
+
+`displacements` and `centroids` are empty. A solved
+[`wind_story_analysis`](@ref) fills both.
+"""
+WindStoryAnalysis(levels, cases) =
+    WindStoryAnalysis(levels, cases, Vector{Float64}[], NTuple{2,Float64}[])
 
 """
     wind_story_analysis(struc; directions, qz, qh, Kd, G, GCpi, ...) -> WindStoryAnalysis
@@ -60,10 +77,24 @@ end
 Apply ASCE 7-22 Chapter 27 MWFRS wall forces to the rigid-diaphragm masters
 and solve them as one batch on the reduced stiffness.
 
-`struc` must already have been through `to_asap!(; diaphragms=:rigid)` with
-slabs, so `asap_rigid_links` is non-empty. A `:flexible` or `:none`
-diaphragm leaves that list empty and throws. `flexible=true` throws before
-any load is built.
+A rigid diaphragm puts the resultant and its moment on the master.
+A flexible diaphragm splits `(Fx, Fy)` among the lines of seismic-system
+walls by the floor width each line takes facing the wind
+([`diaphragm_story_loads`](@ref)). The resultant's
+moment, including the move from the centroid to a master, is applied as a
+couple on the wall lines that have a moment arm. ASCE 7-22 §12.8.4.2.1
+(corpus: asce-7-22, PDF page 187) requires the 5% accidental eccentricity
+only where diaphragms are not flexible; that seismic moment is not this
+wind moment. `flexible=true` is a flexible building (§26.2, natural
+frequency below 1 Hz) and replaces the 0.15 B eccentricity with Eq. 27.3-4.
+`gust` then holds `eR`, `Iz`, `gQ`, `Q`, `gR`, and `R`. `eR` is one
+distance or one distance per level above the base. `gust_site` instead
+decides flexibility from §26.11 for each wind direction
+([`_wind_site_gust`](@ref)); `G` is then the rigid-building factor. A `:semirigid`
+membrane floor takes the force on its exterior edge and the moment about the
+exterior-loop centroid ([`_semirigid_wind_forces`](@ref)); `Mz_kN_m` is then
+that moment. A full-plate `:shell` floor throws from the shared story-load
+builder.
 
 `directions` is two plan directions, the structure's principal axes. They
 must be perpendicular unless `perpendicular` is false. Two copies of one
@@ -107,13 +138,21 @@ function wind_story_analysis(struc::BuildingStructure;
                              GCpi::Real,
                              qi::Union{Real, Nothing}=nothing,
                              flexible::Bool=false,
+                             gust=nothing,
+                             gust_site=nothing,
                              roof::Symbol=:flat,
                              extra_directions=(),
                              perpendicular::Bool=true)
-    if flexible
+    if gust_site !== nothing && (flexible || gust !== nothing)
         throw(ArgumentError(
-            "wind_story_analysis: flexible buildings are outside this slice. " *
-            "ASCE 7-22 Eq. 27.3-4 is not implemented (corpus: asce-7-22, PDF page 353)."))
+            "wind_story_analysis: gust_site decides the building's flexibility from " *
+            "§26.11; do not also pass flexible or gust."))
+    end
+    if flexible && gust === nothing
+        throw(ArgumentError(
+            "wind_story_analysis: a flexible building uses ASCE 7-22 Eq. 27.3-4 " *
+            "(corpus: asce-7-22, PDF page 353). Pass gust with eR, Iz, gQ, Q, " *
+            "gR, and R from §26.11."))
     end
     wind_figure_2731_roof(roof)
     # ASCE 7-22 §27.3.1: "Pressure shall be applied simultaneously on
@@ -136,10 +175,6 @@ function wind_story_analysis(struc::BuildingStructure;
     direction_1, direction_2 = _wind_two_directions(directions; perpendicular)
     extras = _wind_extra_directions(extra_directions, direction_1, direction_2)
 
-    isempty(struc.asap_rigid_links) && throw(ArgumentError(
-        "wind_story_analysis: story forces use the rigid-diaphragm masters. " *
-        "asap_rigid_links is empty. Call to_asap!(struc; diaphragms=:rigid) " *
-        "with slabs present. A :flexible or :none diaphragm is not this distribution."))
     struc.asap_model.processed || throw(ArgumentError(
         "wind_story_analysis: the Asap model is not processed. Call to_asap! first."))
 
@@ -149,14 +184,20 @@ function wind_story_analysis(struc::BuildingStructure;
         "wind_story_analysis: qz has $(length(qz)) values and there are $n " *
         "levels above the base. One qz per level, lowest first."))
 
+    all_directions = (direction_1, direction_2, extras...)
+    site = gust_site === nothing ? nothing :
+        _wind_site_gust(struc, levels, gust_site, all_directions, G)
     calcs = Vector{NamedTuple}(undef, n)
     for i in 1:n
         lv = levels[i]
         qzi = _wind_plain("qz[$i]", qz[i])
         resultants = WindWallResultant[]
-        for d in (direction_1, direction_2, extras...)
-            push!(resultants, wind_wall_resultant(lv.outline, d; qz=qzi, qh, Kd, G,
-                GCpi, qi, height=lv.story_height_m, flexible=false))
+        for (k, d) in enumerate(all_directions)
+            Gd, flex_d, gust_d = site === nothing ?
+                (G, flexible, _wind_level_gust(gust, i, n)) :
+                (site[k].G, site[k].flexible, _wind_level_gust(site[k].gust, i, n))
+            push!(resultants, wind_wall_resultant(lv.outline, d; qz=qzi, qh, Kd, G=Gd,
+                GCpi, qi, height=lv.story_height_m, flexible=flex_d, gust=gust_d))
         end
         pts = NTuple{2, Float64}[]
         for loop in lv.outline
@@ -178,20 +219,22 @@ function wind_story_analysis(struc::BuildingStructure;
     ncase = length(story_cases[1])
     built = WindStoryCase[]
     load_cases = Vector{Vector{Asap.AbstractLoad}}()
+    centroids = _wind_level_centroids(calcs)
     for j in 1:ncase
         template = story_cases[1][j]
         Fx = Float64[story_cases[i][j].Fx for i in 1:n]
         Fy = Float64[story_cases[i][j].Fy for i in 1:n]
         Mz = Float64[story_cases[i][j].Mz for i in 1:n]
-        M_master = _wind_master_moments(levels, calcs, Fx, Fy, Mz)
-        push!(load_cases, _wind_loads(levels, Fx, Fy, M_master))
+        M_master = _wind_master_moments(levels, calcs, Fx, Fy, Mz;
+                                        semirigid=_is_semirigid(struc))
+        push!(load_cases, _wind_loads(struc, levels, Fx, Fy, M_master, centroids))
         push!(built, WindStoryCase(template.kind, template.direction, template.direction_2,
             template.sign_1, template.sign_2, Fx, Fy, M_master,
             Float64[], Float64[]))
     end
-    _wind_append_minima!(built, load_cases, levels, calcs)
+    _wind_append_minima!(struc, built, load_cases, levels, calcs)
 
-    displacements = Asap.solve(struc.asap_model, load_cases, struc.asap_rigid_links)
+    displacements = Asap.solve(struc.asap_model, load_cases, lateral_solve_links(struc))
     length(displacements) == length(built) || throw(ArgumentError(
         "wind_story_analysis: the solve returned $(length(displacements)) cases, " *
         "expected $(length(built))."))
@@ -201,18 +244,28 @@ function wind_story_analysis(struc::BuildingStructure;
         ux = Float64[]
         uy = Float64[]
         for lv in levels
-            x, y = _wind_master_disp(u, lv.master)
-            push!(ux, x)
-            push!(uy, y)
+            if lv.master === nothing
+                # No rigid floor. The case does not report a master displacement.
+                push!(ux, NaN)
+                push!(uy, NaN)
+            else
+                x, y = _wind_master_disp(u, lv.master)
+                push!(ux, x)
+                push!(uy, y)
+            end
         end
         c = built[i]
         push!(solved, WindStoryCase(c.kind, c.direction, c.direction_2,
             c.sign_1, c.sign_2, c.Fx_kN, c.Fy_kN, c.Mz_kN_m, ux, uy))
     end
-    return WindStoryAnalysis(levels, solved)
+    return WindStoryAnalysis(levels, solved, displacements, centroids)
 end
 
-function _wind_append_minima!(built, load_cases, levels, calcs)
+"Plan centroid of each level's first wind resultant."
+_wind_level_centroids(calcs) =
+    NTuple{2,Float64}[c.resultants[1].centroid for c in calcs]
+
+function _wind_append_minima!(struc, built, load_cases, levels, calcs)
     n = length(levels)
     nresult = length(calcs[1].resultants)
     for which in 1:nresult
@@ -233,61 +286,41 @@ function _wind_append_minima!(built, load_cases, levels, calcs)
             Fy[i] = mini.Fy
             Mz[i] = mini.Mz
         end
-        M_master = _wind_master_moments(levels, calcs, Fx, Fy, Mz)
-        push!(load_cases, _wind_loads(levels, Fx, Fy, M_master))
+        M_master = _wind_master_moments(levels, calcs, Fx, Fy, Mz;
+                                        semirigid=_is_semirigid(struc))
+        push!(load_cases, _wind_loads(struc, levels, Fx, Fy, M_master,
+                                      _wind_level_centroids(calcs)))
         push!(built, WindStoryCase(:minimum, direction, nothing, 0, 0,
             Fx, Fy, M_master, Float64[], Float64[]))
     end
     return nothing
 end
 
-"""Masters already elected by the rigid-link pass, and the levels above the base."""
+"""Levels above the base. The story list and the masters are the ones ELF uses."""
 function _wind_levels(struc)
-    skel = struc.skeleton
-    story_z = Set{Int}()
-    for (_, story) in skel.stories
-        push!(story_z, round(Int, ustrip(u"m", story.elevation) * 1000))
-    end
-    master_at = Dict{Int, Asap.Node}()
-    for link in struc.asap_rigid_links
-        zk = round(Int, ustrip(u"m", link.nodeA.position[3]) * 1000)
-        zk in story_z || continue
-        master_at[zk] = link.nodeA
-    end
-
-    raw = NamedTuple[]
-    for (idx, story) in skel.stories
-        isempty(story.faces) && continue
-        z = ustrip(u"m", story.elevation)
-        outline = story_floor_outline(skel, story)
-        push!(raw, (; idx, z, outline))
-    end
-    isempty(raw) && throw(ArgumentError(
-        "wind_story_analysis: the skeleton has no story with faces."))
-
-    z_base = minimum(item.z for item in raw)
-    # Same elevation split ELF uses to keep the base out of the story list.
-    # Geometry, not a code factor. No wind force is applied at the base.
-    above = [item for item in raw if item.z > z_base + 1e-6]
-    isempty(above) && throw(ArgumentError(
-        "wind_story_analysis: no story sits above the base elevation $(z_base) m."))
-    sort!(above; by=item -> item.z)
-
+    # No wind force is applied at the base. The 1e-6 m split is `_stories_above_base`.
+    master_at = _elf_masters(struc)
+    z_base, above = _stories_above_base(_faced_story_floors(struc.skeleton),
+                                        "wind_story_analysis")
     levels = WindStoryLevel[]
     for (i, item) in enumerate(above)
-        zk = round(Int, item.z * 1000)
-        haskey(master_at, zk) || throw(ArgumentError(
-            "wind_story_analysis: story $(item.idx) at $(item.z) m has no rigid-diaphragm master."))
+        master = _level_master(struc, master_at, item.z, item.idx, "wind_story_analysis")
         z_below = i == 1 ? z_base : above[i - 1].z
-        hsx = item.z - z_below
-        hsx > 0 || throw(ArgumentError(
-            "wind_story_analysis: story height below story $(item.idx) is $(hsx) m."))
-        push!(levels, WindStoryLevel(item.idx, item.z, hsx, master_at[zk], item.outline))
+        hsx = _story_height_below(item.z, z_below, item.idx, "wind_story_analysis")
+        push!(levels, WindStoryLevel(item.idx, item.z, hsx, master, item.outline))
     end
     return levels
 end
 
-function _wind_master_moments(levels, calcs, Fx, Fy, Mz)
+function _wind_master_moments(levels, calcs, Fx, Fy, Mz; semirigid::Bool=false)
+    # A membrane floor takes the moment about the exterior-loop centroid itself.
+    semirigid && return copy(Mz)
+    if any(lv -> lv.master === nothing, levels)
+        # No master. The moment stays about the exterior centroid. A flexible
+        # diaphragm turns it into a couple in `_wind_loads`. A semirigid floor
+        # is handled above.
+        return copy(Mz)
+    end
     out = Vector{Float64}(undef, length(levels))
     for i in eachindex(levels)
         cx, cy = calcs[i].resultants[1].centroid
@@ -301,23 +334,251 @@ function _wind_master_moments(levels, calcs, Fx, Fy, Mz)
     return out
 end
 
-function _wind_loads(levels, Fx, Fy, Mz)
-    loads = Asap.AbstractLoad[]
-    z = 0.0 * u"kN"
-    for i in eachindex(levels)
-        if Fx[i] != 0.0 || Fy[i] != 0.0
-            push!(loads, Asap.NodeForce(levels[i].master,
-                [Fx[i] * u"kN", Fy[i] * u"kN", z], :wind_story))
-        end
-        if Mz[i] != 0.0
-            push!(loads, Asap.NodeMoment(levels[i].master,
-                [0.0 * u"kN*m", 0.0 * u"kN*m", Mz[i] * u"kN*m"], :wind_torsion))
-        end
+function _wind_loads(struc, levels, Fx, Fy, Mz, centroids)
+    # An empty list is a hand-built analysis. A rigid floor does not use the
+    # point. A membrane floor throws from the story-load builder.
+    cents = isempty(centroids) ? nothing : centroids
+    loads = diaphragm_story_loads(struc, levels, Fx, Fy, Mz;
+        force_id=:wind_story, moment_id=:wind_torsion, centroids=cents)
+    if struc.diaphragm_layout isa FlexibleDiaphragmLayout
+        append!(loads, _wind_flexible_torsion(struc, levels, Mz, centroids, loads))
     end
-    isempty(loads) && throw(ArgumentError(
-        "wind_story_analysis: a case produced no story force and no torsion."))
     return loads
 end
+
+"""
+Eq. 27.3-4 inputs for level `i`. `eR` is one distance or one per level.
+
+A rigid building passes `gust = nothing`.
+"""
+function _wind_level_gust(gust, i::Int, n::Int)
+    gust === nothing && return nothing
+    eR = gust.eR
+    eRi = eR isa AbstractVector ? eR[i] : eR
+    length_ok = !(eR isa AbstractVector) || length(eR) == n
+    length_ok || throw(ArgumentError(
+        "wind_story_analysis: gust.eR has $(length(eR)) values and there are " *
+        "$n levels above the base."))
+    return (eR=eRi, Iz=gust.Iz, gQ=gust.gQ, Q=gust.Q, gR=gust.gR, R=gust.R)
+end
+
+const _M_TO_FT = 1 / 0.3048
+
+"""
+    _wind_site_gust(struc, levels, site, directions, G) -> Vector{NamedTuple}
+
+Rigid or flexible, and the gust-effect factor, for each wind direction.
+
+`site` holds `V_mph` (basic wind speed), `exposure` (`:B`, `:C`, `:D`), `β`
+(damping, fraction of critical), and optionally `n1` [Hz], `eR` [m, one value
+or one per level], and `frequency_system` (default `:other`, Eq. 26.11-4).
+
+- A low-rise building (§26.2) is rigid (§26.11.2).
+- Otherwise `n1` is `site.n1`, or the approximate `na` of §26.11.3 when
+  §26.11.2.1 permits it: the lower of `frequency_system`'s equation and, when
+  walls run along the wind, Eq. 26.11-5. Both are permitted lower bounds; the
+  lower one is the conservative choice.
+- `n1 ≥ 1 Hz` is rigid and keeps the caller's `G` (§26.11.4 permits 0.85).
+  Below 1 Hz the building is flexible: `Gf` from Eq. 26.11-10, and the
+  Eq. 27.3-4 terms with `site.eR`, which is required and is not assumed.
+
+The plan must be the same at every level: `B` and `L` are single dimensions
+in §26.11. h is the height of the top level above the base.
+
+# Citation
+ASCE 7-22 §26.2, §26.11.2–§26.11.5, §27.3.5 (corpus: asce-7-22, PDF pages
+323, 338–340, and 353).
+"""
+function _wind_site_gust(struc, levels, site, directions, G)
+    for key in (:V_mph, :exposure, :β)
+        haskey(site, key) || throw(ArgumentError("gust_site needs $key"))
+    end
+    n1_given = get(site, :n1, nothing)
+    system = get(site, :frequency_system, :other)
+    z_base = levels[1].elevation_m - levels[1].story_height_m
+    h_m = levels[end].elevation_m - z_base
+    h_ft = h_m * _M_TO_FT
+    pts_at(lv) = reduce(vcat, lv.outline; init=NTuple{2, Float64}[])
+    # B is the extent normal to the wind, L the extent along it.
+    dims(d) = [(B=projected_plan_width(pts_at(lv), d),
+                L=projected_plan_width(pts_at(lv), (-d[2], d[1]))) for lv in levels]
+    for d in directions
+        ds = dims(d)
+        all(x -> abs(x.B - ds[1].B) <= 0.01 * ds[1].B && abs(x.L - ds[1].L) <= 0.01 * ds[1].L, ds) ||
+            throw(ArgumentError(
+                "gust_site: the plan changes between levels; §26.11 takes one B and " *
+                "one L. Pass flexible and gust instead."))
+    end
+    d1 = dims(directions[1])[1]
+    least_ft = min(d1.B, d1.L) * _M_TO_FT
+    low_rise = wind_low_rise(h_ft, least_ft)
+    out = NamedTuple[]
+    for d in directions
+        dm = dims(d)[1]
+        B_ft = dm.B * _M_TO_FT
+        L_ft = dm.L * _M_TO_FT
+        if low_rise
+            push!(out, (G=G, flexible=false, gust=nothing, n1=nothing, low_rise=true))
+            continue
+        end
+        n1 = n1_given
+        if n1 === nothing
+            heights = [(lv.elevation_m - z_base) * _M_TO_FT for lv in levels]
+            Leff = wind_effective_length(heights, fill(L_ft, length(levels)))
+            approximate_frequency_permitted(h_ft, Leff) || throw(ArgumentError(
+                "gust_site: h = $(round(h_ft; digits=1)) ft is past the §26.11.2.1 " *
+                "limits for the approximate frequency (h ≤ 300 ft and h < 4Leff = " *
+                "$(round(4Leff; digits=1)) ft). Pass n1 from an analysis."))
+            n1 = approximate_natural_frequency(h_ft; system)
+            walls = _wind_shear_walls(struc, d, z_base)
+            if !isempty(walls)
+                AB = _wind_base_area_ft2(struc, levels[1].story)
+                n1 = min(n1, shear_wall_natural_frequency(h_ft, AB, walls))
+            end
+        end
+        if n1 >= 1.0
+            push!(out, (G=G, flexible=false, gust=nothing, n1=n1, low_rise=false))
+            continue
+        end
+        eR = get(site, :eR, nothing)
+        eR === nothing && throw(ArgumentError(
+            "gust_site: n1 = $(round(n1; digits=3)) Hz, so the building is flexible " *
+            "(§26.2) and Eq. 27.3-4 needs eR, the distance from the elastic shear " *
+            "center to the center of mass. Pass eR in metres."))
+        gf = gust_effect_factor_flexible(h_ft, B_ft, L_ft; exposure=site.exposure,
+                                         V_mph=site.V_mph, n1=n1, β=site.β)
+        push!(out, (G=gf.Gf, flexible=true, n1=n1, low_rise=false,
+                    gust=(eR=eR, Iz=gf.Iz, gQ=gf.gQ, Q=gf.Q, gR=gf.gR, R=gf.R)))
+    end
+    return out
+end
+
+"""
+Shear walls along the unit plan direction `d`, one per plan line, as
+`(A_ft2, D_ft, h_ft)` for Eq. 26.11-5. A line's height is its stack from the
+lowest pier bottom to the highest pier top; its area is the lowest pier's
+thickness times its length.
+"""
+function _wind_shear_walls(struc, d, z_base)
+    stacks = Dict{NTuple{4, Int}, Vector{NamedTuple}}()
+    for w in struc.walls
+        g = _wall_pier_geometry(w, struc.skeleton)
+        len = hypot(g.x2 - g.x1, g.y2 - g.y1)
+        abs((g.x2 - g.x1) * d[1] + (g.y2 - g.y1) * d[2]) >= (1 - 1e-6) * len || continue
+        a, b = (g.x1, g.y1) <= (g.x2, g.y2) ? ((g.x1, g.y1), (g.x2, g.y2)) : ((g.x2, g.y2), (g.x1, g.y1))
+        key = (round(Int, a[1] * 1000), round(Int, a[2] * 1000),
+               round(Int, b[1] * 1000), round(Int, b[2] * 1000))
+        push!(get!(() -> NamedTuple[], stacks, key), (len=len, g...))
+    end
+    walls = NTuple{3, Float64}[]
+    for piers in values(stacks)
+        low = piers[argmin([p.z_bot for p in piers])]
+        top = maximum(p.z_top for p in piers)
+        D = low.len * _M_TO_FT
+        push!(walls, (low.t_m * low.len * _M_TO_FT^2, D, (top - low.z_bot) * _M_TO_FT))
+    end
+    return walls
+end
+
+"Base area of the building [ft²]: the slab cells of the lowest story above the base."
+function _wind_base_area_ft2(struc, story)
+    faces = Set(struc.skeleton.stories[story].faces)
+    area = 0.0
+    for c in struc.cells
+        c.face_idx in faces || continue
+        c.floor_type === :grade && continue
+        area += ustrip(u"m^2", c.area)
+    end
+    area > 0 || throw(ArgumentError(
+        "gust_site: story $story has no slab area for AB in Eq. 26.11-5."))
+    return area * _M_TO_FT^2
+end
+
+"""
+Torsional wind moment on a flexible diaphragm, as a couple on two wall lines.
+
+The lines are the pair, parallel to one plan axis, with the longest offset
+span. The forces sum to zero. Their moment makes the story loads' moment
+about the exterior centroid equal to `Mz`. The tributary split of `(Fx, Fy)`
+already has a moment, and that part is not added again.
+
+One line, or lines with no separation, cannot provide the arm.
+
+# Citation
+ASCE 7-22 §27.3.5 (corpus: asce-7-22, PDF page 353): the eccentricity is
+considered for each principal axis. The sign is the sign already on `Mz`.
+"""
+function _wind_flexible_torsion(struc, levels, Mz, centroids, story_loads)
+    loads = Asap.AbstractLoad[]
+    for i in eachindex(levels)
+        abs(Mz[i]) <= 1e-9 && continue
+        isempty(centroids) && throw(ArgumentError(
+            "wind eccentricity: level $(levels[i].story) has a torsional moment " *
+            "and no centroid to take it about."))
+        have = _story_load_moment(story_loads, levels[i].elevation_m, centroids[i])
+        append!(loads, _flexible_couple_loads(struc, levels[i].elevation_m, Mz[i] - have,
+            :wind_torsion, "wind eccentricity: level $(levels[i].story)",
+            "ASCE 7-22 §27.3.5 (corpus: asce-7-22, PDF page 353)"))
+    end
+    return loads
+end
+
+"""
+Self-equilibrating couple of moment `need` [kN·m] on one flexible floor.
+
+The two lines are the pair, parallel to one plan axis, with the longest
+offset span. One line, or lines with no separation, cannot provide the arm,
+and `context` and `clause` name the requirement in the error.
+"""
+function _flexible_couple_loads(struc, elevation_m, need, load_id::Symbol,
+                                context::AbstractString, clause::AbstractString)
+    loads = Asap.AbstractLoad[]
+    abs(need) <= 1e-6 && return loads
+    layout = struc.diaphragm_layout
+    e1, e2 = plan_axes(layout.plan_axis)
+    best = nothing
+    for (direction, d, n) in ((:x, e1, e2), (:y, e2, e1))
+        lines = _diaphragm_lines_at(layout, elevation_m, direction)
+        length(lines) < 2 && continue
+        span = lines[end].offset_m - lines[1].offset_m
+        span > 1e-6 || continue
+        if best === nothing || span > best.span
+            best = (d=d, n=n, lines=lines, span=span)
+        end
+    end
+    best === nothing && throw(ArgumentError(
+        "$context has a torsional moment and no two wall lines with a moment " *
+        "arm. $clause requires it."))
+    # Right-handed plan axes. A line of direction d sits at offset * n,
+    # where n is the other plan axis. Force +f along d at the smaller
+    # offset and −f at the larger offset has moment
+    # f * (o1 − o2) * (n × d).
+    d = best.d
+    n = best.n
+    cross = d[1] * n[2] - d[2] * n[1]
+    f = need / (best.span * cross)
+    append!(loads, _diaphragm_line_loads(struc, best.lines[1], f * d[1], f * d[2], load_id))
+    append!(loads, _diaphragm_line_loads(struc, best.lines[end], -f * d[1], -f * d[2], load_id))
+    return loads
+end
+
+"Moment of nodal story forces about `(cx, cy)`, at one floor elevation [kN·m]."
+function _story_load_moment(loads, elevation_m, centroid)
+    cx, cy = centroid
+    m = 0.0
+    for load in loads
+        load isa Asap.NodeForce || continue
+        abs(ustrip(u"m", load.node.position[3]) - elevation_m) <= WALL_CUT_ZTOL_M || continue
+        fx = ustrip(u"kN", load.value[1])
+        fy = ustrip(u"kN", load.value[2])
+        x = ustrip(u"m", load.node.position[1])
+        y = ustrip(u"m", load.node.position[2])
+        m += (x - cx) * fy - (y - cy) * fx
+    end
+    return m
+end
+
+_is_semirigid(struc) = struc.diaphragm_layout isa SemirigidDiaphragmLayout
 
 function _wind_master_disp(u, master)
     gid = master.globalID

@@ -19,7 +19,7 @@ const MOI = JuMP.MOI
     Muy_kipft = [40.0, 50.0, 60.0, 30.0]     # factored moment about y (kip-ft)
     
     # Convert to SI for steel (N, N*m)
-    Pu_N = Pu_kip .* 4448.22
+    Pu_N = Pu_kip .* KIP_TO_N
     Mux_Nm = Mux_kipft .* 1355.82
     Muy_Nm = Muy_kipft .* 1355.82
     
@@ -167,9 +167,14 @@ const MOI = JuMP.MOI
     
     # =========================================================================
     @testset "Material Comparison" begin
-        opts_w = SteelColumnOptions()
-        opts_hss = SteelColumnOptions(section_type = :hss)
-        opts_rc = ConcreteColumnOptions()
+        # Compare on ONE objective (volume) so the magnitudes are commensurable:
+        # objective_value is unit-canonical (m³ here), and a cross-material compare is
+        # only meaningful when both sides minimize the same quantity. (Using each
+        # option's default — MinWeight for steel, MinCarbon for concrete — would
+        # compare kg against kgCO₂e, which is not a volume comparison at all.)
+        opts_w = SteelColumnOptions(objective = MinVolume())
+        opts_hss = SteelColumnOptions(section_type = :hss, objective = MinVolume())
+        opts_rc = ConcreteColumnOptions(objective = MinVolume())
         
         result_w = size_columns(Pu_N, Mux_Nm, steel_geometries, opts_w; Muy=Muy_Nm)
         result_hss = size_columns(Pu_N, Mux_Nm, steel_geometries, opts_hss; Muy=Muy_Nm)

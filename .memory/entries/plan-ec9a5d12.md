@@ -7,12 +7,12 @@ title: 'Codebase audit: mechanical greps and scripted citation check against the
 node_label: Grep + citation audit
 tags: audit,citations,corpus,threading,cache,bugs
 status: active
-open_threads: 0
+open_threads: 5
 success: 'null'
 files: ''
 session_id: sess-41c7c377
 created_at: '2026-11-03T18:06:11.272396+00:00'
-updated_at: '2026-11-03T18:06:11.272396+00:00'
+updated_at: '2026-11-04T19:08:53.053660+00:00'
 has_child_rationale: Six silent bugs found in two days around flat-plate FEA and punching
   (2026-11-02/03); nothing in the test suite catches this class.
 ---

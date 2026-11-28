@@ -82,7 +82,8 @@ base_opts = (material         = RC_4000_60,
              min_depth        = 48.0u"inch",
              depth_increment  = 1.0u"inch")
 
-r_rigid = design_footing(MatFoundation(), demands_mat, positions_mat, soil_mat;
+# Strip moments, not the Eq. (5-1) gate. This grid is not a rigid mat.
+r_rigid = StructuralSizer._design_mat_rigid(demands_mat, positions_mat, soil_mat;
             opts = MatParams(; base_opts..., analysis_method = RigidMat()))
 r_shukla = design_footing(MatFoundation(), demands_mat, positions_mat, soil_mat;
             opts = MatParams(; base_opts..., analysis_method = ShuklaAFM()))
@@ -167,7 +168,7 @@ function rigid_As_x(spacing_ft, ny)
     end
     s = Soil(3.0ksf, 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa";
              ks = 25000.0u"kN/m^3")
-    return design_footing(MatFoundation(), demands, positions, s;
+    return StructuralSizer._design_mat_rigid(demands, positions, s;
         opts = MatParams(; material = RC_4000_60,
                            bar_size_x = 8, bar_size_y = 8,
                            cover = 3.0u"inch", min_depth = 48.0u"inch",
@@ -222,6 +223,7 @@ opts_strip = StripParams(
     min_depth        = 12.0u"inch",
     depth_increment  = 1.0u"inch",
     width_increment  = 1.0u"inch",
+    check_development = false,  # takeoff below counts the named #8 and #5
 )
 
 result_strip = design_footing(StripFooting(),

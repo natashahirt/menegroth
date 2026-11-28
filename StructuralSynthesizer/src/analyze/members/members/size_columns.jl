@@ -45,7 +45,7 @@ function size_members!(
     # Single re-analysis after both member types are sized
     if reanalyze
         Asap.process!(struc.asap_model)
-        Asap.solve!(struc.asap_model)
+        _solve_struc_model!(struc)
     end
 
     return struc
@@ -94,6 +94,14 @@ function size_columns!(
     # Default 0.70 keeps callers that do not pass it byte-identical.
     I_factor::Real = 0.70,
     tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
+    # Group id → `(section, exact)`. Each group keeps that section or a heavier
+    # one. Discrete steel uses `_narrow_to_section_floor`. Discrete concrete
+    # uses the same rule through `frame_section_floors` for this call only.
+    section_floor = nothing,
+    # Default-off monolithic self-weight coupling (steel discrete columns only);
+    # see `DesignParameters.monolithic_column_selfweight` and
+    # `build_column_selfweight_coupling`. Threaded by the member loop from params.
+    monolithic_selfweight::Bool = false,
 )
     # NOTE: as of this writing `BuildingStructure` has NO `design_parameters` field
     # (see building_types/structure.jl), so `hasproperty(...)` is always false and `dp`
@@ -118,7 +126,19 @@ function size_columns!(
         group_collinear_members!(struc; member_type=:columns)
     end
     
-    result = _size_columns_impl!(struc, effective_opts; resolution, reanalyze, gravity_factor, I_factor)
+    section_floor === nothing ||
+        effective_opts isa StructuralSizer.SteelColumnOptions ||
+        effective_opts isa StructuralSizer.ConcreteColumnOptions ||
+        throw(ArgumentError(
+            "column section_floor applies to discrete steel and concrete columns only"))
+    floor_kw = section_floor === nothing ? (;) : (; section_floor)
+    # The monolithic self-weight coupling is a STEEL discrete-column feature; pass
+    # the flag only to that dispatch so the concrete/PixelFrame paths stay
+    # byte-identical (and never see an unknown kwarg).
+    mono_kw = (monolithic_selfweight && effective_opts isa StructuralSizer.SteelColumnOptions) ?
+        (; monolithic_selfweight = true) : (;)
+    result = _size_columns_impl!(struc, effective_opts; resolution, reanalyze, gravity_factor,
+                                 I_factor, floor_kw..., mono_kw...)
     StructuralSizer.emit!(tc, :sizing, "size_columns!", "", :exit)
     return result
 end
@@ -135,6 +155,9 @@ function _size_columns_impl!(
     # steel path (_apply_column_results! is called with material_type=:steel, which never
     # passes I_factor to to_asap_section).
     I_factor::Real = 0.70,
+    section_floor = nothing,
+    # Default-off monolithic self-weight coupling (see build_column_selfweight_coupling).
+    monolithic_selfweight::Bool = false,
 )
     skel = struc.skeleton
     member_edge_group = :columns
@@ -158,19 +181,100 @@ function _size_columns_impl!(
     Pu_t = [d.Pu_t for d in demands]
     Mux = [d.Mux for d in demands]
     Muy = [d.Muy for d in demands]
+    floor_kw = (;)
+    if section_floor !== nothing && any(gid -> haskey(section_floor, gid), group_ids)
+        opts.sizing_strategy == :discrete && opts.n_max_sections == 0 &&
+            opts.materials === nothing || throw(ArgumentError(
+                "column section_floor needs discrete sizing, one material, and n_max_sections = 0"))
+        cat = isnothing(opts.custom_catalog) ?
+            StructuralSizer.steel_column_catalog(opts.section_type, opts.catalog) :
+            opts.custom_catalog
+        cat, feasible = _narrow_to_section_floor(opts, group_ids, cat, nothing, section_floor)
+        floor_kw = (; catalog = cat, feasible)
+    end
+    # Monolithic self-weight coupling (default OFF). Only in the exact regime this
+    # linearization is valid in: discrete, single-material, no section-count cap,
+    # no section floor, and the full-load solve governs (no pattern cases — a live
+    # pattern-solve cache would have enveloped the demand over cases this builder
+    # does not linearize). The builder returns `nothing` if any further guard
+    # (e.g. a group with no current area) fails, in which case the ordinary solve
+    # runs. The outer member loop still verifies every installed column, so this
+    # only ever GUIDES the choice (see build_column_selfweight_coupling).
+    coupling_kw = (;)
+    if monolithic_selfweight && section_floor === nothing &&
+       opts.sizing_strategy === :discrete && opts.n_max_sections == 0 &&
+       opts.materials === nothing && _get_pattern_solve_cache(struc) === nothing
+        cat = isnothing(opts.custom_catalog) ?
+            StructuralSizer.steel_column_catalog(opts.section_type, opts.catalog) :
+            opts.custom_catalog
+        coupling = build_column_selfweight_coupling(struc, opts, group_ids, demands,
+            geometries, cat, opts.material; resolution = resolution)
+        coupling === nothing || (coupling_kw = (; catalog = cat, coupling = coupling))
+    end
 
-    result = StructuralSizer.size_columns(Pu, Mux, geometries, opts; Muy=Muy, Pu_t=Pu_t)
+    # Eq. A-8-4 uses the frame end moments. Dropping them rebuilds each
+    # demand at M1 = 0 (Cm = 0.6). AISC 360-16 App. 8 §8.2.1(a)
+    # (corpus: aisc-360-16, PDF page 306). The section floor (if any) narrows
+    # the catalog via floor_kw; both kwarg groups are accepted together.
+    result = StructuralSizer.size_columns(Pu, Mux, geometries, opts; Muy=Muy, Pu_t=Pu_t,
+        M1x=[d.M1x for d in demands], M2x=[d.M2x for d in demands],
+        M1y=[d.M1y for d in demands], M2y=[d.M2y for d in demands],
+        floor_kw..., coupling_kw...)
     
     # Apply results
     _apply_column_results!(struc, result, group_ids, opts.material, :steel, edge_ids_in_group)
     
     if reanalyze
         Asap.process!(struc.asap_model)
-        Asap.solve!(struc.asap_model)
+        _solve_struc_model!(struc)
     end
     
     @info "Sized $(length(group_ids)) column groups" material="steel" section_type=opts.section_type
     return struc
+end
+
+"""
+    _rc_column_demand_sets(opts, demands, case_rows) -> Vector{RCColumnDemandSet}
+
+One [`RCColumnDemandSet`](@ref) per column group, in kip and kip·ft.
+`member_group_demands` gives the SI group demands and, per group, one
+`ColumnCaseRow` for each member and pattern case, with that member's signed
+end moments in ACI 318-19 convention, so the slenderness path computes
+`Cm = 0.6 − 0.4·(M1/M2)` from the frame.
+
+A group's set is its case rows: each row's axial force and moments act
+together. The group envelope (the largest P of any member and case with the
+largest M of any) is not a load state, and below the balance point it is not
+a bound either, since less compression means less moment capacity (ACI 318-19
+§22.4). The envelope is the set only for a group with no case rows.
+
+Every row is also included with the two section axes swapped: the model does
+not record which global direction bends the section about its strong axis.
+"""
+function _rc_column_demand_sets(opts, demands, case_rows)
+    kipft = Asap.kip * u"ft"
+    to_kipft(M) = ustrip(uconvert(kipft, M * u"N*m"))
+    rc_row(i, d, Pu, Mux, Muy, M1x, M2x, M1y, M2y) = StructuralSizer.RCColumnDemand(i;
+        Pu  = ustrip(uconvert(Asap.kip, Pu * u"N")),
+        Mux = to_kipft(Mux), Muy = to_kipft(Muy),
+        M1x = to_kipft(M1x), M2x = to_kipft(M2x),
+        M1y = to_kipft(M1y), M2y = to_kipft(M2y),
+        βdns = opts.βdns,
+        transverse_load = d.transverse_load,
+    )
+    both(i, d, Pu, Mux, Muy, M1x, M2x, M1y, M2y) =
+        (rc_row(i, d, Pu, Mux, Muy, M1x, M2x, M1y, M2y),
+         rc_row(i, d, Pu, Muy, Mux, M1y, M2y, M1x, M2x))
+    return map(enumerate(demands)) do (i, d)
+        cases = StructuralSizer.RCColumnDemand[]
+        if isempty(case_rows[i])
+            append!(cases, both(i, d, d.Pu_c, d.Mux, d.Muy, d.M1x, d.M2x, d.M1y, d.M2y))
+        end
+        for r in case_rows[i]
+            append!(cases, both(i, d, r.Pu_c, r.Mux, r.Muy, r.M1x, r.M2x, r.M1y, r.M2y))
+        end
+        StructuralSizer.RCColumnDemandSet(i, cases)
+    end
 end
 
 # Concrete implementation
@@ -183,6 +287,7 @@ function _size_columns_impl!(
     # ACI 318-11 §10.10.4.1 — cracked-stiffness reduction for concrete column sections,
     # threaded from params.column_I_factor (default 0.70).
     I_factor::Real = 0.70,
+    section_floor = nothing,
 )
     skel = struc.skeleton
     member_edge_group = :columns
@@ -190,8 +295,10 @@ function _size_columns_impl!(
 
     _add_gravity_loads!(struc, edge_ids_in_group, gravity_factor)
 
+    case_rows = Vector{ColumnCaseRow}[]
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
-        member_group_demands(struc; member_edge_group=member_edge_group, resolution=resolution)
+        member_group_demands(struc; member_edge_group=member_edge_group, resolution=resolution,
+                             case_rows=case_rows)
 
     # Concrete columns now carry per-axis effective length factors so the ACI
     # 318 slenderness check evaluates the strong (kx, h, b·h³/12) and weak
@@ -207,38 +314,214 @@ function _size_columns_impl!(
     # `size_columns` overload preserves the signed end moments end-to-end so
     # the slenderness path can compute `Cm = 0.6 − 0.4·(M1/M2)` instead of
     # the conservative `M1 = 0` stand-in.
-    rc_demands = StructuralSizer.RCColumnDemand[]
-    for (i, d) in enumerate(demands)
-        Pu_kip   = ustrip(uconvert(Asap.kip,         d.Pu_c * u"N"))
-        Mux_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.Mux  * u"N*m"))
-        Muy_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.Muy  * u"N*m"))
-        M1x_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.M1x  * u"N*m"))
-        M2x_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.M2x  * u"N*m"))
-        M1y_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.M1y  * u"N*m"))
-        M2y_kipf = ustrip(uconvert(Asap.kip*u"ft",   d.M2y  * u"N*m"))
+    #
+    # Each group is checked against every concurrent pattern case on its own,
+    # including the NLP path (see `_rc_column_demand_sets`).
+    rc_demands = _rc_column_demand_sets(opts, demands, case_rows)
 
-        push!(rc_demands, StructuralSizer.RCColumnDemand(i;
-            Pu  = Pu_kip,
-            Mux = Mux_kipf, Muy = Muy_kipf,
-            M1x = M1x_kipf, M2x = M2x_kipf,
-            M1y = M1y_kipf, M2y = M2y_kipf,
-            βdns = opts.βdns,
-            transverse_load = d.transverse_load,
-        ))
+    # Iteration floors live only for this call. A group that already has a
+    # row F floor keeps that floor.
+    pinned = _pin_column_section_floors!(struc, opts, section_floor)
+    try
+    if opts.sizing_strategy === :nlp
+        # NLP has no catalog: stored row F rows become constraints. They are
+        # already in kip, and magnification stays off on them: the forces
+        # include story P-delta (ACI 318-19 §6.7).
+        rc_demands = _append_frame_floor_column_cases(rc_demands, group_ids,
+                                                      struc.frame_floor_demands)
+        result = StructuralSizer.size_columns(rc_demands, geometries, opts)
+        sections = [_nlp_section_or_floor(struc, :column, gid, result.sections[i], opts)
+                    for (i, gid) in enumerate(group_ids)]
+        result = merge(result, (; sections))
+        _assert_column_nlp_meets_floors!(struc, group_ids, result, opts)
+    else
+        has_floor = any(gid -> haskey(struc.frame_section_floors, gid), group_ids)
+        if has_floor
+            (opts.materials === nothing && opts.n_max_sections == 0) ||
+                _refuse_frame_floors(struc, group_ids, "this concrete column sizing")
+        end
+        # A section floor indexes one catalog, so growth happens here and the
+        # explicit catalog turns off the growth inside `size_columns`. With no
+        # floor, `size_columns` grows a soft named catalog itself.
+        tier = (has_floor && opts.catalog_constraint === :soft &&
+                opts.custom_catalog === nothing) ? opts.catalog : nothing
+        cat = has_floor ?
+            (isnothing(opts.custom_catalog) ?
+                StructuralSizer.rc_column_catalog(opts.section_shape, opts.catalog) :
+                opts.custom_catalog) : nothing
+        obj = s -> StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
+        frame = (column = _column_checker_bundle(nothing, opts),)
+        result = nothing
+        while true
+            floor_kw = has_floor ?
+                (; catalog = cat,
+                  feasible = _frame_floor_mask(struc, :column, group_ids, cat, frame;
+                                               objective_of = obj)) : (;)
+            try
+                result = StructuralSizer.size_columns(rc_demands, geometries, opts; floor_kw...)
+                break
+            catch e
+                grown = tier isa Symbol ?
+                    StructuralSizer.grow_rc_column_catalog(cat, opts.section_shape, tier) :
+                    nothing
+                (grown !== nothing && _column_catalog_can_grow(e)) || rethrow()
+                cat, nxt = grown
+                depth_in = round(Int, maximum(s -> s isa StructuralSizer.RCCircularSection ?
+                    ustrip(u"inch", s.D) : ustrip(u"inch", max(s.b, s.h)), cat))
+                @warn "RC column sizing: no section in the :$tier catalog passes the section floor; " *
+                      "retrying with :$nxt added (sizes to $(depth_in) in)." reason = e.msg
+                tier = nxt
+            end
+        end
     end
-
-    result = StructuralSizer.size_columns(rc_demands, geometries, opts)
 
     _apply_column_results!(struc, result, group_ids, opts.material, :concrete, edge_ids_in_group;
                            I_factor=I_factor, rebar=opts.rebar_material)
 
     if reanalyze
         Asap.process!(struc.asap_model)
-        Asap.solve!(struc.asap_model)
+        _solve_struc_model!(struc)
+    end
+    finally
+        for gid in pinned
+            delete!(struc.frame_section_floors, gid)
+        end
     end
 
     @info "Sized $(length(group_ids)) column groups" material=StructuralSizer.material_name(opts.material)
     return struc
+end
+
+"""
+A concrete column catalog can take one more tier.
+
+`No feasible sections` means nothing currently allowed passes. The floor
+message means the installed section itself is larger than this tier, which
+happens after an earlier pass already grew the catalog.
+"""
+_column_catalog_can_grow(e::ArgumentError) =
+    startswith(e.msg, "No feasible sections for group") ||
+    occursin("the row F floor is not in it", e.msg)
+_column_catalog_can_grow(::Any) = false
+
+"""
+    submit_column_section_floor!(struc, opts, gid, sec) -> Bool
+
+Record `sec` as a persistent lower bound on column group `gid`.
+
+This is the column owner's write into `frame_section_floors`. A neighbor that
+found `sec` failing its own check submits that section and does not assign a
+replacement. Later discrete sizing keeps `sec` or a heavier one. A floor
+already at least this heavy is left alone, and a section the catalog does
+not contain is refused. Returns whether the stored floor changed.
+"""
+function submit_column_section_floor!(struc, opts, gid, sec)
+    (gid === nothing || sec === nothing) && return false
+    any(s -> _sections_identical(s, sec), _column_catalog(opts)) || return false
+    prev = get(struc.frame_section_floors, gid, nothing)
+    if prev !== nothing
+        obj = s -> StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
+        obj(sec) > obj(prev) * (1 + 1e-9) || return false
+    end
+    struc.frame_section_floors[gid] = sec
+    return true
+end
+
+"""
+Add `section_floor` entries that this call does not already have.
+
+Returns the group ids added here. The caller removes them when sizing
+returns, so an iteration floor does not stay on the building. A group that
+already has a row F floor is left as it is.
+"""
+function _pin_column_section_floors!(struc, opts, section_floor)
+    added = UInt64[]
+    section_floor === nothing && return added
+    (opts.sizing_strategy === :discrete && opts.n_max_sections == 0 &&
+        opts.materials === nothing) || throw(ArgumentError(
+        "column section_floor needs discrete sizing, one material, and n_max_sections = 0"))
+    for (gid, fl) in section_floor
+        haskey(struc.frame_section_floors, gid) && continue
+        sec = fl isa NamedTuple ? fl.section : fl
+        sec === nothing && continue
+        struc.frame_section_floors[gid] = sec
+        push!(added, gid)
+    end
+    return added
+end
+
+"""Append stored row F column rows onto each group's NLP demand set.
+
+Gravity cases keep `magnify = true`. Stored rows are forced to
+`magnify = false`: those forces already include story P-delta
+(ACI 318-19 §6.7, PDF page 84).
+"""
+function _append_frame_floor_column_cases(demands, group_ids, floors)
+    any(gid -> haskey(floors, gid), group_ids) || return demands
+    out = Vector{StructuralSizer.RCColumnDemandSet}(undef, length(demands))
+    for (i, set) in enumerate(demands)
+        rows = get(floors, group_ids[i], nothing)
+        if rows === nothing
+            out[i] = set
+            continue
+        end
+        cases = StructuralSizer.RCColumnDemand[]
+        append!(cases, set.cases)
+        for (_, demand) in rows
+            demand isa StructuralSizer.RCColumnDemand || continue
+            push!(cases, demand.magnify ? _column_demand_unmagnified(demand) : demand)
+        end
+        out[i] = StructuralSizer.RCColumnDemandSet(set.member_idx, cases)
+    end
+    return out
+end
+
+function _column_demand_unmagnified(d::StructuralSizer.RCColumnDemand)
+    return StructuralSizer.RCColumnDemand(d.member_idx;
+        Pu=d.Pu, Mux=d.Mux, Muy=d.Muy,
+        M1x=d.M1x, M2x=d.M2x, M1y=d.M1y, M2y=d.M2y,
+        βdns=d.βdns, transverse_load=d.transverse_load, magnify=false)
+end
+
+"""
+Throw before install when a floored column group has no installable NLP
+section, or the rounded section fails the stored rows.
+
+The checker bundle has slenderness off, matching the row F check.
+"""
+function _assert_column_nlp_meets_floors!(struc, group_ids, result, opts)
+    demands = any(gid -> haskey(struc.frame_floor_demands, gid), group_ids)
+    floors = any(gid -> haskey(struc.frame_section_floors, gid), group_ids)
+    (demands || floors) || return
+    installed = all(s -> !isnothing(s), result.sections)
+    (StructuralSizer._rc_nlp_result_installable(result) || installed) || throw(ArgumentError(
+        "row F section floor: column NLP did not produce an installable section"))
+    bundle = _column_checker_bundle(nothing, opts)
+    frame = (column = bundle,)
+    for (i, gid) in enumerate(group_ids)
+        rows = get(struc.frame_floor_demands, gid, nothing)
+        rows === nothing && continue
+        section = result.sections[i]
+        checked = 0
+        for (j, member) in enumerate(struc.columns)
+            group_id(member) == gid || continue
+            member_rows = Tuple{String, Any}[]
+            for (label, demand) in rows
+                demand isa StructuralSizer.RCColumnDemand || continue
+                demand.member_idx == j || continue
+                push!(member_rows, (label, demand))
+            end
+            isempty(member_rows) && continue
+            checked += 1
+            ok, detail = _member_resists(:column, member, section, member_rows, frame)
+            ok || throw(ArgumentError(
+                "row F section floor: column group $gid does not pass its stored demand rows ($detail)"))
+        end
+        has_column_row = any(d -> d isa StructuralSizer.RCColumnDemand, (d for (_, d) in rows))
+        has_column_row && checked == 0 && throw(ArgumentError(
+            "row F section floor: column group $gid stored rows do not match a column"))
+    end
+    return nothing
 end
 
 # PixelFrame column implementation
@@ -349,7 +632,7 @@ function _size_columns_impl!(
 
     if reanalyze
         Asap.process!(struc.asap_model)
-        Asap.solve!(struc.asap_model)
+        _solve_struc_model!(struc)
     end
 
     n_total = length(group_ids)
@@ -375,6 +658,21 @@ function _add_gravity_loads!(struc, edge_ids_in_group, gravity_factor)
     end
 end
 
+"""
+A catalog section often has `material = nothing`; the grade is the one
+`size_columns` just used. Capture reads `section.material` for Chapter E,
+so a steel section is copied with that grade. The catalog object is left
+unchanged.
+"""
+function _section_with_grade(section, material)
+    material isa StructuralSizer.StructuralSteel || return section
+    hasproperty(section, :material) || return section
+    isnothing(section.material) || return section
+    installed = deepcopy(section)
+    installed.material = material
+    return installed
+end
+
 # Helper: apply optimization results
 """
     _apply_column_results!(struc, result, group_ids, material, material_type, edge_ids_in_group; I_factor)
@@ -398,9 +696,9 @@ function _apply_column_results!(struc, result, group_ids, material, material_typ
     has_multi_mat = hasproperty(result, :materials_chosen)
     
     for (g_idx, gid) in enumerate(group_ids)
-        chosen = result.sections[g_idx]
         group_mat = has_multi_mat ? result.materials_chosen[g_idx] : material
-        
+        chosen = _section_with_grade(result.sections[g_idx], group_mat)
+
         mg = struc.member_groups[gid]
         mg.section = chosen
         
@@ -424,7 +722,16 @@ function _apply_column_results!(struc, result, group_ids, material, material_typ
             L_total = L_raw isa Unitful.Quantity ? L_raw : L_raw * u"m"
             
             set_section!(m, chosen)
+            _record_member_check!(m, chosen, result, g_idx)
             set_volumes!(m, member_material_volumes(chosen, L_total, group_mat; rebar=rebar))
+            # Plan size follows the installed RC section; harmonization,
+            # offsets and reports read c1/c2.
+            if chosen isa StructuralSizer.RCColumnSection ||
+               chosen isa StructuralSizer.RCCircularSection
+                bb = StructuralSizer.bounding_box(chosen)
+                m.c1 = bb.width
+                m.c2 = bb.depth
+            end
             
             # Update ASAP elements
             for seg_idx in segment_indices(m)
@@ -449,15 +756,15 @@ Estimate initial column sizes and store in Column.c1, Column.c2.
 This provides preliminary column dimensions needed for slab clear span calculation
 (ln = l - c) before full column design. The estimate is intentionally conservative.
 
-After sizing, calls `update_structural_offsets!` to compute the inward offset
-from architectural vertices to structural centerlines for edge/corner columns.
+After sizing, calls `update_structural_offsets!` to record boundary normals.
+Column centers stay on the skeleton vertices.
 
 # Arguments
 - `struc`: BuildingStructure with columns and tributary areas computed
 - `fc`: Concrete compressive strength (default 4000 psi)
 - `qu_default`: Default factored floor load if not available from cells (default 200 psf)
 - `method`: :tributary (from Voronoi area) or :span (from span rule of thumb)
-- `input_is_centerline`: forwarded to `update_structural_offsets!`; when `true`, all offsets are zero
+- `input_is_centerline`: forwarded to `update_structural_offsets!`. Column centers stay on the vertices either way.
 - `start`: `:span` sizes for axial load and at least span/15 (StructurePoint).
   `:axial` sizes for axial load only, with a 14" minimum. Column sizing only
   grows, so the start is the smallest column the design can return; `:axial`

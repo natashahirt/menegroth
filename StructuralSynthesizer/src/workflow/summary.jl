@@ -1,6 +1,3 @@
-# Must match `_serialize_slabs` / `agent_situation_card` slab failure predicate.
-_slab_design_ok(sr::SlabDesignResult) = sr.converged && sr.deflection_ok && sr.punching_ok
-
 function _slab_governing_ratio_label(idx::Int, sr::SlabDesignResult)
     rd = sr.deflection_ratio
     rp = sr.punching_max_ratio
@@ -51,20 +48,27 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
         r_ax = col_result.axial_ratio
         r_int = col_result.interaction_ratio
         r_punch = (!isnothing(col_result.punching) ? col_result.punching.ratio : 0.0)
+        r_sh = col_result.shear_ratio
+        r_seis = _seismic_frame_ratio(col_result.seismic_frame)
         # An UNVERIFIED axial/interaction ratio (NaN sentinel — the §E3/§E4 buckling
         # capacity was unavailable; see `_populate_column_results!`) must NOT be
         # treated as a low/passing ratio. Exclude NaN terms from the numeric
         # aggregate (so they can never poison `glob_ratio`/`fail_ratio` with NaN)
         # and force the column to register as a definite failure below.
         axial_unverified = isnan(r_ax) || isnan(r_int)
-        finite_ratios = filter(!isnan, (r_ax, r_int, r_punch))
+        finite_ratios = filter(isfinite, (r_ax, r_int, r_punch, r_sh, r_seis))
         r_glob = isempty(finite_ratios) ? 0.0 : maximum(finite_ratios)
+        others = filter(isfinite, (r_ax, r_int, r_punch, r_sh))
         g_glob = if axial_unverified
             "axial_compression_unverified"
-        elseif r_ax >= r_int && r_ax >= r_punch
+        elseif col_result.seismic_frame !== nothing && r_seis > maximum(others; init = -1.0)
+            "seismic_frame"
+        elseif r_ax >= max(r_int, r_punch, r_sh)
             "axial_compression"
-        elseif r_int >= r_punch
+        elseif r_int >= max(r_punch, r_sh)
             "pm_interaction"
+        elseif r_sh >= r_punch
+            "column_shear"
         else
             "punching_shear_col"
         end
@@ -88,8 +92,17 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
     end
 
     for (idx, beam_result) in design.beams
-        r_glob = max(beam_result.flexure_ratio, beam_result.shear_ratio)
-        g_glob = beam_result.flexure_ratio >= beam_result.shear_ratio ? "flexure" : "shear"
+        r_glob, g_glob = if isempty(beam_result.governing_check)
+            max(beam_result.flexure_ratio, beam_result.shear_ratio),
+            beam_result.flexure_ratio >= beam_result.shear_ratio ? "flexure" : "shear"
+        else
+            beam_result.governing_ratio, beam_result.governing_check
+        end
+        r_seis = _seismic_frame_ratio(beam_result.seismic_frame)
+        if beam_result.seismic_frame !== nothing && r_seis > r_glob
+            r_glob = r_seis
+            g_glob = "seismic_frame"
+        end
         lab_glob = "Beam $idx ($g_glob)"
         if r_glob > glob_ratio
             glob_ratio = r_glob
@@ -107,23 +120,15 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
     end
 
     for (idx, fdn_result) in design.foundations
-        fdn_ratios = (
-            fdn_result.bearing_ratio  => "bearing",
-            fdn_result.punching_ratio => "punching",
-            fdn_result.flexure_ratio  => "flexure",
-        )
-        for (r, check_name) in fdn_ratios
-            if r > glob_ratio
-                glob_ratio = r
-                glob_elem = "Foundation $idx ($check_name)"
-            end
+        r_fdn = max(fdn_result.governing_ratio,
+                    maximum(last, foundation_check_ratios(fdn_result)))
+        if r_fdn > glob_ratio
+            glob_ratio = r_fdn
+            glob_elem = "Foundation $idx ($(foundation_diagnostic_governing_check(fdn_result)))"
         end
         if !fdn_result.ok
             all_ok = false
-            r_fail = max(fdn_result.bearing_ratio, fdn_result.punching_ratio, fdn_result.flexure_ratio)
-            if r_fail < 1.0
-                r_fail = 1.0
-            end
+            r_fail = max(r_fdn, 1.0)
             lab_fail = "Foundation $idx ($(foundation_diagnostic_governing_check(fdn_result)))"
             if r_fail > fail_ratio || isempty(fail_elem)
                 fail_ratio = max(fail_ratio, r_fail)
@@ -169,6 +174,17 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
             end
         end
     end
+    # A flexible lateral floor with no drift check used to read as passing.
+    # Gravity-only designs have no earthquake, so an empty list stays a pass.
+    if params.lateral !== nothing &&
+            struc.diaphragm_layout isa FlexibleDiaphragmLayout &&
+            !any(d -> d isa SeismicStoryDriftCheck, design.seismic_story_drift)
+        all_ok = false
+        fail_ratio = max(fail_ratio, 1.0)
+        isempty(fail_elem) && (fail_elem = "Seismic story drift was not checked")
+        push!(design.diagnostics,
+            "Seismic story drift was not checked on the flexible diaphragm.")
+    end
 
     if !all_ok && (!isempty(fail_elem) || fail_ratio > 0)
         summary.critical_ratio = fail_ratio > 0 ? fail_ratio : glob_ratio
@@ -198,7 +214,7 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
     for slab in struc.slabs
         addq!(_quantity_increments(slab.volumes))
     end
-    ρ_col_rebar = resolve_column_rebar(params.materials).ρ
+    ρ_col_rebar = column_rebar(params).ρ
     for (idx, column) in enumerate(struc.columns)
         vols = volumes(column)
         if !isempty(vols)
@@ -213,6 +229,8 @@ function _compute_design_summary!(design::BuildingDesign, struc::BuildingStructu
     end
     for beam in struc.beams
         addq!(_quantity_increments(volumes(beam)))
+        studs = composite_stud_placement(struc, beam)
+        studs === nothing || (total_steel_wt += studs.mass)
     end
     for (beam_idx, beam_result) in design.beams
         beam_idx isa Integer && beam_idx in eachindex(struc.beams) &&

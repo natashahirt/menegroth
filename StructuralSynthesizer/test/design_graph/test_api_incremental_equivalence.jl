@@ -81,7 +81,8 @@ include(joinpath(@__DIR__, "_verify_shared.jl"))
 function build_flat_plate(; soil = SR.medium_sand,
                             concrete = NWC_4000,
                             max_iterations::Int = 5)
-    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 2, 2, 1)
+    # Three continuous spans each way (ACI 318-11 §13.6.1.1).
+    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 3, 3, 1)
     struc = BuildingStructure(skel)
     params = DesignParameters(
         name               = "test_api_incremental_equivalence_flat_plate",
@@ -205,7 +206,7 @@ function main()
     #     override (member node slice). Discover a REAL size-time beam gid from a
     #     designed reference struc (member groups only exist after a sizing pass).
     struc_disc, base_disc = build_beam_column()
-    design_building(struc_disc, base_disc)
+    design_building(struc_disc, base_disc; restore=false)
     beam_gids = sort(unique(group_id(b) for b in struc_disc.beams))
     record!("B2 beam/column fixture exposes >= 1 steel beam group (got $(length(beam_gids)))",
             !isempty(beam_gids))
@@ -223,7 +224,9 @@ function main()
     # prepare-affecting (or the chat baseline must use full params). PASS here
     # confirms it is correctly a param-only node-slice field (recompute catches up).
     println("\n[ADV] adversarial: capped-baseline max_iterations → full redesign vs cold-at-full")
-    CAP  = 1     # chat fast-mode cap (small)
+    # Chat `run_design` caps max_iterations at 2. One iteration cannot install
+    # this plate: the first column P-M pass changes sizes and needs a confirm.
+    CAP  = 2
     FULL = 20    # full run
 
     # Sanity that the field is NOT prepare-affecting (so the direct

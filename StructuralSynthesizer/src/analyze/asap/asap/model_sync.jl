@@ -120,6 +120,11 @@ See also: [`to_asap!`](@ref), [`snapshot!`](@ref), [`restore!`](@ref)
 function sync_asap!(struc::BuildingStructure;
                     params::DesignParameters=DesignParameters(),
                     loads_only::Bool=false)
+    # A copied model still has its triangles and has lost the layout map, so
+    # a load-only update would solve the mesh those triangles were built for.
+    if _flat_plate_layout_lost(struc, params)
+        return update_analysis!(struc, :geometry; params)
+    end
     # 1. Push current slab self-weights into cells
     for slab in struc.slabs
         sw = StructuralSizer.self_weight(slab.result)
@@ -128,9 +133,10 @@ function sync_asap!(struc::BuildingStructure;
         end
     end
     
-    use_patterns = params.pattern_loading != :none &&
-                   !isempty(struc.cell_dead_loads) &&
-                   any(!isempty, values(struc.cell_dead_loads))
+    use_patterns = _pattern_dead_split(struc, params)
+    # A new slab thickness changes the shell stiffness, so the cached factor
+    # cannot be reused even when the caller saw no change.
+    _sync_flat_plate_shells!(struc, params) && (loads_only = false)
     
     # 2. Update tributary load pressures
     combo = governing_combo(params)
@@ -165,7 +171,12 @@ function sync_asap!(struc::BuildingStructure;
     _sync_edge_eccentricity!(struc, params)
     _sync_shell_area_pressures!(struc, params)
     _sync_wall_self_weight!(struc, params)
+    _sync_drop_panel_loads!(struc, params)
+    _sync_member_self_weight!(struc, params)
+    _sync_fire_coating_loads!(struc, params)
+    _sync_cladding_line_loads!(struc, params)
     _sync_vault_thrust_line_loads!(struc, params)
+    _sync_slab_edge_strip_widths!(struc)
 
     # 3. Re-process stiffness and loads (topology unchanged). When the caller
     #    guarantees K is unchanged (loads_only), rebuild only P and keep the cached
@@ -178,31 +189,41 @@ function sync_asap!(struc::BuildingStructure;
         Asap.process!(struc.asap_model)
     end
     
-    # 4. Solve — single or multi-case (Phase 9b: rigid diaphragm links, if any,
-    # were built by `to_asap!` and are retained on `struc.asap_rigid_links`;
-    # the reprocess above already refreshed K, so `reprocess=false` here.
-    # Pattern loading + rigid diaphragm co-existence is out of Phase 9b scope
-    # and will be revisited in Phase 11).
+    # 4. Solve — single or multi-case. Both honor the rigid diaphragm links
+    # `to_asap!` retained on `struc.asap_rigid_links`.
     if use_patterns && _should_run_patterns(struc, params)
         _solve_with_patterns!(struc, params)
-    elseif !isempty(struc.asap_rigid_links)
-        _clear_pattern_solve_cache!(struc)
-        require_diaphragm_node_stiffness(struc.asap_rigid_links,
-            struc.asap_model.frame_elements, struc.asap_model.shell_elements)
-        Asap.solve!(struc.asap_model, struc.asap_rigid_links; reprocess=false)
     else
         _clear_pattern_solve_cache!(struc)
-        Asap.solve!(struc.asap_model)
+        _solve_struc_model!(struc)
     end
     
     return struc
 end
 
 """
+    _solve_struc_model!(struc) -> model
+
+Solve `struc.asap_model` under the rigid-diaphragm links `to_asap!` built
+(master/slave reduction, Bathe §4.4). A plain `Asap.solve!(model)` ignores
+the links, so every re-solve of the building model goes through here.
+Without links this is `Asap.solve!(model)`.
+"""
+function _solve_struc_model!(struc::BuildingStructure)
+    model = struc.asap_model
+    links = struc.asap_rigid_links
+    isempty(links) && return Asap.solve!(model)
+    require_diaphragm_node_stiffness(links, model.frame_elements, model.shell_elements)
+    Asap.solve!(model, links; reprocess = !model.processed)
+    return model
+end
+
+"""
 Refresh the seat eccentricity of the Asap frame elements from the current member
 depths (Phase 7 rebuild parity for [`sync_asap!`](@ref)). Recomputes the same
 [`_build_edge_eccentricity_map`](@ref) used by `to_asap!` and writes each joist
-edge's `Element.eccentricity` in place; the subsequent reprocess applies it.
+edge's `Element.eccentricity` after `Asap.orient_up_eccentricity`, so the stored
+slot 3 follows that element's roll. The subsequent reprocess applies it.
 Elements not owned by a non-zero-offset joist are left untouched.
 """
 function _sync_edge_eccentricity!(struc::BuildingStructure, params::DesignParameters)
@@ -211,7 +232,11 @@ function _sync_edge_eccentricity!(struc::BuildingStructure, params::DesignParame
     els = model.frame_elements
     for (edge_idx, ecc) in _build_edge_eccentricity_map(struc, params)
         (edge_idx >= 1 && edge_idx <= length(els)) || continue
-        els[edge_idx].eccentricity = ecc
+        el = els[edge_idx]
+        # `ecc` is physical (positive local y = global up). Sign slot 3 for
+        # the roll already stored on this element.
+        el.eccentricity = Asap.orient_up_eccentricity(
+            ecc, el.nodeStart, el.nodeEnd; roll = el.Ψ)
     end
     return
 end
@@ -230,7 +255,8 @@ function _sync_shell_area_pressures!(struc::BuildingStructure, params::DesignPar
     model = struc.asap_model
     isnothing(model) && return
     area_loads = Asap.AreaLoad[ld for ld in model.loads
-                               if ld isa Asap.AreaLoad && ld.id !== :wall_self_weight]
+                               if ld isa Asap.AreaLoad && ld.id !== :wall_self_weight &&
+                                  !(ld.id in _FP_LOAD_IDS)]
     isempty(area_loads) && return
 
     eligible = [slab for slab in struc.slabs
@@ -300,5 +326,82 @@ function _sync_vault_thrust_line_loads!(struc::BuildingStructure, params::Design
         ld.value = [spec.w[1] * u"N/m", spec.w[2] * u"N/m", spec.w[3] * u"N/m"]
     end
     return
+end
+
+"""
+    update_analysis!(struc, change; params) -> struc
+
+Refresh the analysis after a stage, using the least work `change` allows.
+
+- `:loads` — load magnitudes only. The factorization is kept (`sync_asap!`
+  with `loads_only`).
+- `:stiffness` — member sections changed and the mesh did not. Rebuild `K`
+  and re-solve.
+- `:geometry` — thickness, mesh, or connectivity changed. Rebuild the model.
+
+A change that does not match one of these throws. Callers that need a
+diaphragm override or a custom mesh still call `to_asap!` directly.
+"""
+function update_analysis!(struc::BuildingStructure, change::Symbol;
+                          params::DesignParameters = DesignParameters(),
+                          tc = nothing)
+    change in (:loads, :stiffness, :geometry) || throw(ArgumentError(
+        "analysis change :$change is not :loads, :stiffness, or :geometry"))
+    StructuralSizer.emit!(tc, :workflow, "update_analysis!", "", :decision;
+                          change = string(change))
+    if change === :loads
+        return sync_asap!(struc; params, loads_only = true)
+    elseif change === :stiffness
+        return _reanalyze_after_section_change!(struc)
+    end
+    frame = _sized_frame_state(struc.asap_model)
+    to_asap!(struc; params)
+    _restore_sized_frame_state!(struc, params, frame)
+    return struc
+end
+
+"""
+Frame-element sections and self-weight edges of a model, by skeleton edge.
+
+`to_asap!` builds every frame element on a placeholder section and adds no
+member self-weight; sizing writes both later. A rebuild after a wall change
+uses this record to put them back.
+"""
+function _sized_frame_state(model)
+    (isnothing(model) || isempty(model.frame_elements)) && return nothing
+    edge_of = Dict(objectid(el) => i for (i, el) in enumerate(model.frame_elements))
+    self_weight_edges = Int[]
+    for ld in model.loads
+        ld isa Asap.GravityLoad || continue
+        i = get(edge_of, objectid(ld.element), nothing)
+        i === nothing || push!(self_weight_edges, i)
+    end
+    return (sections = [el.section for el in model.frame_elements],
+            self_weight_edges = self_weight_edges)
+end
+
+"""
+Put the sized frame sections, member self-weight, and fire coating back on a
+model `to_asap!` just rebuilt, then re-solve through [`sync_asap!`](@ref).
+Wall and `:absent` edges keep the section the rebuild gave them.
+"""
+function _restore_sized_frame_state!(struc::BuildingStructure, params::DesignParameters,
+                                     frame)
+    frame === nothing && return struc
+    model = struc.asap_model
+    els = model.frame_elements
+    length(els) == length(frame.sections) || throw(ArgumentError(
+        "model rebuild: $(length(els)) frame elements after the rebuild, " *
+        "$(length(frame.sections)) before. The skeleton edges changed."))
+    inert = _inert_frame_edges(struc.skeleton)
+    for (i, sec) in enumerate(frame.sections)
+        i in inert || (els[i].section = sec)
+    end
+    a = member_self_weight_acceleration(params)
+    for i in frame.self_weight_edges
+        push!(model.loads, Asap.GravityLoad(els[i], a))
+    end
+    sync_asap!(struc; params)
+    return struc
 end
 

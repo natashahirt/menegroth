@@ -40,8 +40,7 @@
 
 using Unitful
 
-# psi → Pa (= _KSI_TO_PA/1000, with _KSI_TO_PA defined in flexure.jl).
-const _PSI_TO_PA = _KSI_TO_PA / 1000.0
+const _PSI_TO_PA = Asap.PSI_TO_PA
 
 # ------------------------------------------------------------------------------
 # Bare-SI strength + second-order analysis core
@@ -315,3 +314,91 @@ end
 # Length/force coercion helpers (Unitful quantity or bare SI number → SI Float).
 _oop_len(x)   = x isa Unitful.Quantity ? ustrip(u"m", x) : Float64(x)
 _oop_force(x) = x isa Unitful.Quantity ? ustrip(u"N", x) : Float64(x)
+
+"""
+    wall_modulus_si(fc) -> Float64
+
+Ec = 57000 √f'c, ACI 318-19 §19.2.2.1(b), for normalweight concrete. `fc` is Pa.
+Result is Pa.
+"""
+wall_modulus_si(fc::Real) = 57000.0 * sqrt(fc / _PSI_TO_PA) * _PSI_TO_PA
+
+"""
+    wall_modulus_si(fc, wc) -> Float64
+
+`Ec = wc^1.5 · 33 √f'c` (wc in lb/ft³, f'c and Ec in psi). `fc` is Pa, `wc` is
+the concrete density in kg/m³, and the result is Pa. The density form covers
+lightweight concrete, where `57000 √f'c` overstates the stiffness. Throws
+outside 90 ≤ wc ≤ 160 lb/ft³, where the formula does not apply.
+
+# Citation
+ACI 318-19 §19.2.2.1(a), Eq. (19.2.2.1.a) (corpus: aci-318-19, PDF page 358).
+"""
+function wall_modulus_si(fc::Real, wc::Real)
+    wc_pcf = ustrip(u"lb/ft^3", wc * u"kg/m^3")
+    90.0 <= wc_pcf <= 160.0 || throw(ArgumentError(
+        "ACI 318-19 §19.2.2.1(a): wc must be 90 to 160 lb/ft³, got $(round(wc_pcf, digits = 1))"))
+    return wc_pcf^1.5 * 33.0 * sqrt(fc / _PSI_TO_PA) * _PSI_TO_PA
+end
+
+"""
+    nonsway_slenderness_moment(Pu, M2, Ec, Ig, lu; k=1, βdns=0.6, M1_over_M2=0) -> NamedTuple
+
+Nonsway moment magnification for a wall bent out of plane.
+
+`Mc = δ M2` and `δ = Cm / (1 − Pu/(0.75 Pc)) ≥ 1`. With no transverse load
+between the floors, `Cm = 0.6 − 0.4 (M1/M2)`. `M1/M2` is negative in single
+curvature and positive in double curvature. The other end is not in this
+action, so the default ratio is 0 and `Cm = 0.6`.
+
+`Pc = π² (EI)eff / (k ℓu)²`. `(EI)eff = 0.4 Ec Ig / (1+βdns)`. `βdns = 0.6`
+is the sustained-load value the commentary permits when that split is not
+known, which makes `(EI)eff = 0.25 Ec Ig`. `k = 1` for a nonsway member.
+
+`Pu` and `Pc` are newtons, `M2` is N·m, `Ec` is Pa, `Ig` is m⁴, `lu` is m.
+A tensile `Pu` is not magnified. `Pu ≥ 0.75 Pc` is unstable.
+
+# Citation
+ACI 318-19 §6.6.4.5.1–§6.6.4.5.3 (corpus: aci-318-19, PDF page 82);
+§6.6.4.4.2, §6.6.4.4.3, and §6.6.4.4.4(a) (PDF page 81). The `βdns = 0.6`
+reduction to `0.25 Ec Ig` is the commentary on PDF page 82.
+"""
+function nonsway_slenderness_moment(Pu::Real, M2::Real, Ec::Real, Ig::Real, lu::Real;
+                                    k::Real=1.0, βdns::Real=0.6, M1_over_M2::Real=0.0)
+    M = abs(M2)
+    Pu <= 0 && return (stable=true, δ=1.0, Mc=M, Pc=Inf, Cm=1.0)
+    # ACI 318-19 Eq. (6.6.4.4.4a) and Eq. (6.6.4.4.2). k = 1 per §6.6.4.4.3.
+    EI = 0.4 * Ec * Ig / (1 + βdns)
+    Pc = π^2 * EI / (k * lu)^2
+    Pu >= 0.75 * Pc && return (stable=false, δ=Inf, Mc=Inf, Pc=Pc, Cm=0.6)
+    # ACI 318-19 Eq. (6.6.4.5.3a) and Eq. (6.6.4.5.2).
+    Cm = 0.6 - 0.4 * M1_over_M2
+    δ = max(Cm / (1 - Pu / (0.75 * Pc)), 1.0)
+    return (stable=true, δ=δ, Mc=δ * M, Pc=Pc, Cm=Cm)
+end
+
+"""
+    check_wall_out_of_plane_axial_flexure(ws, material, Nu, Mu) -> CheckResult
+
+Out-of-plane axial plus bending, ACI 318-19 §22.2 and §22.4.
+
+The section is the pier bent through its thickness. Vertical steel is smeared
+across the thickness with the same layer model as the in-plane check. Two
+layers near the faces, required by §11.7.2.3 when the wall is thicker than
+10 in, are stronger than that smear, so this capacity is a lower bound.
+`Mu` is the moment the caller has already magnified.
+
+# Citation
+ACI 318-19 §22.2 / §22.4.2.1, through [`check_wall_inplane_flexure`](@ref).
+§11.7.2.3 (corpus: aci-318-19, PDF page 174) places the steel in two layers
+when the thickness exceeds 10 in.
+"""
+function check_wall_out_of_plane_axial_flexure(ws::WallSection, material, Nu, Mu;
+                                               fy=nothing, Es=nothing)
+    through_thickness = WallSection(ws.t, ws.lw; ρl=ws.ρl, ρt=ws.ρt)
+    result = check_wall_inplane_flexure(through_thickness, material, Nu, Mu;
+                                         fy=fy, Es=Es)
+    return CheckResult(
+        replace(result.name, "in-plane" => "out-of-plane"),
+        result.passed, result.ratio, result.demand, result.capacity, result.code_clause)
+end

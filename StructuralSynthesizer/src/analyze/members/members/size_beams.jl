@@ -85,6 +85,25 @@ function size_beams!(
     composite_deck_orientation = nothing,
     # Beam index → ShellBeamDemand from `analyze_story_shell`. Raises, never lowers.
     shell_demands = nothing,
+    # Beam index → spans of the cracked service shell: `RCShellSpan`s for
+    # concrete, `SteelShellSpan`s for steel. A separate deflection check on
+    # discrete sizing; it never changes the frame-model deflection demand.
+    shell_spans = nothing,
+    # Group id → `(section = s, exact = Bool)`. Discrete steel, and rectangular
+    # discrete concrete; see `_apply_section_floor`. `nothing` leaves every group free.
+    section_floor = nothing,
+    # `gid -> Bool`: size only the beam groups it accepts. `nothing` sizes every
+    # beam group, one pass per framing level when framing exists
+    # (see `_beam_sizing_passes`). Not specialized: each level's predicate is a
+    # different closure, and specializing this function on each one recompiles it.
+    @nospecialize(group_filter = nothing),
+    # ENGINEERING JUDGMENT. `false` sizes shear as Vu ≤ φVc, with no stirrup
+    # credit. The head-face pass uses it. The ordinary pass leaves it true:
+    # ACI 318-11 §11.1.1 permits Vc + Vs.
+    stirrup_shear::Bool = true,
+    # ENGINEERING JUDGMENT (`DesignParameters.rib_head_stirrups`): whether a
+    # story-depth rib piece that frames into a solid head is credited stirrups.
+    rib_head_stirrups::Bool = true,
 )
     dp = (hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters)) ?
          struc.design_parameters : nothing
@@ -127,14 +146,133 @@ function size_beams!(
         :discrete
     end
 
+    # Rib groups with a story depth go to the rib-line sizer, before the
+    # girders they load. Every other group stays with the catalog sizer.
+    owned = story_rib_groups(struc)
+    rib_ids = sort!(UInt64[g for g in keys(owned)
+                           if group_filter === nothing || group_filter(g)])
+    if !isempty(owned) && group_filter !== nothing
+        inner = group_filter
+        group_filter = gid -> !haskey(owned, gid) && inner(gid)
+    end
+    if !isempty(rib_ids)
+        _member_timed(:sb_rib_lines) do
+            size_rib_lines!(struc, rib_ids; fallback = effective_opts, resolution,
+                            gravity_factor, I_factor, stirrup_shear, rib_head_stirrups)
+        end
+        _member_timed(() -> _reanalyze_after_section_change!(struc), :sb_reanalyze)
+    end
+
+    if group_filter === nothing
+        passes = _beam_sizing_passes(struc, effective_opts)
+        if length(passes) > 1
+            for (k, pass) in enumerate(passes)
+                # The caller's `method` and composite kwargs describe the
+                # building-wide options. A level's own options carry theirs.
+                own = pass.own
+                # A level's own options carry method and composite settings.
+                # Call the one-pass function, not size_beams!: a recursive call
+                # makes inference chase this closure until subtype checking
+                # does not finish.
+                pass_method = own ? nothing : method
+                pass_opts = pass.opts
+                pass_strategy = if !isnothing(pass_method)
+                    pass_method
+                elseif hasproperty(pass_opts, :sizing_strategy)
+                    pass_opts.sizing_strategy
+                else
+                    :discrete
+                end
+                _member_timed(:sb_one) do
+                    _size_beams_one!(struc, pass_opts, pass_strategy;
+                            resolution, reanalyze = false, gravity_factor,
+                            member_group_overrides =
+                                _overrides_in(member_group_overrides, pass.accept),
+                            I_factor, tc, composite_concrete,
+                            composite_t_slab = own ? nothing : composite_t_slab,
+                            composite_anchor = own ? nothing : composite_anchor,
+                            composite_shored = own ? nothing : composite_shored,
+                            composite_cp_class = own ? nothing : composite_cp_class,
+                            composite_slab_type = own ? nothing : composite_slab_type,
+                            composite_deck_hr = own ? nothing : composite_deck_hr,
+                            composite_deck_wr = own ? nothing : composite_deck_wr,
+                            composite_deck_orientation =
+                                own ? nothing : composite_deck_orientation,
+                            shell_demands, shell_spans, section_floor,
+                            group_filter = pass.accept, stirrup_shear)
+                end
+                # The next pass reads forces from the sections just installed.
+                # The cached unshored split was sampled before those sections.
+                if k < length(passes) || reanalyze
+                    mesh = _composite_mesh(struc)
+                    mesh === nothing || _clear_unshored_stage!(mesh)
+                    _member_timed(() -> _reanalyze_after_section_change!(struc), :sb_reanalyze)
+                end
+            end
+            _member_timed(() -> _verify_tbeam_flanges(struc, nothing), :sb_flange)
+            return struc
+        end
+        # One pass left: it must still skip the story-owned ribs.
+        isempty(owned) || (group_filter = only(passes).accept)
+    end
+
+    result = _member_timed(:sb_one) do
+        _size_beams_one!(struc, effective_opts, strategy;
+                              resolution, reanalyze, gravity_factor,
+                              member_group_overrides, I_factor, tc,
+                              composite_concrete, composite_t_slab, composite_anchor,
+                              composite_shored, composite_cp_class, composite_slab_type,
+                              composite_deck_hr, composite_deck_wr, composite_deck_orientation,
+                              shell_demands, shell_spans, section_floor, group_filter,
+                              stirrup_shear)
+    end
+    _member_timed(() -> _verify_tbeam_flanges(struc, group_filter), :sb_flange)
+    # A single pass solves inside the sizer, before the solid-head sections
+    # exist. The framing path solves through `_reanalyze_after_section_change!`,
+    # which hangs them on the frame first.
+    written = apply_solid_head_frame_sections!(struc)
+    if reanalyze && !isempty(written) && !isempty(struc.asap_model.frame_elements)
+        _member_timed(() -> _reanalyze_after_section_change!(struc), :sb_reanalyze)
+    end
+    return result
+end
+
+"""One sizing pass. `group_filter` is not specialized: each level's predicate is a different closure."""
+function _size_beams_one!(
+    struc::BuildingStructure,
+    effective_opts,
+    strategy;
+    resolution::Int = 200,
+    reanalyze::Bool = true,
+    gravity_factor::Quantity = GRAVITY,
+    member_group_overrides::Union{Nothing, Dict{UInt64, MemberGroupSizingOverride}} = nothing,
+    I_factor::Real = 0.35,
+    tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
+    composite_concrete = nothing,
+    composite_t_slab = nothing,
+    composite_anchor = nothing,
+    composite_shored = nothing,
+    composite_cp_class = nothing,
+    composite_slab_type = nothing,
+    composite_deck_hr = nothing,
+    composite_deck_wr = nothing,
+    composite_deck_orientation = nothing,
+    shell_demands = nothing,
+    shell_spans = nothing,
+    section_floor = nothing,
+    @nospecialize(group_filter = nothing),
+    stirrup_shear::Bool = true,
+)
+    section_floor === nothing || _section_floor_supported(effective_opts, strategy) ||
+        throw(ArgumentError(
+            "section_floor applies to discrete steel beams and to rectangular " *
+            "discrete concrete beams only"))
     StructuralSizer.emit!(tc, :sizing, "size_beams!", "", :enter;
                           opts_type=string(typeof(effective_opts)),
                           strategy=string(strategy))
 
-    # NOTE: as of this writing `BuildingStructure` has NO `design_parameters` field
-    # (see building_types/structure.jl), so `hasproperty(...)` is always false and this
-    # collinear-grouping branch is an INERT backstop kept for a future harness-gated
-    # addition of the field.
+    # `BuildingStructure` has no `design_parameters` field, so this branch does not
+    # run. The live call is `_size_beams_columns!`, from `DesignParameters`.
     if hasproperty(struc, :design_parameters) && !isnothing(struc.design_parameters) && struc.design_parameters.collinear_grouping
         group_collinear_members!(struc; member_type=:beams)
     end
@@ -199,14 +337,165 @@ function size_beams!(
                           composite_concrete, composite_t_slab, composite_anchor,
                           composite_shored, composite_cp_class, composite_slab_type,
                           composite_deck_hr, composite_deck_wr, composite_deck_orientation,
-                          shell_demands)
+                          shell_demands, shell_spans, section_floor, group_filter)
+    elseif effective_opts isa StructuralSizer.ConcreteBeamOptions && strategy == :discrete
+        _size_beams_impl!(struc, effective_opts, Val(strategy);
+                          resolution, reanalyze, gravity_factor,
+                          member_group_overrides, I_factor, shell_demands,
+                          shell_spans, section_floor, group_filter, stirrup_shear)
     else
         _size_beams_impl!(struc, effective_opts, Val(strategy);
                           resolution, reanalyze, gravity_factor,
-                          member_group_overrides, I_factor, shell_demands)
+                          member_group_overrides, I_factor, shell_demands,
+                          shell_spans, group_filter)
     end
     StructuralSizer.emit!(tc, :sizing, "size_beams!", "", :exit)
     return result
+end
+
+"""
+One beam-sizing pass: `opts` for the groups `accept` keeps.
+
+`accept === nothing` keeps every group. `own` is true when `opts` came from
+`FramingLevel.beam_options` rather than the building-wide options, so the
+caller's composite keyword arguments do not apply.
+"""
+struct _BeamSizingPass
+    opts
+    accept::Union{Nothing, Function}
+    own::Bool
+end
+
+"""
+    _beam_sizing_passes(struc, default_opts) -> Vector{_BeamSizingPass}
+
+No materialized framing level: one pass over every beam group with
+`default_opts`. That is the pre-framing path.
+
+Materialized framing: one pass per framing level, from the slab outward
+(level 1, then 2, …), then one pass for every group no level owns — the
+primary girders, and any override aimed at a group that does not exist.
+A level uses its `beam_options` when set and `default_opts` otherwise.
+Levels at the same number that share the same options are one pass.
+
+`n_max_sections` applies inside a pass, not across passes.
+"""
+function _beam_sizing_passes(struc::BuildingStructure, default_opts)
+    levels = NamedTuple[]
+    for slab in struc.slabs
+        for fl in slab.framing_levels
+            fl.group_id === nothing && continue
+            # A level with a story rib depth is sized by `size_rib_lines!`.
+            push!(levels, (level = fl.level, slab_idx = fl.slab_idx,
+                           group_ids = level_group_ids(fl),
+                           sizing_ids = fl.rib_stem === nothing ?
+                                        level_sizing_group_ids(fl) : UInt64[],
+                           beam_options = fl.beam_options))
+        end
+    end
+    isempty(levels) && return [_BeamSizingPass(default_opts, nothing, false)]
+
+    sort!(levels, by = fl -> (fl.level, fl.slab_idx))
+    claimed = Set{UInt64}()
+    passes = _BeamSizingPass[]
+    i = 1
+    while i <= length(levels)
+        first = levels[i]
+        own = first.beam_options !== nothing
+        opts = own ? first.beam_options : default_opts
+        groups = Set{UInt64}()
+        while i <= length(levels)
+            nxt = levels[i]
+            nxt.level == first.level || break
+            nxt_own = nxt.beam_options !== nothing
+            nxt_own == own || break
+            own && (nxt.beam_options === opts || break)
+            union!(groups, nxt.sizing_ids)
+            union!(claimed, nxt.group_ids)
+            i += 1
+        end
+        accept = let g = groups
+            gid -> gid in g
+        end
+        # A level whose ribs are all story-owned has nothing for the catalog.
+        isempty(groups) || push!(passes, _BeamSizingPass(opts, accept, own))
+    end
+    # Groups no level claimed, including an override gid that matches nothing.
+    rest = let c = claimed
+        gid -> !(gid in c)
+    end
+    push!(passes, _BeamSizingPass(default_opts, rest, false))
+    return passes
+end
+
+"""
+    _beam_opts_by_group(struc, default_opts) -> Dict{UInt64, Any}
+
+The beam options each sizing group actually uses. A framing level with its
+own `beam_options` owns its groups; every other group uses `default_opts`.
+The same split as [`_beam_sizing_passes`](@ref).
+"""
+function _beam_opts_by_group(struc::BuildingStructure, default_opts)
+    out = Dict{UInt64, Any}()
+    for pass in _beam_sizing_passes(struc, default_opts)
+        for beam in struc.beams
+            gid = group_id(beam)
+            gid === nothing && continue
+            pass.accept === nothing || pass.accept(gid) || continue
+            out[gid] = pass.opts
+        end
+    end
+    return out
+end
+
+"""Overrides whose group this pass sizes, or `nothing` when it sizes none."""
+function _overrides_in(overrides, accept)
+    overrides === nothing && return nothing
+    accept === nothing && return overrides
+    sub = Dict{UInt64, MemberGroupSizingOverride}()
+    for (gid, ovr) in overrides
+        accept(gid) && (sub[gid] = ovr)
+    end
+    return isempty(sub) ? nothing : sub
+end
+
+"""
+Demands for the beam groups `accept` keeps. `nothing` keeps every beam group.
+`service_deflection = false` skips the service deflection solve; pass it only
+when no deflection limit applies.
+
+On a floor with one-way concrete joists, each group's strength demand is the
+larger of the frame solve and a solve with the joist ends pinned
+([`_pinned_joist_releases`](@ref)). Service deflections are the frame solve's.
+"""
+function _beam_group_demands(struc::BuildingStructure, accept; resolution::Int,
+                             shell_demands, service_deflection::Bool = true,
+                             beam_shear_cases = nothing)
+    group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
+        member_group_demands(struc; member_edge_group = BEAM_GROUP_SYMBOLS,
+                             resolution = resolution, shell_demands = shell_demands,
+                             service_deflection = service_deflection,
+                             beam_shear_cases = beam_shear_cases)
+    releases = _pinned_joist_releases(struc)
+    if !isempty(releases)
+        pinned_ids, pinned = _with_pinned_joists(struc, releases) do
+            member_group_demands(struc; member_edge_group = BEAM_GROUP_SYMBOLS,
+                                 resolution = resolution, service_deflection = false)[1:2]
+        end
+        pinned_ids == group_ids || error(
+            "pinned-joist solve returned different beam groups than the frame solve")
+        demands = [_envelope_demand(a, b) for (a, b) in zip(demands, pinned)]
+    end
+    accept === nothing &&
+        return group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs
+    keep = [i for (i, gid) in enumerate(group_ids) if accept(gid)]
+    if beam_shear_cases !== nothing
+        kept = beam_shear_cases[keep]
+        empty!(beam_shear_cases)
+        append!(beam_shear_cases, kept)
+    end
+    return group_ids[keep], demands[keep], L_totals[keep], Lb_govs[keep],
+           Cb_govs[keep], Kx_govs[keep], Ky_govs[keep]
 end
 
 # --- Steel beams (discrete) — calls public StructuralSizer.size_beams ---
@@ -235,10 +524,18 @@ function _size_beams_impl!(
     # Pass 1 searches the catalog on the steel model. Pass 2 confirms that
     # one section on the composite deflection. The catalog runs again only
     # when the confirmation fails, and a changed section is confirmed once.
+    # `composite_solved_search` is the one open search after the same steel
+    # section, with a heavier stud layout, still misses its solved deflection.
     composite_pass::Int = 1,
     prior_section_keys = nothing,
     composite_lock::Bool = false,
+    composite_solved_search::Bool = false,
+    # Searches already run after a rejected confirmation; see `_composite_ratchet_floors`.
+    composite_ratchet::Int = 0,
     shell_demands = nothing,
+    shell_spans = nothing,
+    section_floor = nothing,
+    @nospecialize(group_filter = nothing),
 )
     if opts.composite && composite_anchor === nothing
         composite_anchor_from_options(opts)
@@ -253,13 +550,15 @@ function _size_beams_impl!(
     # Later passes already carry the self-weight moved onto the child elements.
     composite_pass == 1 && _add_gravity_loads!(struc, edge_ids_in_group, gravity_factor)
 
+    has_limit = opts.deflection_limit !== nothing || opts.total_deflection_limit !== nothing
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
-        member_group_demands(struc; member_edge_group=BEAM_GROUP_SYMBOLS, resolution=resolution,
-                             shell_demands=shell_demands)
+        _beam_group_demands(struc, group_filter; resolution, shell_demands,
+                            service_deflection = has_limit)
 
     # DEFINITIVE size-time gid gate (Run 4 / Phase B, [P1-2] + [P2-3]). `group_ids`
     # here is the REAL steel-beam group set the sizer actually emits: collinear-MERGED
-    # (`group_collinear_members!` ran in `size_beams!` before this call) AND
+    # (`group_collinear_members!` ran in `_size_beams_columns!` before this call
+    # when `collinear_grouping` is set) AND
     # par_has-FILTERED (`member_group_demands` drops groups with no segment on a
     # :beams edge). Every EFFECTIVE `member_group_overrides` entry MUST target one of
     # these gids — anything else can never be honored on this path and would be
@@ -441,6 +740,7 @@ function _size_beams_impl!(
     δ_LL_vec   = [d.δ_max_LL for d in demands]
     δ_total_vec = [d.δ_max_total for d in demands]
     I_ref_v  = [d.I_ref for d in demands]
+    _require_service_deflections(demands, group_ids, has_limit)
 
     # `SteelBeamOptions.composite` builds one PerStationComposite per group from
     # the per-side tributary profiles and the exact moment field. The checker
@@ -469,26 +769,27 @@ function _size_beams_impl!(
             deck_attachment = deck_attachment_from_options(opts),
             d_rebar = opts.composite_d_rebar === nothing ? 0.0u"m" : opts.composite_d_rebar,
             shell_fields = _shell_moment_fields_by_beam(shell_demands),
-            # The confirmation uses the solved deflection. A catalog search,
-            # including the search after a failed confirmation, still scales
-            # by inertia so a stiffer section can clear that deflection.
-            # The next confirmation then solves that section and checks it.
-            variable_inertia = composite_lock || composite_pass > 2)
+            # The confirmation uses the solved deflection. The search after the
+            # first failed confirmation still scales by inertia, so a stiffer
+            # section or more studs on the same section can clear it. The one
+            # search after that same section's studs still miss uses the solved
+            # deflection, and its studs stay the strength layout.
+            variable_inertia = composite_lock || composite_pass > 2 ||
+                               composite_solved_search)
     else
         nothing
     end
+    # Same δ, I_ref, span, and limits the checker just used for I_need.
+    service_needs = composite_kw === nothing ? nothing :
+        _composite_install_service(demands, geometries, opts, composite_kw)
 
-    # Run 4 / Phase B ([A-revert]): honor per-group restrictions on STEEL beam
-    # groups sourced ONLY from an EFFECTIVE per-design `member_group_overrides`
-    # entry. The single batched size_beams call is routed through a UNION catalog +
-    # per-group `feasible` index mask (see `_beam_override_union_and_feasible`).
-    # `MemberGroup.catalog_override` (the Phase 6 seam) is a documented NO-OP on this
-    # batched design_building / incremental path — it is honored only by the isolated
-    # `size_member_group!` path (it was never honored here pre-Phase-B, and honoring
-    # it opened a regression). Every group with no effective override keeps the full
-    # default catalog and the identical internal AISCChecker screening, so its result
-    # is byte-identical. With no effective override on any group we take the
-    # pre-Phase-B path verbatim (feasible === nothing).
+    # Honor per-group restrictions on STEEL beam groups from an EFFECTIVE
+    # per-design `member_group_overrides` entry. The batched call uses a UNION
+    # catalog and a per-group `feasible` mask (see
+    # `_beam_override_union_and_feasible`). A framing level's catalog is its
+    # `beam_options`, not a field on the group. Every group with no effective
+    # override keeps the full default catalog. With no effective override we
+    # take the unmasked path (feasible === nothing).
     has_eff_override =
         member_group_overrides !== nothing &&
         any(gid -> (o = get(member_group_overrides, gid, nothing)) !== nothing &&
@@ -505,6 +806,10 @@ function _size_beams_impl!(
     else
         nothing, nothing
     end
+    if !composite_lock && section_floor !== nothing
+        catalog_kw, feasible_kw = _apply_section_floor(opts, group_ids, catalog_kw,
+                                                       feasible_kw, section_floor)
+    end
     result = StructuralSizer.size_beams(
         Mu_vec, Vu_vec, geometries, opts;
         Pu = Pu_vec, Pu_t = Pu_t_vec,
@@ -515,14 +820,23 @@ function _size_beams_impl!(
         catalog = catalog_kw,
         feasible = feasible_kw,
         composite = composite_kw,
+        # Floor load acts between the supports. App. 8 §8.2.1(b) takes
+        # Cm = 1.0 (corpus: aisc-360-16, PDF page 306).
+        transverse_load = true,
+        shell_spans = _group_shell_spans(struc, group_ids, shell_spans,
+                                         StructuralSizer.SteelShellSpan),
     )
 
     member_array = struc.beams
     mat = opts.material
     _apply_beam_results!(struc, result, group_ids, member_array, edge_ids_in_group, mat)
 
-    again = function (; pass, keys, lock = false)
-        _size_beams_impl!(struc, opts, Val(:discrete);
+    # invokelatest: this closure calls the function that created it. A direct
+    # call makes inference of this pass include itself until subtype checking
+    # does not finish.
+    again = function (; pass, keys, lock = false, solved_search = false,
+                      floor = section_floor, ratchet = composite_ratchet)
+        Base.invokelatest(_size_beams_impl!, struc, opts, Val(:discrete);
                           resolution, reanalyze, gravity_factor,
                           member_group_overrides, I_factor,
                           composite_concrete, composite_t_slab, composite_anchor,
@@ -530,14 +844,35 @@ function _size_beams_impl!(
                           composite_deck_hr, composite_deck_wr,
                           composite_deck_orientation,
                           composite_pass = pass, prior_section_keys = keys,
-                          composite_lock = lock, shell_demands)
+                          composite_lock = lock,
+                          composite_solved_search = solved_search,
+                          composite_ratchet = ratchet,
+                          shell_demands, shell_spans,
+                          section_floor = floor, group_filter)
+    end
+    # A reselected section is confirmed on its own solved model. A stiffer
+    # section draws more moment, so it can still miss. Then every group keeps
+    # at least its current section and the catalog is searched again on the
+    # solved deflection. The rejected group has to move up, so this ends.
+    confirm = function (keys)
+        try
+            return again(; pass = 3, keys = keys, lock = true)
+        catch e
+            _composite_lock_rejected(e) || rethrow()
+            floors = _composite_ratchet_floors(struc, opts, group_ids, section_floor,
+                                               composite_ratchet)
+            floors === nothing && rethrow()
+            return again(; pass = 2, keys = keys, lock = false, solved_search = true,
+                         floor = floors, ratchet = composite_ratchet + 1)
+        end
     end
 
     shored_now = composite_shored === nothing ? opts.composite_shored : composite_shored
     if opts.composite && composite_kw !== nothing && composite_pass == 1
         installed = _install_composite_analysis!(struc, result, group_ids, composite_kw,
                                                  opts.material, shored_now;
-                                                 resolution = resolution)
+                                                 resolution = resolution,
+                                                 service = service_needs)
         if installed
             _note_composite_section_pass!(struc, 1, result.sections)
             keys = _section_choice_keys(result.sections)
@@ -562,32 +897,60 @@ function _size_beams_impl!(
             _note_composite_section_pass!(struc, 2, result.sections)
             if reanalyze
                 Asap.update!(struc.asap_model; values_only = true)
-                Asap.solve!(struc.asap_model)
+                _solve_struc_model!(struc)
             end
-        elseif changed
-            # The confirmation failed and the catalog chose another section.
-            # Solve that section, then check it alone. A failed check is not
-            # kept: the pass-1 section already failed its own confirmation.
+        elseif composite_solved_search
+            # Solved deflection, catalog open. A heavier steel section can
+            # pass here. The same section already failed this check.
+            if !changed
+                throw(ArgumentError(
+                    "No feasible sections: the composite confirmation rejected " *
+                    "this section, and the solved-deflection search did not find another"))
+            end
             _reanalyze_changed_composite!(struc, result, group_ids, composite_kw,
                                           opts.material, shored_now;
-                                          resolution = resolution)
+                                          resolution = resolution,
+                                          service = service_needs)
             _note_composite_section_pass!(struc, 2, result.sections)
-            return again(; pass = 3, keys = keys_now, lock = true)
+            # Pass 3 is locked by `composite_pass > 2`.
+            return confirm(keys_now)
+        elseif changed
+            # The confirmation failed and the catalog chose another section.
+            # Solve that section, then check it alone.
+            _reanalyze_changed_composite!(struc, result, group_ids, composite_kw,
+                                          opts.material, shored_now;
+                                          resolution = resolution,
+                                          service = service_needs)
+            _note_composite_section_pass!(struc, 2, result.sections)
+            return confirm(keys_now)
         else
-            throw(ArgumentError(
-                "No feasible sections: the composite confirmation rejected " *
-                "this section, and the catalog did not find another"))
+            # Same steel section. The scaling search asked for a heavier stud
+            # layout. Those studs are the design: install them and confirm on
+            # the solved deflection.
+            _reanalyze_changed_composite!(struc, result, group_ids, composite_kw,
+                                          opts.material, shored_now;
+                                          resolution = resolution,
+                                          service = service_needs)
+            try
+                return again(; pass = 2, keys = keys_now, lock = true)
+            catch e
+                _composite_lock_rejected(e) || rethrow()
+                # One open search on the solved deflection. Pass 3 would lock
+                # the catalog, so this stays pass 2 with the flag set.
+                return again(; pass = 2, keys = keys_now, lock = false,
+                             solved_search = true)
+            end
         end
     elseif opts.composite && composite_kw !== nothing && composite_pass > 2
         _restore_composite_parents!(struc)
         _note_composite_section_pass!(struc, composite_pass, result.sections)
         if reanalyze
             Asap.update!(struc.asap_model; values_only = true)
-            Asap.solve!(struc.asap_model)
+            _solve_struc_model!(struc)
         end
     elseif reanalyze
         Asap.process!(struc.asap_model)
-        Asap.solve!(struc.asap_model)
+        _solve_struc_model!(struc)
     end
 
     @info "Sized $(length(group_ids)) steel beam groups via size_beams API"
@@ -662,8 +1025,211 @@ function _composite_lock_catalog(struc::BuildingStructure, group_ids)
     return catalog, feasible
 end
 
+"""Objective of `s` per unit length under `opts`, the order the catalog search minimizes."""
+function _section_objective(opts, s)
+    rebar = hasproperty(opts, :rebar_material) ? opts.rebar_material : nothing
+    rebar === nothing &&
+        return StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
+    transverse = hasproperty(opts, :transverse_rebar_material) ?
+                 StructuralSizer.get_transverse_rebar(opts) : rebar
+    return StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m";
+                                           rebar=rebar, transverse=transverse)
+end
+
+"""
+    _section_floor_supported(opts, strategy) -> Bool
+
+`section_floor` is honored for discrete steel beams and for rectangular
+discrete concrete beams. T-beams, NLP, and other materials are not.
+"""
+function _section_floor_supported(opts, strategy)
+    strategy == :discrete || return false
+    opts isa StructuralSizer.SteelBeamOptions && return true
+    return opts isa StructuralSizer.ConcreteBeamOptions && !opts.include_flange
+end
+
+"""
+    _apply_section_floor(opts, group_ids, catalog, feasible, floors) -> (catalog, feasible)
+
+Narrow each floored group's candidates. A floor `(section = s, exact = false)`
+keeps `s` and every section whose objective is strictly greater; the search
+then keeps `s` while it passes and otherwise takes the lightest heavier
+section that does. `exact = true` keeps `s` alone. A section of equal
+objective never replaces a passing `s`. Groups without a floor are unchanged.
+
+The mask only narrows: every candidate still goes through the full checker.
+Groups are sized independently here, so `n_max_sections` and multi-material
+catalogs are refused. Concrete T-beams are refused: their catalog is a web
+plus a flange, not this rectangular list.
+"""
+function _apply_section_floor(opts::StructuralSizer.SteelBeamOptions, group_ids,
+                              catalog, feasible, floors)
+    opts.n_max_sections == 0 || throw(ArgumentError(
+        "section_floor needs n_max_sections = 0: a shared-section cap couples the groups"))
+    opts.materials === nothing || throw(ArgumentError(
+        "section_floor needs a single-material catalog"))
+    cat = catalog === nothing ?
+        (opts.custom_catalog === nothing ?
+            StructuralSizer.steel_column_catalog(opts.section_type, opts.catalog) :
+            opts.custom_catalog) :
+        catalog
+    return _narrow_to_section_floor(opts, group_ids, cat, feasible, floors)
+end
+
+function _apply_section_floor(opts::StructuralSizer.ConcreteBeamOptions, group_ids,
+                              catalog, feasible, floors)
+    opts.n_max_sections == 0 || throw(ArgumentError(
+        "section_floor needs n_max_sections = 0: a shared-section cap couples the groups"))
+    opts.materials === nothing || throw(ArgumentError(
+        "section_floor needs a single-material catalog"))
+    opts.include_flange && throw(ArgumentError(
+        "section_floor does not apply to T-beam sizing"))
+    cat = catalog === nothing ?
+        (opts.custom_catalog === nothing ?
+            StructuralSizer.rc_beam_catalog(opts.catalog) :
+            opts.custom_catalog) :
+        catalog
+    return _narrow_to_section_floor(opts, group_ids, cat, feasible, floors)
+end
+
+"Keep each floor section and, unless the floor is exact, every strictly heavier one."
+function _narrow_to_section_floor(opts, group_ids, cat, feasible, floors)
+    obj = [_section_objective(opts, s) for s in cat]
+    out = feasible === nothing ? [collect(eachindex(cat)) for _ in group_ids] :
+                                 [copy(f) for f in feasible]
+    for (i, gid) in enumerate(group_ids)
+        fl = get(floors, gid, nothing)
+        fl === nothing && continue
+        o_floor = _section_objective(opts, fl.section)
+        filter!(out[i]) do j
+            _section_same_shape(cat[j], fl.section) ||
+                (!fl.exact && obj[j] > o_floor * (1 + 1e-9))
+        end
+    end
+    return cat, out
+end
+
+"""
+Size rectangular concrete beams. With `section_floor`, each group keeps its
+floor or a strictly heavier section. A named catalog grows one tier when
+nothing in that set passes; a feasibility mask would otherwise stop that
+growth. Without a floor, a row-F frame floor is applied exactly as before.
+"""
+function _rectangular_rc_beam_result(struc, opts, group_ids, Mu, Vu, Mu_neg, Nu,
+                                    geoms, shell_spans, section_floor, shear_cases = nothing)
+    has_frame = any(gid -> haskey(struc.frame_section_floors, gid), group_ids)
+    if has_frame
+        (opts.materials === nothing && opts.n_max_sections == 0) ||
+            _refuse_frame_floors(struc, group_ids, "this concrete beam sizing")
+    end
+    objective_of = s -> StructuralSizer.objective_value(opts.objective, s, opts.material, 1.0u"m")
+    frame = has_frame ? _beam_floor_frame(opts) : nothing
+    if section_floor === nothing
+        floor_kw = (;)
+        if has_frame
+            cat = isnothing(opts.custom_catalog) ?
+                StructuralSizer.rc_beam_catalog(opts.catalog) : opts.custom_catalog
+            floor_kw = (; catalog = cat,
+                        feasible = _frame_floor_mask(struc, :beam, group_ids, cat, frame;
+                                                     objective_of))
+        end
+        return StructuralSizer.size_beams(Mu, Vu, geoms, opts; Mu_neg = Mu_neg, Nu = Nu,
+                                          shell_spans = shell_spans,
+                                          shear_cases = shear_cases, floor_kw...)
+    end
+
+    tier = (opts.catalog_constraint === :soft && opts.custom_catalog === nothing) ?
+        opts.catalog : nothing
+    cat = opts.custom_catalog === nothing ?
+        StructuralSizer.rc_beam_catalog(opts.catalog) : opts.custom_catalog
+    while true
+        frame_feasible = has_frame ?
+            _frame_floor_mask(struc, :beam, group_ids, cat, frame; objective_of) : nothing
+        catalog_kw, feasible_kw = _apply_section_floor(opts, group_ids, cat,
+                                                       frame_feasible, section_floor)
+        try
+            return StructuralSizer.size_beams(Mu, Vu, geoms, opts; Mu_neg = Mu_neg, Nu = Nu,
+                                              shell_spans = shell_spans,
+                                              shear_cases = shear_cases,
+                                              catalog = catalog_kw, feasible = feasible_kw)
+        catch e
+            grown = tier isa Symbol ? StructuralSizer.grow_rc_beam_catalog(cat, tier) : nothing
+            (grown !== nothing && e isa ArgumentError &&
+                startswith(e.msg, "No feasible sections for group")) || rethrow()
+            cat, nxt = grown
+            depth_in = round(Int, ustrip(u"inch", maximum(s -> s.h, cat)))
+            @warn "RC beam sizing: no section in the :$tier catalog passes the section floor; " *
+                  "retrying with :$nxt added (depths to $(depth_in) in)." reason = e.msg
+            tier = nxt
+        end
+    end
+end
+
+"""
+    _frame_floor_mask(struc, group_ids, catalog, objective_of) -> Union{Nothing, Vector{Vector{Int}}}
+
+`struc.frame_section_floors` as a per-group catalog mask. A floored group
+keeps its floor section and every section whose objective is strictly
+greater. The optimizer still checks each one against the group's own demands.
+`nothing` when no group in `group_ids` has a floor.
+"""
+function _frame_floor_mask(struc, group_ids, catalog, objective_of)
+    floors = struc.frame_section_floors
+    any(gid -> haskey(floors, gid), group_ids) || return nothing
+    obj = [objective_of(s) for s in catalog]
+    out = Vector{Vector{Int}}(undef, length(group_ids))
+    for (i, gid) in enumerate(group_ids)
+        fl = get(floors, gid, nothing)
+        out[i] = fl === nothing ? collect(eachindex(catalog)) :
+            _floor_or_heavier(struc, gid, fl, catalog, obj, objective_of)
+    end
+    return out
+end
+
+"""
+Catalog indices of floor `fl` and every section whose objective is strictly
+greater. Refuses when the floor is not in `catalog`.
+"""
+function _floor_or_heavier(struc, gid, fl, catalog, obj, objective_of)
+    o_floor = objective_of(fl)
+    same = [j for j in eachindex(catalog) if _section_same_shape(catalog[j], fl)]
+    if isempty(same)
+        _refuse_frame_floors(struc, [gid],
+            "this sizing catalog (the row F floor is not in it)")
+    end
+    return sort!(union(same, [j for j in eachindex(catalog)
+                              if obj[j] > o_floor * (1 + 1e-9)]))
+end
+
 _composite_lock_rejected(::Any) = false
 _composite_lock_rejected(e::ArgumentError) = occursin("No feasible sections", e.msg)
+
+"""Searches allowed after rejected composite confirmations before the rejection is final."""
+const COMPOSITE_RATCHET_MAX = 6
+
+"""
+    _composite_ratchet_floors(struc, opts, group_ids, section_floor, ratchet) -> Dict or nothing
+
+Floors for the search after a rejected confirmation. Each group keeps its
+installed section or a heavier one. An exact caller floor is kept as given.
+`nothing` when no search is left: the limit is reached, or the options
+cannot take a floor (a shared-section cap or a multi-material catalog).
+"""
+function _composite_ratchet_floors(struc, opts, group_ids, section_floor, ratchet::Int)
+    ratchet < COMPOSITE_RATCHET_MAX || return nothing
+    (opts.n_max_sections == 0 && opts.materials === nothing) || return nothing
+    floors = section_floor === nothing ? Dict{Any, Any}() : Dict{Any, Any}(section_floor)
+    for gid in group_ids
+        fl = get(floors, gid, nothing)
+        fl !== nothing && fl.exact && continue
+        mg = struc.member_groups[gid]
+        isempty(mg.member_indices) && continue
+        sec = section(struc.beams[first(mg.member_indices)])
+        sec === nothing && continue
+        floors[gid] = (section = sec, exact = false)
+    end
+    return floors
+end
 
 # [P2 section-identity, fix cycle 4] Structural (value-level) equality of two catalog
 # section FIELDS. `_beam_sec_key` keys identity on `(typename, name)` only, so two
@@ -716,6 +1282,13 @@ function _field_identical(x, y, depth::Int = 0)
     # below and are compared by VALUE, keeping two distinct-but-value-equal immutables
     # (freshly built vs cached) on the same footing.
     (x === y && ismutable(x)) && return true
+    # Arrays compare element by element. Since Julia 1.11 an Array is a struct
+    # whose fields hold a memory pointer, so the field recursion below would
+    # call two equal arrays different.
+    if x isa AbstractArray || y isa AbstractArray
+        (typeof(x) === typeof(y) && size(x) == size(y)) || return false
+        return all(_field_identical(a, b, depth + 1) for (a, b) in zip(x, y))
+    end
     # Composite (a struct with fields, mutable or immutable): recurse field-by-field so
     # distinct-but-value-equal sub-objects are compared by value, not identity.
     # `typeof` must match so units / type params agree.
@@ -746,10 +1319,110 @@ function _field_identical(x, y, depth::Int = 0)
     return false
 end
 
+"""
+    _frame_floor_mask(struc, kind, group_ids, catalog, frame) -> Union{Nothing, Vector{Vector{Int}}}
+
+`struc.frame_section_floors` as a per-group catalog mask. A floored group
+keeps every catalog section that passes the stored row F rows of each of its
+members (`struc.frame_floor_demands`), checked with `frame` (see
+[`_frame_checkers`](@ref)). A section lighter than the floor that passes those
+rows stays in. The optimizer still checks each one against the group's own
+demands. `nothing` when no group in `group_ids` has a floor.
+
+A floor with no stored rows of type `kind` (e.g. one set by
+`_floor_overstressed_frame_columns!`) has nothing to relax against, so it
+keeps the floor or a strictly heavier section, ranked by `objective_of`.
+Such a floor throws when `objective_of` is not given.
+"""
+function _frame_floor_mask(struc, kind::Symbol, group_ids, catalog, frame;
+                           objective_of = nothing)
+    floors = struc.frame_section_floors
+    any(gid -> haskey(floors, gid), group_ids) || return nothing
+    out = Vector{Vector{Int}}(undef, length(group_ids))
+    obj = nothing
+    for (i, gid) in enumerate(group_ids)
+        fl = get(floors, gid, nothing)
+        if fl === nothing
+            out[i] = collect(eachindex(catalog))
+            continue
+        end
+        rows = _floor_rows_by_member(struc, kind, gid)
+        if isempty(rows)
+            objective_of === nothing && throw(ArgumentError(
+                "member group $gid has a section floor with no stored row F rows, " *
+                "and a floor mask without `objective_of` cannot keep it"))
+            obj === nothing && (obj = [objective_of(s) for s in catalog])
+            out[i] = _floor_or_heavier(struc, gid, fl, catalog, obj, objective_of)
+            continue
+        end
+        out[i] = [j for j in eachindex(catalog)
+                  if _passes_floor_rows(struc, kind, rows, catalog[j], frame)]
+        any(j -> _sections_identical(catalog[j], fl), out[i]) ||
+            _refuse_frame_floors(struc, [gid],
+                "this sizing catalog (the row F floor is not in it, or fails its stored rows)")
+    end
+    return out
+end
+
+"""
+    _floor_rows_by_member(struc, kind, gid) -> Vector{Pair{Int, Vector{Tuple{String, Any}}}}
+
+Stored row F rows of group `gid`, split by the member they were computed for.
+`kind` picks the demand type: `RCColumnDemand` for `:column`, `RCBeamDemand`
+for `:beam`.
+"""
+function _floor_rows_by_member(struc, kind::Symbol, gid)
+    T = kind === :column ? StructuralSizer.RCColumnDemand : StructuralSizer.RCBeamDemand
+    by = Dict{Int, Vector{Tuple{String, Any}}}()
+    for (label, demand) in get(struc.frame_floor_demands, gid, Tuple{String, Any}[])
+        demand isa T || continue
+        push!(get!(Vector{Tuple{String, Any}}, by, demand.member_idx), (label, demand))
+    end
+    return sort!(collect(by); by = first)
+end
+
+"""Whether `section` passes `rows` (from [`_floor_rows_by_member`](@ref)) for every member. Vacuously true for no rows."""
+function _passes_floor_rows(struc, kind::Symbol, rows, section, frame)
+    members = kind === :column ? struc.columns : struc.beams
+    return all(rows) do (j, member_rows)
+        first(_member_resists(kind, members[j], section, member_rows, frame))
+    end
+end
+
+"""Refuse a sizing path that cannot keep the row F section floors of `group_ids`."""
+function _refuse_frame_floors(struc, group_ids, path::AbstractString)
+    for gid in group_ids
+        haskey(struc.frame_section_floors, gid) || continue
+        throw(ArgumentError(
+            "member group $gid has a row F section floor, and $path cannot keep it. " *
+            "Use :discrete sizing with a single-material catalog and n_max_sections = 0."))
+    end
+    return nothing
+end
+
 function _sections_identical(a, b)
     a === b && return true
     typeof(a) === typeof(b) || return false
     for f in fieldnames(typeof(a))
+        _field_identical(getfield(a, f), getfield(b, f)) || return false
+    end
+    return true
+end
+
+"""
+Same catalog shape as `b`.
+
+An installed steel section carries the grade on `material`. The catalog row
+it was copied from leaves `material` unset. Those two are the same shape:
+every other field matches. A section of the same name with a different area
+or inertia is not.
+"""
+function _section_same_shape(a, b)
+    _sections_identical(a, b) && return true
+    typeof(a) === typeof(b) || return false
+    hasproperty(a, :material) || return false
+    for f in fieldnames(typeof(a))
+        f === :material && continue
         _field_identical(getfield(a, f), getfield(b, f)) || return false
     end
     return true
@@ -811,8 +1484,8 @@ override therefore *tightens* a group relative to the global default; a knob set
 LOOSER than the global default is clamped by the global screening (conservative /
 safe by construction).
 
-Per-knob precedence on this batched path ([A-revert] — the `MemberGroup.catalog_override`
-seam is NOT consulted here; it is honored only by `size_member_group!`):
+Per-knob precedence on this batched path. A framing level's catalog is its
+`beam_options`, which is a separate pass, not a mask inside this one:
 - `catalog`         : `override.catalog` > default
 - `max_depth`       : `override.max_depth` > `opts.max_depth`
 - `deflection_limit`: `override.deflection_limit` > `opts.deflection_limit`
@@ -850,10 +1523,7 @@ function _beam_override_union_and_feasible(
     for (i, gid) in enumerate(group_ids)
         ovr = get(member_group_overrides, gid, nothing)
         eff = ovr !== nothing && _is_effective(ovr)
-        # [A-revert]: the batched path honors ONLY the per-design override.
-        # `MemberGroup.catalog_override` is a documented no-op here (honored solely
-        # by `size_member_group!`), so a group with no EFFECTIVE override keeps the
-        # full default catalog → byte-identical to pre-Phase-B.
+        # A group with no EFFECTIVE override keeps the full default catalog.
         if !eff
             resolved_cats[i] = nothing          # no effective override → default catalog membership
             continue
@@ -929,6 +1599,14 @@ function _beam_override_union_and_feasible(
     return union_cat, feasible
 end
 
+"""`:standard_pan` is not a catalog yet. `:mip` is the sizing path."""
+function _require_known_rib_form(opts)
+    opts.rib_form == :mip && return nothing
+    opts.rib_form == :standard_pan && throw(ArgumentError(
+        "rib_form=:standard_pan has no pan list yet. Use rib_form=:mip."))
+    throw(ArgumentError("rib_form must be :mip or :standard_pan; got :$(opts.rib_form)"))
+end
+
 # --- Shared helper: apply MIP/NLP beam results to the BuildingStructure ---
 """
     _apply_beam_results!(struc, result, group_ids, member_array, edge_ids_in_group, mat)
@@ -975,6 +1653,7 @@ function _apply_beam_results!(
             L_raw = sum(struc.segments[i].L for i in segment_indices(m))
             L_total = L_raw isa Unitful.Quantity ? L_raw : L_raw * u"m"
             set_section!(m, chosen)
+            _record_member_check!(m, chosen, result, g_idx)
             # Concrete and rebar are separate keys. `vol_key` alone stored gross
             # area as concrete and dropped the longitudinal steel.
             set_volumes!(m, member_material_volumes(chosen, L_total, group_mat; rebar=rebar))
@@ -989,6 +1668,35 @@ function _apply_beam_results!(
 end
 
 # --- Concrete beams (discrete MIP) ---
+
+# Per-structure T-beam capacity-cache stores. Discrete T-beam sizing spends most
+# of its time precomputing φMn/φVn/εt over the candidate catalog; across the ~20
+# member iterations the rib geometry is frozen, so the same handful of catalogs
+# recur. Keyed by content fingerprint (see `StructuralSizer._tbeam_capacity_key`),
+# the precompute is reused across iterations while every span- and load-dependent
+# check still runs per demand — results are bit-identical to recomputing. The
+# outer `WeakKeyDict` drops a structure's store when the structure is collected,
+# so long-lived API processes do not accumulate caches. Set
+# `SS_TBEAM_CAP_NOCACHE=1` to disable (A/B exactness checks).
+const _TBEAM_CAP_STORE = WeakKeyDict{Any, Dict{UInt, Any}}()
+const _TBEAM_CAP_STORE_LOCK = ReentrantLock()
+
+"""
+    _tbeam_capacity_store(struc) -> Union{Dict{UInt,Any}, Nothing}
+
+The T-beam capacity-cache store for `struc`, created on first use. Returns
+`nothing` when `SS_TBEAM_CAP_NOCACHE=1`, which makes `size_tbeams` precompute
+capacities every call (the pre-cache behavior, for A/B exactness checks). The
+returned dict is mutated serially by the (serial) batch loop, so only the
+per-structure lookup needs the lock.
+"""
+function _tbeam_capacity_store(struc)
+    get(ENV, "SS_TBEAM_CAP_NOCACHE", "") == "1" && return nothing
+    lock(_TBEAM_CAP_STORE_LOCK) do
+        get!(() -> Dict{UInt, Any}(), _TBEAM_CAP_STORE, struc)
+    end
+end
+
 function _size_beams_impl!(
     struc::BuildingStructure,
     opts::StructuralSizer.ConcreteBeamOptions,
@@ -1005,6 +1713,11 @@ function _size_beams_impl!(
     # threaded from params.beam_I_factor (default 0.35).
     I_factor::Real = 0.35,
     shell_demands = nothing,
+    shell_spans = nothing,
+    # Group id → `(section, exact)`. Rectangular beams only; see `_apply_section_floor`.
+    section_floor = nothing,
+    @nospecialize(group_filter = nothing),
+    stirrup_shear::Bool = true,
 )
     # DEFENSE-IN-DEPTH layer-symmetric guard (Phase B). This non-steel overload
     # ACCEPTS `member_group_overrides` for uniform `size_beams!` dispatch but does NOT
@@ -1033,74 +1746,159 @@ function _size_beams_impl!(
 
     _add_gravity_loads!(struc, edge_ids_in_group, gravity_factor)
 
-    # Extract demands from analysis (MemberDemand in SI: N, N·m, m)
+    # Extract demands from analysis (MemberDemand in SI: N, N·m, m).
+    # `beam_shear` is one row per pattern per member. The envelope `Nu` is the
+    # fallback when a group recorded no station row.
+    beam_shear = Vector{Vector{BeamShearCase}}()
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
-        member_group_demands(struc; member_edge_group=BEAM_GROUP_SYMBOLS, resolution=resolution,
-                             shell_demands=shell_demands)
+        _member_timed(:sbc_demands) do
+            _beam_group_demands(struc, group_filter; resolution, shell_demands,
+                                beam_shear_cases=beam_shear)
+        end
 
     isempty(group_ids) && return struc
 
     member_array = struc.beams
+    grouped_spans = _group_shell_spans(struc, group_ids, shell_spans,
+                                       StructuralSizer.RCShellSpan)
 
-    # Build demand vectors with Unitful SI units.
-    # Mu = sagging (Mux_pos); Mu_neg = hogging. Nu is signed: tension
-    # (Pu_t > 0) is negative so ACI 318-11 §11.2.2.3 Eq. (11-8) reduces Vc;
-    # otherwise compression Pu_c uses §11.2.1.2 Eq. (11-4).
-    # ENGINEERING JUDGMENT: compression/shear concurrency is not tracked —
-    # the group envelope Pu is applied to the group envelope Vu.
+    # Mu = sagging (Mux_pos); Mu_neg = hogging. Shear uses the station rows.
+    # The fallback Nu is envelope tension (Eq. 11-8) and no compression:
+    # Eq. (11-4) would raise Vc if that compression is not the shear's case.
     Mu = [d.Mux_pos * u"N*m"  for d in demands]
     Mu_neg = [d.Mux_neg * u"N*m" for d in demands]
+    _store_hogging_envelopes!(struc, group_ids, demands)
     Vu = [d.Vu_strong * u"N"   for d in demands]
-    Nu = [d.Pu_t > 0 ? -d.Pu_t * u"N" : d.Pu_c * u"N" for d in demands]
+    Nu = [d.Pu_t > 0 ? -d.Pu_t * u"N" : 0.0u"N" for d in demands]
+    shear_arg = [_nlp_shear_arg(rows) for rows in beam_shear]
+    shear_kw = any(!isnothing, shear_arg) ? shear_arg : nothing
 
     # Build geometries (L_totals are Float64 in meters)
     geoms = [StructuralSizer.ConcreteMemberGeometry(L) for L in L_totals]
 
     # ── T-beam path (include_flange = true) ──
     if opts.include_flange
+        section_floor === nothing || throw(ArgumentError(
+            "section_floor does not apply to T-beam sizing"))
         isempty(struc.slabs) && error(
             "include_flange=true but no slabs found. Size slabs first.")
+        _require_known_rib_form(opts)
+        _refuse_frame_floors(struc, group_ids, "T-beam sizing")
 
-        bf_vec, hf_vec = _compute_flange_params(struc, group_ids, L_totals)
+        specs = _member_timed(() -> _compute_flange_params(struc, group_ids), :sbc_flange)
 
-        # Envelope: use min bf/hf across groups that have slabs (conservative)
-        valid = findall(!isnothing, bf_vec)
+        valid = findall(!isnothing, specs)
         if isempty(valid)
             @warn "include_flange=true but no beams have adjacent slabs — " *
                   "falling back to rectangular beam sizing"
         else
-            bf_env = minimum(bf_vec[i] for i in valid)
-            hf_env = minimum(hf_vec[i] for i in valid)
-
-            result = StructuralSizer.size_tbeams(
-                Mu, Vu, geoms, opts;
-                flange_width     = bf_env,
-                flange_thickness = hf_env,
-                Mu_neg           = Mu_neg,
-                Nu               = Nu,
-                catalog_size     = opts.catalog_size_tbeam,
-            )
-
-            _apply_beam_results!(struc, result, group_ids, member_array,
-                                 edge_ids_in_group, opts.material; I_factor=I_factor,
-                                 rebar=opts.rebar_material)
+            # One shared section when the floor asks for one rib size; ribs and
+            # girders never share a batch. Otherwise each group is its own batch.
+            batches = if opts.uniform_geometry
+                kinds = [filter(i -> (specs[i].joist_spacing !== nothing) == rib, valid)
+                         for rib in (true, false)]
+                filter(!isempty, kinds)
+            else
+                [[i] for i in valid]
+            end
+            # ENGINEERING JUDGMENT: every rib in this pass uses the thickest
+            # topping any rib bay was given, so the flange is one thickness.
+            # ACI 318-11 §8.12 takes hf as the slab that is there. A bay still
+            # cast thinner than this value is named by the warning.
+            rib_hf = [specs[i].hf for i in valid if specs[i].joist_spacing !== nothing]
+            floor_hf = isempty(rib_hf) ? nothing : maximum(rib_hf)
+            if floor_hf !== nothing && any(hf -> hf < floor_hf, rib_hf)
+                @warn "Rib flanges use the thickest topping on this pass " *
+                      "($(floor_hf)). A bay whose slab is thinner is not " *
+                      "thickened by this pass." maxlog = 1
+            end
+            # Group id → (demand index, joist spacing the checker was given).
+            checked_as = Dict{UInt64, Tuple{Int, Any}}()
+            # Reuse catalog capacity precomputes across iterations (see
+            # `_tbeam_capacity_store`). Mutated serially by this loop.
+            cap_store = _tbeam_capacity_store(struc)
+            for idxs in batches
+                ribs = all(specs[i].joist_spacing !== nothing for i in idxs)
+                hf = ribs && floor_hf !== nothing ? floor_hf :
+                    minimum(specs[i].hf for i in idxs)
+                spacings = [specs[i].joist_spacing for i in idxs
+                            if specs[i].joist_spacing !== nothing]
+                js = isempty(spacings) ? nothing : maximum(spacings)
+                batch = Set(group_ids[idxs])
+                rib_max = _rib_web_max(opts, js)
+                # ACI 318-11 §8.12.2: each candidate web gets its own flange.
+                bf_cache = Dict{typeof(1.0u"m"), typeof(1.0u"m")}()
+                bf_of = bw -> get!(bf_cache, uconvert(u"m", bw)) do
+                    minimum(_group_flange_width(struc, specs[i], bw; hf, batch,
+                                                rib_web_max = rib_max) for i in idxs)
+                end
+                spans = grouped_spans === nothing ? nothing : grouped_spans[idxs]
+                result = _member_timed(:sbc_mip) do
+                    _size_tbeams_escalating(
+                        Mu[idxs], Vu[idxs], geoms[idxs], opts;
+                        flange_width     = bf_of,
+                        flange_thickness = hf,
+                        joist_spacing    = js,
+                        Mu_neg           = Mu_neg[idxs],
+                        Nu               = Nu[idxs],
+                        sustained_live_fraction = opts.sustained_live_fraction,
+                        shell_spans      = spans,
+                        stirrup_shear    = stirrup_shear,
+                        shear_cases      = shear_kw === nothing ? nothing : shear_kw[idxs],
+                        capacity_store   = cap_store,
+                    )
+                end
+                _apply_beam_results!(struc, result, group_ids[idxs], member_array,
+                                     edge_ids_in_group, opts.material; I_factor=I_factor,
+                                     rebar=opts.rebar_material)
+                for i in idxs
+                    checked_as[group_ids[i]] = (i, result.joist_spacing)
+                end
+            end
+            recheck = function (mi, sec)
+                i, js = checked_as[group_id(member_array[mi])]
+                return StructuralSizer.check_tbeam_section(
+                    sec, Mu[i], Vu[i], geoms[i], opts;
+                    Mu_neg = Mu_neg[i], Nu = Nu[i], joist_spacing = js,
+                    sustained_live_fraction = opts.sustained_live_fraction,
+                    shell_span = grouped_spans === nothing ? nothing : grouped_spans[i],
+                    stirrup_shear = stirrup_shear)
+            end
+            _member_timed(:sbc_sharebars) do
+                _share_collinear_rib_bars!(struc, group_ids, specs, opts;
+                                           uniform = opts.uniform_geometry,
+                                           I_factor = I_factor,
+                                           edge_ids = edge_ids_in_group,
+                                           rebar = opts.rebar_material,
+                                           recheck = recheck)
+            end
+            missing = findall(isnothing, specs)
+            if !isempty(missing)
+                spans = grouped_spans === nothing ? nothing : grouped_spans[missing]
+                result = StructuralSizer.size_beams(
+                    Mu[missing], Vu[missing], geoms[missing], opts;
+                    Mu_neg = Mu_neg[missing], Nu = Nu[missing], shell_spans = spans,
+                    shear_cases = shear_kw === nothing ? nothing : shear_kw[missing])
+                _apply_beam_results!(struc, result, group_ids[missing], member_array,
+                                     edge_ids_in_group, opts.material; I_factor=I_factor,
+                                     rebar=opts.rebar_material)
+            end
 
             if reanalyze
                 Asap.process!(struc.asap_model)
-                Asap.solve!(struc.asap_model)
+                _solve_struc_model!(struc)
             end
 
             fc_psi = round(Int, ustrip(u"psi", opts.material.fc′))
-            bf_in  = round(ustrip(u"inch", bf_env); digits=1)
-            hf_in  = round(ustrip(u"inch", hf_env); digits=1)
-            @info "Sized $(length(group_ids)) RC T-beam groups via MIP" fc_psi bf_in hf_in
+            @info "Sized $(length(valid)) RC T-beam groups via MIP" fc_psi uniform=opts.uniform_geometry
 
             return struc
         end
     end
 
     # ── Rectangular beam path (default) ──
-    result = StructuralSizer.size_beams(Mu, Vu, geoms, opts; Mu_neg=Mu_neg, Nu=Nu)
+    result = _rectangular_rc_beam_result(struc, opts, group_ids, Mu, Vu, Mu_neg, Nu,
+                                         geoms, grouped_spans, section_floor, shear_kw)
 
     _apply_beam_results!(struc, result, group_ids, member_array,
                          edge_ids_in_group, opts.material; I_factor=I_factor,
@@ -1108,13 +1906,119 @@ function _size_beams_impl!(
 
     if reanalyze
         Asap.process!(struc.asap_model)
-        Asap.solve!(struc.asap_model)
+        _solve_struc_model!(struc)
     end
 
     fc_psi = round(Int, ustrip(u"psi", opts.material.fc′))
     @info "Sized $(length(group_ids)) RC beam groups via MIP" fc_psi=fc_psi
 
     return struc
+end
+
+"""Raise the flexure envelope to the stored row F moments and append those shear rows.
+
+Stored `RCBeamDemand` values are kip and kip·ft (`Tu` is kip·in). The shear
+vectors stay in newtons and newton-metres, matching `BeamShearCase`.
+"""
+function _merge_beam_floor_demands!(struc, group_ids, Mu, Mu_neg, shear_cases)
+    for (i, gid) in enumerate(group_ids)
+        rows = get(struc.frame_floor_demands, gid, nothing)
+        rows === nothing && continue
+        for (_, demand) in rows
+            demand isa StructuralSizer.RCBeamDemand || continue
+            Mu[i] = max(Mu[i], demand.Mu * Asap.kip * u"ft")
+            Mu_neg[i] = max(Mu_neg[i], demand.Mu_neg * Asap.kip * u"ft")
+            push!(shear_cases[i], BeamShearCase(
+                ustrip(u"N", demand.Vu * Asap.kip),
+                ustrip(u"N", demand.Nu * Asap.kip),
+                ustrip(u"N*m", demand.Tu * Asap.kip * u"inch"),
+                ustrip(u"N*m", demand.Mu * Asap.kip * u"ft"),
+                ustrip(u"N*m", demand.Mu_neg * Asap.kip * u"ft"),
+            ))
+        end
+    end
+    return nothing
+end
+
+"""Quantity triples for the sizer, or `nothing` when the group has no station row."""
+function _nlp_shear_arg(cases)
+    isempty(cases) && return nothing
+    return [(c.Vu * u"N", c.Nu * u"N", c.Tu * u"N*m") for c in cases]
+end
+
+"""Sagging moments for the beam NLP, one per station row, or `nothing` when there is no row."""
+function _nlp_flexure_arg(cases)
+    isempty(cases) && return nothing
+    return [c.Mu_pos * u"N*m" for c in cases]
+end
+
+"""
+NLP section to install for group `gid` of `kind` (`:column` or `:beam`).
+
+The NLP section is kept when it passes the group's stored row F rows, as
+discrete sizing keeps any catalog section that does (see
+[`_frame_floor_mask`](@ref)). A section that fails them, or a failed solve,
+is replaced by the floor.
+"""
+function _nlp_section_or_floor(struc, kind::Symbol, gid, section, opts)
+    fl = get(struc.frame_section_floors, gid, nothing)
+    fl === nothing && return section
+    section === nothing && return fl
+    typeof(section) === typeof(fl) || throw(ArgumentError(
+        "row F section floor for member group $gid is a $(typeof(fl)), " *
+        "and NLP returned a $(typeof(section))"))
+    frame = kind === :column ? (column = _column_checker_bundle(nothing, opts),) :
+                               _beam_floor_frame(opts)
+    rows = _floor_rows_by_member(struc, kind, gid)
+    return _passes_floor_rows(struc, kind, rows, section, frame) ? section : fl
+end
+
+"""Row F checker bundle of beam options `opts`, in the shape [`_member_resists`](@ref) takes."""
+function _beam_floor_frame(opts)
+    bundle = _beam_checker_bundle(nothing, opts)
+    return (beam = bundle, beam_for = _ -> bundle)
+end
+
+"""
+Keep an NLP beam section. A group with stored row F rows throws instead of
+skipping when the solve is infeasible or the rounded section fails those rows.
+"""
+function _keep_beam_nlp_section!(struc, gid, result, opts)
+    rows = get(struc.frame_floor_demands, gid, nothing)
+    floored = rows !== nothing &&
+        any(d -> d isa StructuralSizer.RCBeamDemand, (d for (_, d) in rows))
+    ok = result.status in (:optimal, :feasible)
+    section = _nlp_section_or_floor(struc, :beam, gid, ok ? result.section : nothing, opts)
+    if section === nothing
+        floored && throw(ArgumentError(
+            "row F section floor: beam group $gid NLP status is $(result.status)"))
+        return nothing
+    end
+    floored && _assert_beam_floor_section!(struc, gid, section, opts, rows)
+    return section
+end
+
+function _assert_beam_floor_section!(struc, gid, section, opts, rows)
+    bundle = _beam_checker_bundle(nothing, opts)
+    frame = (beam = bundle, beam_for = _ -> bundle)
+    checked = 0
+    for (j, member) in enumerate(struc.beams)
+        group_id(member) == gid || continue
+        member_rows = Tuple{String, Any}[]
+        for (label, demand) in rows
+            demand isa StructuralSizer.RCBeamDemand || continue
+            demand.member_idx == j || continue
+            push!(member_rows, (label, demand))
+        end
+        isempty(member_rows) && continue
+        checked += 1
+        ok, detail = _member_resists(:beam, member, section, member_rows, frame)
+        ok || throw(ArgumentError(
+            "row F section floor: beam group $gid does not pass its stored demand rows ($detail)"))
+    end
+    checked == 0 && throw(ArgumentError(
+        "row F section floor: beam group $gid stored rows do not match a beam"))
+    return nothing
 end
 
 # --- Concrete beams (NLP) ---
@@ -1133,6 +2037,8 @@ function _size_beams_impl!(
     # (ConcreteBeamOptions.material), so it is passed to every to_asap_section call below.
     I_factor::Real = 0.35,
     shell_demands = nothing,
+    shell_spans = nothing,
+    @nospecialize(group_filter = nothing),
 )
     # DEFENSE-IN-DEPTH layer-symmetric guard (Phase B). This non-steel overload
     # ACCEPTS `member_group_overrides` for uniform `size_beams!` dispatch but does NOT
@@ -1161,23 +2067,34 @@ function _size_beams_impl!(
 
     _add_gravity_loads!(struc, edge_ids_in_group, gravity_factor)
 
-    # Extract demands from analysis (MemberDemand in SI: N, N·m, m)
+    # Extract demands from analysis (MemberDemand in SI: N, N·m, m).
+    # `beam_shear` is one row per pattern per member: Vu with the axial at
+    # that station. The envelope `Nu` below is only the fallback when a group
+    # recorded no station row.
+    beam_shear = Vector{Vector{BeamShearCase}}()
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
-        member_group_demands(struc; member_edge_group=BEAM_GROUP_SYMBOLS, resolution=resolution,
-                             shell_demands=shell_demands)
+        _beam_group_demands(struc, group_filter; resolution, shell_demands,
+                            beam_shear_cases=beam_shear)
 
     isempty(group_ids) && return struc
+    _refuse_frame_floors(struc, group_ids, "concrete beam NLP sizing")
 
     member_array = struc.beams
 
     # Sagging / hogging faces. NLP post-checks Mu_neg (top steel is not a DV)
-    # and may return :infeasible instead of deepening. Nu is signed: tension
-    # (Pu_t > 0) is negative so ACI 318-11 §11.2.2.3 Eq. (11-8) reduces Vc;
-    # otherwise compression Pu_c uses §11.2.1.2 Eq. (11-4).
+    # and may return :infeasible instead of deepening. Sagging flexure and
+    # shear each use one row per pattern case. The fallback `Nu` takes the
+    # envelope tension (Eq. 11-8)
+    # and no compression: pairing the largest compression with the largest
+    # shear raises Vc (ACI 318-11 Eq. 11-4) and is unconservative.
     Mu = [d.Mux_pos * u"N*m"  for d in demands]
     Mu_neg = [d.Mux_neg * u"N*m" for d in demands]
+    _store_hogging_envelopes!(struc, group_ids, demands)
     Vu = [d.Vu_strong * u"N" for d in demands]
-    Nu = [d.Pu_t > 0 ? -d.Pu_t * u"N" : d.Pu_c * u"N" for d in demands]
+    Nu = [d.Pu_t > 0 ? -d.Pu_t * u"N" : 0.0u"N" for d in demands]
+    _merge_beam_floor_demands!(struc, group_ids, Mu, Mu_neg, beam_shear)
+    shear_cases = [_nlp_shear_arg(rows) for rows in beam_shear]
+    flexure_cases = [_nlp_flexure_arg(rows) for rows in beam_shear]
 
     # Map ConcreteBeamOptions → NLPBeamOptions (shared material fields)
     stirrup_int = parse(Int, replace(string(opts.transverse_bar_size), "no" => ""))
@@ -1196,7 +2113,19 @@ function _size_beams_impl!(
         isempty(struc.slabs) && error(
             "include_flange=true but no slabs found. Size slabs first.")
 
-        bf_vec, hf_vec = _compute_flange_params(struc, group_ids, L_totals)
+        specs = _compute_flange_params(struc, group_ids)
+        # §8.13.8's Vc increase is inside the T-beam NLP. A rib that misses
+        # §8.13.2 or §8.13.3 is checked as a beam.
+        # The flange widens with the web, so the narrowest web the NLP may pick
+        # gives a flange no candidate exceeds (ACI 318-11 §8.12.2).
+        bf_vec = [s === nothing ? nothing :
+                  _group_flange_width(struc, s, nlp_opts.min_width; batch = Set([gid]))
+                  for (s, gid) in zip(specs, group_ids)]
+        rib_hf = [s.hf for s in specs if s !== nothing && s.joist_spacing !== nothing]
+        floor_hf = isempty(rib_hf) ? nothing : maximum(rib_hf)
+        hf_vec = [s === nothing ? nothing :
+                  (s.joist_spacing !== nothing && floor_hf !== nothing ? floor_hf : s.hf)
+                  for s in specs]
 
         # NLP supports per-beam bf/hf vectors
         # Groups without slabs → fall back to rectangular NLP
@@ -1212,17 +2141,32 @@ function _size_beams_impl!(
             bf_t  = [bf_vec[i] for i in tbeam_idx]
             hf_t  = [hf_vec[i] for i in tbeam_idx]
 
+            # ACI 318-11 §8.13.2 and §8.13.3 are constraints when a rib inside
+            # the width bounds can meet them. Otherwise §8.13.4 applies: the
+            # rib is a beam, and §8.13.8 does not.
+            requested = [specs[i].joist_spacing for i in tbeam_idx]
+            spacing_t = [StructuralSizer.joist_nlp_spacing(s, nlp_opts, hf)
+                         for (s, hf) in zip(requested, hf_t)]
+            if any(!isnothing, requested) && any(isnothing, spacing_t)
+                @warn "ACI 318-11 §8.13.2 and §8.13.3 cannot be met inside the " *
+                      "rib width bounds; those ribs are sized as beams and do not " *
+                      "receive the §8.13.8 shear increase." maxlog=4
+            end
             t_results = StructuralSizer.size_rc_tbeams_nlp(Mu_t, Vu_t, bf_t, hf_t, nlp_opts;
                                                           Mu_neg=Mu_neg[tbeam_idx],
-                                                          Nu=Nu[tbeam_idx])
+                                                          Nu=Nu[tbeam_idx],
+                                                          shear_cases=shear_cases[tbeam_idx],
+                                                          flexure_cases=flexure_cases[tbeam_idx],
+                                                          joist_spacing=spacing_t,
+                                                          sustained_live_fraction=opts.sustained_live_fraction)
 
             for (k, g_idx) in enumerate(tbeam_idx)
                 r = t_results[k]
-                r.status in (:optimal, :feasible) || continue
+                chosen = _keep_beam_nlp_section!(struc, group_ids[g_idx], r, opts)
+                chosen === nothing && continue
                 n_feasible += 1
 
                 gid = group_ids[g_idx]
-                chosen = r.section
                 mg = struc.member_groups[gid]
                 mg.section = chosen
                 asap_sec = StructuralSizer.to_asap_section(chosen, mat; I_factor=I_factor)  # ACI 318-11 §10.10.4.1
@@ -1232,7 +2176,7 @@ function _size_beams_impl!(
                     L_raw = sum(struc.segments[i].L for i in segment_indices(m))
                     L_total = L_raw isa Unitful.Quantity ? L_raw : L_raw * u"m"
                     set_section!(m, chosen)
-                    set_volumes!(m, MaterialVolumes(_volume_key(mat) => StructuralSizer.section_area(chosen) * L_total))
+                    set_volumes!(m, MaterialVolumes(_volume_key(mat) => StructuralSizer.self_weight_area(chosen) * L_total))
                     for seg_idx in segment_indices(m)
                         edge_idx = struc.segments[seg_idx].edge_idx
                         edge_idx in edge_ids_in_group || continue
@@ -1240,6 +2184,11 @@ function _size_beams_impl!(
                     end
                 end
             end
+            _share_collinear_rib_bars!(struc, group_ids, specs, opts;
+                                       uniform = opts.uniform_geometry,
+                                       I_factor = I_factor,
+                                       edge_ids = edge_ids_in_group,
+                                       rebar = opts.rebar_material)
         end
 
         # Rectangular fallback for groups without slabs
@@ -1248,15 +2197,17 @@ function _size_beams_impl!(
             Vu_r = Vu[rect_idx]
             r_results = StructuralSizer.size_rc_beams_nlp(Mu_r, Vu_r, nlp_opts;
                                                          Mu_neg=Mu_neg[rect_idx],
-                                                         Nu=Nu[rect_idx])
+                                                         Nu=Nu[rect_idx],
+                                                         shear_cases=shear_cases[rect_idx],
+                                                         flexure_cases=flexure_cases[rect_idx])
 
             for (k, g_idx) in enumerate(rect_idx)
                 r = r_results[k]
-                r.status in (:optimal, :feasible) || continue
+                chosen = _keep_beam_nlp_section!(struc, group_ids[g_idx], r, opts)
+                chosen === nothing && continue
                 n_feasible += 1
 
                 gid = group_ids[g_idx]
-                chosen = r.section
                 mg = struc.member_groups[gid]
                 mg.section = chosen
                 asap_sec = StructuralSizer.to_asap_section(chosen, mat; I_factor=I_factor)  # ACI 318-11 §10.10.4.1
@@ -1266,7 +2217,7 @@ function _size_beams_impl!(
                     L_raw = sum(struc.segments[i].L for i in segment_indices(m))
                     L_total = L_raw isa Unitful.Quantity ? L_raw : L_raw * u"m"
                     set_section!(m, chosen)
-                    set_volumes!(m, MaterialVolumes(_volume_key(mat) => StructuralSizer.section_area(chosen) * L_total))
+                    set_volumes!(m, MaterialVolumes(_volume_key(mat) => StructuralSizer.self_weight_area(chosen) * L_total))
                     for seg_idx in segment_indices(m)
                         edge_idx = struc.segments[seg_idx].edge_idx
                         edge_idx in edge_ids_in_group || continue
@@ -1278,7 +2229,7 @@ function _size_beams_impl!(
 
         if reanalyze
             Asap.process!(struc.asap_model)
-            Asap.solve!(struc.asap_model)
+            _solve_struc_model!(struc)
         end
 
         fc_psi = round(Int, ustrip(u"psi", mat.fc′))
@@ -1290,16 +2241,17 @@ function _size_beams_impl!(
     end
 
     # ── Rectangular NLP path (default) ──
-    results = StructuralSizer.size_rc_beams_nlp(Mu, Vu, nlp_opts; Mu_neg=Mu_neg, Nu=Nu)
+    results = StructuralSizer.size_rc_beams_nlp(Mu, Vu, nlp_opts; Mu_neg=Mu_neg, Nu=Nu,
+                                                shear_cases=shear_cases,
+                                                flexure_cases=flexure_cases)
 
     mat = opts.material
     n_feasible = 0
     for (g_idx, gid) in enumerate(group_ids)
         r = results[g_idx]
-        r.status in (:optimal, :feasible) || continue
+        chosen = _keep_beam_nlp_section!(struc, gid, r, opts)
+        chosen === nothing && continue
         n_feasible += 1
-
-        chosen = r.section
 
         mg = struc.member_groups[gid]
         mg.section = chosen
@@ -1312,7 +2264,7 @@ function _size_beams_impl!(
             L_raw = sum(struc.segments[i].L for i in segment_indices(m))
             L_total = L_raw isa Unitful.Quantity ? L_raw : L_raw * u"m"
             set_section!(m, chosen)
-            set_volumes!(m, MaterialVolumes(_volume_key(mat) => StructuralSizer.section_area(chosen) * L_total))
+            set_volumes!(m, MaterialVolumes(_volume_key(mat) => StructuralSizer.self_weight_area(chosen) * L_total))
 
             for seg_idx in segment_indices(m)
                 edge_idx = struc.segments[seg_idx].edge_idx
@@ -1324,7 +2276,7 @@ function _size_beams_impl!(
 
     if reanalyze
         Asap.process!(struc.asap_model)
-        Asap.solve!(struc.asap_model)
+        _solve_struc_model!(struc)
     end
 
     fc_psi = round(Int, ustrip(u"psi", mat.fc′))
@@ -1350,6 +2302,8 @@ function _size_beams_impl!(
     # applied internally by its own to_asap_section call), so the beam I_factor is unused.
     I_factor::Real = 0.35,
     shell_demands = nothing,
+    shell_spans = nothing,
+    @nospecialize(group_filter = nothing),
 )
     # DEFENSE-IN-DEPTH layer-symmetric guard (Phase B). This non-steel overload
     # ACCEPTS `member_group_overrides` for uniform `size_beams!` dispatch but does NOT
@@ -1380,8 +2334,7 @@ function _size_beams_impl!(
 
     # Extract demands from analysis (MemberDemand in SI: N, N·m, m)
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
-        member_group_demands(struc; member_edge_group=BEAM_GROUP_SYMBOLS, resolution=resolution,
-                             shell_demands=shell_demands)
+        _beam_group_demands(struc, group_filter; resolution, shell_demands)
 
     isempty(group_ids) && return struc
 
@@ -1466,7 +2419,7 @@ function _size_beams_impl!(
 
     if reanalyze
         Asap.process!(struc.asap_model)
-        Asap.solve!(struc.asap_model)
+        _solve_struc_model!(struc)
     end
 
     n_total = length(group_ids)
@@ -1476,3 +2429,53 @@ function _size_beams_impl!(
     return struc
 end
 
+"""
+Keep each RC beam group's factored hogging envelope on its member beams
+(`Beam.Mu_neg_envelope`, N·m). Detailing reads it for top bars, so the bars
+match the moment the section was sized for, not the last solved case.
+"""
+function _store_hogging_envelopes!(struc, group_ids, demands)
+    for (gid, d) in zip(group_ids, demands)
+        for m_idx in struc.member_groups[gid].member_indices
+            struc.beams[m_idx].Mu_neg_envelope = Float64(d.Mux_neg)
+        end
+    end
+    return struc
+end
+
+"""
+Size the batch from `opts.catalog_size_tbeam`. A demand the ordinary catalog
+cannot carry is sized again from the heavy catalog (`large_rc_tbeams`, webs
+to 30 in and depths to 48 in). A heavy catalog that also has no section
+still throws.
+
+The result carries `joist_spacing`: the spacing the checker was given, which
+is `nothing` once §8.13.4 sized the batch as beams.
+"""
+_no_feasible_section(err) =
+    err isa ArgumentError && occursin("No feasible sections", err.msg)
+
+function _size_tbeams_escalating(Mu, Vu, geoms, opts; kwargs...)
+    kw = (; kwargs...)
+    used = (; joist_spacing = get(kw, :joist_spacing, nothing))
+    cat = opts.catalog_size_tbeam
+    try
+        return merge(StructuralSizer.size_tbeams(Mu, Vu, geoms, opts;
+                                                 catalog_size = cat, kw...), used)
+    catch err
+        _no_feasible_section(err) || rethrow()
+        # The joist catalog keeps only ribs that meet ACI 318-11 §8.13.2 and
+        # §8.13.3 (corpus: aci-318-11, page 120). None of them can carry this
+        # demand, so §8.13.4 sizes the member as a beam and §8.13.8 does not apply.
+        if get(kw, :joist_spacing, nothing) !== nothing
+            @warn "No joist rib meeting ACI 318-11 §8.13.2 and §8.13.3 can carry " *
+                  "this demand. §8.13.4 sizes it as a beam, and §8.13.8 does not apply." maxlog = 4
+            return _size_tbeams_escalating(Mu, Vu, geoms, opts;
+                                           merge(kw, (joist_spacing = nothing,))...)
+        end
+        cat === :large && rethrow()
+        @warn "RC T-beam demand exceeds the $cat catalog; sizing from the heavy catalog" maxlog = 4
+        return merge(StructuralSizer.size_tbeams(Mu, Vu, geoms, opts;
+                                                 catalog_size = :large, kw...), used)
+    end
+end

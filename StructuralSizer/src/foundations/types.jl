@@ -79,64 +79,90 @@ function Soil(qa, γ, ϕ, c, Es; qs=nothing, qp=nothing, ks=nothing)
     Soil{typeof(qa), typeof(γ)}(qa, γ, Float64(ϕ), c, Es, qs, qp, ks)
 end
 
-"""Preset: loose sand — qa = 75 kPa, ks = 5 000 kN/m³ (Bowles 1996 Table 9-1)."""
+"""Preset: loose sand — qa = 75 kPa. `ks` = 5 000 kN/m³ is judgment inside Bowles Table 9-1 loose sand (4 800–16 000)."""
 const loose_sand = Soil(
     75.0u"kPa",         # qa
     16.0u"kN/m^3",      # γ
     28.0,               # ϕ
     0.0u"kPa",          # c
     10.0u"MPa";         # Es
-    ks = 5000.0u"kN/m^3"  # Bowles Table 9-1: loose sand
+    # ENGINEERING JUDGMENT: inside Bowles 5th ed. Table 9-1, loose sand
+    # 4800–16000 kN/m³ (corpus: textbook-bowles-foundation-analysis-design-5e,
+    # §9-6, PDF p. 533 / printed p. 505). The table gives a range, not this value.
+    ks = 5000.0u"kN/m^3"
 )
 
-"""Preset: medium sand — qa = 150 kPa, ks = 25 000 kN/m³ (Bowles 1996 Table 9-1)."""
+"""Preset: medium sand — qa = 150 kPa. `ks` = 25 000 kN/m³ is judgment inside Bowles Table 9-1 medium dense sand (9 600–80 000)."""
 const medium_sand = Soil(
     150.0u"kPa",        # qa
     18.0u"kN/m^3",      # γ
     32.0,               # ϕ
     0.0u"kPa",          # c
     25.0u"MPa";         # Es
-    ks = 25000.0u"kN/m^3"  # Bowles Table 9-1: medium sand
+    # ENGINEERING JUDGMENT: inside Bowles 5th ed. Table 9-1, medium dense sand
+    # 9600–80000 kN/m³ (corpus: textbook-bowles-foundation-analysis-design-5e,
+    # §9-6, PDF p. 533 / printed p. 505). The table row is "medium dense sand",
+    # not "medium sand", and it gives a range, not this value.
+    ks = 25000.0u"kN/m^3"
 )
 
-"""Preset: dense sand — qa = 300 kPa, ks = 100 000 kN/m³ (Bowles 1996 Table 9-1)."""
+"""Preset: dense sand — qa = 300 kPa. `ks` = 100 000 kN/m³ is judgment inside Bowles Table 9-1 dense sand (64 000–128 000)."""
 const dense_sand = Soil(
     300.0u"kPa",        # qa
     20.0u"kN/m^3",      # γ
     38.0,               # ϕ
     0.0u"kPa",          # c
     50.0u"MPa";         # Es
-    ks = 100000.0u"kN/m^3"  # Bowles Table 9-1: dense sand
+    # ENGINEERING JUDGMENT: inside Bowles 5th ed. Table 9-1, dense sand
+    # 64000–128000 kN/m³ (corpus: textbook-bowles-foundation-analysis-design-5e,
+    # §9-6, PDF p. 533 / printed p. 505). The table gives a range, not this value.
+    ks = 100000.0u"kN/m^3"
 )
 
-"""Preset: soft clay — qa = 50 kPa, ks = 12 000 kN/m³ (Bowles 1996 Table 9-1)."""
+"""Preset: soft clay — qa = 50 kPa. `ks` = 12 000 kN/m³ is the low end of Bowles Table 9-1 for clayey soil with qa < 200 kPa (12 000–24 000)."""
 const soft_clay = Soil(
     50.0u"kPa",         # qa
     16.0u"kN/m^3",      # γ
     0.0,                # ϕ
     25.0u"kPa",         # c (undrained shear strength)
     5.0u"MPa";          # Es
-    ks = 12000.0u"kN/m^3"  # Bowles Table 9-1: soft clay
+    # ENGINEERING JUDGMENT: low end of Bowles 5th ed. Table 9-1, clayey soil
+    # with qa < 200 kPa, 12000–24000 kN/m³ (corpus:
+    # textbook-bowles-foundation-analysis-design-5e, §9-6, PDF p. 533 /
+    # printed p. 505). The table has no "soft clay" row.
+    ks = 12000.0u"kN/m^3"
 )
 
-"""Preset: stiff clay — qa = 150 kPa, ks = 50 000 kN/m³ (Bowles 1996 Table 9-1)."""
+"""Preset: stiff clay — qa = 150 kPa. `ks` = 50 000 kN/m³ is outside the Bowles Table 9-1 band for this qa."""
 const stiff_clay = Soil(
     150.0u"kPa",        # qa
     19.0u"kN/m^3",      # γ
     0.0,                # ϕ
     75.0u"kPa",         # c
     20.0u"MPa";         # Es
-    ks = 50000.0u"kN/m^3"  # Bowles Table 9-1: stiff clay
+    # ENGINEERING JUDGMENT, and outside the table band for this qa.
+    # Bowles 5th ed. Table 9-1, clayey soil qa < 200 kPa: 12000–24000 kN/m³;
+    # 200 < qa < 800 kPa: 24000–48000; qa > 800 kPa: > 48000
+    # (corpus: textbook-bowles-foundation-analysis-design-5e, §9-6,
+    # PDF p. 533 / printed p. 505). This preset's qa is 150 kPa, so 50000
+    # is above every finite band. There is no "stiff clay" row.
+    ks = 50000.0u"kN/m^3"
 )
 
-"""Preset: hard clay — qa = 300 kPa, ks = 150 000 kN/m³ (Bowles 1996 Table 9-1)."""
+"""Preset: hard clay — qa = 300 kPa. `ks` = 150 000 kN/m³ is outside the Bowles Table 9-1 band for this qa."""
 const hard_clay = Soil(
     300.0u"kPa",        # qa
     21.0u"kN/m^3",      # γ
     0.0,                # ϕ
     150.0u"kPa",        # c
     50.0u"MPa";         # Es
-    ks = 150000.0u"kN/m^3"  # Bowles Table 9-1: hard clay
+    # ENGINEERING JUDGMENT, and outside the table band for this qa.
+    # Bowles 5th ed. Table 9-1, clayey soil 200 < qa < 800 kPa: 24000–48000
+    # kN/m³; qa > 800 kPa: > 48000 (corpus:
+    # textbook-bowles-foundation-analysis-design-5e, §9-6, PDF p. 533 /
+    # printed p. 505). This preset's qa is 300 kPa, so 150000 is not a
+    # tabulated value. There is no "hard clay" row.
+    ks = 150000.0u"kN/m^3"
 )
 
 # =============================================================================
@@ -145,6 +171,35 @@ const hard_clay = Soil(
 
 """Supertype for all foundation design result structs."""
 abstract type AbstractFoundationResult end
+
+"""
+    FoundationUtilizations(; bearing=NaN, punching=NaN, one_way_shear=NaN,
+                             sliding=NaN, overturning=NaN, uplift=NaN)
+
+The per-check utilizations behind a footing's governing `utilization`.
+`NaN` means the routine did not compute that check.
+
+- `bearing`: service soil pressure / allowable `qa`.
+- `punching`: two-way shear Vu/φVc, worst column. A mat with walls also
+  includes the wall-cantilever shear here.
+- `one_way_shear`: Vu/φVc on the critical section (wall footings).
+- `sliding`: global horizontal-sliding demand/resistance, worst ASCE 7-22
+  counteracting combination (friction + adhesion + passive; Bowles 5e).
+- `overturning`: resultant-eccentricity demand/limit (e / (base/2)), worst
+  compression combination.
+- `uplift`: net factored tension / stabilizing self-weight, worst combination.
+
+The three stability checks are `NaN` unless a `StabilityParams` is supplied
+and the loads carry horizontal shear or net uplift.
+"""
+Base.@kwdef struct FoundationUtilizations
+    bearing::Float64 = NaN
+    punching::Float64 = NaN
+    one_way_shear::Float64 = NaN
+    sliding::Float64 = NaN
+    overturning::Float64 = NaN
+    uplift::Float64 = NaN
+end
 
 """
     SpreadFootingResult{L, V, F}
@@ -174,6 +229,7 @@ struct SpreadFootingResult{L, V, F} <: AbstractFoundationResult
     concrete_volume::V  # Total concrete (m³)
     steel_volume::V     # Total rebar (m³)
     utilization::Float64
+    checks::FoundationUtilizations
 end
 
 """
@@ -191,6 +247,7 @@ struct CombinedFootingResult{L, V, F} <: AbstractFoundationResult
     concrete_volume::V  # (m³)
     steel_volume::V     # (m³)
     utilization::Float64
+    checks::FoundationUtilizations
 end
 
 """
@@ -220,6 +277,10 @@ Design result for a strip (combined) footing supporting N ≥ 2 columns.
   compression column is checked.
 - `sqA`: √(A2/A1) ≤ 2 used for that Bn (1 when the support is not
   wider on all sides than the loaded area).
+- `analysis`: `:rigid` for linear soil pressure (ACI 336.2R §3.2 / §5.2).
+  A wall footing that is not rigid records `:winkler` (ACI 336.2R §5.4).
+  For a wall footing, `n_columns` is 0, `B` is the leg width, and
+  `B * L_ftg` is the contact area with a shared corner counted once.
 """
 struct StripFootingResult{L, A, V, F} <: AbstractFoundationResult
     B::L
@@ -236,6 +297,8 @@ struct StripFootingResult{L, A, V, F} <: AbstractFoundationResult
     As_tensile::A    # §15.8.1.2(b) tensile interface steel
     Bn::F            # φBn_footing at governing (min sqA) column
     sqA::Float64     # √(A2/A1) ≤ 2 at that column
+    analysis::Symbol
+    checks::FoundationUtilizations
 end
 
 """
@@ -254,6 +317,9 @@ Design result for a mat foundation.
 - `concrete_volume`: Total concrete volume
 - `steel_volume`: Total rebar volume
 - `utilization`: Governing utilization ratio
+- `analysis`: `:rigid`, `:shukla`, or `:winkler`, the method that produced
+  the moments. A rigid mat that failed its applicability check and was
+  redesigned records `:winkler`.
 """
 struct MatFootingResult{L, A, V, F} <: AbstractFoundationResult
     B::L
@@ -268,6 +334,8 @@ struct MatFootingResult{L, A, V, F} <: AbstractFoundationResult
     concrete_volume::V
     steel_volume::V
     utilization::Float64
+    analysis::Symbol
+    checks::FoundationUtilizations
 end
 
 """
@@ -286,7 +354,23 @@ struct PileCapResult{L, V} <: AbstractFoundationResult
     concrete_volume::V  # Cap + piles (if cast-in-place)
     steel_volume::V     # Reinforcement volume
     utilization::Float64
+    checks::FoundationUtilizations
 end
+
+# Callers that predate `checks` get an empty breakdown.
+SpreadFootingResult{L, V, F}(args::Vararg{Any, 10}) where {L, V, F} =
+    SpreadFootingResult{L, V, F}(args..., FoundationUtilizations())
+CombinedFootingResult{L, V, F}(args::Vararg{Any, 9}) where {L, V, F} =
+    CombinedFootingResult{L, V, F}(args..., FoundationUtilizations())
+StripFootingResult{L, A, V, F}(args::Vararg{Any, 15}) where {L, A, V, F} =
+    StripFootingResult{L, A, V, F}(args..., FoundationUtilizations())
+MatFootingResult{L, A, V, F}(args::Vararg{Any, 13}) where {L, A, V, F} =
+    MatFootingResult{L, A, V, F}(args..., FoundationUtilizations())
+PileCapResult{L, V}(args::Vararg{Any, 10}) where {L, V} =
+    PileCapResult{L, V}(args..., FoundationUtilizations())
+
+"""Per-check utilizations of a foundation result (see [`FoundationUtilizations`](@ref))."""
+utilization_checks(r::AbstractFoundationResult) = r.checks
 
 # =============================================================================
 # Common Interface
@@ -331,7 +415,7 @@ utilization(r::AbstractFoundationResult) = r.utilization
 # Imperial length canonicalize (bearing / strip stations)
 # =============================================================================
 
-# SI m↔inch of 1 ft is 0.3048/0.0254 = 12 + ~1.78e-15, not Unitful's exact
+# SI m↔inch of 1 ft is FT_TO_M/IN_TO_M = 12 + ~1.78e-15, not Unitful's exact
 # ×12. That ulp is conversion noise, not a construction leftover (0.01 in
 # is ~1e10× larger) and not an ε-not-wider rule. Do not grid-round the
 # station onto a 1e-12 leftover: `round(x/1e-12)*1e-12` sends 12+6e-13 to
@@ -348,7 +432,7 @@ const _SI_INCH_ULP = 1e-12
 Convert a length to inches before mixed-unit arithmetic.
 
 Every unit, including already-tagged inch/ft: an inch-tagged SI leftover
-is still 0.3048/0.0254, not ×12. Do not grid-round onto leftover (6e-13
+is still FT_TO_M/IN_TO_M, not ×12. Do not grid-round onto leftover (6e-13
 must not become 1e-12). SI residuals are snapped on the four overhangs
 after face subtraction (`_snap_si_overhang`). A true leftover (e.g.
 0.01 in) is unchanged. Not a construction tolerance and not an
@@ -418,6 +502,70 @@ struct FoundationDemand{F, M, L}
     c2::L       # Column dim 2 (= c1 for circular)
     shape::Symbol   # :rectangular or :circular
     uplift::Bool    # factored vertical reaction is tension
+end
+
+"""
+    WallLineSample{L, F}
+
+One vertical reaction on a wall line, at station `s` measured from `p1`
+toward `p2`. Compression is positive. Samples are the base nodes of the
+wall; they are not columns, and they are not punched.
+"""
+struct WallLineSample{L, F}
+    s::L
+    Pu::F
+    Ps::F
+end
+
+"""
+    WallLineDemand{L, F}
+
+A grade wall (or one leg of an L or T) as a line load on a footing.
+
+# Fields
+- `idx`: Index assigned by the caller. Not used in the design equations.
+- `p1`, `p2`: Plan endpoints of the wall centerline.
+- `tw`: Wall thickness.
+- `hw`: Wall height, for the shear-wall term of ACI 336.2R Eq. (5-2).
+- `samples`: Base reactions along the wall. A node shared with another leg
+  belongs to exactly one leg.
+- `solid`: Length of wall that is concrete at the base. An opening whose
+  sill is at the base is not part of it. Defaults to the centerline length.
+"""
+struct WallLineDemand{L, F}
+    idx::Int
+    p1::NTuple{2, L}
+    p2::NTuple{2, L}
+    tw::L
+    hw::L
+    samples::Vector{WallLineSample{L, F}}
+    solid::L
+end
+
+"""
+    WallLineDemand(idx, p1, p2, tw, hw, samples; solid_length=nothing) → WallLineDemand
+
+`p1` and `p2` are `(x, y)` plan coordinates. Lengths are stored in metres
+and forces in newtons, so a wall in feet and a thickness in inches are
+the same demand. `solid_length` is the concrete at the base; omitted, it
+is the distance from `p1` to `p2`.
+"""
+function WallLineDemand(idx::Int, p1, p2, tw, hw, samples; solid_length=nothing)
+    isempty(samples) && throw(ArgumentError(
+        "Wall line $idx has no base reactions"))
+    xy(p) = (uconvert(u"m", p[1]), uconvert(u"m", p[2]))
+    normed = [WallLineSample(uconvert(u"m", s.s),
+                             uconvert(u"N", s.Pu),
+                             uconvert(u"N", s.Ps)) for s in samples]
+    p1m, p2m = xy(p1), xy(p2)
+    centerline = hypot(ustrip(u"m", p2m[1] - p1m[1]), ustrip(u"m", p2m[2] - p1m[2]))
+    solid = solid_length === nothing ? centerline * u"m" : uconvert(u"m", solid_length)
+    ustrip(u"m", solid) <= centerline + 1e-6 || throw(ArgumentError(
+        "Wall line $idx concrete length exceeds its centerline"))
+    ustrip(u"m", solid) >= 0 || throw(ArgumentError(
+        "Wall line $idx has a negative concrete length"))
+    WallLineDemand{typeof(p1m[1]), typeof(normed[1].Pu)}(
+        idx, p1m, p2m, uconvert(u"m", tw), uconvert(u"m", hw), normed, solid)
 end
 
 """

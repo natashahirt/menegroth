@@ -15,7 +15,7 @@ import Meshes
 import Graphs
 import Asap
 import LinearAlgebra: norm, normalize, diag, eigmin, Symmetric
-import SparseArrays: sparse, SparseMatrixCSC
+import SparseArrays: sparse, spzeros, SparseMatrixCSC
 using Unitful
 
 function __init__()
@@ -98,6 +98,7 @@ include("floor_design_contracts.jl")
 # time (method-definition time), not at call time — so `BuildingStructure` and
 # `DesignParameters` must already be defined. This include MUST therefore come
 # after building_types.jl and design_types.jl.
+include("workflow/sizing_probe.jl")
 include("design_graph/_design_graph.jl")
 
 # Design workflow (uses both building_types and design_types)
@@ -119,12 +120,26 @@ include("postprocess/_postprocess.jl")
 # API server (Oxygen routes, JSON serialization)
 include("api/_api.jl")
 
+# Binary scene packets for the web viewer (docs/src/reference/scene_format.md).
+include("scene/_scene.jl")
+
+# Finalized design file. The scene is rebuilt from this; the design is not re-run.
+include("design/archive.jl")
+
 # =============================================================================
 # Exports
 # =============================================================================
 
+# --- Scene packets (web viewer) ---
+export build_scene, write_scene, read_scene, export_scene, export_scene_meshes, ScenePacket
+export append_variant!, write_design_variants, drop_variant!, compact_variants!
+export read_variant_index, materialize_variant, variant_neighbors, variant_axes, variant_stored_hashes
+export structure_geometry_hash, param_snapshot, PARAM_ANCHOR
+export scene_buffer, scene_f32, scene_u32, scene_u16, scene_u8
+export scene_station_displacement, hermite_local, demo_frame_model
+
 # --- Geometry generation ---
-export gen_medium_office
+export gen_medium_office, add_center_core!
 
 # --- Building types ---
 export BuildingSkeleton, BuildingStructure, Story
@@ -134,7 +149,7 @@ export CellGroup
 export Segment, MemberGroup
 # Framing hierarchy (Phase 4). AbstractJoistPattern + joist_geometry come from
 # StructuralSizer via @reexport; the concrete patterns + FramingLevel are local.
-export LinearAxisPattern, IsoparametricPattern, RadialPattern, CustomPattern
+export LinearAxisPattern, IsoparametricPattern, ModularRibPattern, RadialPattern, CustomPattern
 export FramingLevel, attach_framing_level!
 # Framing auto-generation (Phase 5)
 export populate_levels!, derive_framing_level, materialize_level!
@@ -151,6 +166,8 @@ export tributary_cache_key
 export get_cached_edge_tributaries, cache_edge_tributaries!
 export get_cached_column_tributary, cache_column_tributary!
 export column_tributary_area, column_tributary_by_cell, column_tributary_polygons
+export split_cell_edges, split_cell_walls, cell_support_polygons, ColumnSupportShare, WallSupportShare, WallWidthPiece
+export wall_edge_nodal_forces, wall_tributary_area
 export cell_edge_tributaries, cell_strip_geometry, has_cell_tributaries
 export clear_geometry_caches!
 
@@ -164,9 +181,12 @@ export DisplayUnits, imperial, metric, fmt
 export structure, skeleton  # BuildingDesign accessors
 export slab_design, column_design, beam_design, foundation_design, all_ok, critical_ratio
 export has_analysis_model, build_analysis_model!
+export save_design, load_design
 
 # --- Design workflow ---
 export design_building, compare_designs, build_pipeline, PipelineStage, sync_asap!
+export analyze_story_shell, ShellBeamDemand, story_shell_beam_demands, size_beams_with_story_shell!
+export StoryShell, build_story_shell, solve_story_shell!
 export prepare!, capture_design
 export floor_design_request, design_floor, design_floor!, design_floors!, install_floor_design!
 
@@ -228,7 +248,8 @@ export beam_side_profiles, composite_context_from_beam
 export beam_interior_supports, beam_support_lookup
 export beam_signed_moment_field, check_composite_beam, composite_deflection_scale
 export apply_composite_element_stiffness!, refine_composite_stiffness!
-export set_slab_openings!
+export set_slab_openings!, SlabOpening, add_slab_opening!, frame_slab_openings!, face_openings, face_opening_loops, face_hole_loops, face_net_area
+export WallOpening, WallOpeningSpec, add_wall_opening!
 export composite_group_payload, composite_payloads_for_groups, composite_anchor_from_options
 export classify_column_position, is_exterior_support  # Column position classification for DDM/EFM
 export slab_material_angle, classify_corner_kind       # Corner refinement (convex vs re-entrant)
@@ -238,7 +259,10 @@ export Support, Foundation, FoundationGroup, FoundationDemand
 # --- Building operations ---
 export add_vertex!, add_element!, find_faces!, rebuild_stories!, to_asap!
 export require_diaphragm_node_stiffness
-export classify_diaphragm_idealization, distribute_flexible_diaphragm_story_force
+export classify_diaphragm_idealization, deck_floor_diaphragm, stricter_diaphragm_idealization
+export diaphragm_inertial_force, diaphragm_bay_actions
+export FlexibleDiaphragmLayout, DiaphragmLine, flexible_diaphragm_layout!
+export SemirigidDiaphragmLayout, SemirigidFloor, semirigid_shells, set_semirigid_stiffness!, semirigid_sfrs!
 export elf_story_analysis
 export SeismicEffectCase, seismic_effect_cases, seismic_effect_loads
 export orthogonal_combination_required, nonparallel_system_elements
@@ -248,6 +272,12 @@ export check_seismic_story_drift, wind_story_drift_report
 export factored_wind_cases, factored_seismic_cases
 export WallMesh, WallPierMesh, WallAssembly, WallCut, StoryCutEquilibrium
 export wall_assemblies, wall_pier_cut, check_story_cut_equilibrium
+export check_opening_row_equilibrium
+export SpandrelEndAction, PierSegmentActions, SpandrelSegmentActions
+export VerticalSegmentForces, HorizontalSegmentForces, SegmentForceReport, OpeningRowGate
+export pier_segment_actions, spandrel_segment_actions
+export segment_opening_forces, opening_row_equilibria
+export segment_end_strength, check_pier_segment, column_one_way_shear_capacity
 export WALL_MESH_DIV, WALL_MESH_ROWS, wall_panel_quads
 export wall_self_weight_loads
 export GravityBasicCases, solve_gravity_basic_cases
@@ -257,10 +287,17 @@ export assembly_wall_action, combine_wall_action, wall_strength_actions
 export wind_pier_actions, seismic_strength_pier_actions
 export WallCheckRecord, check_ordinary_wall
 export OrdinaryWallInputs, OrdinaryWallResult, design_ordinary_walls!
-export refuse_joined_wall_design
+export DualSystemResult, design_dual_system!
+export WallThicknessTrial, propose_wall_thickness, scale_wall_action
+export shared_wall_thickness, wall_thickness_groups, WALL_THICKNESS_GROUPINGS,
+       propose_wall_thicknesses, wall_thickness_candidates, wall_thickness_passes
+export pier_self_weight_N, wall_thickness_scale_applies, apply_wall_thickness!
+export split_tee_junctions!, joined_clear_length, assembly_corners, WallCorner
+export joint_vertical_shear, corner_vertical_shear, joined_assembly_cuts
+export select_corner_ratio
 export require_seismic_wall_demand_provisions
 export LateralDesign, LateralSystem, DemandAssignment
-export WallsSeismicSystem, InteractiveShearWallFrameSystem
+export WallsSeismicSystem, InteractiveShearWallFrameSystem, DualSystem
 export OutriggerSystem, BuildingUnit, IsolatedWallShare
 export prepare_lateral_model!, seismic_members, system_checks, assign_lateral_demands
 export SeismicStoryDriftCheck, WindStoryDriftReport, FactoredLateralCase
@@ -277,11 +314,9 @@ export edge_length, face_area, vertex_coords, edge_vertices, face_vertices
 export edge_face_count, edge_story
 export is_convex_face
 
-# --- Frame lines and slab geometry ---
+# --- Frame lines ---
 export FrameLine, perpendicular, direction_vector
 export n_spans, n_joints, is_end_span, get_span_supports
-export decompose_to_rectangles, group_by_connectivity
-export validate_and_split_slab, build_cell_grid, CellGrid
 export initialize_cells!, initialize_slabs!
 export initialize_segments!, initialize_members!, update_bracing!
 export build_slab_groups!, build_cell_groups!, compute_cell_tributaries!
@@ -307,6 +342,7 @@ export group_foundations_by_reaction!, size_foundations_grouped!, foundation_gro
 
 # --- Postprocessing (Embodied Carbon + Engineering Report) ---
 export element_ec, material_ec, material_ec_total, material_takeoff, takeoff_by_element, compute_building_ec, ec_summary
+export BuildingDetail, detail_building, building_detail_mass
 export ElementECResult, BuildingECResult, MaterialTakeoff
 export to_dict
 export engineering_report

@@ -208,3 +208,48 @@ end
         StructuralSynthesizer.MaterialVolumes(stud => v))
     @test studs.rebar ≈ uconvert(u"kg", v * stud.ρ)
 end
+
+@testset "column axial strength uses the column concrete and Eq. (10-2)" begin
+    slab = StructuralSizer.NWC_4000
+    col = StructuralSizer.RC_6000_60
+    mats = MaterialOptions(concrete = slab, rebar = StructuralSizer.Rebar_60, column = col)
+    @test StructuralSynthesizer.resolve_column_concrete(mats) === StructuralSizer.NWC_6000
+    @test StructuralSynthesizer.resolve_column_rebar(mats) === StructuralSizer.Rebar_60
+    @test resolve_concrete(DesignParameters(materials = mats)) === slab
+    @test StructuralSynthesizer._get_design_fc(DesignParameters(materials = mats)) ==
+          StructuralSizer.NWC_6000.fc′
+
+    fc = StructuralSizer.NWC_6000.fc′
+    fy = StructuralSizer.Rebar_60.Fy
+    Pu = 2.5e6u"N"
+    Ag = StructuralSizer.tied_column_area_for_axial(Pu, fc; fy = fy)
+    @test StructuralSizer.tied_column_axial_strength(Ag, fc; fy = fy) ≈ Pu
+    # Eq. (10-2) at ρg = 0.01 is below 0.65×0.80×f′c×Ag, so the required area is larger.
+    @test Ag > Pu / (0.65 * 0.80 * fc)
+end
+
+@testset "column materials have one source" begin
+    SSz, SSy = StructuralSizer, StructuralSynthesizer
+    # No column options: checks and takeoff both use the cascade (6 ksi default).
+    p0 = DesignParameters()
+    @test SSy.column_concrete(p0) === SSz.NWC_6000
+    @test SSy._flat_plate_column_opts(p0).material === SSz.NWC_6000
+    @test SSy._get_column_opts(p0).material === SSz.NWC_6000
+    # Column options alone: they win everywhere.
+    p1 = DesignParameters(columns = SSz.ConcreteColumnOptions(material = SSz.NWC_5000))
+    @test SSy.column_concrete(p1) === SSz.NWC_5000
+    @test SSy.column_rebar(p1) === SSz.Rebar_60
+    @test SSy.check_column_materials(p1) === nothing
+    # Both name a column concrete and disagree: rejected.
+    p2 = DesignParameters(columns = SSz.ConcreteColumnOptions(material = SSz.NWC_5000),
+                          materials = MaterialOptions(column = SSz.RC_6000_60))
+    @test_throws ArgumentError SSy.check_column_materials(p2)
+    @test_throws ArgumentError resolve_floor_options(p2)
+    p3 = DesignParameters(columns = SSz.ConcreteColumnOptions(rebar_material = SSz.Rebar_75),
+                          materials = MaterialOptions(rebar = SSz.Rebar_60))
+    @test_throws ArgumentError SSy.check_column_materials(p3)
+    # Both set and equal: accepted.
+    p4 = DesignParameters(columns = SSz.ConcreteColumnOptions(material = SSz.NWC_6000),
+                          materials = MaterialOptions(column = SSz.RC_6000_60))
+    @test SSy.check_column_materials(p4) === nothing
+end

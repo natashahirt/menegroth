@@ -166,5 +166,18 @@ df = DataFrame(rows)
     end
 end
 
+@testset "Explicit thickness-regime plot filter" begin
+    mixed = DataFrame(min_h_rule = ["table_minimum", "computed_deflection"],
+                      h_in = [8.0, 6.0])
+    @test_throws ErrorException _pick_variant(mixed)
+    kept = _pick_variant(mixed; min_h_rule = "computed_deflection")
+    @test nrow(kept) == 1
+    @test kept.h_in[1] == 6.0
+    alias = _pick_variant(mixed; min_h_rule = "ACI")
+    @test alias.min_h_rule[1] == "table_minimum"
+    single = DataFrame(min_h_rule = ["computed_deflection"], h_in = [6.0])
+    @test nrow(_pick_variant(single)) == 1
+end
+
 println("\n✓ Section 1 EC plot smoke test passed.")
 println("  Wrote PNGs to $tmp_figs")

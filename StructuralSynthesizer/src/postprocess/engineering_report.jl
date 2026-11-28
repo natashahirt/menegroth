@@ -296,7 +296,7 @@ end
 # 2b. Vault panels
 # ─────────────────────────────────────────────────────────────────────────────
 
-"""Print a vault panel: geometry, thrust, stress/deflection/convergence checks."""
+"""Print a vault panel: geometry, thrust, stress/kern/deflection/convergence checks."""
 function _report_vault_panel(io::IO, design::BuildingDesign,
                               s_idx::Int, slab, r::StructuralSizer.VaultResult;
                               conc=resolve_concrete(design.params),
@@ -349,6 +349,14 @@ function _report_vault_panel(io::IO, design::BuildingDesign,
     Printf.@printf(io, "  │    σ_max = %.2f %s,  σ_allow = %.2f %s,  Ratio = %.2f  %s\n",
                    σ_val, stress_label, σ_allow_val, stress_label, sc.ratio, pass_fail(sc.ok))
     Printf.@printf(io, "  │    Governing case: %s\n", string(r.governing_case))
+    println(io, "  │")
+
+    kc = r.kern_check
+    println(io, "  │  THRUST-LINE KERN CHECK (half-span live, middle third)")
+    e_val = _to_report(du, :deflection, kc.e * u"mm"; digits=2)
+    e_lim = _to_report(du, :deflection, kc.limit * u"mm"; digits=2)
+    Printf.@printf(io, "  │    e = %.2f %s,  t·cosθ/6 = %.2f %s,  Ratio = %.2f  %s\n",
+                   e_val, defl_u, e_lim, defl_u, kc.ratio, pass_fail(kc.ok))
     println(io, "  │")
 
     dc = r.deflection_check
@@ -555,19 +563,23 @@ function _report_beams(io::IO, design::BuildingDesign; du::DisplayUnits=design.p
     force_u = _ul(du, :force)
     len_u = _ul(du, :length)
 
-    Printf.@printf(io, "  %-5s %-12s %9s %9s %9s %8s %8s %4s\n",
-        "Beam", "Section", "Mu($mom_u)", "Vu($force_u)", "L($len_u)", "FlxRat", "ShrRat", "OK?")
-    Printf.@printf(io, "  %-5s %-12s %9s %9s %9s %8s %8s %4s\n",
-        "─"^5, "─"^12, "─"^9, "─"^9, "─"^9, "─"^8, "─"^8, "─"^4)
+    println(io, "  Mu is the flexure-check demand. Case is the peak of the solved load case.")
+    println(io)
+    Printf.@printf(io, "  %-5s %-22s %9s %9s %9s %9s %8s %8s %4s\n",
+        "Beam", "Section", "Mu($mom_u)", "Case($mom_u)", "Vu($force_u)", "L($len_u)", "FlxRat", "ShrRat", "OK?")
+    Printf.@printf(io, "  %-5s %-22s %9s %9s %9s %9s %8s %8s %4s\n",
+        "─"^5, "─"^22, "─"^9, "─"^9, "─"^9, "─"^9, "─"^8, "─"^8, "─"^4)
 
     for (beam_idx, br) in sort(collect(design.beams); by=first)
-        Mu_val = _to_report(du, :moment, br.Mu; digits=1)
+        Mu_chk = br.check_Mu === nothing ? br.Mu : br.check_Mu
+        Mu_val = _to_report(du, :moment, Mu_chk; digits=1)
+        Case_val = _to_report(du, :moment, br.Mu; digits=1)
         Vu_val = _to_report(du, :force, br.Vu; digits=1)
         L_val  = _to_report(du, :length, br.member_length; digits=1)
 
-        Printf.@printf(io, "  B-%-2d %-12s %9.1f %9.1f %9.1f %8s %8s %4s\n",
+        Printf.@printf(io, "  B-%-2d %-22s %9.1f %9.1f %9.1f %9.1f %8s %8s %4s\n",
             beam_idx, br.section_size,
-            Mu_val, Vu_val, L_val,
+            Mu_val, Case_val, Vu_val, L_val,
             fv(br.flexure_ratio; d=3), fv(br.shear_ratio; d=3), pass_fail(br.ok))
     end
     println(io)
@@ -753,13 +765,17 @@ checker's `CheckResult` names.
 """
 function _wall_check_measure(check::AbstractString)
     check == "in-plane shear" && return :force
+    check == "shear friction" && return :force
+    check == "out-of-plane shear (reported)" && return :force
     check == "in-plane axial-flexure (P-M): axial cap" && return :force
     check == "bearing wall axial (§11.5.3 simplified)" && return :force
     startswith(check, "bearing wall (§11.5.3): net axial") && return :force
     check == "in-plane axial-flexure (P-M)" && return :moment
     check == "second-order moment" && return :moment
+    check == "out-of-plane moment (reported)" && return :moment
     startswith(check, "min longitudinal") && return :ratio
     startswith(check, "min transverse") && return :ratio
+    check == "corner horizontal ratio (selected)" && return :ratio
     check == "bearing wall (§11.5.3): thickness below minimum" && return :length
     check == "bearing wall (§11.5.3): resultant outside middle third" && return :length
     check == "bearing wall (§11.5.3): too slender for simplified method" && return :slenderness
@@ -808,7 +824,7 @@ end
 """
 Print ordinary-wall checks and seismic story drift.
 
-A gravity-only design has neither, and this section is omitted. Each wall
+A gravity-only design has the wall checks and no story-drift lines. Each wall
 shows its governing check. A failing check that is not the governing one is
 listed as well. Demand and capacity use the checker's units, converted to the
 report's display units. Every check remains on the design JSON.
@@ -840,17 +856,17 @@ function _report_ordinary_walls(io::IO, design::BuildingDesign;
     println(io, section_break("SEISMIC STORY DRIFT"))
     println(io, "  Design story drift against the allowable already stored on the check.")
     println(io)
-    Printf.@printf(io, "  %-5s %-3s %-8s %10s %10s %s\n",
-        "Story", "Dir", "Torsion", "Δ($len_u)", "Δa($len_u)", "OK?")
-    Printf.@printf(io, "  %-5s %-3s %-8s %10s %10s %s\n",
-        "─"^5, "─"^3, "─"^8, "─"^10, "─"^10, "─"^3)
+    Printf.@printf(io, "  %-5s %-3s %-8s %10s %10s %-4s %s\n",
+        "Story", "Dir", "Torsion", "Δ($len_u)", "Δa($len_u)", "OK?", "Effect")
+    Printf.@printf(io, "  %-5s %-3s %-8s %10s %10s %-4s %s\n",
+        "─"^5, "─"^3, "─"^8, "─"^10, "─"^10, "─"^3, "─"^6)
     for drift in design.seismic_story_drift
         drift isa SeismicStoryDriftCheck || continue
         Δ = _to_report(du, :length, drift.drift_m * u"m"; digits=4)
         Δa = _to_report(du, :length, drift.allowable_m * u"m"; digits=4)
-        Printf.@printf(io, "  %-5d %-3s %-8s %10.4f %10.4f %s\n",
+        Printf.@printf(io, "  %-5d %-3s %-8s %10.4f %10.4f %-4s %s\n",
             drift.story, string(drift.direction), string(drift.torsion),
-            Δ, Δa, pass_fail(drift.passes))
+            Δ, Δa, pass_fail(drift.passes), string(drift.effect))
     end
     println(io)
 end
@@ -880,26 +896,12 @@ function _report_takeoff(io::IO, design::BuildingDesign; du::DisplayUnits=design
         isnothing(r) && continue
         slab_area = sum(struc.cells[ci].area for ci in slab.cell_indices)
         total_slab_area += slab_area
-        if hasproperty(r, :volume_per_area)
-            total_slab_conc += r.volume_per_area * slab_area
-        elseif hasproperty(r, :thickness)
-            total_slab_conc += StructuralSizer.total_depth(r) * slab_area
+        if :concrete in StructuralSizer.materials(r)
+            total_slab_conc += StructuralSizer.volume_per_area(r, :concrete) * slab_area
         end
         # Drop panel concrete — per column, trimmed to slab boundary
-        if !isnothing(slab.drop_panel)
-            dp = slab.drop_panel
-            slab_cells = Set(slab.cell_indices)
-            bbox = _slab_bbox_m(struc, slab)
-            for (col_idx, col) in enumerate(struc.columns)
-                isempty(intersect(col.tributary_cell_indices, slab_cells)) && continue
-                v_idx = col.vertex_idx
-                (v_idx < 1 || v_idx > length(struc.skeleton.vertices)) && continue
-                c = Meshes.coords(struc.skeleton.vertices[v_idx])
-                cx = ustrip(u"m", c.x)
-                cy = ustrip(u"m", c.y)
-                a1_eff, a2_eff = _trimmed_drop_extents_m(dp, cx, cy, bbox)
-                total_drop_conc += uconvert(u"m^3", StructuralSizer.drop_panel_concrete_volume(dp, a1_eff, a2_eff))
-            end
+        for (_, V) in drop_panel_column_volumes(struc, slab)
+            total_drop_conc += V
         end
     end
 

@@ -46,6 +46,22 @@ println("Testing design architecture types...")
         @test params2.name == "4ksi Concrete"
         @test params2.materials.concrete.fc′ == 4000.0u"psi"
     end
+
+    @testset "Resolved design context owns effective inputs" begin
+        params = DesignParameters(
+            name="owned",
+            framing_opts=(; spacing=2.0u"m"),
+        )
+        context = resolve_design_context(params)
+        expected_hash = context.content_hash
+
+        params.name = "mutated by caller"
+        params.framing_opts = (; spacing=3.0u"m")
+
+        @test context.params.name == "owned"
+        @test context.framing_opts.spacing == 2.0u"m"
+        @test context.content_hash == expected_hash
+    end
     
     @testset "BuildingDesign" begin
         # BuildingDesign requires a BuildingStructure
@@ -60,6 +76,22 @@ println("Testing design architecture types...")
         @test isempty(design.columns)
         @test all_ok(design)  # No failures yet
         @test critical_ratio(design) == 0.0
+    end
+
+    @testset "Captured designs own finalized state" begin
+        skel = gen_medium_office(10.0u"m", 10.0u"m", 3.0u"m", 1, 1, 1)
+        struc = BuildingStructure(skel)
+        params = DesignParameters(name="captured")
+
+        design = capture_design(struc, params)
+        params.name = "later mutation"
+
+        @test design.finalized
+        @test design.structure !== struc
+        @test design.params !== params
+        @test design.params.name == "captured"
+        @test !isempty(design.context_hash)
+        @test_throws ArgumentError size!(design)
     end
 
     @testset "DesignSummary critical element prefers failing slabs over high-ratio passing foundations" begin
@@ -104,6 +136,24 @@ println("Testing design architecture types...")
         @test StructuralSynthesizer.slab_diagnostic_governing_check(sr) == "reinforcement_design"
     end
 
+    @testset "an unmeasured slab deflection is not a passing check" begin
+        sr = SlabDesignResult(;
+            thickness = 0.2u"m",
+            self_weight = 1.0u"kPa",
+            converged = true,
+            punching_ok = true,
+            punching_max_ratio = 0.4,
+        )
+        @test !StructuralSynthesizer.slab_deflection_measured(sr)
+        @test StructuralSynthesizer.slab_diagnostic_governing_check(sr) == "punching_shear_slab"
+        blank = SlabDesignResult(;
+            thickness = 0.2u"m",
+            self_weight = 1.0u"kPa",
+            converged = true,
+        )
+        @test StructuralSynthesizer.slab_diagnostic_governing_check(blank) == ""
+    end
+
     @testset "column_diagnostic_governing_check picks failing limit state, not max passing ratio" begin
         pc = PunchingDesignResult(;
             Vu = 100.0u"kN",
@@ -133,6 +183,32 @@ println("Testing design architecture types...")
         @test StructuralSynthesizer.beam_diagnostic_governing_check(br) == "shear"
     end
 
+    @testset "beam summary reports the sizer's governing check" begin
+        br = BeamDesignResult(; ok = true, flexure_ratio = 0.4, shear_ratio = 0.3,
+                              governing_check = "deflection_ll", governing_ratio = 0.93)
+        @test StructuralSynthesizer.beam_diagnostic_governing_check(br) == "deflection_ll"
+
+        skel = gen_medium_office(10.0u"m", 10.0u"m", 3.0u"m", 1, 1, 1)
+        struc = BuildingStructure(skel)
+        params = DesignParameters()
+        design = BuildingDesign(struc, params)
+        design.beams[1] = br
+        StructuralSynthesizer._compute_design_summary!(design, struc, params)
+        @test design.summary.critical_ratio ≈ 0.93
+        @test occursin("deflection_ll", design.summary.critical_element)
+
+        expl = StructuralSizer.FeasibilityExplanation(true, [
+            StructuralSizer.CheckResult("shear_strong", true, 0.2, 0.0, 0.0, ""),
+            StructuralSizer.CheckResult("shear_anchors", true, 0.9, 0.0, 0.0, ""),
+            StructuralSizer.CheckResult("flexure_pos", true, 0.6, 0.0, 0.0, ""),
+            StructuralSizer.CheckResult("pm_interaction_compression", true, 0.7, 0.0, 0.0, ""),
+        ], "shear_anchors", 0.9)
+        r = StructuralSynthesizer._apply_beam_check!(BeamDesignResult(), expl)
+        @test r.governing_check == "shear_anchors" && r.governing_ratio == 0.9
+        @test r.flexure_ratio == 0.7
+        @test r.shear_ratio == 0.2
+    end
+
     @testset "foundation_diagnostic_governing_check picks failing check over high passing bearing" begin
         fr = FoundationDesignResult(;
             ok = false,
@@ -141,6 +217,28 @@ println("Testing design architecture types...")
             flexure_ratio = 0.2,
         )
         @test StructuralSynthesizer.foundation_diagnostic_governing_check(fr) == "punching_shear_fdn"
+
+        wall = FoundationDesignResult(; ok = false, bearing_ratio = 0.8,
+                                      one_way_shear_ratio = 1.1, governing_ratio = 1.1)
+        @test StructuralSynthesizer.foundation_diagnostic_governing_check(wall) == "one_way_shear_fdn"
+
+        # A failing utilization that no reported check explains is not
+        # attributed to the largest passing one.
+        unexplained = FoundationDesignResult(; ok = false, bearing_ratio = 0.6,
+                                             governing_ratio = 1.2)
+        @test StructuralSynthesizer.foundation_diagnostic_governing_check(unexplained) == "utilization"
+    end
+
+    @testset "foundation results carry per-check utilizations" begin
+        old = StructuralSizer.SpreadFootingResult{typeof(1.0u"m"), typeof(1.0u"m^3"), typeof(1.0u"kN")}(
+            1.0u"m", 1.0u"m", 0.5u"m", 0.4u"m", 0.001u"m", 4, 0.016u"m",
+            0.5u"m^3", 0.01u"m^3", 0.7)
+        @test isnan(StructuralSizer.utilization_checks(old).punching)
+        demand = StructuralSizer.FoundationDemand(1; Pu = 800.0u"kN", Ps = 560.0u"kN")
+        r = StructuralSizer.design_footing(StructuralSizer.SpreadFooting(), demand,
+                                           StructuralSizer.medium_sand)
+        chk = StructuralSizer.utilization_checks(r)
+        @test StructuralSizer.utilization(r) ≈ max(chk.bearing, chk.punching)
     end
     
     @testset "Existing Material Types (StructuralSizer)" begin

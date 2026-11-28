@@ -7,12 +7,12 @@ title: Hogging Cb uses Commentary C-F1-5; the rebar force cap is in
 node_label: Hogging Cb and the rebar cap
 tags: composite,phase-5,hogging,cb,aisc
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-0bf271fa
 created_at: '2026-10-26T17:42:28.451900+00:00'
-updated_at: '2026-10-26T17:42:28.451900+00:00'
+updated_at: '2026-10-26T17:53:30.796486+00:00'
 ---
 Phase 5 is partly in and is not committed. Phase 5 is not closed.
 

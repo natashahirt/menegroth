@@ -153,17 +153,16 @@ end
         @test !isempty(timber_joists)
     end
 
-    params = DesignParameters(materials = MaterialOptions(steel = A992_Steel,
-                                                          beam = A992_Steel))
+    params = DesignParameters(materials = MaterialOptions(steel = A992_Steel))
 
     """First skeleton edge index owned by `beam`."""
     beam_edge(beam) = struc.segments[first(SS.segment_indices(beam))].edge_idx
     """Asap element for `beam`'s (single-segment) edge."""
-    beam_element(beam) = struc.asap_model.elements[beam_edge(beam)]
+    beam_element(beam) = struc.asap_model.frame_elements[beam_edge(beam)]
 
     # ── (1)/(c) Phase-2 release map + pre-sizing eccentricity map ──────────
     @testset "(1) release map: steel joist ends → Asap :joist enum" begin
-        rel_map = SS._build_edge_release_map(struc, A992_Steel)
+        rel_map = SS._build_edge_release_map(struc, params)
         for jb in steel_joists
             @test get(rel_map, beam_edge(jb), :fixedfixed) === :joist
         end
@@ -373,10 +372,10 @@ end
         @test length(area_loads) == 1
         al = first(area_loads)
 
-        # Position in model.elements == skeleton edge index (frame_elements are
+        # Position in model.frame_elements == skeleton edge index
         # built one-per-edge, in edge order, and Model stores that same vector).
         elem_edge = IdDict{Any, Int}()
-        for (e, el) in enumerate(model.elements)
+        for (e, el) in enumerate(model.frame_elements)
             elem_edge[el] = e
         end
         edge_role = Dict{Int, Symbol}()
@@ -411,7 +410,7 @@ end
         @test length(area_loads_synced) == 1
         al_synced = first(area_loads_synced)
         elem_edge_synced = IdDict{Any, Int}()
-        for (e, el) in enumerate(model_synced.elements)
+        for (e, el) in enumerate(model_synced.frame_elements)
             elem_edge_synced[el] = e
         end
         @test all(el -> get(edge_role, elem_edge_synced[el], :missing) === :joist,

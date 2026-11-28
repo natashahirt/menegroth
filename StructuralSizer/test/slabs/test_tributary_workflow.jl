@@ -55,7 +55,7 @@ end
     println("Cells: $(length(struc.cells))")
     println("Slabs: $(length(struc.slabs))")
     println("TributaryLoads: $total_loads")
-    println("Asap Elements: $(length(struc.asap_model.elements))")
+    println("Asap Elements: $(length(struc.asap_model.frame_elements))")
     println("Asap Loads: $(length(struc.asap_model.loads))")
     
     # Debug: Check Asap node positions

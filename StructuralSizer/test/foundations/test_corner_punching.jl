@@ -52,12 +52,16 @@ const SS = StructuralSizer
     # e = (b − cAB) − c/2. See eccentricity_to_critical_centroid.
     e_x = (b1 - cAB_x) - c1 / 2
     e_y = (b2 - cAB_y) - c2 / 2
-    Mux_adj = max(abs(Mux) - Vu * e_x, zero(Mux))
-    Muy_adj = max(abs(Muy) - Vu * e_y, zero(Muy))
+    # Centroid moment |M| − Vu·e. Here Vu·e_y = 19.6 kip·ft > Muy = 18, so
+    # the y moment reverses and face CD (lever b2 − cAB_y) governs
+    # (R11.11.7.2, page 210).
+    Mux_c = abs(Mux) - Vu * e_x
+    Muy_c = abs(Muy) - Vu * e_y
+    @test Mux_c > zero(Mux_c) && Muy_c < zero(Muy_c)
 
     v_direct = uconvert(u"psi", Vu / (b0 * d))
-    v_Mux = uconvert(u"psi", γv_x * Mux_adj * cAB_x / Jc_x)
-    v_Muy = uconvert(u"psi", γv_y * Muy_adj * cAB_y / Jc_y)
+    v_Mux = uconvert(u"psi", γv_x * Mux_c * cAB_x / Jc_x)
+    v_Muy = uconvert(u"psi", γv_y * (-Muy_c) * (b2 - cAB_y) / Jc_y)
     vu_oracle = v_direct + v_Mux + v_Muy
 
     @testset "geometry + Jc helpers" begin

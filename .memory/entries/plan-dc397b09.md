@@ -8,12 +8,12 @@ title: General-shape punching critical sections (non-orthogonal + re-entrant cor
 node_label: General-shape punching critical sections (non-orth
 tags: ''
 status: active
-open_threads: 0
+open_threads: 4
 success: 'null'
 files: corpus/manifests/sources.yml@d03a3c6
 session_id: sess-6c133fea
 created_at: '2026-10-22T23:28:12.980925+00:00'
-updated_at: '2026-10-22T23:28:12.980925+00:00'
+updated_at: '2026-10-23T01:41:58.218156+00:00'
 ---
 GOAL: handle unusual/non-right-angle and re-entrant (L-shape inside) corners elegantly, replacing the 3-tag closed-form dispatch (:interior/:edge/:corner) with a general critical-section model.
 

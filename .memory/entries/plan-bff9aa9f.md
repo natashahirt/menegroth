@@ -7,12 +7,13 @@ title: 'Building solve speed: Phase 0 determinism, Tier 1 exact caches, Tier 2 g
 node_label: 'Building solve speed: Phase 0 determinism, Tier 1 '
 tags: performance,caching,asap,fea,column-mip,design-building
 status: active
-open_threads: 0
+open_threads: 3
 success: 'null'
 files: ''
 session_id: sess-60601e5d
 created_at: '2026-10-26T15:01:59.124568+00:00'
-updated_at: '2026-10-26T15:01:59.124568+00:00'
+updated_at: '2026-11-08T15:35:41.741608+00:00'
+related_to: plan-2d4158d0
 ---
 Speed up design_building from the measured hot spots, then add caches that leave results byte-identical. Tier 2 changes results and waits for engineering sign-off.
 

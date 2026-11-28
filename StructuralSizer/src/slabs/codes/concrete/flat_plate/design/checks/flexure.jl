@@ -1,24 +1,32 @@
 # =============================================================================
-# Flexural Adequacy Check (ACI 318-11 §9.3.2)
+# Flexural Adequacy Check (ACI 318-19 §21.2.2)
 # =============================================================================
 
 """
-    check_flexural_adequacy(moment_results, columns, d, fc; verbose=false) -> NamedTuple
+    check_flexural_adequacy(moment_results, columns, d, fc; fy=60 ksi, verbose=false) -> NamedTuple
 
 Verify that all strip locations remain tension-controlled (Rn ≤ Rn_max).
 
 Computes the resistance coefficient Rn = Mu / (φ·b·d²) for each strip and
-compares against `Rn_max`, the Rn at which εt = 0.005 (ACI 318-11 §10.3.4,
-corpus: aci-318-11, page 142). This is the same limit `required_reinforcement`
-enforces, so a depth that passes here also gets finite steel there. If any
-strip exceeds the limit the section needs more depth.
+compares against `Rn_max`, the Rn at which εt = εty + 0.003 (ACI 318-19
+Table 21.2.2, [`tension_controlled_strain`](@ref); 0.005 for Grade 60). The
+slab pipeline passes the same limit to `required_reinforcement`, so a depth
+that passes here also gets finite steel there. If any strip exceeds the limit
+the section needs more depth.
 
-With the §10.2.7.1 stress block (page 140), c/d = 0.003/(0.003 + 0.005) = 3/8,
+With the §22.2.2 stress block, c/d = 0.003/(0.003 + εt,min),
 ω = 0.85·β₁·c/d, and Rn_max = ω·f'c·(1 − ω/1.7).
 
-Uses the same ACI 318-11 §13.6.4/.6 transverse distribution as `design_strip_reinforcement`:
-exterior negative → column-strip fraction from βt (§13.6.4.2); interior
-negative → 75 / 25 %; positive → 60 / 40 %.
+Strip moments are `aci_strip_moments`, the same ACI 318-11 §13.6.4/.6
+distribution `design_strip_reinforcement` designs the steel for. An EFM
+result that still carries face moments is checked at the §13.7.7.1
+critical section (`_efm_moments_at_face`), as final design is.
+
+With `drop` (oriented with `a_drop_1` along this span), the column-strip
+negative moment is checked at the same stations the steel is designed for
+(`_negative_cs_stations`): the column face on the better of the slab
+section and the ACI 318-11 §13.3.7 drop section, and the wall faces and
+the drop edge on the slab section.
 
 # Returns
 Named tuple `(ok, max_ratio, governing_strip)` where
@@ -27,9 +35,14 @@ Named tuple `(ok, max_ratio, governing_strip)` where
 - `governing_strip`: symbol identifying the controlling location
 """
 function check_flexural_adequacy(moment_results, columns, d, fc;
-                                 βt::Float64 = 0.0, verbose=false)
+                                 βt::Float64 = 0.0, verbose=false,
+                                 fy::Pressure = 60_000.0u"psi",
+                                 struc=nothing, slab=nothing, span_axis=nothing,
+                                 drop=nothing)
+    moment_results isa MomentAnalysisResult &&
+        (moment_results = _efm_moments_at_face(moment_results))
     φ = 0.9
-    ω_tc = 0.85 * beta1(fc) * (0.003 / (0.003 + 0.005))
+    ω_tc = 0.85 * beta1(fc) * (0.003 / (0.003 + tension_controlled_strain(fy)))
     Rn_max = ω_tc * fc * (1 - ω_tc / 1.7)
 
     l1 = moment_results.l1
@@ -39,49 +52,29 @@ function check_flexural_adequacy(moment_results, columns, d, fc;
     cs_width = min(l1, l2) / 2
     ms_width = l2 - cs_width
 
-    # ACI 318-11 §13.6.4.2 — exterior-negative column-strip fraction depends
-    # on edge-beam torsional stiffness βt (linear interp 100%→75% over [0, 2.5]).
-    cs_ext_frac = aci_col_strip_ext_neg_fraction(βt)
-    ms_ext_frac = 1.0 - cs_ext_frac
-
-    # Derive strip design moments (mirrors design_strip_reinforcement)
-    zero_M = zero(moment_results.M0)
-    M_neg_ext_cs = zero_M
-    M_neg_ext_ms = zero_M
-    M_neg_int_cs = zero_M
-    M_neg_int_ms = zero_M
-
-    for (i, col) in enumerate(columns)
-        m = moment_results.column_moments[i]
-        if col.position == :interior
-            M_neg_int_cs = max(M_neg_int_cs, 0.75 * m)
-            M_neg_int_ms = max(M_neg_int_ms, 0.25 * m)
-        else
-            M_neg_ext_cs = max(M_neg_ext_cs, cs_ext_frac * m)
-            M_neg_ext_ms = max(M_neg_ext_ms, ms_ext_frac * m)
-        end
-    end
-
-    M_pos_cs = 0.60 * moment_results.M_pos
-    M_pos_ms = 0.40 * moment_results.M_pos
-
-    # Collect (label, Mu, strip width) for every strip location
+    section = drop_negative_section(drop, columns, d, cs_width)
+    s = aci_strip_moments(moment_results, columns; βt = βt, struc = struc, slab = slab,
+                          span_axis = span_axis,
+                          drop_edge = section === nothing ? nothing : section.x_edge)
+    drop_st = _drop_cs_stations(s, cs_width, d, section)
+    slab_only(Mu, b) = [[(Mu, b, d)]]
     strips = [
-        (:ext_neg_cs,  M_neg_ext_cs, cs_width),
-        (:ext_neg_ms,  M_neg_ext_ms, ms_width),
-        (:int_neg_cs,  M_neg_int_cs, cs_width),
-        (:pos_cs,      M_pos_cs,     cs_width),
-        (:int_neg_ms,  M_neg_int_ms, ms_width),
-        (:pos_ms,      M_pos_ms,     ms_width),
+        (:ext_neg_cs, drop_st === nothing ? slab_only(s.M_neg_ext_cs, cs_width) : drop_st.ext),
+        (:ext_neg_ms, slab_only(s.M_neg_ext_ms, ms_width)),
+        (:int_neg_cs, drop_st === nothing ? slab_only(s.M_neg_int_cs, cs_width) : drop_st.int),
+        (:pos_cs,     slab_only(s.M_pos_cs, cs_width)),
+        (:int_neg_ms, slab_only(s.M_neg_int_ms, ms_width)),
+        (:pos_ms,     slab_only(s.M_pos_ms, ms_width)),
     ]
+
+    # uconvert before dividing: ft/inch stays NoDims but ustrip counts it as 12.
+    section_ratio((Mu, b, dd)) = ustrip(NoUnits, uconvert(u"psi", Mu / (φ * b * dd^2)) / Rn_max)
 
     max_ratio = 0.0
     governing = :none
 
-    for (label, Mu, b) in strips
-        # uconvert before dividing: ft/inch stays NoDims but ustrip counts it as 12.
-        Rn = uconvert(u"psi", Mu / (φ * b * d^2))
-        ratio = ustrip(NoUnits, Rn / Rn_max)
+    for (label, stations) in strips
+        ratio = maximum(alts -> minimum(section_ratio, alts), stations)
         if ratio > max_ratio
             max_ratio = ratio
             governing = label

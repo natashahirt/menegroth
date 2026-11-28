@@ -172,16 +172,20 @@ where ``P_{nx}`` = nominal axial capacity at eccentricity ``e_x`` only, ``P_{ny}
 pca_load_contour
 ```
 
-`pca_load_contour(Mux, Muy, φMnox, φMnoy; β=0.65)` — PCA load contour method:
+`pca_load_contour(Mux, Muy, φMnox, φMnoy; β=0.65)` — PCA bilinear load contour (EB712, Fig. 7-17 and Eqs. (15) and (18), pages 223–226). The two lines meet on the 45° line. The smaller relative moment is multiplied by ``(1-\beta)/\beta``:
 
 ```math
-u_r = \max\left(
-\frac{M_{ux}}{\phi M_{nox}} + \beta\frac{M_{uy}}{\phi M_{noy}},
-\beta\frac{M_{ux}}{\phi M_{nox}} + \frac{M_{uy}}{\phi M_{noy}}
-\right) \le 1.0
+u_r =
+\begin{cases}
+\dfrac{1-\beta}{\beta}\,\dfrac{M_{ux}}{\phi M_{nox}} + \dfrac{M_{uy}}{\phi M_{noy}}
+  & \text{when } \dfrac{M_{uy}}{\phi M_{noy}} > \dfrac{M_{ux}}{\phi M_{nox}} \\[1em]
+\dfrac{M_{ux}}{\phi M_{nox}} + \dfrac{1-\beta}{\beta}\,\dfrac{M_{uy}}{\phi M_{noy}}
+  & \text{otherwise}
+\end{cases}
+\le 1.0
 ```
 
-where ``\beta`` is a biaxial interaction factor (default 0.65).
+``\beta`` is between 0.5 and 1.0 (page 222). 0.5 is the straight line between the uniaxial strengths. 1.0 leaves each axis at its own uniaxial strength. The manual procedure's initial choice is 0.65 (page 226). Figs. 7-15 and 7-16 plot envelopes of ``\beta`` against ``P_n/P_o``, bar arrangement, and ``\omega``; they are graphs, not a table, so a caller who has read them passes that value in.
 
 ```@docs
 check_biaxial_capacity
@@ -545,7 +549,7 @@ mat_tuple = to_material_tuple(material, fy_ksi, Es_ksi)
 |:---------|:-------|:------------|
 | `bresler_load_contour(...)` | Bresler | (Mux/φMnx)^α + (Muy/φMny)^α |
 | `bresler_reciprocal_load(...)` | Bresler | 1/Pn = 1/Pnx + 1/Pny − 1/P0 |
-| `pca_load_contour(...)` | PCA | Linear contour with β factor |
+| `pca_load_contour(...)` | PCA | Bilinear contour, Eqs. (15) and (18); β passed in |
 | `check_biaxial_capacity(...)` | Full | Uses separate x/y diagrams |
 | `check_biaxial_auto(...)` | Auto | Detects square vs rectangular |
 

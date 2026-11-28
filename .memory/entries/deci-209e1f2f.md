@@ -8,13 +8,13 @@ title: 'General corner critical section via half-plane clipping: handles any fre
 node_label: General corner critical section via half-plane cli
 tags: ''
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: StructuralSizer/src/codes/aci/punching.jl@7c67346, StructuralSizer/src/slabs/codes/concrete/flat_plate/design/checks.jl@7c67346,
   StructuralSizer/test/slabs/test_general_critical_section.jl@7c67346, scripts/runners/check_corner_clip.jl@7c67346
 session_id: sess-817fac76
 created_at: '2026-10-23T01:41:58.218156+00:00'
-updated_at: '2026-10-23T01:41:58.218156+00:00'
+updated_at: '2026-10-23T01:51:52.905114+00:00'
 ---
 Delivered the angled-notch/wedge feature (route non-orthogonal corners through the App. B engine) with `corner_critical_section(c1,c2,d,kind,inward_normals; θ)` in punching.jl.
 

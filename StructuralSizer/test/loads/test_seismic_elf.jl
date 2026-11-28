@@ -365,3 +365,178 @@ const _RTOL = 1e-12
         @test occursin("redesigned", err.msg)
     end
 end
+
+@testset "Table 12.2-1 ordinary concrete rows" begin
+    # Read from the rendered table. PDF pages 173-175. NL categories only.
+    a3 = ordinary_concrete_seismic_system(:A3, :B)
+    @test a3.R == 4.0 && a3.Ω0 == 2.5 && a3.Cd == 4.0
+    @test ordinary_concrete_seismic_system(:A3, :C).row === :A3
+    b6 = ordinary_concrete_seismic_system(:B6, :C)
+    @test b6.R == 5.0 && b6.Ω0 == 2.5 && b6.Cd == 4.5
+    c7 = ordinary_concrete_seismic_system(:C7, :B)
+    @test c7.R == 3.0 && c7.Ω0 == 3.0 && c7.Cd == 2.5
+    e8 = ordinary_concrete_seismic_system(:E8, :B)
+    @test e8.R == 5.5 && e8.Ω0 == 2.5 && e8.Cd == 4.5
+    f = ordinary_concrete_seismic_system(:F, :B)
+    @test f.R == 4.5 && f.Ω0 == 2.5 && f.Cd == 4.0
+    @test f.detailing == "12.2.5.8 and 14.2"
+    for (row, sdc) in ((:A3, :D), (:B6, :E), (:C7, :C), (:E8, :F), (:F, :C))
+        err = try
+            ordinary_concrete_seismic_system(row, sdc)
+            nothing
+        catch e
+            e
+        end
+        @test err isa ArgumentError
+        @test occursin("NP", err.msg)
+    end
+    err = try
+        ordinary_concrete_seismic_system(:F, :A)
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    @test occursin("not a column", err.msg)
+    err = try
+        ordinary_concrete_seismic_system(:A1, :B)
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    @test occursin("A3", err.msg)
+end
+
+@testset "Table 12.2-1 special concrete shear walls, categories B and C" begin
+    # Rendered PDF page 173. A.1 is the bearing-wall special row. B.4 is the
+    # building-frame special row. B and C are NL. D, E, and F have heights.
+    a1 = concrete_shear_wall_system(:A1, :B)
+    @test a1.R == 5.0 && a1.Ω0 == 2.5 && a1.Cd == 5.0
+    @test a1.detailing == "14.2"
+    @test a1.height_limit_ft == (160.0, 160.0, 100.0)
+    @test concrete_shear_wall_system(:A1, :C).row === :A1
+    b4 = concrete_shear_wall_system(:B4, :C)
+    @test b4.R == 6.0 && b4.Ω0 == 2.5 && b4.Cd == 5.0
+    # Same page, the ordinary row still comes back through this lookup.
+    a3 = concrete_shear_wall_system(:A3, :B)
+    @test a3.R == 4.0 && a3.Cd == 4.0
+    @test a1.R > a3.R
+    @test b4.R > a1.R
+    @test a1.Cd == b4.Cd && a1.Ω0 == b4.Ω0
+    for (sdc, limit) in ((:D, 160.0), (:E, 160.0), (:F, 100.0))
+        @test concrete_shear_wall_system(:A1, sdc).row === :A1
+        @test concrete_shear_wall_system(:A1, sdc; hn = (limit - 1) * u"ft").row === :A1
+        err = try
+            concrete_shear_wall_system(:A1, sdc; hn = (limit + 1) * u"ft")
+            nothing
+        catch e
+            e
+        end
+        @test err isa ArgumentError
+        @test occursin(string(Int(limit)), err.msg)
+        @test !occursin("NP", err.msg)
+    end
+    err = try
+        concrete_shear_wall_system(:A3, :D)
+        nothing
+    catch e
+        e
+    end
+    @test err isa ArgumentError
+    @test occursin("NP", err.msg)
+end
+
+@testset "Table 12.2-1 Section D dual systems (special moment frames)" begin
+    # Rendered PDF page 174 (printed 113), verified 2026-11-23. Section D rows
+    # are NL in every SDC B–F. See memory note-52af93b5.
+    d3 = dual_seismic_system(:D3, :D)
+    @test d3.R == 7.0 && d3.Ω0 == 2.5 && d3.Cd == 5.5
+    @test d3.detailing == "14.2"
+    d8 = dual_seismic_system(:D8, :E)
+    @test d8.R == 7.5 && d8.Ω0 == 2.5 && d8.Cd == 6.0
+    @test d8.detailing == "14.3"
+    # D.9 — the steel-SMF + RC-core (composite special shear walls) row.
+    d9 = dual_seismic_system(:D9, :F)
+    @test d9.R == 7.0 && d9.Ω0 == 2.5 && d9.Cd == 6.0
+    @test d9.detailing == "14.3"
+
+    # Every Section D row carried here is permitted (NL) in all of B–F.
+    for row in (:D3, :D8, :D9), sdc in (:B, :C, :D, :E, :F)
+        @test dual_seismic_system(row, sdc).row === row
+    end
+
+    # :E8 (Section E, intermediate-moment-frame dual) delegates to the ordinary
+    # table: same R/Cd, and its B/C-only permission still holds.
+    e8 = dual_seismic_system(:E8, :C)
+    @test e8.R == 5.5 && e8.Cd == 4.5
+    err_e8 = try
+        dual_seismic_system(:E8, :D)   # IMF dual is NP in SDC D
+        nothing
+    catch e
+        e
+    end
+    @test err_e8 isa ArgumentError && occursin("NP", err_e8.msg)
+
+    # An unknown row and an out-of-table category both throw.
+    err_row = try
+        dual_seismic_system(:D99, :D)
+        nothing
+    catch e
+        e
+    end
+    @test err_row isa ArgumentError && occursin("not a Table 12.2-1 dual row", err_row.msg)
+    err_cat = try
+        dual_seismic_system(:D9, :A)
+        nothing
+    catch e
+        e
+    end
+    @test err_cat isa ArgumentError && occursin("not a column", err_cat.msg)
+end
+
+@testset "ASCE 7-22 §11.6 Seismic Design Category" begin
+    sdc(; SDS, SD1, S1=0.0, rc=:II) =
+        seismic_design_category(; SDS=SDS, SD1=SD1, S1=S1, risk_category=rc)
+
+    # Table 11.6-1 columns (SD1 held at A so SDS governs), Risk Category I/II/III.
+    @test sdc(SDS=0.10, SD1=0.0) == :A          # SDS < 0.167
+    @test sdc(SDS=0.167, SD1=0.0) == :B         # lower bound inclusive
+    @test sdc(SDS=0.25, SD1=0.0) == :B
+    @test sdc(SDS=0.33, SD1=0.0) == :C          # lower bound inclusive
+    @test sdc(SDS=0.49, SD1=0.0) == :C
+    @test sdc(SDS=0.50, SD1=0.0) == :D          # lower bound inclusive
+    @test sdc(SDS=1.0, SD1=0.0) == :D
+
+    # Table 11.6-1, Risk Category IV shifts B→C and C→D.
+    @test sdc(SDS=0.25, SD1=0.0, rc=:IV) == :C
+    @test sdc(SDS=0.40, SD1=0.0, rc=:IV) == :D
+    @test sdc(SDS=0.10, SD1=0.0, rc=:IV) == :A
+
+    # Table 11.6-2 columns (SDS held at A so SD1 governs).
+    @test sdc(SDS=0.0, SD1=0.05) == :A          # SD1 < 0.067
+    @test sdc(SDS=0.0, SD1=0.067) == :B
+    @test sdc(SDS=0.0, SD1=0.133) == :C
+    @test sdc(SDS=0.0, SD1=0.20) == :D
+    @test sdc(SDS=0.0, SD1=0.10, rc=:IV) == :C
+    @test sdc(SDS=0.0, SD1=0.15, rc=:IV) == :D
+    @test sdc(SDS=0.0, SD1=0.25, rc=:IV) == :D  # 0.20 ≤ SD1 row, IV column is D
+
+    # §11.6: the more severe of the two tables governs.
+    # SDS→C (0.33–0.50), SD1→D (≥0.20) ⇒ D.
+    @test sdc(SDS=0.40, SD1=0.25) == :D
+    # SDS→D (≥0.50), SD1→B (0.067–0.133) ⇒ D.
+    @test sdc(SDS=0.60, SD1=0.10) == :D
+
+    # §11.6: S1 ≥ 0.75 overrides to E (I/II/III) or F (IV), irrespective of SDS/SD1.
+    @test sdc(SDS=0.10, SD1=0.0, S1=0.75) == :E
+    @test sdc(SDS=0.10, SD1=0.0, S1=0.80, rc=:IV) == :F
+    @test sdc(SDS=1.5, SD1=0.9, S1=1.0, rc=:I) == :E
+    # Just below the S1 threshold, the tables govern (here A).
+    @test sdc(SDS=0.10, SD1=0.0, S1=0.74) == :A
+
+    @test_throws ArgumentError seismic_design_category(;
+        SDS=0.2, SD1=0.1, S1=0.1, risk_category=:V)
+    @test_throws ArgumentError seismic_design_category(;
+        SDS=-0.1, SD1=0.1, S1=0.1, risk_category=:II)
+end

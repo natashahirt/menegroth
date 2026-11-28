@@ -1,0 +1,15 @@
+{
+  "csv": "dual_heatmap_20261102_171503.csv",
+  "git_sha": "d9253a8f1e35a2251a769a74390a2f5c6fac3a60",
+  "git_dirty": true,
+  "asap_sha": "2033e4584c4b2d7c4d32061e11c4a163decd31a2",
+  "submodules": " 2033e4584c4b2d7c4d32061e11c4a163decd31a2 external/Asap (heads/main)",
+  "manifest_structuralstudies": "07cfa812de600e5e705063b0e5d62de4ef621b60",
+  "manifest_structuralsizer": "8f3beca47ec2cd6f4059cdb8dc4bb7b3a96f2524",
+  "manifest_structuralsynthesizer": "46ada42d43fcc21b240a90461b6e36fc19c45100",
+  "julia": "1.12.1",
+  "nthreads": "1",
+  "seed": "nothing",
+  "extra": "",
+  "note": "dual_heatmap spans_x=[20.0] spans_y=[20.0] ll=[150.0] concretes=[\"NWC_4000\"] methods=[\"DDM (Full)\", \"FEA (frame)\"] n_stories=3 n_bays=3 half_grid=false regimes=[\"ACI\"] punching=[:all_levers, :columns_only, :studs_only, :studs_then_thickness, :thickness_only]"
+}

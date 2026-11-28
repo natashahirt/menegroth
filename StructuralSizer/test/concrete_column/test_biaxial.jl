@@ -28,20 +28,21 @@ include("test_data/biaxial_rect_18x24.jl")
         
         Pn = StructuralSizer.bresler_reciprocal_load(Pnx, Pny, P0)
         
-        # 1/Pn = 1/2250 + 1/2050 - 1/2584 = 0.000444 + 0.000488 - 0.000387 = 0.000545
-        # Pn ≈ 1835 kip
-        @test Pn ≈ ref.bresler_reciprocal.Pn_calc rtol=0.05
-        
-        # Check adequacy: Pn > Pn_req = 1846 kip
+        # 1/Pn = 1/2250 + 1/2050 − 1/2584. That is 1834 kip, not the 1880 kip
+        # previously stored on the example. With these uniaxial capacities the
+        # reciprocal load is short of Pn,req = 1846 kip. A 5% slack is not a
+        # provision of the method.
+        Pn_formula = 1 / (1 / Pnx + 1 / Pny - 1 / P0)
+        @test Pn ≈ Pn_formula rtol = 1e-12
         Pn_req = ref.required.Pn_req
-        @test Pn > Pn_req - 50  # Allow small margin since values are approx
+        @test Pn < Pn_req
         
-        # Test utilization ratio
-        util = StructuralSizer.check_bresler_reciprocal(
-            ref.demands.Pu / ref.required.φ,  # Nominal demand (Pn_req)
-            Pnx, Pny, P0
-        )
-        @test util ≤ 1.05  # Should be adequate (slightly > 1.0 is acceptable for approx)
+        # Pu/φ is 1200/0.65 = 1846.15 kip. The stored Pn_req of 1846 kip is
+        # that quotient rounded to the nearest kip.
+        nominal_demand = ref.demands.Pu / ref.required.φ
+        util = StructuralSizer.check_bresler_reciprocal(nominal_demand, Pnx, Pny, P0)
+        @test util ≈ nominal_demand / Pn rtol = 1e-12
+        @test util > 1
     end
     
     # =========================================================================
@@ -73,21 +74,35 @@ include("test_data/biaxial_rect_18x24.jl")
     
     # =========================================================================
     @testset "PCA Load Contour Method" begin
-        # Formula: Mux/φMnox + β×Muy/φMnoy ≤ 1.0
-        
+        # EB712 Eq. (15): the smaller ratio takes the factor (1−β)/β.
         Mux = ref.demands.Mux
         Muy = ref.demands.Muy
         φMnox = ref.uniaxial.Mnox * ref.required.φ
         φMnoy = ref.uniaxial.Mnoy * ref.required.φ
-        
-        util = StructuralSizer.pca_load_contour(
-            Mux, Muy, φMnox, φMnoy,
-            β = ref.pca_contour.β
-        )
-        
-        # Expected ≈ 0.86
-        @test util ≈ ref.pca_contour.util rtol=0.10
+        β = ref.pca_contour.β
+        ratio_x = Mux / φMnox
+        ratio_y = Muy / φMnoy
+        slope = (1 - β) / β
+
+        util = StructuralSizer.pca_load_contour(Mux, Muy, φMnox, φMnoy; β)
+        @test ratio_x > ratio_y
+        @test util ≈ ratio_x + slope * ratio_y rtol = 1e-12
+        @test util ≈ ref.pca_contour.util atol = 0.001
         @test util < 1.0
+
+        # The same line with the axes swapped.
+        util_swap = StructuralSizer.pca_load_contour(Muy, Mux, φMnoy, φMnox; β)
+        @test util_swap ≈ util rtol = 1e-12
+
+        # Page 222: β = 0.5 is the straight line; β = 1.0 is each axis alone.
+        @test StructuralSizer.pca_load_contour(Mux, Muy, φMnox, φMnoy; β = 0.5) ≈
+              ratio_x + ratio_y rtol = 1e-12
+        @test StructuralSizer.pca_load_contour(Mux, Muy, φMnox, φMnoy; β = 1.0) ≈
+              max(ratio_x, ratio_y) rtol = 1e-12
+        @test_throws ArgumentError StructuralSizer.pca_load_contour(
+            Mux, Muy, φMnox, φMnoy; β = 0.4)
+        @test_throws ArgumentError StructuralSizer.pca_load_contour(
+            Mux, Muy, φMnox, φMnoy; β = 1.1)
     end
     
     # =========================================================================
@@ -347,4 +362,94 @@ end
         expected_util_y = (150.0 / φMny)^1.5
         @test result_y_only.utilization ≈ expected_util_y rtol=0.05
     end
+
+    @testset "PCA contour uses the diagram capacities" begin
+        Pu = 400.0
+        Mux, Muy = 200.0, 80.0
+        pca = check_biaxial_rectangular(section, mat, Pu, Mux, Muy; method = :pca, β = 0.65)
+        @test pca.method == :pca
+        @test pca.utilization ≈ StructuralSizer.pca_load_contour(
+            Mux, Muy, pca.φMnx_at_Pu, pca.φMny_at_Pu; β = 0.65) rtol = 1e-12
+        @test pca.adequate == (pca.utilization ≤ 1.0)
+    end
+end
+
+# Regression: a square section is not equally strong about both axes unless its
+# bar layout is 90°-symmetric. The `:perimeter` layout puts the odd interior
+# pair of a 6-bar square on the top/bottom faces (3 + 3 bars resisting Mx,
+# 2 + 2 corner bars resisting My), so φMny < φMnx near balanced. The column
+# checker used to reuse φMnx for φMny whenever b ≈ h, overstating y capacity.
+@testset "Square Column with Asymmetric Bar Layout" begin
+    mat = RC_4000_60
+    sec6 = RCColumnSection(b = 16u"inch", h = 16u"inch", bar_size = 8, n_bars = 6)
+    sec8 = RCColumnSection(b = 16u"inch", h = 16u"inch", bar_size = 8, n_bars = 8)
+
+    @testset "Layout symmetry detection" begin
+        @test StructuralSizer._bars_symmetric_90(sec6) == false
+        @test StructuralSizer._bars_symmetric_90(sec8) == true
+    end
+
+    @testset "Weak-axis capacity is lower in the compression region" begin
+        d6 = generate_PM_diagrams_biaxial(sec6, mat; n_intermediate = 20)
+        d8 = generate_PM_diagrams_biaxial(sec8, mat; n_intermediate = 20)
+        for Pu in (150.0, 250.0, 350.0)
+            @test capacity_at_axial(d6.y, Pu) < capacity_at_axial(d6.x, Pu)
+            @test capacity_at_axial(d8.y, Pu) ≈ capacity_at_axial(d8.x, Pu) rtol = 0.01
+        end
+    end
+
+    @testset "check_biaxial_auto uses separate diagrams" begin
+        r = check_biaxial_auto(sec6, mat, 250.0, 50.0, 50.0)
+        @test r.is_square == true
+        @test r.φMny_at_Pu < r.φMnx_at_Pu
+    end
+
+    @testset "ACIColumnChecker rejects My between φMny and φMnx" begin
+        kip = StructuralSizer.Asap.kip
+        checker = ACIColumnChecker(; include_slenderness = false, include_biaxial = true,
+                                   fy_ksi = 60.0, Es_ksi = 29000.0)
+        cache = StructuralSizer.create_cache(checker, 1)
+        StructuralSizer.precompute_capacities!(checker, cache, [sec6], NWC_4000, MinVolume())
+        @test cache.is_square[1] == true
+        @test cache.diagrams_y[1] !== nothing
+
+        Pu = 250.0
+        φMnx = capacity_at_axial(cache.diagrams[1], Pu)
+        φMny = capacity_at_axial(cache.diagrams_y[1], Pu)
+        @test φMny < φMnx
+        Mu = 0.5 * (φMnx + φMny)
+        geom = ConcreteMemberGeometry(3.66; k = 1.0, braced = true)
+        kft = kip * u"ft"
+        about_x = RCColumnDemand(1; Pu = Pu * kip, Mux = Mu * kft, Muy = 0.0 * kft,
+                                 M1x = 0.0 * kft, M1y = 0.0 * kft)
+        about_y = RCColumnDemand(1; Pu = Pu * kip, Mux = 0.0 * kft, Muy = Mu * kft,
+                                 M1x = 0.0 * kft, M1y = 0.0 * kft)
+        @test StructuralSizer.is_feasible(checker, cache, 1, sec6, NWC_4000, about_x, geom) == true
+        @test StructuralSizer.is_feasible(checker, cache, 1, sec6, NWC_4000, about_y, geom) == false
+    end
+end
+
+# An enlarged column used to be re-barred for Mu only. The second moment
+# was left for the full-building check, which then grew the section.
+@testset "Enlarged column reinforcement resists both moments" begin
+    mat = RC_4000_60
+    Pu = 80.0
+    bars = (bar_sizes = [6, 8, 10], n_bars_options = [4, 8, 12])
+    orig = RCColumnSection(b = 16u"inch", h = 16u"inch", bar_size = 8, n_bars = 4)
+    # Light uniaxial demand: the enlarged outline keeps the lightest legal bars.
+    grown_uni = resize_column_with_reinforcement(
+        orig, 20u"inch", 20u"inch", Pu, 30.0, mat; bars...)
+    diagrams = generate_PM_diagrams_biaxial(grown_uni, mat; n_intermediate = 10)
+    φMn = min(capacity_at_axial(diagrams.x, Pu), capacity_at_axial(diagrams.y, Pu))
+    # Each moment is inside the uniaxial diagram. Together they fall outside
+    # the load contour, so bars chosen for Mu alone are not enough.
+    Mu = 0.75 * φMn
+    Muy = 0.75 * φMn
+    @test check_PM_capacity(diagrams.x, Pu, Mu).adequate
+    @test check_biaxial_auto(grown_uni, mat, Pu, Mu, Muy).adequate == false
+    grown = resize_column_with_reinforcement(
+        orig, 20u"inch", 20u"inch", Pu, Mu, mat; Muy = Muy, bars...)
+    @test check_biaxial_auto(grown, mat, Pu, Mu, Muy).adequate
+    @test check_biaxial_auto(grown, mat, Pu, Muy, Mu).adequate
+    @test ustrip(u"inch^2", grown.As_total) > ustrip(u"inch^2", grown_uni.As_total)
 end

@@ -109,3 +109,60 @@ end
     @test seismic.V ≈ 1.2 * 10.0 + 1.0 * 1.0 + _RHO * 100.0
     @test seismic.N ≈ seismic.V * 0 + (1.2 * 1000.0 + 1.0 * 200.0 + _RHO * 5.0 + 0.2 * _SDS * 1000.0)
 end
+
+@testset "a larger shell reaction scales dead and live axial" begin
+    g = PierGravityActions(:Lr,
+        WallAction(1000.0, 10.0, 100.0, 3.0, 7.0),
+        WallAction(200.0, 1.0, 4.0, 0.5, 1.5),
+        WallAction(50.0, 0.5, 2.0, 0.2, 0.4))
+    n_trib = 1.2 * 1000.0 + 1.6 * 200.0
+    raised = StructuralSynthesizer.raise_wall_axial_to_shell(g, 1.5 * n_trib)
+    @test raised.D.N ≈ 1500.0
+    @test raised.L.N ≈ 300.0
+    @test raised.D.V ≈ 10.0
+    @test raised.D.M ≈ 100.0
+    @test raised.L.V ≈ 1.0
+    @test raised.L.M ≈ 4.0
+    @test raised.D.Vo ≈ 3.0
+    @test raised.L.Mo ≈ 1.5
+    @test raised.companion.N ≈ 50.0
+    @test raised.companion.V ≈ 0.5
+    @test raised.roof === :Lr
+    @test 1.2 * raised.D.N + 1.6 * raised.L.N ≈ 1.5 * n_trib
+
+    smaller = StructuralSynthesizer.raise_wall_axial_to_shell(g, 0.5 * n_trib)
+    @test smaller.D.N == g.D.N
+    @test smaller.L.N == g.L.N
+    @test smaller.companion.N == g.companion.N
+
+    # No dead/live axial means there is no proportion to scale.
+    bare = PierGravityActions(:Lr, WallAction(), WallAction(0.0, 1.0, 2.0),
+                              WallAction(50.0, 0.0, 0.0))
+    skipped = StructuralSynthesizer.raise_wall_axial_to_shell(bare, 5000.0)
+    @test skipped.D.N == 0.0
+    @test skipped.L.N == 0.0
+    @test skipped.L.V == 1.0
+    @test skipped.companion.N == 50.0
+end
+
+struct _ShellRxn
+    position::Vector
+    reaction::Vector
+end
+
+@testset "one shell node is counted on the first wall" begin
+    pieces = [
+        (1, ((0.0, 0.0), (4.0, 0.0))),
+        (2, ((0.0, 0.0), (0.0, 4.0))),
+    ]
+    nodes = [
+        _ShellRxn([0.0u"m", 0.0u"m", 0.0u"m"], [0.0u"N", 0.0u"N", 100.0u"N"]),
+        _ShellRxn([2.0u"m", 0.0u"m", 0.0u"m"], [0.0u"N", 0.0u"N", 40.0u"N"]),
+        _ShellRxn([0.0u"m", 2.0u"m", 0.0u"m"], [0.0u"N", 0.0u"N", 25.0u"N"]),
+        _ShellRxn([2.0u"m", 2.0u"m", 0.0u"m"], [0.0u"N", 0.0u"N", 999.0u"N"]),
+    ]
+    totals = StructuralSynthesizer._factored_wall_reactions(nodes, pieces)
+    @test totals[1] ≈ 140.0
+    @test totals[2] ≈ 25.0
+    @test !haskey(totals, 3)
+end

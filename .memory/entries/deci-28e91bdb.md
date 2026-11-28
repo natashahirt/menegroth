@@ -8,7 +8,7 @@ title: 'Cut agent dev cost: requestable rules, lean hooks, critic-only coordinat
 node_label: 'Cut agent dev cost: requestable rules, lean hooks,'
 tags: cost,agent-config,rules,hooks,coordinator,testing
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: .cursor/agents.yaml@76c7208, .cursor/hooks.json@76c7208, .cursor/rules/angelo.mdc@76c7208,
   .cursor/rules/coordinator.mdc@76c7208, .cursor/rules/corpus.mdc@76c7208, .cursor/rules/memory.mdc@76c7208,
@@ -16,7 +16,7 @@ files: .cursor/agents.yaml@76c7208, .cursor/hooks.json@76c7208, .cursor/rules/an
   docs/agent-setup.md@76c7208, scripts/check_agent_config.sh@76c7208, scripts/runners/test_quiet.jl@76c7208
 session_id: sess-c85ddd04
 created_at: '2026-10-22T18:16:38.513146+00:00'
-updated_at: '2026-10-22T18:16:38.513146+00:00'
+updated_at: '2026-10-22T18:16:57.611055+00:00'
 ---
 Budget-driven reduction of per-request and per-run agent token spend (2026-10-22).
 

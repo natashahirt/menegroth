@@ -8,12 +8,12 @@ title: 'Phase 6b: Vulcraft deck geometry, and the brace force reported beside th
 node_label: 'Phase 6b: Vulcraft geometry, reported deck'
 tags: composite,phase-6,vulcraft,sdi,diaphragm,deck
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-17184d82
 created_at: '2026-10-27T15:14:55.489132+00:00'
-updated_at: '2026-10-27T15:14:55.489132+00:00'
+updated_at: '2026-10-27T15:16:43.267273+00:00'
 has_child_rationale: User asked to search the corpus and to keep fastener input optional,
   with a default where a source names one.
 ---

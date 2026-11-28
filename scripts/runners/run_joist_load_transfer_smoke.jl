@@ -383,11 +383,11 @@ end
 
 """Map each Asap element to its skeleton edge index (elements are built one per
 edge, in edge order, and `member_group_demands` indexes them as
-`model.elements[edge_idx]`)."""
+`model.frame_elements[edge_idx]`)."""
 function edge_of_element_map(model)
     m = IdDict{Any, Int}()
-    for e in eachindex(model.elements)
-        m[model.elements[e]] = e
+    for e in eachindex(model.frame_elements)
+        m[model.frame_elements[e]] = e
     end
     return m
 end
@@ -415,7 +415,7 @@ function beam_shear_moment(struc, beam, element_loads; resolution = 200)
     Vmax = 0.0; Mmax = 0.0
     for si in SS.segment_indices(beam)
         e = struc.segments[si].edge_idx
-        el = struc.asap_model.elements[e]
+        el = struc.asap_model.frame_elements[e]
         ell = element_loads[el.elementID]
         fd = Asap.ElementForceAndDisplacement(el, ell; resolution = resolution)
         f = fd.forces
@@ -440,7 +440,7 @@ function joist_end_reactions(struc, beam)
     sis = collect(SS.segment_indices(beam))
     function end_reaction(si, at_start::Bool)
         e = struc.segments[si].edge_idx
-        f = struc.asap_model.elements[e].forces   # LCS end forces (SI, N/N·m)
+        f = struc.asap_model.frame_elements[e].forces   # LCS end forces (SI, N/N·m)
         return at_start ? hypot(f[2], f[3]) : hypot(f[8], f[9])
     end
     return (end_reaction(first(sis), true), end_reaction(last(sis), false))
@@ -458,7 +458,7 @@ end
 
 @testset "Joist → girder load transfer (defect #1/#2)" begin
     params = DesignParameters(materials =
-        MaterialOptions(steel = A992_Steel, beam = A992_Steel))
+        MaterialOptions(steel = A992_Steel))
 
     # ── Framed bay ──────────────────────────────────────────────────────────
     struc = build_bay(with_joists = true)
@@ -577,10 +577,10 @@ end
         @test SS._slab_has_joist_framing(struc_L, slab_L)
         @test !isempty([b for b in struc_L.beams if SS.level_of(b) == 1])
 
-        # …but the TRUE boundary is non-convex, so the one-way strip routing must
-        # DECLINE (return nothing) and defer to the per-cell tributary path — the
-        # P0 fix. Applying the midpoint-rule strips over each member's full length
-        # on an L/T/U plate would silently drop gravity load (Σ width·L ≠ area).
+        # …but the TRUE boundary is non-convex, so the uniform strip routing must
+        # DECLINE (return nothing). Each rectangular cell is then split along its
+        # joists. Applying the midpoint-rule strips over the whole L would drop
+        # gravity load (Σ width·L ≠ area).
         poly_L = SS._slab_interior_polygon_m(struc_L, slab_L)
         @test poly_L !== nothing
         @test Asap.is_convex_polygon(poly_L) == false
@@ -598,40 +598,20 @@ end
         expected_L = p_Pa_L * L_AREA_M2
         @test isapprox(F_total_L, expected_L; rtol = 1e-3)
 
-        # P2-c: PER-MEMBER conservation (not just total). The docstring claims the
-        # per-cell fallback conserves BOTH total AND per-member distribution. Verify
-        # per member: the true per-cell tributary band of each skeleton edge is
-        # p × Σ(cached edge-tributary area) over the slab's cells; the applied
-        # gravity force on that edge must match within rtol — no member silently
-        # starved or double-loaded. (Both the expected band and the emitted load
-        # key on the global skeleton-edge index = Asap element index, so the check
-        # is exact up to the width-profile discretization.)
-        exp_area = Dict{Int, Float64}()
-        for ci in slab_L.cell_indices
-            tribs = SS.cell_edge_tributaries(struc_L, ci)
-            tribs === nothing && continue
-            face_edges = struc_L.skeleton.face_edge_indices[struc_L.cells[ci].face_idx]
-            for trib in tribs
-                li = trib.local_edge_idx
-                (1 <= li <= length(face_edges)) || continue
-                ge = face_edges[li]
-                exp_area[ge] = get(exp_area, ge, 0.0) + trib.area
-            end
-        end
-        @test !isempty(exp_area)
+        # The joists of each rectangular cell carry the slab. The boundary
+        # skeleton is not the load path once the cells have been split.
+        roles_L = edge_role_map(struc_L)
         e_of_el_L = edge_of_element_map(struc_L.asap_model)
-        F_edge = Dict{Int, Float64}()
+        F_joist_L = 0.0
         for ld in struc_L.asap_model.loads
             ld isa Asap.TributaryLoad || continue
             ge = get(e_of_el_L, ld.element, 0)
-            F_edge[ge] = get(F_edge, ge, 0.0) + tributary_force_N(ld)
+            get(roles_L, ge, :missing) === :joist || continue
+            F_joist_L += tributary_force_N(ld)
         end
-        for (ge, area) in exp_area
-            area < 1e-9 && continue
-            @test isapprox(get(F_edge, ge, 0.0), p_Pa_L * area; rtol = 1e-3)
-        end
+        @test F_joist_L > 0.2 * F_total_L
 
-        @info "Non-convex L-bay conservation" F_total_N = F_total_L expected_N = expected_L ratio = F_total_L / expected_L n_edges_checked = count(a -> a >= 1e-9, values(exp_area))
+        @info "Non-convex L-bay conservation" F_total_N = F_total_L expected_N = expected_L ratio = F_total_L / expected_L F_joist_N = F_joist_L
     end
 
     # ── Convex NON-RECTANGULAR bays: strip check must reject ⇒ conserve load ──

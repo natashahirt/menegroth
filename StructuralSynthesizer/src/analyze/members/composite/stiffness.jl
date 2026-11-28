@@ -133,6 +133,35 @@ function composite_stiffness_at(p, s::Real)
                                         Asr = p.Asr, d_rebar = p.d_rebar, regions = p.regions)
 end
 
+"""
+    composite_profile_on_regions(profile, regions) -> NamedTuple
+
+`profile` with its sagging regions replaced by `regions`, in the same station
+coordinate. Each new region takes the smallest anchor strength among the
+recorded regions it overlaps. A new region that overlaps none is dropped, so
+its stations take the cracked section.
+
+# ENGINEERING JUDGMENT
+The anchors were designed on the recorded regions. Where the new regions do
+not match them one to one, the smallest overlapping anchor strength gives
+the lower `I_LB`.
+"""
+function composite_profile_on_regions(p, regions)
+    kept = empty(collect(regions))
+    ΣQn = Any[]
+    for r in regions
+        q = nothing
+        for (rf, qf) in zip(p.regions, p.ΣQn)
+            min(r.s_right, rf.s_right) - max(r.s_left, rf.s_left) > 1e-9 || continue
+            q = q === nothing ? qf : min(q, qf)
+        end
+        q === nothing && continue
+        push!(kept, r)
+        push!(ΣQn, q)
+    end
+    return merge(p, (; regions = kept, ΣQn = map(identity, ΣQn)))
+end
+
 """Member length for the effective-width cap. A bare number is meters."""
 function _beam_span_length(beam::Beam)
     L = member_length(beam)

@@ -7,12 +7,12 @@ title: Shell beams are frames on the shell nodes, checked against hand solutions
 node_label: frame beams on shell nodes
 tags: slabs,shell,beams,fea,composite
 status: active
-open_threads: 0
+open_threads: 2
 success: 'null'
 files: StructuralSizer/src/slabs/codes/concrete/panel_shell_beams.jl@7521f0b
 session_id: sess-c44f0c35
 created_at: '2026-11-03T16:05:37.447756+00:00'
-updated_at: '2026-11-03T16:05:37.447756+00:00'
+updated_at: '2026-11-06T22:35:57.127487+00:00'
 ---
 Locked 2026-11-03. Beams are frame elements, not shells. Each beam is a chain of frame elements between the shell nodes that lie on its line, so the beam and the slab share those nodes.
 

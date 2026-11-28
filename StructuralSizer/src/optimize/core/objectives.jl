@@ -34,6 +34,42 @@ MinCost() = MinCost(NaN)
 struct MinCarbon <: AbstractObjective end
 
 """
+    ParetoScalarization(o1, o2, w, ref1, ref2) <: AbstractObjective
+
+Weighted-sum scalarization of two objectives, for tracing a Pareto front by
+continuation. Minimises the DIMENSIONLESS convex combination
+
+    w · (o1 / ref1)  +  (1 − w) · (o2 / ref2),    w ∈ [0, 1]
+
+where `ref1`, `ref2` are fixed positive reference quantities carrying the same
+units as `o1`, `o2` respectively. They render each term dimensionless and O(1) so
+two incommensurable metrics — e.g. structural volume (m³) and embodied carbon
+(kgCO₂e) — can be combined on one axis. Sweeping `w` from 1 → 0 walks the
+*supported* Pareto points from the `o1`-optimum to the `o2`-optimum; setting each
+`ref` to the corresponding single-objective optimum normalises both anchors to 1.
+
+Because it delegates to each component's own [`objective_value`](@ref), it
+inherits their exact semantics — including the RC concrete/rebar carbon split —
+and works unchanged under every checker whose cache precomputes `objective_value`
+(AISC steel, ACI columns/beams). Precompute keyword args (`rebar`, `transverse`)
+are forwarded verbatim to the components, so the RC path is handled correctly.
+"""
+struct ParetoScalarization{O1<:AbstractObjective, O2<:AbstractObjective, R1, R2} <: AbstractObjective
+    o1::O1
+    o2::O2
+    w::Float64
+    ref1::R1
+    ref2::R2
+    function ParetoScalarization(o1::AbstractObjective, o2::AbstractObjective,
+                                 w::Real, ref1, ref2)
+        0 ≤ w ≤ 1 || throw(ArgumentError("ParetoScalarization: w must be in [0,1]; got $w."))
+        (ustrip(ref1) > 0 && ustrip(ref2) > 0) ||
+            throw(ArgumentError("ParetoScalarization: ref1 and ref2 must be positive."))
+        new{typeof(o1), typeof(o2), typeof(ref1), typeof(ref2)}(o1, o2, Float64(w), ref1, ref2)
+    end
+end
+
+"""
     objective_value(obj::AbstractObjective, section, material, L) -> Unitful.Quantity
 
 Compute the objective function value for a single section of length `L`. The
@@ -43,25 +79,33 @@ return is always a typed quantity (`kg` for [`MinWeight`](@ref), `m^3` for
 """
 function objective_value end
 
-"""Objective value for MinWeight: A × L × ρ."""
+# Each method `uconvert`s to the canonical unit promised by the `objective_value`
+# contract (kg / m³ / kgCO₂e). This is a no-op for SI-defined materials (the factor
+# is exactly 1), but it is essential for materials whose properties carry US units
+# — e.g. A992 steel with ρ in lb/ft³ — where the bare product would otherwise be a
+# compound unit (m³·lb/ft³·…). Without it the stored objective coefficient is off by
+# the lb/ft³→kg/m³ factor (~16×) AND two materials on different unit systems (A992 in
+# US, S355 in SI) would be compared on incompatible scales inside one MIP.
+
+"""Objective value for MinWeight: `A × L × ρ`, canonicalized to `kg`."""
 function objective_value(::MinWeight, s::AbstractSection, mat::AbstractMaterial, L)
-    section_area(s) * L * mat.ρ
+    uconvert(u"kg", self_weight_area(s) * L * mat.ρ)
 end
 
-"""Objective value for MinVolume (without material): A × L."""
+"""Objective value for MinVolume (without material): `A × L`, canonicalized to `m³`."""
 function objective_value(::MinVolume, s::AbstractSection, L)
-    section_area(s) * L
+    uconvert(u"m^3", self_weight_area(s) * L)
 end
 
 """Objective value for MinVolume (material ignored): A × L."""
 objective_value(::MinVolume, s::AbstractSection, ::AbstractMaterial, L) = objective_value(MinVolume(), s, L)
 
-"""Objective value for MinCost with a numeric unit cost: A × L × ρ × cost."""
+"""Objective value for MinCost with a numeric unit cost: `(A × L × ρ → kg) × cost`."""
 function objective_value(obj::MinCost{<:Real}, s::AbstractSection, mat::AbstractMaterial, L)
     cost = isnan(obj.unit_cost) ? mat.cost : obj.unit_cost
     isnan(cost) && error("MinCost requires material.cost to be set (material has cost=NaN). " *
                          "Either set cost on your material or use MinCost(unit_cost_per_kg).")
-    section_area(s) * L * mat.ρ * cost
+    uconvert(u"kg", self_weight_area(s) * L * mat.ρ) * cost
 end
 
 """Objective value for MinCost with a custom function: f(section, material) × L."""
@@ -69,9 +113,48 @@ function objective_value(obj::MinCost{<:Function}, s::AbstractSection, mat::Abst
     obj.unit_cost(s, mat) * L
 end
 
-"""Objective value for MinCarbon: A × L × ρ × ecc."""
+"""Objective value for MinCarbon: `A × L × ρ × ecc`, canonicalized to `kgCO₂e`."""
 function objective_value(::MinCarbon, s::AbstractSection, mat::AbstractMaterial, L)
-    section_area(s) * L * mat.ρ * mat.ecc
+    uconvert(u"kgCO2e", self_weight_area(s) * L * mat.ρ * mat.ecc)
+end
+
+"""
+Objective value for a [`ParetoScalarization`](@ref): the dimensionless weighted
+sum `w·(o1/ref1) + (1−w)·(o2/ref2)`. Delegates to each component's
+`objective_value`, forwarding any precompute keyword args (`rebar`, `transverse`)
+so the RC concrete/rebar split is applied correctly. Each `vᵢ/refᵢ` must be
+dimensionless (matching units), which `ustrip(NoUnits, …)` enforces.
+"""
+function objective_value(obj::ParetoScalarization, s::AbstractSection,
+                         mat::AbstractMaterial, L; kwargs...)
+    v1 = objective_value(obj.o1, s, mat, L; kwargs...)
+    v2 = objective_value(obj.o2, s, mat, L; kwargs...)
+    return obj.w * ustrip(Unitful.NoUnits, v1 / obj.ref1) +
+           (1 - obj.w) * ustrip(Unitful.NoUnits, v2 / obj.ref2)
+end
+
+"""
+Concrete, longitudinal steel, and ties or stirrups of one RC section.
+
+`As` is the longitudinal area. Ties and stirrups come from
+[`transverse_steel_per_length`](@ref) on `section` and replace concrete as
+well. Weight is kilograms for every RC section. `MinCost` stays the gross
+volume and does not come through here.
+"""
+function _rc_objective(obj::AbstractObjective, Ag, As, concrete, rebar, transverse, L, section)
+    As_tr = transverse_steel_per_length(section, concrete, transverse)
+    Ac = Ag - As - As_tr
+    Ac < zero(Ac) && (Ac = zero(Ac))
+    mc = uconvert(u"kg", Ac * L * concrete.ρ)
+    ml = uconvert(u"kg", As * L * rebar.ρ)
+    mt = uconvert(u"kg", As_tr * L * transverse.ρ)
+    if obj isa MinWeight
+        return mc + ml + mt
+    elseif obj isa MinCarbon
+        return uconvert(u"kgCO2e", mc * concrete.ecc + ml * rebar.ecc + mt * transverse.ecc)
+    else
+        error("$(typeof(obj)) has no rebar split")
+    end
 end
 
 """

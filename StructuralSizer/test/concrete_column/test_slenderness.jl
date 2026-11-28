@@ -13,6 +13,11 @@ using Unitful
 include("test_data/slenderness_nonsway_17x17.jl")
 include("test_data/slenderness_sway_18x18.jl")
 
+# The reference puts bar centers 2.5 in. from each face (Ise = 10·1.00·6² = 360 in⁴).
+# `cover` is clear cover to the #4 tie, so back out the tie and half a #9 bar.
+const NONSWAY_17_CLEAR_COVER =
+    2.5u"inch" - StructuralSizer.rebar(4).diameter - StructuralSizer.rebar(9).diameter / 2
+
 @testset "Slenderness Effects (ACI 318-19)" begin
     ref = SLENDER_NONSWAY_17X17
     
@@ -32,7 +37,7 @@ include("test_data/slenderness_sway_18x18.jl")
         section = RCColumnSection(
             b = 17.0u"inch",
             h = 17.0u"inch",
-            cover = 2.5u"inch",
+            cover = NONSWAY_17_CLEAR_COVER,
             bar_size = 9,
             n_bars = 10,
             tie_type = :tied,
@@ -59,7 +64,7 @@ include("test_data/slenderness_sway_18x18.jl")
         section = RCColumnSection(
             b = 17.0u"inch",
             h = 17.0u"inch",
-            cover = 2.5u"inch",
+            cover = NONSWAY_17_CLEAR_COVER,
             bar_size = 9,
             n_bars = 10,
             tie_type = :tied,
@@ -105,7 +110,7 @@ include("test_data/slenderness_sway_18x18.jl")
         section = RCColumnSection(
             b = 17.0u"inch",
             h = 17.0u"inch",
-            cover = 2.5u"inch",
+            cover = NONSWAY_17_CLEAR_COVER,
             bar_size = 9,
             n_bars = 10,
             tie_type = :tied,
@@ -149,7 +154,7 @@ include("test_data/slenderness_sway_18x18.jl")
         section = RCColumnSection(
             b = 17.0u"inch",
             h = 17.0u"inch",
-            cover = 2.5u"inch",
+            cover = NONSWAY_17_CLEAR_COVER,
             bar_size = 9,
             n_bars = 10,
             tie_type = :tied,
@@ -201,6 +206,29 @@ include("test_data/slenderness_sway_18x18.jl")
         @test δns_calc ≈ ref.slenderness.δns rtol=0.01
         @test δns_calc >= 1.0
     end
+
+    # =========================================================================
+    @testset "Second-order moment ratio (ACI 318-19 §6.2.5.3)" begin
+        # δns ≤ 1.4, and δns finite. The cap is the magnifier, not M2,min/M2.
+        @test StructuralSizer.second_order_magnifier_permitted(1.0)
+        @test StructuralSizer.second_order_magnifier_permitted(1.4)
+        @test !StructuralSizer.second_order_magnifier_permitted(1.4 + 1e-4)
+        @test !StructuralSizer.second_order_magnifier_permitted(Inf)
+
+        section = RCColumnSection(
+            b = 12.0u"inch", h = 12.0u"inch", cover = 1.5u"inch",
+            bar_size = 8, n_bars = 4, tie_type = :tied,
+        )
+        mat = RC_3000_60
+        # 30 m, k = 1: kℓu/r is far past §6.2.5.1, and Pu is past 0.75 Pc,
+        # so Eq. (6.6.4.5.2) is undefined and the magnifier is not permitted.
+        geometry = ConcreteMemberGeometry(30.0; k = 1.0, braced = true)
+        result = StructuralSizer.magnify_moment_nonsway(
+            section, mat, geometry, 400.0, 0.0, 50.0; βdns = 0.6)
+        @test result.slender
+        @test !isfinite(result.δns)
+        @test !result.permitted
+    end
     
     # =========================================================================
     @testset "Minimum Moment" begin
@@ -216,7 +244,7 @@ include("test_data/slenderness_sway_18x18.jl")
         section = RCColumnSection(
             b = 17.0u"inch",
             h = 17.0u"inch",
-            cover = 2.5u"inch",
+            cover = NONSWAY_17_CLEAR_COVER,
             bar_size = 9,
             n_bars = 10,
             tie_type = :tied,
@@ -242,8 +270,10 @@ include("test_data/slenderness_sway_18x18.jl")
         # function returns Mc = |M2| unmodified.
         @test result.slender == false
 
-        # When slender=false, Cm and δns are defaults (1.0)
+        # When slender=false, Cm and δns are defaults (1.0) and §6.2.5.3
+        # does not apply.
         @test result.δns ≈ 1.0
+        @test result.permitted
 
         # Mc = |M2| = 105 (the SP example happens to have M2 > M_min anyway,
         # so the regression value is the same as before the M_min fix).
@@ -261,7 +291,7 @@ include("test_data/slenderness_sway_18x18.jl")
         section = RCColumnSection(
             b = 17.0u"inch",
             h = 17.0u"inch",
-            cover = 2.5u"inch",
+            cover = NONSWAY_17_CLEAR_COVER,
             bar_size = 9,
             n_bars = 10,
             tie_type = :tied,
@@ -286,6 +316,26 @@ include("test_data/slenderness_sway_18x18.jl")
         @test result.slender == false
         @test result.Mc ≈ M2_small atol = 1e-6   # M_min must NOT inflate Mc
         @test result.Mc < M_min_kipft            # explicit: M_min did not apply
+    end
+
+    # ACI 318-11 §10.10.6.5 (corpus: aci-318-11, page 156): M2 in Eq. (10-11)
+    # is not taken less than M2,min, so Mc = δns·max(|M2|, M2,min), not
+    # max(δns·|M2|, M2,min).
+    @testset "Slender column magnifies M2,min" begin
+        section = RCColumnSection(
+            b = 17.0u"inch", h = 17.0u"inch", cover = NONSWAY_17_CLEAR_COVER,
+            bar_size = 9, n_bars = 10, tie_type = :tied, arrangement = :two_layer)
+        mat = RC_3000_60
+        geometry = ConcreteMemberGeometry(6.0; k = 1.0, braced = true)
+        Pu = 300.0
+        M2_small = 5.0
+        M_min = StructuralSizer.minimum_moment(Pu, 17.0)
+        @test M_min > M2_small
+        r = StructuralSizer.magnify_moment_nonsway(
+            section, mat, geometry, Pu, -M2_small, M2_small; βdns = 0.6)
+        @test r.slender
+        @test r.δns > 1.0
+        @test r.Mc ≈ r.δns * M_min rtol = 1e-12
     end
 
     
@@ -699,4 +749,29 @@ end
             section, mat, geometry, StructuralSizer.StrongAxis())
         @test Pc_y < Pc_x   # weaker axis has smaller Ig → smaller Pc
     end
+end
+
+@testset "Alignment chart anchors" begin
+    # Fig. R10.10.1.1 (ACI 318-11, page 150). Chart endpoints, and the
+    # StructurePoint sway example ψA = 2.027, ψB = 0, k = 1.282.
+    k = alignment_chart_k
+    @test k(0.0, 0.0; sway=false) ≈ 0.5 atol=1e-6
+    @test k(0.0, 1e8; sway=false) ≈ 0.7 atol=0.01
+    @test k(1e8, 1e8; sway=false) ≈ 1.0 atol=1e-3
+    @test k(0.0, 0.0; sway=true) ≈ 1.0 atol=1e-6
+    @test k(0.0, 1e8; sway=true) ≈ 2.0 atol=0.01
+    @test k(2.027, 0.0; sway=true) ≈ 1.282 atol=0.01
+    @test_throws ArgumentError k(1e8, 1e8; sway=true)
+    # Stiffer far end (smaller ψ) shortens k. A more flexible far end lengthens it.
+    @test k(1.0, 1.0; sway=true) < k(1.0, 5.0; sway=true)
+    @test k(1.0, 1.0; sway=false) < k(5.0, 5.0; sway=false)
+    # Sway root is exactly k = 2 at ψA = ψB = 12/π; the chart has a root on both sides.
+    @test k(12 / π, 12 / π; sway=true) ≈ 2.0 atol=1e-6
+    @test k(3.8240731317668653, 3.8240731317668653; sway=true) > 2.0
+    @test k(3.81, 3.81; sway=true) < 2.0
+    @test 0.5 < k(2.0, 2.0; sway=false) < 1.0
+    story_ns = SwayStoryProperties(1000.0, 0.0, 100.0, 0.4, 120.0) # Q = 0.033
+    story_sw = SwayStoryProperties(1000.0, 0.0, 100.0, 1.0, 120.0) # Q = 0.083
+    @test !is_sway_frame(story_ns)
+    @test is_sway_frame(story_sw)
 end

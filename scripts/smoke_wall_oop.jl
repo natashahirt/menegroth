@@ -1,14 +1,16 @@
 # Standalone oracle-validation smoke test for the ACI 318-19 §11.8 out-of-plane
 # slender wall module (StructuralSizer/src/walls/out_of_plane.jl). Runs the
-# bare-SI core in isolation — no full-package load — against the spWall tilt-up
+# bare-SI core without loading StructuralSizer — against the spWall tilt-up
 # worked example (corpus: sp-de-tilt-up-wall-aci19, note-w0000014). Immune to any
 # concurrent edits to the rest of the package sources.
 
+import Pkg
+Pkg.activate(joinpath(@__DIR__, "..", "external", "Asap"); io=devnull)
+using Asap
 using Unitful
 using Printf
 
 # --- minimal prerequisites the module's bare-SI core references ---------------
-const _KSI_TO_PA = 6.894757e6
 _beta1_from_fc_psi(fc_psi) = fc_psi ≤ 4000 ? 0.85 :
                              fc_psi ≥ 8000 ? 0.65 : 0.85 - 0.05 * (fc_psi - 4000) / 1000
 function wall_phi_flexure(εt::Real, εty::Real)
@@ -21,8 +23,8 @@ end
 include(joinpath(@__DIR__, "..", "StructuralSizer", "src", "walls", "out_of_plane.jl"))
 
 # --- unit conversions (US → SI) ----------------------------------------------
-const IN = 0.0254; const FT = 0.3048; const KIP = 4448.2216
-const PSI = 6894.757; const IN2 = IN^2; const IN4 = IN^4
+const IN = IN_TO_M; const FT = FT_TO_M; const KIP = KIP_TO_N
+const PSI = PSI_TO_PA; const IN2 = IN2_TO_M2; const IN4 = IN4_TO_M4
 const KIPFT = KIP * FT; const KIP_PER_FT = KIP / FT
 
 # --- oracle inputs ------------------------------------------------------------

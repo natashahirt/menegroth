@@ -200,7 +200,7 @@ function build_override_beam_struc()
     model.nodes[id1].dof = [false, false, false, false, false, false]
     model.nodes[id2].dof = [true,  true,  false, true,  true,  true]
     w_si = uconvert(u"N/m", 2.8u"kip/ft")
-    push!(model.loads, Asap.LineLoad(model.elements[e1], [0.0u"N/m", 0.0u"N/m", -w_si]))
+    push!(model.loads, Asap.LineLoad(model.frame_elements[e1], [0.0u"N/m", 0.0u"N/m", -w_si]))
     Asap.process!(model)
     Asap.solve!(model)
     return struc
@@ -211,7 +211,7 @@ end
 # 50 psf live) — large spans + high L/D so checkerboard partitions produce a
 # meaningful force envelope. `to_asap!`/`sync_asap!` are READ-only here (called,
 # not edited) to obtain the governing member demands the pattern_loading guard
-# protects. Returns the per-element force vectors (plain internal-unit scalars).
+# protects. Returns the per-element force vectors and the prepared structure.
 function _prepared_frame_forces(; pattern_loading::Symbol)
     skel  = gen_medium_office(60.0u"ft", 60.0u"ft", 12.0u"ft", 2, 2, 1)
     struc = BuildingStructure(skel)
@@ -228,7 +228,8 @@ function _prepared_frame_forces(; pattern_loading::Symbol)
     params = DesignParameters(pattern_loading = pattern_loading)
     to_asap!(struc; params = params)
     sync_asap!(struc; params = params)
-    return [collect(el.forces) for el in struc.asap_model.frame_elements]
+    forces = [collect(el.forces) for el in struc.asap_model.frame_elements]
+    return forces, struc
 end
 
 # -----------------------------------------------------------------------------
@@ -361,10 +362,6 @@ function run_coarse_reference(struc::BuildingStructure, params::DesignParameters
         stage.fn(struc)
         stage.needs_sync && sync_asap!(struc; params = params)
     end
-    if params.uniform_column_sizing !== :off
-        n_harmonized = SS.harmonize_uniform_column_sizes!(struc, params)
-        n_harmonized > 0 && sync_asap!(struc; params = params)
-    end
     design = capture_design(struc, params; t_start = t_start)
     restore!(struc; geometry_is_centerline = params.geometry_is_centerline)
     return design
@@ -395,11 +392,12 @@ function main()
     ok0sig, bad0sig = same_signature(design_signature(ref_base),
                                      design_signature(base_design(session)))
     record!("base session comprehensive per-member signature matches (mismatch: $bad0sig)", ok0sig)
-    # Fine topology: the single flat-plate slab is node :slab_sizing_s1, so "all
-    # sizing nodes" = every per-slab node ∪ {:members, :foundations}.
+    # Fine topology: the single flat-plate slab is node :slab_sizing_s1. A full
+    # run recomputes every per-slab node, members, foundations, and ordinary walls.
     record!("base run recomputes all sizing nodes",
             Set(last_recomputed(session)) ==
-                (slab_set(graph_of(session)) ∪ Set([NODE_MEMBERS, NODE_FOUNDATIONS])))
+                (slab_set(graph_of(session)) ∪
+                 Set([NODE_MEMBERS, NODE_FOUNDATIONS, NODE_ORDINARY_WALLS])))
 
     # ── VARIATION 1: column-only (`:beams`) on a beam/column vault building ───
     # `:beams` is read by :members (not :slab_sizing) and is NOT prepare-
@@ -412,8 +410,8 @@ function main()
     beams_variant = SR.SteelBeamOptions(deflection_limit = 1/480)
 
     frontier_col = dirty_frontier(session_bc; beams = beams_variant)
-    record!("column-only frontier == [:members] (got $frontier_col)",
-            frontier_col == [NODE_MEMBERS])
+    record!("column-only frontier == [:members, :ordinary_walls] (got $frontier_col)",
+            frontier_col == [NODE_MEMBERS, NODE_ORDINARY_WALLS])
     record!("column-only preview: not prepare-affecting",
             !requires_new_engine(session_bc; beams = beams_variant))
 
@@ -422,9 +420,9 @@ function main()
     rs_col = last_restored(session_bc)
     record!("column-only recomputed == [:members] (got $rc_col)", rc_col == [NODE_MEMBERS])
     record!("column-only did NOT recompute any slab node", !any(SS.is_slab_node_key, rc_col))
-    # No foundations on the vault, so the restored set is EXACTLY the slab nodes.
-    record!("column-only restored all slab nodes (got $rs_col)",
-            Set(rs_col) == slab_set(graph_of(session_bc)))
+    # No foundations on the vault. The wall node is restored, not recomputed.
+    record!("column-only restored slab nodes and ordinary walls (got $rs_col)",
+            Set(rs_col) == (slab_set(graph_of(session_bc)) ∪ Set([NODE_ORDINARY_WALLS])))
 
     # Output-equivalent (rtol=1e-8) to a from-scratch design_building with the SAME override.
     struc_bc_ref, _ = build_beam_column(beams = beams_variant)
@@ -454,11 +452,13 @@ function main()
     inc_load = redesign(session; foundation_options = soil_variant)
     rc_load = last_recomputed(session)
     rs_load = last_restored(session)
-    record!("load-ish recomputed == [:foundations] (got $rc_load)", rc_load == [NODE_FOUNDATIONS])
+    record!("load-ish recomputed == [:foundations] (got $rc_load)",
+            rc_load == [NODE_FOUNDATIONS])
     record!("load-ish did NOT recompute any slab node", !any(SS.is_slab_node_key, rc_load))
     record!("load-ish did NOT recompute :members", !(NODE_MEMBERS in rc_load))
-    record!("load-ish restored all slab nodes + :members (got $rs_load)",
-            Set(rs_load) == (slab_set(graph_of(session)) ∪ Set([NODE_MEMBERS])))
+    record!("load-ish restored slabs, members, and ordinary walls (got $rs_load)",
+            Set(rs_load) == (slab_set(graph_of(session)) ∪
+                             Set([NODE_MEMBERS, NODE_ORDINARY_WALLS])))
 
     # Output-equivalent (rtol=1e-8) to a from-scratch design_building with the SAME soil.
     struc_load_ref, _ = build_flat_plate(soil = SR.soft_clay)
@@ -484,7 +484,8 @@ function main()
             requires_new_engine(session; floor = floor_variant))
     record!("slab-type swap frontier reaches whole chain (structural upper bound)",
             Set(dirty_frontier(session; floor = floor_variant)) ==
-                (slab_set(graph_of(session)) ∪ Set([NODE_MEMBERS, NODE_FOUNDATIONS])))
+                (slab_set(graph_of(session)) ∪
+                 Set([NODE_MEMBERS, NODE_FOUNDATIONS, NODE_ORDINARY_WALLS])))
     guarded_floor = false
     try
         redesign(session; floor = floor_variant)
@@ -547,33 +548,27 @@ function main()
     end
     record!("pattern_loading redesign throws ArgumentError (guard)", guarded_pat)
 
-    # Prove the guard protects a REAL difference (not masking a no-op). Discrete
-    # member sizing can round out a small demand change, so we prove it at the
-    # level the P0 actually endangers — the GOVERNING MEMBER MOMENT. Patterned
-    # (checkerboard) live load envelopes member forces strictly UPWARD versus the
-    # :none baseline (classic continuous-member result; ACI 318-11 §13.7.6): the
-    # max positive span moment occurs under alternate-span loading, not all-spans.
-    # So an engine that silently skipped patterning over a :none baseline would
-    # UNDER-predict these demands — exactly the unconservative outcome the guard
-    # prevents. (The vault routes slab pressure through thrust line-loads, so
-    # patterns don't apply there — hence a flat plate here, matching the proven
-    # fixture in test/analyze/test_pattern_loading.jl.)
-    forces_none = _prepared_frame_forces(pattern_loading = :none)
-    forces_pat  = _prepared_frame_forces(pattern_loading = :checkerboard)
-    upward = true            # every DOF enveloped ≥ baseline (within numerical tol)
-    n_strict = 0             # DOFs where patterning is STRICTLY higher (real change)
+    # ACI 318-11 §13.7.6.3 (corpus: aci-318-11, page 261) places three-quarters
+    # of the factored live load on the alternate spans. §13.7.6.4 keeps full
+    # live on the all-spans case. The three-quarter cases move the displacement.
+    # The enveloped end forces stay on the all-spans solve.
+    forces_none, _ = _prepared_frame_forces(pattern_loading = :none)
+    forces_pat, struc_pat = _prepared_frame_forces(pattern_loading = :checkerboard)
+    upward = true
     gov_none = 0.0; gov_pat = 0.0
     for (fn, fp) in zip(forces_none, forces_pat)
         for k in eachindex(fn)
             a = abs(fn[k]); b = abs(fp[k])
             gov_none = max(gov_none, a); gov_pat = max(gov_pat, b)
             b >= a - 1e-6 || (upward = false)
-            b > a + 1e-3 && (n_strict += 1)
         end
     end
-    record!("checkerboard envelopes member moments strictly upward vs :none " *
-            "(upward=$upward, strict DOFs=$n_strict, gov $(round(gov_pat, digits=1)) ≥ $(round(gov_none, digits=1)))",
-            upward && n_strict > 0 && gov_pat >= gov_none - 1e-6)
+    cached = StructuralSynthesizer._get_pattern_solve_cache(struc_pat)
+    u_move = cached === nothing ? 0.0 :
+        maximum(abs.(cached[2][2] .- cached[2][1]))
+    record!("checkerboard keeps the end-force envelope and moves the frame " *
+            "(upward=$upward, gov $(round(gov_pat, digits=1)) ≥ $(round(gov_none, digits=1)), |Δu|=$(round(u_move, digits=6)) m)",
+            upward && gov_pat >= gov_none - 1e-6 && cached !== nothing && u_move > 1e-4)
 
     # ── VARIATION 7: load_combinations on a VAULT (structural-effects) ────────
     # `:load_combinations` is NON-prepare-affecting: `sync_asap!` refreshes every
@@ -598,14 +593,16 @@ function main()
     frontier_lc = dirty_frontier(session_lc; load_combinations = lc_variant)
     # Fine topology: the frontier is every per-slab node (topological order) then
     # :members — both read the load MAGNITUDE that sync refreshes.
-    expected_lc_frontier = vcat(slab_keys(graph_of(session_lc)), [NODE_MEMBERS])
+    expected_lc_frontier = vcat(slab_keys(graph_of(session_lc)),
+                                [NODE_MEMBERS, NODE_ORDINARY_WALLS])
     record!("load_combinations (vault) frontier == [slab nodes…,:members] (got $frontier_lc)",
             frontier_lc == expected_lc_frontier)
 
     inc_lc = redesign(session_lc; load_combinations = lc_variant)
     rc_lc = last_recomputed(session_lc)
     record!("load_combinations (vault) recomputed == [slab nodes…,:members] (got $rc_lc)",
-            Set(rc_lc) == (slab_set(graph_of(session_lc)) ∪ Set([NODE_MEMBERS])))
+            Set(rc_lc) == (slab_set(graph_of(session_lc)) ∪
+                           Set([NODE_MEMBERS, NODE_ORDINARY_WALLS])))
 
     struc_lc_ref, base_lc_ref0 = build_beam_column()
     ref_lc = design_building(struc_lc_ref, SS.with(base_lc_ref0; load_combinations = lc_variant))
@@ -708,7 +705,8 @@ function main()
     inc_tv = redesign(session_tv; load_combinations = tv_variant)
     rc_tv  = last_recomputed(session_tv)
     record!("thrust vault variation recomputes all slab nodes + :members (got $rc_tv)",
-            Set(rc_tv) == (slab_set(graph_of(session_tv)) ∪ Set([NODE_MEMBERS])))
+            Set(rc_tv) == (slab_set(graph_of(session_tv)) ∪
+                           Set([NODE_MEMBERS, NODE_ORDINARY_WALLS])))
     struc_tv_ref2, base_tv_ref20 = build_thrust_vault()
     ref_tv = design_building(struc_tv_ref2, SS.with(base_tv_ref20; load_combinations = tv_variant))
     ok_tv, bad_tv2 = same_signature(design_signature(ref_tv), design_signature(inc_tv))
@@ -829,22 +827,15 @@ function main()
     record!("override changes sized section (got free=$free_name, override=$ov_name)",
             free_name ∉ custom_names && ov_name ∈ custom_names && ov_name != free_name)
 
-    # precedence: override > MemberGroup.catalog_override > global default.
-    # BOTH candidate sections must be FEASIBLE for this fixture so the test isolates
-    # PRECEDENCE, not catalog adequacy. The 20 ft fixed-pinned beam's governing
-    # moment is the HOGGING moment at the fixed end, and the hogging Chapter-F LTB
-    # check (ϕMn_neg ≥ Mux_neg at Lb=L, Cb=1.0 — checker.jl `_hogging_ltb_inputs`)
-    # rejects deep, LTB-weak shapes such as W21X44 (ϕMn_neg ≈ 103 kip·ft < 140).
-    # W24X68 (0.39) and W24X103 (0.20) both pass; the override-supplied W24X68 must
-    # win over the lower-precedence MemberGroup.catalog_override.
+    # precedence: the per-design override catalog beats the caller's default.
+    # W24X68 passes the hogging Chapter-F check on this fixture.
     struc_pr = build_override_beam_struc()
     build_member_groups!(struc_pr; member_type = :beams)
     gid_pr = first(keys(struc_pr.member_groups))
-    struc_pr.member_groups[gid_pr].catalog_override = [SR.W("W24X103")]  # loses to the override
     size_member_group!(struc_pr, gid_pr; member_edge_group = :beams,
                        material = A992_Steel, reanalyze = true,
                        override = MemberGroupSizingOverride(catalog = [SR.W("W24X68")]))
-    record!("precedence: override beats MemberGroup.catalog_override",
+    record!("precedence: override catalog beats the default",
             struc_pr.member_groups[gid_pr].section.name == "W24X68")
 
     # (a) EMPTY (default): design_building runs; an explicit-empty dict is
@@ -1067,29 +1058,6 @@ function main()
     record!("member_group_overrides change → dirties :members frontier, not prepare-affecting",
             (NODE_MEMBERS in dirty_frontier(session_fr; member_group_overrides = fr_ovr)) &&
             !requires_new_engine(session_fr; member_group_overrides = fr_ovr))
-
-    # ── [12c] Finding A-revert: MemberGroup.catalog_override is a NO-OP in the batched path ──
-    # A beam group carrying ONLY a MemberGroup.catalog_override (Phase 6 seam) and
-    # EMPTY member_group_overrides must be a NO-OP in the batched size_beams! path —
-    # catalog_override is honored solely by the isolated size_member_group! path
-    # (never here: it was never honored pre-Phase-B, and honoring it opened a
-    # regression). So the sized section is BYTE-IDENTICAL to the no-override free
-    # optimum, NOT narrowed to the seam catalog.
-    println("\n[12c] Finding A-revert: MemberGroup.catalog_override is a no-op in batched size_beams!")
-    heavy_co = SR.all_W()[argmax([SR.section_area(s) for s in SR.all_W()])]
-    struc_cofree = build_override_beam_struc()
-    build_member_groups!(struc_cofree; member_type = :beams)
-    size_beams!(struc_cofree, SR.SteelBeamOptions(); reanalyze = false)
-    gid_cof = first(keys(struc_cofree.member_groups))
-    free_co = struc_cofree.member_groups[gid_cof].section.name
-    struc_co = build_override_beam_struc()
-    build_member_groups!(struc_co; member_type = :beams)
-    gid_co = first(keys(struc_co.member_groups))
-    struc_co.member_groups[gid_co].catalog_override = [heavy_co]   # ONLY the seam
-    size_beams!(struc_co, SR.SteelBeamOptions(); reanalyze = false)  # no per-design override
-    co_sized = struc_co.member_groups[gid_co].section.name
-    record!("MemberGroup.catalog_override is a no-op in batched size_beams!, byte-identical to free (got $co_sized, free=$free_co; seam=$(heavy_co.name))",
-            co_sized == free_co && co_sized != heavy_co.name)
 
     # ── [12d] Finding B: LOOSER deflection_limit/max_depth override refused fail-loud ──
     # The batched path always intersects the per-group mask with the global

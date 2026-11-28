@@ -315,13 +315,14 @@ using StructuralSizer
         to_asap!(struc)
         model = struc.asap_model
 
-        # Simply supported BCs
+        # Simply supported: the steel beam's pinned end releases; a roller at
+        # id2 frees only the axial translation.
         model.nodes[id1].dof = [false, false, false, false, false, false]
-        model.nodes[id2].dof = [true,  true,  false, true,  true,  true]
+        model.nodes[id2].dof = [true,  false, false, false, false, false]
 
         w_factored = 2.8u"kip/ft"
         w_factored_si = uconvert(u"N/m", w_factored)
-        push!(model.loads, Asap.LineLoad(model.elements[e1], [0.0u"N/m", 0.0u"N/m", -w_factored_si]))
+        push!(model.loads, Asap.LineLoad(model.frame_elements[e1], [0.0u"N/m", 0.0u"N/m", -w_factored_si]))
 
         Asap.process!(model)
         Asap.solve!(model)

@@ -3,6 +3,67 @@
 # Note: AbstractDemand is defined in StructuralSizer/src/types.jl
 
 # ==============================================================================
+# Lateral-translation (sway) demand split — shared across material codes
+# ==============================================================================
+
+"""
+    LateralTranslation{T}
+
+The lateral-translation (sidesway) component of a column's force demand, kept
+separate from the no-translation (gravity-restrained) component so the
+material-specific sway amplifier can magnify only the sway part. This is the
+shared representation behind both approximate second-order procedures:
+
+- ACI 318-11 §10.10.7 (Eq. 10-18): `M = Mns + δs·Ms`, with `Ms` the moment
+  from loads producing appreciable sidesway.
+- AISC 360-16 Appendix 8 (Eq. A-8-1, A-8-2): `Mr = B1·Mnt + B2·Mlt` and
+  `Pr = Pnt + B2·Plt`, with the `lt` subscript the lateral-translation analysis.
+
+A column whose demand carries no `LateralTranslation` (the field is `nothing`)
+is a pure gravity/no-translation member: `Ms = Mlt = 0`, `Plt = 0`, and the
+design reduces exactly to the non-sway procedure. The no-translation
+component stays in the host demand's existing moment/axial fields.
+
+# Fields (all default to zero; same units as the host demand)
+- `Plt`: lateral-translation axial force (signed; + = compression)
+- `M1ltx`, `M2ltx`: lateral-translation end moments about the strong (x) axis
+- `M1lty`, `M2lty`: lateral-translation end moments about the weak (y) axis
+
+End-moment convention matches the host demand: `M1` is the smaller end moment,
+`M2` the larger, signed per the §App.8.2.1.2 / §6.6.4.5.3 curvature rule.
+"""
+struct LateralTranslation{T}
+    Plt::T
+    M1ltx::T
+    M2ltx::T
+    M1lty::T
+    M2lty::T
+end
+
+"""
+    LateralTranslation(; Plt=0.0, M1ltx=0.0, M2ltx=0.0, M1lty=0.0, M2lty=0.0)
+
+Keyword constructor; the element type `T` is inferred by `promote_type` over
+all arguments so a `LateralTranslation` matches its host demand's units.
+"""
+function LateralTranslation(; Plt=0.0, M1ltx=0.0, M2ltx=0.0, M1lty=0.0, M2lty=0.0)
+    vals = (Plt, M1ltx, M2ltx, M1lty, M2lty)
+    T = promote_type(typeof.(vals)...)
+    return LateralTranslation{T}(T(Plt), T(M1ltx), T(M2ltx), T(M1lty), T(M2lty))
+end
+
+"""Strong-axis lateral-translation moment envelope `max(|M1ltx|, |M2ltx|)`."""
+Mltx(lt::LateralTranslation) = max(abs(lt.M1ltx), abs(lt.M2ltx))
+"""Weak-axis lateral-translation moment envelope `max(|M1lty|, |M2lty|)`."""
+Mlty(lt::LateralTranslation) = max(abs(lt.M1lty), abs(lt.M2lty))
+
+"""Convert a `LateralTranslation` (or `nothing`) to element type `T` for a host demand."""
+_convert_lt(::Nothing, ::Type) = nothing
+_convert_lt(lt::LateralTranslation, ::Type{T}) where {T} = LateralTranslation{T}(
+    convert(T, lt.Plt), convert(T, lt.M1ltx), convert(T, lt.M2ltx),
+    convert(T, lt.M1lty), convert(T, lt.M2lty))
+
+# ==============================================================================
 # Steel/General Member Demand (AISC-style)
 # ==============================================================================
 
@@ -40,8 +101,11 @@ Unified demand for framing members (beams, columns, beam-columns).
 - Used by both `Cm = 0.6 − 0.4·(M1/M2)` and the slenderness limit
   `34 + 12·(M1/M2)` (capped at 40); see `calc_Cm` and
   `should_consider_slenderness` in `slenderness.jl`.
-- If `M1`/`M2` are not provided, defaults to `M1 = 0`, `M2 = Mux`/`Muy`
-  (conservative single-curvature stand-in: `Cm = 0.6`).
+- If `M1`/`M2` are not provided, defaults to `M1 = 0`, `M2 = Mux`/`Muy`.
+  Eq. A-8-4 then gives `Cm = 0.6`. That is not single curvature. Single
+  curvature is `M1 = −M2` and `Cm = 1.0`. A member loaded between its
+  supports sets `transverse_load` so `Cm = 1.0` (AISC 360-16 App. 8
+  §8.2.1(b), corpus: aisc-360-16, PDF page 306).
 """
 struct MemberDemand{T, C} <: AbstractDemand
     member_idx::Int
@@ -63,6 +127,10 @@ struct MemberDemand{T, C} <: AbstractDemand
     I_ref::T     # Reference I used in analysis (for scaling)
     composite::C # Nothing, CompositeContext, PerStationComposite, or true
     transverse_load::Bool  # Whether transverse loading between supports
+    # Lateral-translation (sway) split for AISC 360-16 App. 8 (B1·Mnt + B2·Mlt).
+    # `nothing` = pure no-translation member (Mlt = Plt = 0); the Mnt/Pnt part
+    # stays in the fields above. See `LateralTranslation`.
+    lt::Union{Nothing, LateralTranslation{T}}
 end
 
 """
@@ -75,7 +143,9 @@ end
 Keyword constructor with defaults for [`MemberDemand`](@ref).
 
 When `M1x`/`M2x` (or `M1y`/`M2y`) are `nothing`, defaults to `M1=0`, `M2=Mux`
-(conservative single-curvature assumption, Cm = 0.6 per AISC 360-16 Appendix 8).
+(Eq. A-8-4 at a zero ratio, Cm = 0.6). Single curvature is `M1 = −M2`
+(Cm = 1.0). Span load uses `transverse_load` (Cm = 1.0, AISC 360-16
+App. 8 §8.2.1(b), corpus: aisc-360-16, PDF page 306).
 When `Mux_pos` / `Mux_neg` are omitted, both default to `Mux` so a caller that
 only has an unsigned envelope still checks both faces at full magnitude
 (hogging Chapter F at `Lb=L`, `Cb=1.0` — AISC 360-16 §F2.2, page 103).
@@ -90,7 +160,8 @@ function MemberDemand(idx::Int;
     Tu=0.0,
     δ_max_LL=0.0, δ_max_total=0.0, I_ref=1.0,
     composite=nothing,
-    transverse_load=false
+    transverse_load=false,
+    lt::Union{Nothing, LateralTranslation}=nothing
 )
     Mux_pos_val = isnothing(Mux_pos) ? Mux : Mux_pos
     Mux_neg_val = isnothing(Mux_neg) ? Mux : Mux_neg
@@ -109,13 +180,13 @@ function MemberDemand(idx::Int;
                            T(M1x_val), T(M2x_val), T(M1y_val), T(M2y_val),
                            T(Vu_strong), T(Vu_weak), T(Tu),
                            T(δ_max_LL), T(δ_max_total), T(I_ref),
-                           composite, transverse_load)
+                           composite, transverse_load, _convert_lt(lt, T))
     else
         MemberDemand{Any, C}(idx, Pu_c, Pu_t, Mux, Mux_pos_val, Mux_neg_val, Muy,
                              M1x_val, M2x_val, M1y_val, M2y_val,
                              Vu_strong, Vu_weak, Tu,
                              δ_max_LL, δ_max_total, I_ref,
-                             composite, transverse_load)
+                             composite, transverse_load, _convert_lt(lt, Any))
     end
 end
 
@@ -149,12 +220,13 @@ converted internally to kip/kip-ft for ACI calculations.
 - `M1/M2 < 0`: **single** curvature (worst case).
 - Used by `Cm = 0.6 − 0.4·(M1/M2)` (Eq. 6.6.4.5.3a) and slenderness limit
   `34 + 12·(M1/M2)` capped at 40 (Eq. 6.2.5.1b/c).
-- If not provided, defaults to `M1 = 0` (Cm = 0.6, conservative
-  single-curvature stand-in).
+- If not provided, defaults to `M1 = 0` (Cm = 0.6, slenderness limit 34).
+  This is NOT conservative: single curvature (`M1 = −M2`) gives Cm = 1.0
+  and a limit of 22. Pass `M1 = −M2` when the curvature is unknown.
 
 # Examples
 ```julia
-# Simple: envelope moment only (uses conservative M1=0)
+# Simple: envelope moment only (M1 = 0; see the note above)
 demand = RCColumnDemand(1; Pu=500.0, Mux=100.0, Muy=50.0)
 
 # Full: with end moments for proper slenderness (double curvature)
@@ -176,12 +248,19 @@ struct RCColumnDemand{T} <: AbstractDemand
     M2y::T                 # Larger signed end moment about y-axis
     βdns::Float64          # Sustained load ratio (slenderness)
     transverse_load::Bool  # ACI 318-19 §6.6.4.5.3 — forces Cm = 1.0
+    # `false` skips the §6.6 moment magnifier. Row F forces already include
+    # story P-delta (ACI 318-19 §6.7); magnifying them again double-counts.
+    magnify::Bool
+    # Lateral-translation (sway) split for ACI 318-11 §10.10.7 (Mns + δs·Ms).
+    # `nothing` = pure non-sway member (Ms = Plt = 0); the Mns/Pu part stays in
+    # the fields above (Pu, M1x/M2x, M1y/M2y). See `LateralTranslation`.
+    lt::Union{Nothing, LateralTranslation{T}}
 end
 
 """
     RCColumnDemand(idx; Pu=0.0, Mux=nothing, Muy=nothing,
                    M1x=0.0, M2x=nothing, M1y=0.0, M2y=nothing,
-                   βdns=0.6, transverse_load=false) -> RCColumnDemand
+                   βdns=0.6, transverse_load=false, magnify=true) -> RCColumnDemand
 
 Keyword constructor with defaults for [`RCColumnDemand`](@ref).
 
@@ -191,6 +270,8 @@ When `M2x`/`M2y` are `nothing`, they default to `Mux`/`Muy`.
 ACI 318-19 §6.6.4.4.4 / historically ACI 318-11 §10.10.6.2).
 `transverse_load` defaults to `false`; set `true` for columns with
 transverse loads between supports so `calc_Cm` returns 1.0.
+`magnify` defaults to `true`. Set `false` when the moments already come
+from a second-order analysis (ACI 318-19 §6.7) so §6.6 is not applied again.
 """
 function RCColumnDemand(idx::Int;
     Pu = 0.0,
@@ -202,6 +283,8 @@ function RCColumnDemand(idx::Int;
     M2y = nothing,
     βdns = 0.6,
     transverse_load::Bool = false,
+    magnify::Bool = true,
+    lt::Union{Nothing, LateralTranslation} = nothing,
 )
     if isnothing(Mux)
         if isnothing(M2x)
@@ -229,7 +312,29 @@ function RCColumnDemand(idx::Int;
                      typeof(M1x), typeof(M2x), typeof(M1y), typeof(M2y))
     RCColumnDemand{T}(idx, T(Pu), T(Mux), T(Muy),
                       T(M1x), T(M2x), T(M1y), T(M2y),
-                      Float64(βdns), transverse_load)
+                      Float64(βdns), transverse_load, magnify, _convert_lt(lt, T))
+end
+
+"""
+    RCColumnDemandSet(member_idx, cases) <: AbstractDemand
+
+Every load case one RC column group must resist. Each case carries the axial
+force and the end moments of one analysis case, so they act together. A
+section is feasible when it passes every case.
+
+An envelope that pairs the largest axial force of any case with the largest
+moment of any case is not a bound for a reinforced concrete section. Below
+the balanced point more axial compression raises the moment capacity
+(ACI 318-19 §22.4, P–M interaction), so a case with less axial force and the
+same moment can fail while the envelope passes.
+"""
+struct RCColumnDemandSet{D <: RCColumnDemand} <: AbstractDemand
+    member_idx::Int
+    cases::Vector{D}
+    function RCColumnDemandSet(member_idx::Int, cases::Vector{D}) where {D <: RCColumnDemand}
+        isempty(cases) && throw(ArgumentError("RCColumnDemandSet needs at least one case"))
+        return new{D}(member_idx, cases)
+    end
 end
 
 # ==============================================================================

@@ -33,9 +33,49 @@ function _elf_plan_length(skel, eidx)
     return hypot(x2 - x1, y2 - y1)
 end
 
+"""
+Story 0 is the support level and has no beam grid. Copy the story-1 beam
+plan down to the column bases so a ground wall has an edge to claim.
+"""
+function _elf_grade_beams!(skel)
+    beams = Set(get(skel.groups_edges, :beams, Int[]))
+    any(e -> e in beams && _elf_horizontal(skel, e), skel.stories[0].edges) && return skel
+    z0 = skel.stories_z[1]
+    for e in skel.stories[1].edges
+        (e in beams && _elf_horizontal(skel, e)) || continue
+        v1, v2 = skel.edge_indices[e]
+        x1, y1 = _elf_xy(skel, v1)
+        x2, y2 = _elf_xy(skel, v2)
+        StructuralSynthesizer.add_element!(skel, Meshes.Segment(
+            Meshes.Point(x1 * u"m", y1 * u"m", z0),
+            Meshes.Point(x2 * u"m", y2 * u"m", z0));
+            group=:beams, level_idx=0)
+    end
+    # find_faces! has already run, so the grade faces are added here.
+    at = Dict{NTuple{2, Float64}, Int}()
+    for (k, v) in enumerate(skel.vertices)
+        c = Meshes.coords(v)
+        abs(ustrip(u"m", c.z) - ustrip(u"m", z0)) <= 1e-6 || continue
+        at[(round(ustrip(u"m", c.x); digits=6), round(ustrip(u"m", c.y); digits=6))] = k
+    end
+    for face in skel.stories[1].faces
+        cycle = Int[]
+        for v in skel.face_vertex_indices[face]
+            x, y = _elf_xy(skel, v)
+            key = (round(x; digits=6), round(y; digits=6))
+            haskey(at, key) || error("elf fixture: no grade vertex at $key")
+            push!(cycle, at[key])
+        end
+        StructuralSynthesizer.add_face!(skel, Meshes.Ngon(skel.vertices[cycle]...);
+                                        group=:grade, level_idx=0, v_indices=cycle)
+    end
+    return skel
+end
+
 """1×1 office, two stories, one wall on story 0, rigid diaphragm."""
 function _elf_building()
     skel = gen_medium_office(10.0u"m", 6.0u"m", 4.0u"m", 1, 1, 2)
+    _elf_grade_beams!(skel)
     beams = Set(get(skel.groups_edges, :beams, Int[]))
     edges = [e for e in skel.stories[0].edges if e in beams && _elf_horizontal(skel, e)]
     @assert !isempty(edges)
@@ -97,6 +137,9 @@ function _elf_downward_kN(loads)
             total_N += ld._pressure_Pa * area * (-ld.direction[3])
         elseif ld isa Asap.GravityLoad
             total_N += StructuralSynthesizer._gravity_load_weight_kN(ld) * 1000
+        elseif ld isa Asap.LineLoad
+            L = ustrip(u"m", length(ld.element))
+            total_N += -ustrip(u"N/m", ld.value[3]) * L
         else
             error("elf dead-load check: unhandled $(typeof(ld))")
         end
@@ -109,6 +152,9 @@ function _elf_base_column(struc)
     wall_edges = Set(get(struc.skeleton.groups_edges, :walls, Int[]))
     for (i, el) in enumerate(struc.asap_model.frame_elements)
         i in wall_edges && continue
+        # A column inside a wall is parked with a zero section. Its weight is
+        # nothing, so the self-weight check needs a column that was built.
+        ustrip(u"m^2", el.section.A) > 0 || continue
         z1 = ustrip(u"m", el.nodeStart.position[3])
         z2 = ustrip(u"m", el.nodeEnd.position[3])
         z_bot, z_top = minmax(z1, z2)
@@ -214,13 +260,35 @@ end
     @test w_wall > 0
     @test length(struc.wall_mesh.piers) == 1
     cells_above = _elf_cells_above_base_kN(struc)
-    @test sum(lv.weight_kN for lv in result.levels) ≈ cells_above + 0.5 * w_wall rtol=1e-9
-    # The unfactored dead case includes the whole wall and the slabs above the
-    # base, and omits the :grade slab at the base. Equilibrium makes this
-    # resultant the vertical base reaction.
+    # 10 × 6 m plan, stories 4 m. One 10 m wall replaces that side of the
+    # ground story, so the first band is the other 22 m and the roof band is
+    # the full 32 m. Half of the first band stays at the base.
+    # ASCE 7-22 §3.1.1 and §12.7.2 (corpus: asce-7-22, PDF pages 72 and 184).
+    p = struc.cladding_SDL
+    w_story1 = ustrip(u"kN", p * 22.0u"m" * 4.0u"m")
+    w_story2 = ustrip(u"kN", p * 32.0u"m" * 4.0u"m")
+    clad_above = 0.5 * w_story1 + w_story2
+    clad_base = 0.5 * w_story1
+    @test sum(lv.weight_kN for lv in result.levels) ≈
+          cells_above + 0.5 * w_wall + clad_above rtol=1e-9
+    # The unfactored dead case includes the whole wall, the whole façade, and
+    # the slabs above the base, and omits the :grade slab at the base.
+    # Equilibrium makes this resultant the vertical base reaction.
     dead = solve_gravity_basic_cases(struc)
     @test dead.symbols[1] === :D
-    @test _elf_downward_kN(dead.loads[1]) ≈ cells_above + w_wall rtol=1e-6 atol=1e-3
+    @test _elf_downward_kN(dead.loads[1]) ≈
+          cells_above + w_wall + clad_above + clad_base rtol=1e-6 atol=1e-3
+    clad_loads = [ld for ld in struc.asap_model.loads
+                  if ld isa Asap.LineLoad && ld.id === :cladding]
+    @test !isempty(clad_loads)
+    bands = StructuralSynthesizer._cladding_bands(struc)
+    w_bands = sum(ustrip(u"kN", p * b.length_m * u"m" * b.height_m * u"m") for b in bands)
+    @test w_bands ≈ w_story1 + w_story2 rtol=1e-9
+    factored_kN = sum(-ustrip(u"N/m", ld.value[3]) * ustrip(u"m", length(ld.element))
+                      for ld in clad_loads) / 1000
+    params = DesignParameters(materials=MaterialOptions(concrete=NWC_5000))
+    factor = StructuralSynthesizer._wall_self_weight_dead_factor(params; patterned=false)
+    @test factored_kN ≈ factor * (w_story1 + w_story2) rtol=1e-6
 
     # A base column's GravityLoad is unfactored ρAg. Half is above the base.
     struc2 = _elf_building()
@@ -254,4 +322,25 @@ end
     @test xnone.Fx_kN ≈ strength.Fx_kN
     @test all(==(0.0), xnone.Fy_kN)
     @test isempty(factored_seismic_cases(result, strength_1_2D_1_0W))
+
+    # wall_SDL of zero is an explicit façade of none. W returns to slab plus
+    # the half of the wall that sits above the base.
+    struc0 = _elf_building()
+    params0 = DesignParameters(
+        materials=MaterialOptions(concrete=NWC_5000),
+        loads=GravityLoads(wall_SDL=0.0u"psf"))
+    to_asap!(struc0; params=params0, diaphragms=:rigid)
+    @test iszero(ustrip(struc0.cladding_SDL))
+    @test !any(ld -> ld isa Asap.LineLoad && ld.id === :cladding, struc0.asap_model.loads)
+    result0 = elf_story_analysis(struc0;
+        method=:sds, SDS=0.05, S1=0.02, R=8, Ie=1.0, T=0.4, Cd=4.0, β=1.0,
+        SD1=0.02, TL=8.0)
+    w_wall0 = 0.0
+    for pier in struc0.wall_mesh.piers
+        for sh in pier.shells
+            w_wall0 += StructuralSynthesizer._shell_self_weight_kN(sh)
+        end
+    end
+    @test sum(lv.weight_kN for lv in result0.levels) ≈
+          _elf_cells_above_base_kN(struc0) + 0.5 * w_wall0 rtol=1e-9
 end

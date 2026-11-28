@@ -16,10 +16,14 @@
 #   6. Geometric: hf < h (slab thickness < total depth)
 #   7. (optional) LL deflection: Δ_LL ≤ L/360  (ACI §24.2)
 #   8. (optional) Total deflection: Δ_total ≤ L/240  (ACI §24.2)
+#   9. (joist ribs) ACI 318-11 §8.13.2 and §8.13.3
 #
-# Hogging (Mu_neg) section adequacy is enforced as a post-NLP check in
-# `size_rc_tbeam_nlp` (top steel is not an NLP design variable). The NLP
-# may therefore return `:infeasible` instead of deepening the section.
+# The snapped section is checked with ACIBeamChecker in `size_rc_tbeam_nlp`
+# (the catalog sizer's check, including hogging). Top steel is not an NLP
+# design variable, so that check may return `:infeasible`. A joist rib is
+# checked again against §8.13.2 and §8.13.3 after snapping. §8.13.8's 10
+# percent one-way Vc increase is applied only when that snapped section
+# still meets them.
 
 using Unitful
 using Asap: kip, ksi, to_kip, to_kipft, to_inches, to_sqinches
@@ -55,6 +59,7 @@ sizing and tributary geometry.
 - Geometric: bw ≤ bf, hf < h
 - (optional) LL deflection: Δ_LL ≤ L/360 (ACI §24.2, when service loads provided)
 - (optional) Total deflection: Δ_total ≤ L/240 (ACI §24.2)
+- (joist ribs) ACI 318-11 §8.13.2 and §8.13.3
 """
 struct RCTBeamNLPProblem <: AbstractNLPProblem
     Mu_kipft::Float64
@@ -92,6 +97,8 @@ struct RCTBeamNLPProblem <: AbstractNLPProblem
     fr_psi::Float64         # Modulus of rupture (psi)
     defl_support::Symbol    # :simply_supported, :cantilever, etc.
     defl_ξ::Float64         # Long-term factor (2.0 = 5+ years)
+    # Share of live load in the sustained load of ACI 318-11 §9.5.2.5. 0 = dead only.
+    defl_sustained_live::Float64
 
     # ── Torsion constraint (ACI §11.5.3.1) ──
     Tu_kipin::Float64              # Torsion demand (kip·in). 0.0 = no torsion.
@@ -99,6 +106,14 @@ struct RCTBeamNLPProblem <: AbstractNLPProblem
     # Signed axial (kip). Positive = compression (Eq. 11-4); negative = tension
     # (Eq. 11-8, Vc ≥ 0). 0.0 = shear and flexure only (Eq. 11-3).
     Nu_kip::Float64
+    # One shear (and, when `Tu_kipin > 0`, torsion) row per load case.
+    shear_cases::Vector{RCBeamNLPShearCase}
+    # One sagging moment per load case, kip·ft.
+    flexure_cases::Vector{Float64}
+
+    # ACI 318-11 §8.13. 0 means this rib is not joist construction.
+    joist_spacing_in::Float64
+    joist_direction::Symbol
 end
 
 """
@@ -112,7 +127,13 @@ negative (Eq. 11-8). Public default is `Nu = 0`.
 function RCTBeamNLPProblem(Mu, Vu, bf, hf, opts::NLPBeamOptions;
                            w_dead=nothing, w_live=nothing, L_span=nothing,
                            support::Symbol=:simply_supported, ξ::Float64=2.0,
-                           Tu=0.0, Nu=0.0)
+                           sustained_live_fraction::Real=0.0,
+                           Tu=0.0, Nu=0.0, shear_cases=nothing,
+                           flexure_cases=nothing,
+                           joist_spacing::Union{Nothing, Length}=nothing,
+                           joist_direction::Symbol=:one_way)
+    _require_nlp_objective(
+        opts.objective, (MinVolume, MinWeight); problem="RC T-beam NLP")
     fc = fc_ksi(opts.material)
     fy = fy_ksi(opts.rebar_material)
     Es = Es_ksi(opts.rebar_material)
@@ -137,6 +158,25 @@ function RCTBeamNLPProblem(Mu, Vu, bf, hf, opts::NLPBeamOptions;
     h_min  = max(ustrip(u"inch", opts.min_depth), hf_in + 2.0)  # h > hf + clearance
     h_max  = ustrip(u"inch", opts.max_depth)
 
+    # ACI 318-11 §8.13.2–§8.13.3 (corpus: aci-318-11, PDF page 120). The rib
+    # is at least 4 in wide, the clear distance is at most 30 in, and the
+    # stem stays within 3.5 widths. The last of those is a constraint; the
+    # first two are bounds.
+    spacing_in = joist_spacing === nothing ? 0.0 : ustrip(u"inch", joist_spacing)
+    if spacing_in > 0
+        joist_direction in (:one_way, :two_orthogonal) || throw(ArgumentError(
+            "joist direction must be :one_way or :two_orthogonal, got :$joist_direction"))
+        bw_min = max(bw_min, 4.0, spacing_in - 30.0)
+        bw_max = min(bw_max, spacing_in - 1e-3)  # clear spacing stays positive
+        bw_min <= bw_max || throw(ArgumentError(
+            "ACI 318-11 §8.13.2 and §8.13.3 cannot be met at $(spacing_in) in " *
+            "centers: the rib would have to be at least $(bw_min) in wide and " *
+            "at most $(bw_max) in"))
+        h_min <= hf_in + 3.5 * bw_max || throw(ArgumentError(
+            "ACI 318-11 §8.13.2 cannot be met: the stem is deeper than 3.5 " *
+            "times the widest rib"))
+    end
+
     # ACI 318-11 §10.5.1: ρ_min = max(3√f'c/fy, 200/fy) (uses bw)
     fc_psi = fc * 1000.0
     fy_psi = fy * 1000.0
@@ -157,15 +197,12 @@ function RCTBeamNLPProblem(Mu, Vu, bf, hf, opts::NLPBeamOptions;
         fr_psi_val = 0.0
     end
 
-    # Torsion demand
-    Tu_kipin_val = if Tu isa Unitful.Quantity
-        abs(ustrip(u"lbf*inch", Tu)) / 1000.0
-    else
-        abs(Float64(Tu))
-    end
+    Tu_kipin_val = _torsion_kipin(Tu)
 
     # Signed axial: preserve sign (tension is negative).
     Nu_kip_val = Nu isa Unitful.Quantity ? to_kip(Nu) : Float64(Nu)
+    cases = _beam_nlp_shear_cases(Vu_kip, Nu_kip_val, Tu_kipin_val, shear_cases)
+    moments = _beam_nlp_flexure_cases(Mu_kipft, flexure_cases)
 
     RCTBeamNLPProblem(
         Mu_kipft, Vu_kip, opts,
@@ -175,9 +212,12 @@ function RCTBeamNLPProblem(Mu, Vu, bf, hf, opts::NLPBeamOptions;
         ρ_min_aci,
         bw_min, bw_max, h_min, h_max,
         wd_kiplf, wl_kiplf, L_span_in, Ec_psi_val, fr_psi_val,
-        support, ξ,
+        support, ξ, _as_sustained_live_fraction(sustained_live_fraction),
         Tu_kipin_val, c_ctr,
         Nu_kip_val,
+        cases,
+        moments,
+        spacing_in, joist_direction,
     )
 end
 
@@ -236,27 +276,47 @@ end
 # AbstractNLPProblem Interface: Constraints
 # ==============================================================================
 
-"""Number of constraints: 4 base + 2 deflection (if service loads) + 1 torsion (if Tu > 0)."""
+"""Number of constraints: one flexure per case, one shear per case, strain, ρmin, optional deflection, torsion per case with Tu > 0, plus 3 joist limits."""
 function n_constraints(p::RCTBeamNLPProblem)
-    nc = 4
+    nc = 2 + length(p.flexure_cases) + length(p.shear_cases)
     p.w_dead_kiplf > 0 && (nc += 2)  # LL + total deflection
-    p.Tu_kipin > 0 && (nc += 1)       # torsion adequacy (ACI §11.5.3.1)
-    return nc
+    p.joist_spacing_in > 0 && (nc += 3)  # §8.13.2 width and depth, §8.13.3 spacing
+    return nc + count(c -> c.Tu_kipin > 0, p.shear_cases)
 end
 
 """Human-readable constraint names for solver diagnostics."""
 function constraint_names(p::RCTBeamNLPProblem)
-    names = [
-        "flexure utilization",
-        "shear adequacy",
-        "net tensile strain (εt ≥ 0.005)",
-        "min reinforcement (§10.5.1)",
-    ]
+    names = String[]
+    if length(p.flexure_cases) == 1
+        push!(names, "flexure utilization")
+    else
+        for i in eachindex(p.flexure_cases)
+            push!(names, "flexure utilization (case $i)")
+        end
+    end
+    if length(p.shear_cases) == 1
+        push!(names, "shear adequacy")
+    else
+        for i in eachindex(p.shear_cases)
+            push!(names, "shear adequacy (case $i)")
+        end
+    end
+    push!(names, "net tensile strain (εt ≥ 0.005)")
+    push!(names, "min reinforcement (§10.5.1)")
     if p.w_dead_kiplf > 0
         push!(names, "deflection LL (L/360)")
         push!(names, "deflection total (L/240)")
     end
-    p.Tu_kipin > 0 && push!(names, "torsion adequacy (§11.5.3.1)")
+    for (i, c) in enumerate(p.shear_cases)
+        c.Tu_kipin > 0 || continue
+        push!(names, length(p.shear_cases) == 1 ?
+            "torsion adequacy (§11.5.3.1)" : "torsion adequacy (case $i)")
+    end
+    if p.joist_spacing_in > 0
+        push!(names, "rib width (§8.13.2)")
+        push!(names, "rib depth (§8.13.2)")
+        push!(names, "clear spacing (§8.13.3)")
+    end
     return names
 end
 
@@ -321,7 +381,10 @@ function constraint_fns(p::RCTBeamNLPProblem, x::Vector{Float64})
     φ = flexure_phi(εt)
 
     φMn_kipft = φ * Mn_lbin / 12_000.0
-    util_flexure = p.Mu_kipft / max(φMn_kipft, 1e-6)
+    constraints = Float64[]
+    for Mu_kipft in p.flexure_cases
+        push!(constraints, Mu_kipft / max(φMn_kipft, 1e-6))
+    end
 
     # --- Shear adequacy (uses bw, not bf; signed Nu via Eq. 11-4 / 11-8) ---
     # ACI 318-11 §11.2.1.2 Eq. (11-4) / §11.2.2.3 Eq. (11-8) —
@@ -334,16 +397,23 @@ function constraint_fns(p::RCTBeamNLPProblem, x::Vector{Float64})
     hw = max(h - hf, 0.0)
     Ag_comp = Af + bw * hw
     Ag_tens = bw * h
-    φVn_max_kip = _φVn_with_axial(bw, d, Ag_comp, Ag_tens, p.fc_psi, p.λ, p.Nu_kip)
-    util_shear = p.Vu_kip / max(φVn_max_kip, 1e-6)
+    # §8.13.8 raises Vc only while this point meets §8.13.2 and §8.13.3.
+    # The snapped section is checked again; a snap that leaves those limits
+    # loses the increase.
+    vc_factor = _tbeam_nlp_vc_factor(p, bw, h)
+    # One row per load case, each with its own Vu and Nu.
+    for sc in p.shear_cases
+        φVn_max_kip = _φVn_with_axial(bw, d, Ag_comp, Ag_tens, p.fc_psi, p.λ, sc.Nu_kip;
+                                      vc_factor = vc_factor)
+        push!(constraints, sc.Vu_kip / max(φVn_max_kip, 1e-6))
+    end
 
     # --- Net tensile strain ---
     util_strain = 0.005 / max(εt, 1e-8)
 
     # --- Minimum reinforcement (uses bw) ---
     util_as_min = p.ρ_min_aci / max(ρ, 1e-8)
-
-    constraints = [util_flexure, util_shear, util_strain, util_as_min]
+    push!(constraints, util_strain, util_as_min)
 
     # --- Deflection constraints (ACI §24.2) ---
     if p.w_dead_kiplf > 0
@@ -391,12 +461,18 @@ function constraint_fns(p::RCTBeamNLPProblem, x::Vector{Float64})
         end
         Icr = max(Icr, 1.0)
 
-        # Service moments (kip·in) → convert to lb·in for consistency
+        # Service moments (kip·in) → convert to lb·in for consistency.
+        # Sustained load is dead plus the sustained share ψ of live
+        # (ACI 318-11 §9.5.2.5, R9.5.2.5).
+        ψ = p.defl_sustained_live
+        w_s = w_d + ψ * w_l
         Ma_D_lbin  = _tbeam_nlp_service_moment(w_d, L, p.defl_support) * 1000.0   # kip·in → lb·in
+        Ma_S_lbin  = _tbeam_nlp_service_moment(w_s, L, p.defl_support) * 1000.0
         Ma_DL_lbin = _tbeam_nlp_service_moment(w_d + w_l, L, p.defl_support) * 1000.0
 
-        # Effective moment of inertia (Branson)
+        # Effective moment of inertia (Branson) at each service level.
         Ie_D  = _tbeam_nlp_branson(Mcr_lbin, Ma_D_lbin, Ig, Icr)
+        Ie_S  = _tbeam_nlp_branson(Mcr_lbin, Ma_S_lbin, Ig, Icr)
         Ie_DL = _tbeam_nlp_branson(Mcr_lbin, Ma_DL_lbin, Ig, Icr)
 
         # Deflections (inches): Δ = coeff × w × L⁴ / (E × Ie)
@@ -404,16 +480,20 @@ function constraint_fns(p::RCTBeamNLPProblem, x::Vector{Float64})
         # → w (kip/in) × L⁴ (in⁴) / (E (psi) × Ie (in⁴)) gives kip·in³/lb = 1000·in
         # Need to convert w to lb/in: w_lb = w_kip × 1000
         w_d_lbin  = w_d * 1000.0      # lb/in
+        w_s_lbin  = w_s * 1000.0
         w_dl_lbin = (w_d + w_l) * 1000.0
 
         coeff = _tbeam_nlp_defl_coeff(p.defl_support)
         Δ_D  = coeff * w_d_lbin * L^4 / max(Ec * Ie_D, 1.0)
+        Δ_S  = coeff * w_s_lbin * L^4 / max(Ec * Ie_S, 1.0)
         Δ_DL = coeff * w_dl_lbin * L^4 / max(Ec * Ie_DL, 1.0)
+        # Table 9.5(b): immediate live is the full live load.
         Δ_LL = max(Δ_DL - Δ_D, 0.0)
 
-        # Long-term
-        λΔ = p.defl_ξ  # no compression steel assumed in NLP
-        Δ_total = λΔ * Δ_D + Δ_LL
+        # Long-term: λΔ multiplies the sustained-load deflection (R9.5.2.5).
+        # ψ = 0 reproduces λΔ·Δ_D + Δ_LL. No compression steel in the NLP.
+        λΔ = p.defl_ξ
+        Δ_total = λΔ * Δ_S + (Δ_DL - Δ_S)
 
         # Deflection limits
         Δ_allow_LL  = L / 360.0
@@ -427,16 +507,18 @@ function constraint_fns(p::RCTBeamNLPProblem, x::Vector{Float64})
     end
 
     # --- Torsion adequacy (ACI 318-11 §11.5.3.1) ---
-    # For T-beams: Aoh/ph based on web rectangle (closed stirrups in web)
-    if p.Tu_kipin > 0
-        c_ctr = p.cover_to_stirrup_ctr_in
+    # For T-beams: Aoh/ph based on web rectangle (closed stirrups in web).
+    # One row per case that has torsion, using that case's Vu and Tu.
+    c_ctr = p.cover_to_stirrup_ctr_in
+    for sc in p.shear_cases
+        sc.Tu_kipin > 0 || continue
         xo = max(bw - 2*c_ctr, 0.1)   # inner width to stirrup centerline
         yo = max(h - 2*c_ctr, 0.1)    # inner height to stirrup centerline
         Aoh = xo * yo
         ph  = 2 * (xo + yo)
 
-        Vu_lb   = p.Vu_kip * 1000.0
-        Tu_lbin = p.Tu_kipin * 1000.0
+        Vu_lb   = sc.Vu_kip * 1000.0
+        Tu_lbin = sc.Tu_kipin * 1000.0
 
         τv = Vu_lb / max(bw * d, 0.01)
         τt = Tu_lbin * ph / max(1.7 * Aoh^2, 0.01)
@@ -445,11 +527,34 @@ function constraint_fns(p::RCTBeamNLPProblem, x::Vector{Float64})
         Vc_stress = 2 * p.λ * sqrt_fc
         rhs = 0.75 * (Vc_stress + 8 * sqrt_fc)
 
-        util_torsion = lhs / max(rhs, 1e-6)
-        push!(constraints, util_torsion)
+        push!(constraints, lhs / max(rhs, 1e-6))
+    end
+
+    # ACI 318-11 §8.13.2 and §8.13.3. Slab thickness is §8.13.5 / §8.13.6
+    # and is not a rib-section constraint.
+    if p.joist_spacing_in > 0
+        stem = max(h - p.hf_in, 0.0)
+        clear = max(p.joist_spacing_in - bw, 0.0)
+        push!(constraints, 4.0 / max(bw, 1e-6))
+        push!(constraints, stem / max(3.5 * bw, 1e-6))
+        push!(constraints, clear / 30.0)
     end
 
     return constraints
+end
+
+"""
+One-way `Vc` factor at a continuous rib.
+
+[`JOIST_ONE_WAY_VC_FACTOR`](@ref) when `p` is joist construction and this
+`(bw, h)` meets §8.13.2 and §8.13.3, otherwise 1. Punching is not sized here.
+"""
+function _tbeam_nlp_vc_factor(p::RCTBeamNLPProblem, bw::Float64, h::Float64)
+    p.joist_spacing_in > 0 || return 1.0
+    stem = h - p.hf_in
+    clear = p.joist_spacing_in - bw
+    qualifies = bw >= 4.0 && stem <= 3.5 * bw + 1e-8 && clear <= 30.0 + 1e-8
+    return qualifies ? JOIST_ONE_WAY_VC_FACTOR : 1.0
 end
 
 # ── NLP deflection helpers (bare Float64, no Unitful) ──
@@ -546,6 +651,21 @@ function build_rc_tbeam_nlp_result(p::RCTBeamNLPProblem, opt_result)
     # Ensure constraints after snapping
     bw_final = min(bw_final, p.bf_in)
     h_final  = max(h_final, p.hf_in + 2.0)
+    # Ceil on depth can break §8.13.2. Drop back to the last increment whose
+    # stem is at most 3.5 times the snapped width. The strength re-check
+    # widens the rib if that depth is no longer enough.
+    if p.joist_spacing_in > 0
+        bw_final = max(bw_final, 4.0, p.joist_spacing_in - 30.0)
+        bw_final = min(bw_final, p.bw_max)
+        if p.opts.snap
+            incr = ustrip(u"inch", p.opts.dim_increment)
+            cap = p.hf_in + 3.5 * bw_final
+            if h_final > cap + 1e-8 && incr > 0
+                h_final = floor(cap / incr) * incr
+            end
+        end
+        h_final = max(h_final, p.hf_in + 2.0)
+    end
 
     section = _build_tbeam_nlp_section(bw_final, h_final, p.bf_in, p.hf_in, ρ_opt, p.opts)
 
@@ -587,8 +707,12 @@ function _build_tbeam_nlp_section(
         As_required = ρg * bw_in * d_in
         bar = rebar(opts.bar_size)
         As_bar = ustrip(u"inch^2", bar.A)
-
-        n_bars = max(2, ceil(Int, As_required / As_bar))
+        # ACI 318-11 §10.5.1 (corpus: aci-318-11, page 144). Rounding up to the
+        # next bar keeps a snapped section from landing under As,min.
+        fc_psi = ustrip(u"psi", opts.material.fc′)
+        fy_psi = ustrip(u"psi", opts.rebar_material.Fy)
+        As_floor = max(As_required, _as_min_aci_1051(bw_in, d_in, fc_psi, fy_psi))
+        n_bars = max(2, ceil(Int, As_floor / As_bar))
         n_bars = min(n_bars, 20)
 
         return RCTBeamSection(

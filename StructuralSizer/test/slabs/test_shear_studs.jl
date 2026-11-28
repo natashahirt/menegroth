@@ -202,7 +202,9 @@ end
     # Default options
     opts = StructuralSizer.FlatPlateOptions()
     
-    @test opts.shear_studs == :never
+    # The default joint search may place studs, so the legacy field reads :if_needed.
+    @test opts.punching_strategy == :joint_search
+    @test opts.shear_studs == :if_needed
     @test opts.max_column_size ≈ 30.0u"inch" atol=0.1u"inch"
     @test opts.stud_material === StructuralSizer.Stud_51
     @test opts.stud_diameter ≈ 0.5u"inch" atol=0.01u"inch"
@@ -556,9 +558,10 @@ end
 @testset "FlatPlateOptions — New Strategy Fields" begin
     # ─── Default values ───
     opts = StructuralSizer.FlatPlateOptions()
-    @test opts.punching_strategy === :grow_columns
+    @test opts.punching_strategy === :joint_search
     @test opts.punching_reinforcement === :headed_studs_generic
-    @test opts.shear_studs === :never  # backward compat virtual property
+    @test opts.objective isa StructuralSizer.MinCarbon
+    @test opts.shear_studs === :if_needed
 
     # ─── Explicit new-style construction ───
     opts = StructuralSizer.FlatPlateOptions(
@@ -876,12 +879,13 @@ end
 end
 
 @testset "Transfer depth is settled before punching" begin
-    # 3×3 FEA edge column, first-pass moment 44.4 kip·ft on a 16 in square.
-    # At h = 5 in the §13.5.3 band cannot develop that moment (As is infinite);
-    # at h = 5.5 in it can. The depth search has to see this, or punching is
-    # solved at 5 in and the analysis starts over.
+    # Edge column, 16 in square, moment spanning into the slab, so the §13.5.3.2
+    # band is c2 + 3h. γf ≈ 0.61, γf·M ≈ 38 kip·ft. The tension-controlled
+    # band holds about 33 kip·ft at h = 5 in (As is infinite) and 43 kip·ft at
+    # h = 5.5 in. The depth search has to see this, or punching is solved at
+    # 5 in and the analysis starts over.
     col = _ScanCol(16.0u"inch", 16.0u"inch", :edge)
-    M = 44.36768400688581u"kip*ft"
+    M = 62.0u"kip*ft"
     moments = (unbalanced_moments = [M],)
     fc, fy = 4000.0u"psi", 60000.0u"psi"
     d_of(h) = h - 0.75u"inch" - 0.625u"inch" / 2

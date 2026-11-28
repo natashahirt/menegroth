@@ -16,6 +16,7 @@ function _floor_type_code(params::DesignParameters)
     f isa StructuralSizer.FlatPlateOptions && return "flat_plate"
     f isa StructuralSizer.FlatSlabOptions && return "flat_slab"
     f isa StructuralSizer.OneWayOptions && return "one_way"
+    f isa StructuralSizer.TwoWayOptions && return "two_way"
     f isa StructuralSizer.VaultOptions && return "vault"
     return string(typeof(f).name.name)
 end
@@ -238,7 +239,7 @@ function _summary_slabs(design::BuildingDesign, du::DisplayUnits, thick_label::S
     n == 0 && return Dict{String, Any}("count" => 0, "passing" => 0, "failing" => 0)
 
     slab_vec = sort(collect(design.slabs); by=first)
-    passing = count(((_, sr),) -> sr.converged && sr.deflection_ok && sr.punching_ok, slab_vec)
+    passing = count(((_, sr),) -> _slab_design_ok(sr), slab_vec)
     n_non_converged = count(((_, sr),) -> !sr.converged, slab_vec)
 
     thicknesses = [_round_val(_to_display(du, :thickness, sr.thickness); digits=2) for (_, sr) in slab_vec]
@@ -271,7 +272,7 @@ function _summary_slabs(design::BuildingDesign, du::DisplayUnits, thick_label::S
             )
         end
         for (k, sr) in slab_vec
-        if !(sr.converged && sr.deflection_ok && sr.punching_ok)
+        if !_slab_design_ok(sr)
     ]
 
     result = Dict{String, Any}(

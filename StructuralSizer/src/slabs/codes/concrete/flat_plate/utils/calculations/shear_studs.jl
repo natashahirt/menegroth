@@ -51,10 +51,14 @@ function punching_capacity_with_studs(
     
     # ACI 318-11 §11.11.5.1: Vc with studs ≤ 3λ√f'c × b0 × d
     # Compute vc from §11.11.2.1, then cap at 3λ√f'c
-    vc_a = (2 + 4 / β) * λ * sqrt_fc               # Eq. (11-31)
-    vc_b = (αs * d_in / b0_in + 2) * λ * sqrt_fc   # Eq. (11-32)
-    vc_c = 4 * λ * sqrt_fc                          # Eq. (11-33)
-    vcs = min(min(vc_a, vc_b, vc_c), 3.0 * λ * sqrt_fc)
+    # ACI 318-19 Table 22.6.6.1: concrete terms carry λs (Eq. 22.5.5.1.3) and
+    # √f'c ≤ 100 psi (§22.6.3.1). λs = 1 is permitted by §22.6.6.2 and not used.
+    λs_v = size_effect_factor(d)
+    sqrt_fc_v = _shear_sqrt_fc(fc)
+    vc_a = (2 + 4 / β) * λs_v * λ * sqrt_fc_v               # Eq. (11-31)
+    vc_b = (αs * d_in / b0_in + 2) * λs_v * λ * sqrt_fc_v   # Eq. (11-32)
+    vc_c = 4 * λs_v * λ * sqrt_fc_v                          # Eq. (11-33)
+    vcs = min(min(vc_a, vc_b, vc_c), 3.0 * λs_v * λ * sqrt_fc_v)
     
     # Steel contribution: vs = Av × fyt / (b0 × s)
     vs = s_in > 0 ? Av_in2 * fyt_psi / (b0_in * s_in) : 0.0
@@ -81,17 +85,14 @@ end
 
 Punching capacity at outer critical section (beyond shear studs).
 
-    vc,out = 2λ√f'c  (psi)
+    vc,out = 2 λs λ √f'c  (psi)
 
 At d/2 beyond the outermost peripheral line of studs, the concrete is
-unreinforced. ACI 318-11 §11.11.5.4 requires vu ≤ φ × 2λ√f'c at this section.
-
-# Reference
-- ACI 318-11 §11.11.5.4
+unreinforced. ACI 318-19 Table 22.6.6.1(e) (corpus: aci-318-19, printed
+p. 418): vc = 2 λs λ √f'c, λs from `size_effect_factor(d)`, √f'c ≤ 100 psi.
 """
 function punching_capacity_outer(fc::Pressure, d::Length; λ::Float64 = 1.0)
-    sqrt_fc = sqrt(ustrip(u"psi", fc))
-    vc_out = 2.0 * λ * sqrt_fc
+    vc_out = 2.0 * size_effect_factor(d) * λ * _shear_sqrt_fc(fc)
     return vc_out * u"psi"
 end
 
@@ -245,10 +246,14 @@ function design_shear_studs(
     
     # ACI 318-11 §11.11.5.1: Vc with studs ≤ 3λ√f'c × b0 × d
     # Compute vc from §11.11.2.1, then cap at 3λ√f'c
-    vc_a = (2 + 4 / β) * λ * sqrt_fc               # Eq. (11-31)
-    vc_b = (αs * d_in / b0_in + 2) * λ * sqrt_fc   # Eq. (11-32)
-    vc_c = 4 * λ * sqrt_fc                          # Eq. (11-33)
-    vcs = min(min(vc_a, vc_b, vc_c), 3.0 * λ * sqrt_fc)
+    # ACI 318-19 Table 22.6.6.1: concrete terms carry λs (Eq. 22.5.5.1.3) and
+    # √f'c ≤ 100 psi (§22.6.3.1). λs = 1 is permitted by §22.6.6.2 and not used.
+    λs_v = size_effect_factor(d)
+    sqrt_fc_v = _shear_sqrt_fc(fc)
+    vc_a = (2 + 4 / β) * λs_v * λ * sqrt_fc_v               # Eq. (11-31)
+    vc_b = (αs * d_in / b0_in + 2) * λs_v * λ * sqrt_fc_v   # Eq. (11-32)
+    vc_c = 4 * λs_v * λ * sqrt_fc_v                          # Eq. (11-33)
+    vcs = min(min(vc_a, vc_b, vc_c), 3.0 * λs_v * λ * sqrt_fc_v)
     
     # Required steel contribution
     vs_reqd = max(vu_psi / φ - vcs, 0.0)
@@ -359,19 +364,25 @@ end
 ACI 318-11 §13.5.3.1 (corpus: aci-318-11, page 250): a fraction of the
 unbalanced moment at the slab-column connection is transferred by flexure
 in each direction.  γf from Eq. (13-1) / §13.5.3.2 uses `b1`, `b2` in the
-direction of that moment; effective width is `c_face + 3h` (or `+ 1.5h`
-at a free edge).  Returns the governing `As` and the moment/γf that sized it.
+direction of that moment.  `Mux` spans along the named `c1` and `Muy`
+along the named `c2`; a free edge does not reassign those moments.
+[`transfer_bands`](@ref) gives each its `b1`, `b2` and effective width.
+Returns the governing `As` and the moment/γf that sized it.
 
-For `:edge`, named `c1`/`c2` are run through `_orient_edge_column` before
-`b1`/`b2`/`bb` so ACI c1 is perpendicular to the free edge
-(R11.11.7.2, corpus: aci-318-11, pages 209–211).  Both moment axes are
-still sized; the larger `As` governs.  Interior / corner geometry is
-unchanged.
+`d` is the depth of the `Mux` layer.  `d_y` is the depth of the `Muy`
+layer, the inner bar layer when `Muy` is the secondary span
+(`inner_layer_effective_depth`); it defaults to `d`.
 
 A non-finite input (moment, dimension or material) returns `As = NaN`, and
 a non-finite `As` in either direction is returned as is (Inf before NaN),
 so `transfer_section_inadequate` rejects it on every caller.  A NaN in one
 direction must not lose the comparison to a finite `As` in the other.
+
+`γf_x` / `γf_y` replace Eq. (13-1) for `Mux` / `Muy` when the punching check
+took a §13.5.3.3 value for that moment (`moment_transfer_gamma_f`), so the
+flexural fraction placed in the band is the complement of the γv the
+punching check used.  The result also carries `As_x`, `As_y`, `bb_x`, `bb_y`
+for the final §13.5.3.3(b) strain check on the placed steel.
 """
 function governing_transfer_reinforcement(
     Mux::Moment, Muy::Moment,
@@ -379,44 +390,79 @@ function governing_transfer_reinforcement(
     fc::Pressure, fy::Pressure;
     position::Symbol = :interior,
     free_edge_parallel::Symbol = :c2,
+    γf_x::Union{Nothing, Float64} = nothing,
+    γf_y::Union{Nothing, Float64} = nothing,
+    d_y::Union{Nothing, Length} = nothing,
 )
-    if !all(isfinite, (Mux, Muy, c1, c2, h, d, fc, fy))
+    dy = something(d_y, d)
+    if !all(isfinite, (Mux, Muy, c1, c2, h, d, dy, fc, fy))
         Mu_bad = isfinite(Mux) ? Muy : Mux
         return (As = NaN * u"inch^2", Mu = Mu_bad, γf = NaN, bb = NaN * u"inch")
     end
-    function _as_for(Mu, b1, b2, bb)
+    bands = transfer_bands(c1, c2, h, d; position, free_edge_parallel)
+    γfx = something(γf_x, gamma_f(bands.b1_x, bands.b2_x))
+    γfy = something(γf_y, gamma_f(bands.b1_y, bands.b2_y))
+    function _as_for(Mu, γf, bb, depth)
         abs(ustrip(kip * u"ft", Mu)) < 1e-6 && return 0.0 * u"inch^2"
-        γf = gamma_f(b1, b2)
-        transfer_reinforcement(abs(Mu), γf, bb, d, fc, fy)
+        transfer_reinforcement(abs(Mu), γf, bb, depth, fc, fy)
     end
-    if position === :edge
-        ori = _orient_edge_column(c1, c2, Mux, Muy; free_edge_parallel)
-        c1 = ori.c1
-        c2 = ori.c2
-    end
-    edge = position != :interior
-    b1_x = edge ? c1 + d / 2 : c1 + d
-    b2_x = edge ? c2 + d     : c2 + d
-    b1_y = edge ? c2 + d / 2 : c2 + d
-    b2_y = edge ? c1 + d     : c1 + d
-    bb_x = edge ? c2 + 1.5h : c2 + 3h
-    bb_y = edge ? c1 + 1.5h : c1 + 3h
-    As_x = _as_for(Mux, b1_x, b2_x, bb_x)
-    As_y = _as_for(Muy, b1_y, b2_y, bb_y)
+    bb_x, bb_y = bands.bb_x, bands.bb_y
+    As_x = _as_for(Mux, γfx, bb_x, d)
+    As_y = _as_for(Muy, γfy, bb_y, dy)
     if isinf(As_x)
-        return (As = Inf * u"inch^2", Mu = Mux, γf = gamma_f(b1_x, b2_x), bb = bb_x)
+        return (As = Inf * u"inch^2", Mu = Mux, γf = γfx, bb = bb_x)
     end
     if isinf(As_y)
-        return (As = Inf * u"inch^2", Mu = Muy, γf = gamma_f(b1_y, b2_y), bb = bb_y)
+        return (As = Inf * u"inch^2", Mu = Muy, γf = γfy, bb = bb_y)
     end
     if isnan(As_x) || isnan(As_y)
         return (As = NaN * u"inch^2", Mu = isnan(As_x) ? Mux : Muy,
                 γf = NaN, bb = isnan(As_x) ? bb_x : bb_y)
     end
+    per_axis = (As_x = As_x, As_y = As_y, bb_x = bb_x, bb_y = bb_y)
     if ustrip(u"inch^2", As_y) > ustrip(u"inch^2", As_x)
-        return (As = As_y, Mu = Muy, γf = gamma_f(b1_y, b2_y), bb = bb_y)
+        return (As = As_y, Mu = Muy, γf = γfy, bb = bb_y, axis = :y, per_axis...)
     end
-    return (As = As_x, Mu = Mux, γf = gamma_f(b1_x, b2_x), bb = bb_x)
+    return (As = As_x, Mu = Mux, γf = γfx, bb = bb_x, axis = :x, per_axis...)
+end
+
+"""
+    transfer_bands(c1, c2, h, d; position=:interior, free_edge_parallel=:c2)
+        -> (b1_x, b2_x, b1_y, b2_y, bb_x, bb_y)
+
+Critical-section sides and §13.5.3.2 effective widths for `Mux` (`_x`,
+spanning along the named `c1`) and `Muy` (`_y`, along the named `c2`).
+The moments stay on those axes. `b1` is the critical-section side in the
+span of that moment (ACI 318-11 §13.5.3.2, corpus: aci-318-11, page 250).
+
+`bb` is 1.5h beyond each column face that has slab (R13.5.3). A moment
+spanning perpendicular to a free edge has slab on both sides of its band
+(`c_parallel + 3h`; StructurePoint exterior column, corpus:
+sp-de-two-way-flat-plate-aci318-14, page 18). A moment spanning along a
+free edge, and both moments at a corner, have slab on one side
+(`c_transverse + 1.5h`).
+"""
+function transfer_bands(c1::Length, c2::Length, h::Length, d::Length;
+                        position::Symbol = :interior,
+                        free_edge_parallel::Symbol = :c2)
+    if position === :interior
+        return (b1_x = c1 + d, b2_x = c2 + d, bb_x = c2 + 3h,
+                b1_y = c2 + d, b2_y = c1 + d, bb_y = c1 + 3h)
+    elseif position === :corner
+        return (b1_x = c1 + d / 2, b2_x = c2 + d / 2, bb_x = c2 + 1.5h,
+                b1_y = c2 + d / 2, b2_y = c1 + d / 2, bb_y = c1 + 1.5h)
+    elseif position === :edge
+        free_edge_parallel in (:c1, :c2) ||
+            throw(ArgumentError("free_edge_parallel must be :c1 or :c2; got :$free_edge_parallel"))
+        # The moment spanning perpendicular to the edge takes the full band.
+        if free_edge_parallel === :c1
+            return (b1_x = c1 + d,     b2_x = c2 + d / 2, bb_x = c2 + 1.5h,
+                    b1_y = c2 + d / 2, b2_y = c1 + d,     bb_y = c1 + 3h)
+        end
+        return (b1_x = c1 + d / 2, b2_x = c2 + d,     bb_x = c2 + 3h,
+                b1_y = c2 + d,     b2_y = c1 + d / 2, bb_y = c1 + 1.5h)
+    end
+    throw(ArgumentError("position must be :interior, :edge or :corner; got :$position"))
 end
 
 """
@@ -447,7 +493,7 @@ function transfer_reinforcement(
     Mu_transfer = γf * Mu
     
     # Required reinforcement within effective width
-    As_req = required_reinforcement(Mu_transfer, bb, d, fc, fy)
+    As_req = required_reinforcement(Mu_transfer, bb, d, fc, fy; εt_min = tension_controlled_strain(fy))
     
     return As_req
 end
@@ -503,6 +549,74 @@ end
 # This ensures a "cable" mechanism if the slab loses support at a column.
 
 """
+    integrity_bottom_bars(cs_pos_primary, cs_pos_secondary) -> NamedTuple
+
+ACI 318-11 §13.3.8.5 (corpus: aci-318-11, page 247): column-strip bottom
+bars in each direction are continuous or spliced (Class B, Fig. 13.3.8), and
+at least two of them in each direction pass within the column core and are
+anchored at exterior supports. The requirement is prescriptive; there is no
+force check.
+
+This checks the count: each direction's column-strip positive steel
+(`StripReinforcement`) has at least two bars. Routing two of them through
+the core, continuity, and hooks at exterior supports are placed by the slab
+detailing (`:integrity` bar group in `detailing/slab.jl`).
+
+`cs_pos_secondary = nothing` means the secondary direction was not designed.
+The clause asks for bars in each direction, so that is a failure, reported
+with `secondary_verified = false`.
+
+Returns `(ok, n_primary, n_secondary, secondary_verified, utilization)`,
+with `utilization` = 2 / (fewest bars in a checked direction).
+"""
+function integrity_bottom_bars(cs_pos_primary, cs_pos_secondary)
+    n_p = cs_pos_primary.n_bars
+    n_s = cs_pos_secondary === nothing ? nothing : cs_pos_secondary.n_bars
+    n_min = n_s === nothing ? n_p : min(n_p, n_s)
+    return (ok = n_s !== nothing && n_min >= 2, n_primary = n_p, n_secondary = n_s,
+            secondary_verified = n_s !== nothing,
+            utilization = 2 / max(n_min, 1e-9))
+end
+
+"""
+    integrity_bottom_bars!(rebar_design, h) -> Bool
+
+Raise `rebar_design`'s column-strip positive steel to two bars when it has
+fewer (§13.3.8.5). Returns `true` when it changed the design.
+"""
+function integrity_bottom_bars!(rebar_design, h)
+    k = _cs_pos_index(rebar_design)
+    k === nothing && return false
+    cs = rebar_design.column_strip_reinf[k]
+    cs.n_bars >= 2 && return false
+    # ACI 318-11 §13.3.2 + §7.6.5 — slab-thickness-dependent s_max.
+    # `select_bars` places at least two bars.
+    b = select_bars(cs.As_provided, rebar_design.column_strip_width;
+                    max_spacing = max_bar_spacing(h))
+    rebar_design.column_strip_reinf[k] = StripReinforcement(
+        :pos, cs.Mu, cs.As_reqd, cs.As_min,
+        uconvert(u"m^2", b.As_provided), b.bar_size,
+        uconvert(u"m", b.spacing), b.n_bars, cs.section_adequate)
+    return true
+end
+
+"""Index of the column-strip positive (bottom) steel in `rebar_design`, or `nothing`."""
+_cs_pos_index(rebar_design) =
+    findfirst(r -> r.location === :pos, rebar_design.column_strip_reinf)
+
+"""
+    design_integrity_check(rebar_design, secondary_rebar_design) -> NamedTuple
+
+[`integrity_bottom_bars`](@ref) on the column-strip positive steel of each
+direction's design (`secondary_rebar_design` may be `nothing`).
+"""
+function design_integrity_check(rebar_design, secondary_rebar_design)
+    cs_pos(rd) = (k = _cs_pos_index(rd); k === nothing ? (n_bars = 0,) : rd.column_strip_reinf[k])
+    sec = secondary_rebar_design === nothing ? nothing : cs_pos(secondary_rebar_design)
+    return integrity_bottom_bars(cs_pos(rebar_design), sec)
+end
+
+"""
     integrity_reinforcement(
         tributary_area::Area,
         qD::LinearLoad,
@@ -511,10 +625,10 @@ end
         load_factor::Float64 = 2.0
     ) -> NamedTuple
 
-Calculate required structural integrity reinforcement per ACI 318-11 §13.3.8.5.
-
-The required steel area provides tensile capacity to carry the reaction force
-from the tributary area under a progressive collapse scenario.
+Not an ACI 318-11 requirement and not used by the slab pipeline: §13.3.8.5
+is prescriptive (see [`integrity_bottom_bars`](@ref)). This force estimate,
+2(D + L) over the tributary area carried in tension at 0.9 fy, is kept for
+the report generators that print it.
 
 # Arguments
 - `tributary_area`: Area supported by the column connection
@@ -533,9 +647,6 @@ Named tuple with:
 - Applies to all column types (interior, edge, corner)
 - This is in addition to flexural reinforcement requirements
 
-# Reference
-- ACI 318-11 §13.3.8.5: Two-way slab structural integrity
-- ACI 318-11 R13.3.8: Commentary on progressive collapse resistance
 """
 function integrity_reinforcement(
     tributary_area::Area,

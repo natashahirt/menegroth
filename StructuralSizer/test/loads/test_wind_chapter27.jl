@@ -17,8 +17,9 @@ const _ATOL = 1e-9
 const _SQ = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)]
 
 function _wall(loops, direction; qz=10.0, qh=20.0, Kd=1.0, G=1.0, GCpi=0.0,
-               height=1.0, qi=nothing, flexible=false)
-    return wind_wall_resultant(loops, direction; qz, qh, Kd, G, GCpi, height, qi, flexible)
+               height=1.0, qi=nothing, flexible=false, gust=nothing)
+    return wind_wall_resultant(loops, direction; qz, qh, Kd, G, GCpi, height, qi,
+                               flexible, gust)
 end
 
 @testset "ASCE 7-22 Chapter 27 MWFRS wind" begin
@@ -109,6 +110,40 @@ end
         @test_throws ArgumentError _wall([(0.0, 0.0), (1.0, 0.0), (2.0, 0.0)], (1.0, 0.0))
         @test_throws ArgumentError _wall(_SQ, (0.0, 0.0))
         @test_throws ArgumentError _wall(_SQ, (1.0, 0.0); flexible=true)
+        @test_throws ArgumentError _wall(_SQ, (1.0, 0.0); flexible=true,
+                                         gust=(eR=1.0, Iz=0.2, gQ=3.4, Q=0.8, gR=3.8))
+    end
+
+    @testset "Eq. 27.3-4" begin
+        # HAND CHECK. The square-root term does not change sign, so −e_Q is
+        # not the negative of +e_Q.
+        # e_Q = 4.5, e_R = 1, I_z = 0.2, g_Q = 3.4, Q = 0.8, g_R = 3.8, R = 0.3.
+        # √((3.4·0.8·4.5)^2 + (3.8·0.3·1)^2) = √(12.24^2 + 1.14^2)
+        # √((3.4·0.8)^2 + (3.8·0.3)^2) = √(2.72^2 + 1.14^2)
+        eQ, eR = 4.5, 1.0
+        Iz, gQ, Q, gR, R = 0.2, 3.4, 0.8, 3.8, 0.3
+        root_den = sqrt((gQ * Q)^2 + (gR * R)^2)
+        den = 1 + 1.7 * Iz * root_den
+        plus = (eQ + 1.7 * Iz * sqrt((gQ * Q * eQ)^2 + (gR * R * eR)^2)) / den
+        minus = (-eQ + 1.7 * Iz * sqrt((gQ * Q * -eQ)^2 + (gR * R * eR)^2)) / den
+        kw = (; Iz, gQ, Q, gR, R)
+        @test wind_flexible_eccentricity(eQ, eR; kw...) ≈ plus atol=_ATOL
+        @test wind_flexible_eccentricity(-eQ, eR; kw...) ≈ minus atol=_ATOL
+        @test minus ≉ -plus
+
+        # Case 2 on the 10 × 10 square. Along-wind shear is 180, so 75% is
+        # 135. B = 10 and e_Q = ±1.5. The shape moment is 0.
+        gust = (eR=eR, Iz=Iz, gQ=gQ, Q=Q, gR=gR, R=R)
+        fx = _wall(_SQ, (1.0, 0.0); flexible=true, gust)
+        fy = _wall(_SQ, (0.0, 1.0); flexible=true, gust)
+        cases = wind_cases_from_resultants(fx, fy)
+        cplus = only(c for c in cases if c.kind === :case2 && c.sign_1 == 1 && c.direction == (1.0, 0.0))
+        cminus = only(c for c in cases if c.kind === :case2 && c.sign_1 == -1 && c.direction == (1.0, 0.0))
+        e_plus = wind_flexible_eccentricity(0.15 * 10, eR; kw...)
+        e_minus = wind_flexible_eccentricity(-0.15 * 10, eR; kw...)
+        @test cplus.Mz ≈ 135.0 * e_plus atol=_ATOL
+        @test cminus.Mz ≈ 135.0 * e_minus atol=_ATOL
+        @test cplus.Mz ≉ -cminus.Mz
     end
 
     @testset "oblique wind and a non-rectangular plan" begin

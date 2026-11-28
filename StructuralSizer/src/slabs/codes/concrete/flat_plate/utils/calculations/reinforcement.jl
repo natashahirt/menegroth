@@ -4,40 +4,20 @@
 """
     minimum_reinforcement(b, h, fy)
 
-Minimum reinforcement per ACI 318-11 §13.3.1 / §7.12.2.1 for shrinkage and temperature.
+Minimum flexural reinforcement of a nonprestressed slab, ACI 318-19 §8.6.1.1
+(corpus: aci-318-19, printed p. 110):
 
-# Minimum Ratios (ACI 318-11 §7.12.2.1)
-- fy < 60 ksi:  ρ_min = 0.0020
-- 60 ≤ fy < 77 ksi: ρ_min = 0.0018
-- fy ≥ 77 ksi:  ρ_min = max(0.0014, 0.0018 × 60000/fy)
+    As,min = 0.0018 Ag = 0.0018 b h
+
+ACI 318-19 dropped the fy-dependent ratios of ACI 318-11 §7.12.2.1, so `fy`
+does not change the result; the argument is kept for callers.
 
 # Arguments
 - `b`: Strip width
 - `h`: Total slab thickness (gross section)
-- `fy`: Reinforcement yield strength
-
-# Returns
-- As_min = ρ_min × b × h
-
-# Reference
-- ACI 318-11 §13.3.1, §7.12.2.1
-- StructurePoint Example: fy=60ksi → As_min = 0.0018 × b × h
+- `fy`: Reinforcement yield strength (unused)
 """
-function minimum_reinforcement(b::Length, h::Length, fy::Pressure)
-    # ACI 318-11 §7.12.2.1 thresholds
-    # Round to nearest psi to avoid Asap ksi ↔ Unitful psi conversion gap
-    fy_psi = round(Int, ustrip(u"psi", fy))
-    
-    ρ_min = if fy_psi < 60_000      # fy < 60 ksi (Grade 40/50)
-        0.0020
-    elseif fy_psi < 77_000          # 60 ksi ≤ fy < 77 ksi (Grade 60)
-        0.0018
-    else                            # fy ≥ 77 ksi (Grade 80+)
-        max(0.0014, 0.0018 * 60_000 / fy_psi)
-    end
-    
-    return ρ_min * b * h
-end
+minimum_reinforcement(b::Length, h::Length, fy::Pressure) = 0.0018 * b * h
 
 
 """

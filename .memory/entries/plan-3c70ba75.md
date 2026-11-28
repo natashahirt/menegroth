@@ -8,12 +8,12 @@ title: Add wall, column, and beam self-weight to ELF seismic weight W and P-delt
 node_label: self-weight in W and Px
 tags: walls,phase-7,elf,p-delta,seismic-weight,px,asce-7-22
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-1cf8ff4f
 created_at: '2026-10-31T13:21:18.621461+00:00'
-updated_at: '2026-10-31T13:21:18.621461+00:00'
+updated_at: '2026-10-31T14:34:05.963160+00:00'
 ---
 Finding (scripts/runners/pdelta_ratio_probe.jl, logs/pdelta_ratio_probe.log): the M2/M1 about 1.5 on the office fixtures is Y-direction sway amplification. Both fixtures have walls only along X. ELF W and Px are summed from Cell self_weight + sdl + live only. Wall self-weight (and column/beam self-weight) is missing, so the vertical force through each story cut under 1.0D is 2.6-5.1x the ELF Px (3.4-6.9x under 1.2D+1.6Lr). Corrected Y theta is about 0.39-0.43, above theta_max 0.125; the measured K_G amplification (1.56-1.75) matches 1/(1-theta_corrected). The story geometric stiffness is correct; theta and W are understated.
 

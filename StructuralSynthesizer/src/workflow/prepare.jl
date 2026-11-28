@@ -3,6 +3,48 @@
 # =============================================================================
 
 """
+`true` when a composite-deck bay is longer than the profile's longest
+published single-span unshored length. The deck then needs fill beams.
+
+Floor cells still carry `floor_type == :unknown` here: `initialize!` has
+built their spans, and the slab type is applied later. Grade is the only
+cell that is not a deck bay.
+"""
+function _deck_bay_needs_fill_beams(struc, floor_type, floor_opts)
+    floor_type === :composite_deck || return false
+    floor_opts isa StructuralSizer.CompositeDeckOptions || return false
+    limit = StructuralSizer.max_unshored_simple_span(floor_opts.deck_profile)
+    for cell in struc.cells
+        cell.floor_type === :grade && continue
+        cell.spans.primary > limit && return true
+    end
+    return false
+end
+
+"""Framing options that place steel fill beams at the schema's joist spacing."""
+function _with_deck_fill_beams(opts::NamedTuple, params)
+    steel = params.materials.steel
+    steel isa StructuralSizer.StructuralSteel || (steel = StructuralSizer.A992_Steel)
+    mats = get(opts, :materials, NamedTuple())
+    mats isa NamedTuple || (mats = NamedTuple())
+    return merge(opts, (materials = merge(mats, (steel = steel,)),))
+end
+
+"""Center-to-center rib spacing the top slab spans, or `nothing`."""
+function _rib_topping_center(opts::NamedTuple)
+    raw = if haskey(opts, :module_spacing)
+        opts.module_spacing
+    elseif haskey(opts, :spacing)
+        opts.spacing
+    else
+        return nothing
+    end
+    vals = raw isa Union{Tuple, AbstractVector} ? raw : (raw,)
+    isempty(vals) && return nothing
+    return maximum(v -> v isa Unitful.Length ? v : v * u"m", vals)
+end
+
+"""
     prepare!(struc::BuildingStructure, params::DesignParameters;
              framing_opts::NamedTuple = NamedTuple()) -> struc
 
@@ -42,17 +84,49 @@ end
 """
 function prepare!(struc::BuildingStructure, params::DesignParameters;
                   framing_opts::NamedTuple = NamedTuple())
+    # A module grid that cannot be a waffle becomes one-way joists before the
+    # floor type and the rib layout are read. ACI 318-11 §8.13.4.
+    opts = isempty(framing_opts) ? params.framing_opts : framing_opts
+    opts, _ = _qualify_module_framing(opts, params)
     floor_opts = resolve_floor_options(params)
     floor_type = _infer_floor_type(floor_opts)
-    
+    # Resolve framing before the support check. Joists are materialized
+    # after `initialize!`, so a ribbed floor has to be told they are coming.
+    plan = _rib_layout_opts(opts)
+    grillage_planned = plan.grillage
+    # Rib bay counts set the topping span of a `:bays` grillage.
+    rib_bays = plan.layout === :bays ? (Int(opts.n_xi), Int(opts.n_eta)) : nothing
+    joists_planned = floor_type in (:one_way, :two_way) &&
+        (haskey(opts, :spacing) || haskey(opts, :beam_options) || grillage_planned)
+    # A waffle's top slab spans the rib module, not the beam bay.
+    # `spacing` is a tributary joist; `module_spacing` is a grillage.
+    topping_span = joists_planned ? _rib_topping_center(opts) : nothing
+
+    # A drawn slab edge becomes centerlines once. Column resizing then moves
+    # the slab border, not the grid.
+    params.geometry_is_centerline || apply_facade_setback!(struc)
+
     initialize!(struc; loads=params.loads, floor_type=floor_type,
+                material=_primary_material(floor_opts),
                 floor_opts=floor_opts,
                 scoped_floor_overrides=params.scoped_floor_overrides,
                 # ACI 318-11 §10.10.4.1 — scoped-override cells inherit the global column cracking factor
                 col_I_factor = params.column_I_factor,
                 tributary_axis=params.tributary_axis,
                 plan_axis=isnothing(params.lateral) ? (1.0, 0.0) : params.lateral.plan_axis,
-                wall_thickness=params.wall_thickness)
+                wall_thickness=params.wall_thickness,
+                topping_span=topping_span,
+                rib_bays=rib_bays,
+                joists_planned=joists_planned,
+                park_wall_overlaps=params.park_wall_overlaps)
+
+    # A composite deck spans between beams. When the bay is longer than the
+    # profile's published single-span unshored length, the girders are too
+    # far apart, so fill beams are added at the steel-joist spacing.
+    if _deck_bay_needs_fill_beams(struc, floor_type, floor_opts) &&
+            _resolve_level_material(opts, :steel, :beam) === nothing
+        opts = _with_deck_fill_beams(opts, params)
+    end
 
     # Auto-generate the framing hierarchy above each slab (plan
     # `joists-roles-materials`, Phase 5). Runs immediately after
@@ -66,8 +140,14 @@ function prepare!(struc::BuildingStructure, params::DesignParameters;
     # carry framing through a single `design_building(struc, params)` call
     # (`routes.jl` passes no kwarg). An empty result stays a strict no-op for
     # flat-plate/flat-slab/beam-supported systems.
-    opts = isempty(framing_opts) ? params.framing_opts : framing_opts
     populate_levels!(struc; opts=opts)
+    # Joists exist now, so a deck they cross is spanned at their spacing.
+    _record_deck_spans!(struc)
+    if joists_planned && !any(b -> b isa Beam && is_joist(b), struc.beams)
+        throw(ArgumentError(
+            "framing options asked for joists, but none were created. " *
+            "A one-way or two-way floor cannot treat missing ribs as supports."))
+    end
 
     fc = _get_design_fc(params)
     fp_opts = floor_opts isa StructuralSizer.FlatSlabOptions ? floor_opts.base : floor_opts
@@ -91,6 +171,10 @@ function prepare!(struc::BuildingStructure, params::DesignParameters;
     # Walls as the seismic system are validated before the model is built.
     # Releases stay on the material defaults. A gravity-only building skips this.
     struc.ordinary_wall_result = nothing
+    struc.foundation_lateral = nothing
+    empty!(struc.stage_diagnostics)
+    empty!(struc.frame_section_floors)
+    empty!(struc.frame_floor_demands)
     if params.lateral !== nothing
         prepare_lateral_model!(struc, params.lateral)
     end

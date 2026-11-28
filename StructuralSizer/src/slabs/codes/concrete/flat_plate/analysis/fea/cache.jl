@@ -19,6 +19,21 @@ struct ElementMoments
     Mxy::Float64
 end
 
+"""
+    FEASlabView(shell_elements, nodes, u)
+
+One slab's triangles in a larger solved model. `shell_elements[k]` is the
+triangle of `element_data[k]`. `nodes` is the whole model's node list, so a
+triangle's `nodeID` indexes it, and `u` is the displacement those triangles
+are read at. Readers that only need the slab's own shells (nodal smoothing,
+element precompute) take this in place of an `Asap.Model`.
+"""
+struct FEASlabView
+    shell_elements::Vector{Asap.ShellTri3}
+    nodes::Vector{Asap.Node}
+    u::Vector{Float64}
+end
+
 """Column stub half: `(element, base_node, slab_node)` for one side of a column."""
 const ColStubHalf = NamedTuple{(:element, :base_node, :slab_node)}
 
@@ -54,8 +69,9 @@ This enables:
 mutable struct FEAModelCache
     initialized::Bool
 
-    # Asap model + column stubs (persistent across iterations)
-    model::Union{Nothing, Asap.Model}
+    # Asap model + column stubs (persistent across iterations). A slab read
+    # from the building model holds an `FEASlabView` of its own triangles.
+    model::Union{Nothing, Asap.Model, FEASlabView}
     col_stubs::Dict{Int, ColStubData}   # i => (below=..., above=...)
     shells::Union{Nothing, Vector{<:Asap.ShellElement}}  # shell elements from mesher
 
@@ -94,6 +110,10 @@ mutable struct FEAModelCache
     # through every call site.  Set by `_build_or_update_fea!`.
     drop_panel::Union{Nothing, DropPanelGeometry}
 
+    # Unfactored drop-projection self-weight (Pa), `h_drop × γ × g`. It acts on
+    # the `:drop_panel` shells only, as dead load ([`_set_fea_area_loads!`](@ref)).
+    q_drop::Float64
+
     # Edge-beam frame elements (ACI 318-11 §13.6.4.2 / §13.7.5).  Empty when
     # `has_edge_beam=false` and `edge_beam_βt=0`.  When configured, holds one
     # `Asap.Element` per skeleton boundary edge connecting consecutive
@@ -114,6 +134,21 @@ mutable struct FEAModelCache
     # `FEA.averaging_width_factor` before moment extraction.
     averaging_width_factor::Union{Nothing, Float64}
 
+    # How many times this cache built a mesh, and how many times it kept
+    # the mesh and only updated sections and loads. A reset keeps both,
+    # so a column that grows and forces a remesh still adds to the count.
+    n_rebuilds::Int
+    n_updates::Int
+
+    # Fixed-mesh re-tag map (audit #1 / direction 7.8). Each entry is
+    # `(shell_index, col_index)`: a fenced-zone triangle that belongs to
+    # column `col_index`'s cap footprint. On every update the triangle is
+    # re-tagged `:col_patch` (inside the current column) or `:slab` (in the
+    # annulus out to the cap), so a column step reuses the mesh. Empty unless
+    # the mesh was built with `fixed_mesh=true`; belongs to this mesh, so a
+    # reset clears it.
+    patch_zone::Vector{Tuple{Int, Int}}
+
     FEAModelCache() = new(
         false, nothing, Dict{Int,ColStubData}(), nothing,
         FEAElementData[], Dict{Int,Vector{Int}}(),
@@ -124,10 +159,14 @@ mutable struct FEAModelCache
         Dict{Int,NamedTuple}(),
         0.0,
         nothing,
+        0.0,
         Any[],
         0.0,
         nothing,
         nothing,
+        0,
+        0,
+        Tuple{Int, Int}[],
     )
 end
 
@@ -146,17 +185,28 @@ and its patch matches the new column.
 """
 function fea_mesh_key(struc, slab, columns;
                       target_edge::Union{Nothing, Length} = nothing,
-                      drop_panel::Union{Nothing, DropPanelGeometry} = nothing)
+                      drop_panel::Union{Nothing, DropPanelGeometry} = nothing,
+                      fixed_mesh::Bool = false,
+                      fixed_mesh_cap::Union{Nothing, Length} = nothing)
     boundary, all_vis, interior_edges = _get_slab_face_boundary(struc, slab)
     skel = struc.skeleton
     _m(x) = Float64(ustrip(u"m", x))
     bxy = Tuple(_vertex_xy_m(skel, vi) for vi in boundary)
     verts = Tuple(sort!(collect(Int, all_vis)))
     edges = Tuple(sort!(collect(interior_edges)))
+    # Fixed mesh: the fenced zone is sized for the cap, so a column's own c1/c2
+    # (and the rebuild they would force) leave the key. Centre, position and
+    # orientation still key, so moving or rotating a column still rebuilds.
+    # `col_shape` leaves the key too: the cap is meshed as a square either way.
+    cap_m = fixed_mesh && fixed_mesh_cap !== nothing ? _m(fixed_mesh_cap) : nothing
     cols = Tuple(
         let xy = _column_xy_m(skel, col)
             pos = hasproperty(col, :position) ? col.position : :interior
-            (xy[1], xy[2], _m(col.c1), _m(col.c2), col_shape(col), pos, col_orientation(col))
+            if fixed_mesh
+                (xy[1], xy[2], cap_m, cap_m, :fixed, pos, col_orientation(col))
+            else
+                (xy[1], xy[2], _m(col.c1), _m(col.c2), col_shape(col), pos, col_orientation(col))
+            end
         end
         for col in columns
     )
@@ -199,7 +249,9 @@ median edge length all belong to one mesh, so none of them survive a remesh.
 """
 function _reset_fea_cache!(cache::FEAModelCache)
     fresh = FEAModelCache()
+    kept = (:n_rebuilds, :n_updates)
     for f in fieldnames(FEAModelCache)
+        f in kept && continue
         setfield!(cache, f, getfield(fresh, f))
     end
     return cache

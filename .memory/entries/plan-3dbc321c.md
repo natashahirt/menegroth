@@ -12,9 +12,10 @@ success: 'null'
 files: ''
 session_id: sess-c424b3b3
 created_at: '2026-07-14T01:33:04.901387+00:00'
-updated_at: '2026-07-14T01:37:05.933812+00:00'
+updated_at: '2026-11-23T17:42:54.430715+00:00'
 has_child_rationale: Close the roof gap — there is no roof building type, truss model,
   or joist-girder sizing today
+related_to: deci-ff84d1d8
 ---
 # Phase C — Roof & truss systems
 

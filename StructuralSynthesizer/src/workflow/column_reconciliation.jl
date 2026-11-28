@@ -4,10 +4,18 @@
 
 """Extract column options from DesignParameters for flat plate/slab sizing.
 Returns ConcreteColumnOptions or PixelFrameColumnOptions; `nothing` for steel (not supported).
-Caller must reject PixelFrame for flat plate/slab before use."""
+With `params.columns` unset on a flat plate or flat slab, returns
+[`concrete_column_options`](@ref), so the slab loop sizes columns in the
+cascade's column materials. Caller must reject PixelFrame for flat plate/slab before use."""
 function _get_column_opts(params::DesignParameters)
     opts = params.columns
-    (opts isa ConcreteColumnOptions || opts isa StructuralSizer.PixelFrameColumnOptions) ? opts : nothing
+    (opts isa ConcreteColumnOptions || opts isa StructuralSizer.PixelFrameColumnOptions) && return opts
+    if opts === nothing
+        floor = something(params.floor, StructuralSizer.FlatPlateOptions())
+        StructuralSizer.floor_symbol(floor) in (:flat_plate, :flat_slab) &&
+            return concrete_column_options(params)
+    end
+    return nothing
 end
 
 # Half a sizing increment. Used only to recognize an unchanged cross-section.
@@ -49,7 +57,8 @@ function _same_bars_on_new_size(existing, col)
     end
     return StructuralSizer.RCColumnSection(
         b = col.c1, h = col.c2, bar_size = layout.bar_size, n_bars = layout.n_bars,
-        cover = existing.cover, tie_type = existing.tie_type)
+        cover = existing.cover, tie_type = existing.tie_type,
+        tie_bar_size = existing.tie_bar_size)
 end
 
 """
@@ -59,7 +68,8 @@ ACI 318-11 §10.9.1 (corpus: aci-318-11, page 148). Used when a column has no
 section, or its previous bars fall outside that window on a grown cross-section.
 The axial grow check already set Ag from ACI 318-11 Eq. (10-2) at ρg = 0.01,
 so this only restores the reinforcement limits. Bar counts are even, matching the column
-reinforcement designer, and at least 4 for tied columns or 6 for spiral.
+reinforcement designer, and at least 4 for tied columns or 6 for spiral. Layouts the
+section constructor rejects (e.g. ACI 318-19 §25.2.3 clear spacing) are skipped.
 """
 function _minimum_longitudinal_section(col, existing)
     Ag = col.shape == :circular ?
@@ -70,12 +80,19 @@ function _minimum_longitudinal_section(col, existing)
     has_sec = existing isa StructuralSizer.RCColumnSection || existing isa StructuralSizer.RCCircularSection
     tie = has_sec ? existing.tie_type : (col.shape == :circular ? :spiral : :tied)
     cover = has_sec ? existing.cover : 1.5u"inch"
+    tie_bar = existing isa StructuralSizer.RCColumnSection ? existing.tie_bar_size : 4
     min_bars = tie == :spiral ? 6 : 4
     layout = has_sec ? _uniform_bar_layout(existing) : nothing
     sizes = layout === nothing ? (8, 6, 7, 9, 10, 11) : (layout.bar_size, 8, 6, 7, 9, 10, 11)
 
-    best = nothing
-    best_As = As_max + 1.0u"inch^2"
+    build(size, n) = col.shape == :circular ?
+        StructuralSizer.RCCircularSection(
+            D = col.c1, bar_size = size, n_bars = n, cover = cover, tie_type = tie) :
+        StructuralSizer.RCColumnSection(
+            b = col.c1, h = col.c2, bar_size = size, n_bars = n, cover = cover,
+            tie_type = tie, tie_bar_size = tie_bar)
+
+    candidates = Tuple{typeof(1.0u"inch^2"), Int, Int}[]
     for size in unique(sizes)
         Ab = uconvert(u"inch^2", StructuralSizer.rebar(size).A)
         n = max(min_bars, ceil(Int, ustrip(As_min / Ab)))
@@ -83,22 +100,21 @@ function _minimum_longitudinal_section(col, existing)
         while n <= 40
             As = n * Ab
             As > As_max && break
-            if As >= As_min && As < best_As
-                best = (bar_size = size, n_bars = n, cover = cover, tie_type = tie)
-                best_As = As
-            end
+            As >= As_min && push!(candidates, (As, size, n))
             n += 2
         end
     end
-    best === nothing && error("No longitudinal layout satisfies ACI 318-11 §10.9.1 for this column size")
-    if col.shape == :circular
-        return StructuralSizer.RCCircularSection(
-            D = col.c1, bar_size = best.bar_size, n_bars = best.n_bars,
-            cover = best.cover, tie_type = best.tie_type)
+    sort!(candidates; by = first)
+    for (_, size, n) in candidates
+        sec = try
+            build(size, n)
+        catch e
+            e isa ArgumentError || rethrow()
+            continue
+        end
+        return sec
     end
-    return StructuralSizer.RCColumnSection(
-        b = col.c1, h = col.c2, bar_size = best.bar_size, n_bars = best.n_bars,
-        cover = best.cover, tie_type = best.tie_type)
+    error("No longitudinal layout satisfies ACI 318-11 §10.9.1 and ACI 318-19 §25.2.3 for this column size")
 end
 
 """
@@ -136,6 +152,109 @@ function _assign_flat_plate_column_section!(col)
     return chosen
 end
 
+"""
+    _rc_column_frame_section(col, params) -> Asap.Section
+
+Frame section for an RC column at its current `c1` × `c2` (or diameter).
+Concrete is the column's own `concrete` when set, else
+[`column_concrete`](@ref); the second moments of area are
+multiplied by `params.column_I_factor` (ACI 318-11 §10.10.4.1). The
+rectangular torsion constant is the thin-rectangle series
+`β·a·b³`, `β = 1/3 − 0.21 (b/a)(1 − (b/a)⁴/12)`.
+"""
+function _rc_column_frame_section(col, params::DesignParameters)
+    conc = something(col.concrete, column_concrete(params))
+    E_Pa = ustrip(u"Pa", conc.E)
+    G_Pa = E_Pa / (2.0 * (1.0 + conc.ν))
+    ρ_kg = ustrip(u"kg/m^3", conc.ρ)
+    k = params.column_I_factor
+    b_m = ustrip(u"m", col.c1)
+    h_m = ustrip(u"m", col.c2)
+    if col.shape == :circular
+        A = π * b_m^2 / 4
+        I = π * b_m^4 / 64
+        J = π * b_m^4 / 32
+        return Asap.Section(A * u"m^2", E_Pa * u"Pa", G_Pa * u"Pa",
+                            k * I * u"m^4", k * I * u"m^4", k * J * u"m^4",
+                            ρ_kg * u"kg/m^3")
+    end
+    a_dim, b_dim = max(b_m, h_m), min(b_m, h_m)
+    β = 1/3 - 0.21 * (b_dim / a_dim) * (1 - (b_dim / a_dim)^4 / 12)
+    return Asap.Section(b_m * h_m * u"m^2", E_Pa * u"Pa", G_Pa * u"Pa",
+                        k * b_m * h_m^3 / 12 * u"m^4", k * h_m * b_m^3 / 12 * u"m^4",
+                        k * β * a_dim * b_dim^3 * u"m^4", ρ_kg * u"kg/m^3")
+end
+
+"""
+    _install_column_frame_section!(struc, col, asap_sec) -> Bool
+
+Put `asap_sec` on every frame element of `col`, skipping any element whose
+section already equals it by value. `Asap.Section` is an immutable value type,
+so `==` is an exact field comparison and `_rc_column_frame_section` is
+deterministic in the column's dimensions; an unchanged column therefore writes
+nothing. Returns `true` when any element's section actually changed, so callers
+can tell whether a re-solve is needed.
+"""
+function _install_column_frame_section!(struc::BuildingStructure, col, asap_sec)
+    changed = false
+    for seg_idx in segment_indices(col)
+        edge_idx = struc.segments[seg_idx].edge_idx
+        (edge_idx < 1 || edge_idx > length(struc.asap_model.frame_elements)) && continue
+        el = struc.asap_model.frame_elements[edge_idx]
+        el.section == asap_sec && continue
+        el.section = asap_sec
+        changed = true
+    end
+    return changed
+end
+
+"""
+    _install_sized_column_frame!(struc, params) -> Bool
+
+Put every sized RC column's concrete section on the frame and its
+self-weight on the model, then re-solve. Until then a flat-plate frame column
+carries the placeholder section `to_asap!` gave it and no self-weight, so
+frame `Pu` leaves out the weight of the columns above. The self-weight is at
+[`member_self_weight_acceleration`](@ref). Returns `true` when the model was
+re-solved.
+"""
+function _install_sized_column_frame!(struc::BuildingStructure, params::DesignParameters;
+                                     skip_resolve_if_unchanged::Bool = false)
+    edges = Set{Int}()
+    changed = false
+    for col in struc.columns
+        (isnothing(col.c1) || isnothing(col.c2)) && continue
+        changed |= _install_column_frame_section!(struc, col, _rc_column_frame_section(col, params))
+        for seg_idx in segment_indices(col)
+            push!(edges, struc.segments[seg_idx].edge_idx)
+        end
+    end
+    isempty(edges) && return false
+    n_before = length(struc.asap_model.loads)
+    _add_gravity_loads!(struc, edges, member_self_weight_acceleration(params))
+    added = length(struc.asap_model.loads) > n_before
+    # #18 (exact): when the caller guarantees the model was just solved for the
+    # current state (the in-loop `refresh_flat_plate_analysis!`), a pass that
+    # changed no frame section and added no load leaves `model.u` already
+    # correct — the re-solve would only reproduce it. Skip it. The pre-loop
+    # caller leaves `skip_resolve_if_unchanged=false` and always re-solves.
+    (skip_resolve_if_unchanged && !changed && !added) && return false
+    return _resolve_after_column_change!(struc)
+end
+
+"""
+Re-solve after column sections changed on an unchanged mesh: element
+stiffness values only, then solve and refresh the pattern cache. Returns
+`true` when the model was processed and solved.
+"""
+function _resolve_after_column_change!(struc::BuildingStructure)
+    struc.asap_model.processed || return false
+    Asap.update!(struc.asap_model; values_only=true)
+    _solve_struc_model!(struc)
+    _refresh_pattern_solve_cache!(struc)
+    return true
+end
+
 StructuralSizer.TRACE_REGISTRY[(:_reconcile_columns!, :workflow)] =
     StructuralSizer.TracedFunctionMeta(
         :_reconcile_columns!,
@@ -147,52 +266,42 @@ StructuralSizer.TRACE_REGISTRY[(:_reconcile_columns!, :workflow)] =
     )
 
 """
-Tied-column design axial strength by ACI 318-11 Eq. (10-2), in newtons.
-
-φPn,max = 0.80 φ [0.85 f′c (Ag − Ast) + fy Ast], with φ = 0.65 for a
-compression-controlled tied member (§9.3.2.2(b); corpus aci-318-11, p. 127)
-and Ast = 0.01 Ag (§10.9.1; p. 148). Eq. (10-2) is §10.3.6.2, p. 143.
-`Ag_m2` is gross area in m²; stresses are in Pa.
-"""
-function _tied_pn_max(Ag_m2, fc_Pa, fy_Pa; ρg::Float64 = 0.01, φ::Float64 = 0.65)
-    Ast = ρg * Ag_m2
-    return 0.80 * φ * (0.85 * fc_Pa * (Ag_m2 - Ast) + fy_Pa * Ast)
-end
-
-"""Gross area (m²) at which [`_tied_pn_max`](@ref) equals `Pu_N`."""
-function _tied_ag_for_pu(Pu_N, fc_Pa, fy_Pa; ρg::Float64 = 0.01, φ::Float64 = 0.65)
-    denom = 0.80 * φ * (0.85 * fc_Pa * (1.0 - ρg) + fy_Pa * ρg)
-    return Pu_N / denom
-end
-
-"""
     _reconcile_columns!(struc, params) -> (struc=struc, n_reconciled=Int)
 
 Reconcile column sizes after flat-plate slab sizing.
 
 The slab loop designs columns from tributary Pu (single-floor tributary).
 For multi-story buildings, Asap model forces may be larger due to load
-accumulation from upper floors. This stage grows any column whose
+accumulation from upper floors. The frame first gets each column's concrete
+section and self-weight ([`_install_sized_column_frame!`](@ref)). This stage
+then grows any column whose
 Asap-model axial demand exceeds ACI 318-11 Eq. (10-2) at ρg = 0.01,
 using the column concrete and rebar rather than the slab's.
 
-Returns the mutated structure and the number of columns that grew.
+Then [`check_flat_plate_columns!`](@ref) gives every column the lightest
+section that passes its full-load strength, its §10.12 joints, and punching.
+`floors` is forwarded there: a plan size the slab commit or an earlier
+section search grew a column to. The search does not go under it.
+
+`model_current` (#18): set `true` only when the model was just solved for the
+current state (the in-loop `refresh_flat_plate_analysis!`). It lets
+[`_install_sized_column_frame!`](@ref) skip its re-solve on a round that changes
+no frame section — `model.u` is already correct. The pre-loop caller leaves it
+`false` and always re-solves.
+
+Returns the structure, the number of columns either step grew, whether the
+model was re-solved, and the full-load check's summary.
 """
 function _reconcile_columns!(
     struc::BuildingStructure,
     params::DesignParameters;
     tc::Union{Nothing, StructuralSizer.TraceCollector} = nothing,
+    floors::Dict{Int, Tuple} = Dict{Int, Tuple}(),
+    model_current::Bool = false,
 )
     _col_opts = _get_column_opts(params)
-    conc = resolve_column_concrete(params.materials)
-    reb = resolve_column_rebar(params.materials)
-    fc_Pa = ustrip(u"Pa", conc.fc′)
-    fy_Pa = ustrip(u"Pa", reb.Fy)
-    E_Pa = ustrip(u"Pa", conc.E)
-    ν_c = conc.ν
-    G_Pa = E_Pa / (2.0 * (1.0 + ν_c))
-    ρ_kg = ustrip(u"kg/m^3", conc.ρ)
-    I_factor = params.column_I_factor  # ACI 318-11 §10.10.4.1
+    conc = column_concrete(params)
+    reb = column_rebar(params)
     grew = 0
 
     _shape_con = !isnothing(_col_opts) ? _col_opts.shape_constraint : :square
@@ -201,6 +310,8 @@ function _reconcile_columns!(
 
     StructuralSizer.emit!(tc, :workflow, "_reconcile_columns!", "", :enter;
                           n_columns=length(struc.columns))
+
+    framed = _install_sized_column_frame!(struc, params; skip_resolve_if_unchanged = model_current)
 
     for col in struc.columns
         isnothing(col.c1) && continue
@@ -211,8 +322,9 @@ function _reconcile_columns!(
         needs_growth = false
         if Pu_N > 0
             # ACI 318-11 Eq. (10-2) at ρg = 0.01. Same expression as the axial check.
-            Ag_required_m2 = _tied_ag_for_pu(Pu_N, fc_Pa, fy_Pa)
-            Ag_required = Ag_required_m2 * u"m^2"
+            Ag_required = StructuralSizer.tied_column_area_for_axial(
+                Pu_N * u"N", conc.fc′; fy = reb.Fy)
+            Ag_required_m2 = ustrip(u"m^2", Ag_required)
             c_required = sqrt(Ag_required_m2) * u"m"
             if c_required > col.c1 || c_required > col.c2
                 grow_column_for_axial!(col, Ag_required;
@@ -223,80 +335,39 @@ function _reconcile_columns!(
             end
         end
 
-        b_m = ustrip(u"m", col.c1)
-        h_m = ustrip(u"m", col.c2)
-        col_shape = hasproperty(col, :shape) ? col.shape : :rectangular
-
         # The slab loop already stored the P-M section. Keep its bars, or
         # redesign only when this column grew, and record concrete and rebar
         # volumes from that section.
         _assign_flat_plate_column_section!(col)
         _set_rc_column_volumes!(
             col,
-            something(col.concrete, resolve_column_concrete(params.materials)),
-            resolve_column_rebar(params.materials),
+            something(col.concrete, column_concrete(params)),
+            column_rebar(params),
         )
-
-        # Update Asap model elements if column grew
-        if needs_growth
-            if col_shape == :circular
-                D_m = b_m  # c1 = c2 = D for circular
-                A = π * D_m^2 / 4
-                I = π * D_m^4 / 64  # Same for both axes
-                J = π * D_m^4 / 32  # Torsional constant, solid circular
-                asap_sec = Asap.Section(
-                    A * u"m^2", E_Pa * u"Pa", G_Pa * u"Pa",
-                    I_factor * I * u"m^4", I_factor * I * u"m^4",
-                    I_factor * J * u"m^4",
-                    ρ_kg * u"kg/m^3",
-                )
-            else
-                A   = b_m * h_m
-                Ig_x = b_m * h_m^3 / 12
-                Ig_y = h_m * b_m^3 / 12
-                a_dim = max(b_m, h_m); b_dim = min(b_m, h_m)
-                β = 1/3 - 0.21 * (b_dim / a_dim) * (1 - (b_dim / a_dim)^4 / 12)
-                asap_sec = Asap.Section(
-                    A * u"m^2", E_Pa * u"Pa", G_Pa * u"Pa",
-                    I_factor * Ig_x * u"m^4", I_factor * Ig_y * u"m^4",
-                    I_factor * β * a_dim * b_dim^3 * u"m^4",
-                    ρ_kg * u"kg/m^3",
-                )
-            end
-
-            for seg_idx in segment_indices(col)
-                edge_idx = struc.segments[seg_idx].edge_idx
-                (edge_idx < 1 || edge_idx > length(struc.asap_model.frame_elements)) && continue
-                struc.asap_model.frame_elements[edge_idx].section = asap_sec
-            end
-        end
+        needs_growth &&
+            _install_column_frame_section!(struc, col, _rc_column_frame_section(col, params))
     end
-    
+
     grew > 0 && @info "Column reconciliation: $grew columns grew from Asap model forces"
-
-    # Recompute structural offsets after column dimensions changed
     grew > 0 && update_structural_offsets!(struc; input_is_centerline=params.geometry_is_centerline)
+    # Self-sync, so the outer pipeline can skip a full sync_asap!.
+    synced = (grew > 0 && _resolve_after_column_change!(struc)) || framed
 
-    # Self-sync: if any columns grew, do a lightweight K+S update and re-solve
-    # so the outer pipeline can skip the redundant full sync_asap!
-    synced = false
-    if grew > 0 && struc.asap_model.processed
-        Asap.update!(struc.asap_model; values_only=true)
-        Asap.solve!(struc.asap_model)
-        _refresh_pattern_solve_cache!(struc)
-        synced = true
-    end
+    StructuralSizer.emit!(tc, :workflow, "_reconcile_columns!", "", :decision;
+                          outcome = grew > 0 ? "grew_columns" : "no_change",
+                          n_reconciled=grew, self_synced=synced)
 
-    if grew > 0
-        StructuralSizer.emit!(tc, :workflow, "_reconcile_columns!", "", :decision;
-                              outcome="grew_columns", n_reconciled=grew, self_synced=synced)
-    else
-        StructuralSizer.emit!(tc, :workflow, "_reconcile_columns!", "", :decision;
-                              outcome="no_change", n_reconciled=0, self_synced=false)
-    end
+    full = check_flat_plate_columns!(struc, params; tc, floors)
+    synced |= !isempty(full.grown)
+    grew += length(full.grown)
+
     StructuralSizer.emit!(tc, :workflow, "_reconcile_columns!", "", :exit;
                           n_reconciled=grew, self_synced=synced)
 
-    return (struc = struc, n_reconciled = grew, synced = synced)
+    return (struc = struc, n_reconciled = grew, synced = synced, full_load = full)
 end
+
+
+
+
 

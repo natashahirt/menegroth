@@ -36,6 +36,10 @@ function _serialize_columns(design::BuildingDesign, du::DisplayUnits)
             axial_ratio = _round_val(cr.axial_ratio),
             interaction_ratio = _round_val(cr.interaction_ratio),
             ok = cr.ok,
+            seismic_frame_ratio = cr.seismic_frame === nothing ? nothing :
+                _round_val(cr.seismic_frame.ratio),
+            seismic_frame_check = cr.seismic_frame === nothing ? "" :
+                cr.seismic_frame.governing_check,
         ))
     end
     return results
@@ -70,6 +74,10 @@ function _serialize_beams(design::BuildingDesign, du::DisplayUnits)
             flexure_ratio = _round_val(br.flexure_ratio),
             shear_ratio = _round_val(br.shear_ratio),
             ok = br.ok,
+            seismic_frame_ratio = br.seismic_frame === nothing ? nothing :
+                _round_val(br.seismic_frame.ratio),
+            seismic_frame_check = br.seismic_frame === nothing ? "" :
+                br.seismic_frame.governing_check,
         ))
     end
     return results

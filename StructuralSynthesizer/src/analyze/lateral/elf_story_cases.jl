@@ -37,8 +37,9 @@
 #   Eq. 12.8-15 may be computed that way. Applying Ax back onto the moment
 #   depends on Seismic Design Category and Type 1 horizontal irregularity,
 #   which this function does not classify.
-# - δdi = 0. The rigid link neglects in-plane diaphragm deformation, which
-#   §12.8.6 permits when computing story drift.
+# - δdi = 0. The rigid link, and the straight line between the wall lines of
+#   a flexible floor, neglect in-plane diaphragm deformation, which §12.8.6.5
+#   permits when computing story drift.
 
 """One level above the base that receives an ELF story force."""
 struct ElfLevel
@@ -54,7 +55,8 @@ struct ElfLevel
     gravity_kN::Float64
     "Expected gravity at this level and above [kN]. Px in Eq. 12.8-18."
     px_kN::Float64
-    master::Asap.Node
+    "Rigid-diaphragm master, or `nothing` when the diaphragm has no rigid links."
+    master::Union{Nothing, Asap.Node}
     "Center of mass [m], the §12.8.6.5 drift point. Slab cells plus the self-weight assigned to this level."
     center_of_mass::NTuple{2, Float64}
     "Projected plan widths (extent along the first plan axis, along the second) [m], from the floor outline."
@@ -125,7 +127,12 @@ struct ElfStoryAnalysis
     cases::Vector{ElfCase}
     "Unit vector of the first plan axis. `:y` cases act along it turned 90° counterclockwise."
     plan_axis::NTuple{2, Float64}
+    "Full displacement of each case, same order as `cases`. Empty when no solve was stored."
+    displacements::Vector{Vector{Float64}}
 end
+
+ElfStoryAnalysis(levels, cases, plan_axis::NTuple{2, <:Real}) =
+    ElfStoryAnalysis(levels, cases, NTuple{2, Float64}(plan_axis), Vector{Float64}[])
 
 ElfStoryAnalysis(levels, cases) = ElfStoryAnalysis(levels, cases, (1.0, 0.0))
 
@@ -144,8 +151,19 @@ them as one batch on the reduced stiffness.
 together when the Y-direction row differs. Omitting them uses the X row in
 both directions. ASCE 7-22 §12.2.2 (corpus: asce-7-22, PDF page 176).
 
-`struc` must already have been through `to_asap!(; diaphragms=:rigid)` with
-slabs, so `asap_rigid_links` is non-empty. Any other diaphragm throws.
+A rigid diaphragm puts the story force and the accidental torsion on the
+master. A flexible diaphragm splits `(Fx, Fy)` among the lines of
+seismic-system walls by tributary seismic weight
+([`diaphragm_story_loads`](@ref)) and does not apply the 5% eccentricity.
+ASCE 7-22 §12.8.4.2.1 (corpus: asce-7-22, PDF page 187) requires accidental
+torsion only where diaphragms are not flexible, so the moment is not
+replaced by a couple. A flexible floor reads center-of-mass drift and θ
+between its wall lines, and leaves Ax unset. A `:semirigid` membrane floor
+takes the force on its nodes by seismic weight and the torsion as nodal
+forces, and reads drift from its seismic-system walls
+([`_semirigid_story_loads`](@ref), [`_semirigid_disp_at`](@ref)). The solved
+displacement of every case is kept on the analysis so a later pier read does
+not solve again. A full-plate `:shell` floor throws.
 
 `method` is `:sds` (Eq. 12.8-3, which needs `SD1` and `TL`) or `:sa`
 (Eq. 12.8-2, which needs `Sa`). `between` is `:two` or `:interpolate` when
@@ -179,12 +197,9 @@ function elf_story_analysis(struc::BuildingStructure;
                             Ry::Union{Real, Nothing}=nothing,
                             Cdy::Union{Real, Nothing}=nothing,
                             Ω0y::Union{Real, Nothing}=nothing,
-                            plan_axis::Tuple{Real, Real}=(1.0, 0.0))
+                            plan_axis::Tuple{Real, Real}=(1.0, 0.0),
+                            flexible_accidental_torsion::Bool=false)
     axis = unit_plan_axis(plan_axis)
-    isempty(struc.asap_rigid_links) && throw(ArgumentError(
-        "elf_story_analysis: story forces and accidental torsion use the rigid-diaphragm " *
-        "masters. asap_rigid_links is empty. Call to_asap!(struc; diaphragms=:rigid) " *
-        "with slabs present. A flexible diaphragm is a different distribution."))
     struc.asap_model.processed || throw(ArgumentError(
         "elf_story_analysis: the Asap model is not processed. Call to_asap! first."))
 
@@ -213,8 +228,9 @@ function elf_story_analysis(struc::BuildingStructure;
             Vx = seismic_story_shear(dist.Fx, heights)
             for torsion in (:none, :plus, :minus)
                 Mz = _elf_moments(levels, dist.Fx, direction, torsion)
-                push!(load_cases, _elf_loads(levels, dist.Fx, Mz,
-                                             plan_axis_vector(axis, direction)))
+                push!(load_cases, _elf_loads(struc, levels, dist.Fx, Mz,
+                                             plan_axis_vector(axis, direction);
+                                             flexible_accidental_torsion))
                 push!(cases, ElfCase(direction, purpose, torsion, Cs, V, k,
                     copy(dist.Fx), copy(Vx), Mz,
                     Float64[], Float64[], Float64[], Float64[],
@@ -225,16 +241,17 @@ function elf_story_analysis(struc::BuildingStructure;
         end
     end
 
-    displacements = Asap.solve(struc.asap_model, load_cases, struc.asap_rigid_links)
+    displacements = Asap.solve(struc.asap_model, load_cases, lateral_solve_links(struc))
     length(displacements) == length(cases) || throw(ArgumentError(
         "elf_story_analysis: the solve returned $(length(displacements)) cases, expected $(length(cases))."))
 
+    layout = isempty(struc.asap_rigid_links) ? _require_masterless_layout(struc, axis) : nothing
     solved = ElfCase[]
     for (i, u) in enumerate(displacements)
         Cdd, Ω0d = recover[i]
-        push!(solved, _elf_recover(cases[i], levels, u, Ie, Cdd, β, Ω0d, axis))
+        push!(solved, _elf_recover(cases[i], levels, u, Ie, Cdd, β, Ω0d, axis, layout))
     end
-    return ElfStoryAnalysis(levels, solved, axis)
+    return ElfStoryAnalysis(levels, solved, axis, displacements)
 end
 
 """
@@ -274,6 +291,58 @@ function _elf_cs(method, for_drift, SDS, S1, R, Ie, T, SD1, TL, Sa)
     end
     throw(ArgumentError(
         "elf_story_analysis: method must be :sa or :sds; got $(repr(method))."))
+end
+
+"""Stories that have faces, in skeleton order. Each entry is `(idx, z, outline)`."""
+function _faced_story_floors(skel)
+    raw = NamedTuple[]
+    for (idx, story) in skel.stories
+        isempty(story.faces) && continue
+        z = ustrip(u"m", story.elevation)
+        push!(raw, (; idx, z, outline=story_floor_outline(skel, story)))
+    end
+    return raw
+end
+
+"""
+Base elevation and the stories above it, lowest first.
+
+`label` names the analysis in the error. The 1e-6 m gap that keeps the base
+out of the list is the split wind and ELF already share. It is not
+[`WALL_CUT_ZTOL_M`](@ref).
+"""
+function _stories_above_base(raw, label::AbstractString)
+    isempty(raw) && throw(ArgumentError(
+        "$label: the skeleton has no story with faces."))
+    z_base = minimum(item.z for item in raw)
+    above = [item for item in raw if item.z > z_base + 1e-6]
+    isempty(above) && throw(ArgumentError(
+        "$label: no story sits above the base elevation $(z_base) m."))
+    sort!(above; by=item -> item.z)
+    return z_base, above
+end
+
+"""
+Rigid-diaphragm master at elevation `z`.
+
+`nothing` when the building has no rigid links. A building that has links
+and no master at this story throws. `label` names the analysis.
+"""
+function _level_master(struc, master_at, z, story_idx, label::AbstractString)
+    master = get(master_at, round(Int, z * 1000), nothing)
+    if master === nothing && !isempty(struc.asap_rigid_links)
+        throw(ArgumentError(
+            "$label: story $(story_idx) at $(z) m has no rigid-diaphragm master."))
+    end
+    return master
+end
+
+"Story height below `z`. Zero or negative throws. `label` names the analysis."
+function _story_height_below(z, z_below, story_idx, label::AbstractString)
+    hsx = z - z_below
+    hsx > 0 || throw(ArgumentError(
+        "$label: story height below story $(story_idx) is $(hsx) m."))
+    return hsx
 end
 
 """Masters already elected by the rigid-link pass, keyed by story elevation in millimetres."""
@@ -350,8 +419,8 @@ end
 """
 Unfactored `ρ A g L` of one frame [`Asap.GravityLoad`](@ref) [kN].
 
-`load.factor` is the acceleration, the same value the dead case applies.
-Asap accumulates `w = ρ A g` along the member (`accumulate_force!`).
+`load.factor` on the building model carries the strength dead factor
+([`member_self_weight_acceleration`](@ref)), so the weight uses `g`.
 """
 function _gravity_load_weight_kN(ld::Asap.GravityLoad)
     el = ld.element
@@ -364,10 +433,7 @@ function _gravity_load_weight_kN(ld::Asap.GravityLoad)
         "elf_story_analysis: a GravityLoad section has density $(sec.ρ)."))
     A >= 0 || throw(ArgumentError(
         "elf_story_analysis: a GravityLoad section has area $(sec.A)."))
-    g = ustrip(u"m/s^2", ld.factor)
-    g >= 0 || throw(ArgumentError(
-        "elf_story_analysis: a GravityLoad factor is $(ld.factor). The dead " *
-        "case uses this acceleration unfactored."))
+    g = ustrip(u"m/s^2", GRAVITY)
     L = ustrip(u"m", length(el))
     L > 0 || throw(ArgumentError(
         "elf_story_analysis: a GravityLoad member has length $(L) m."))
@@ -381,10 +447,11 @@ function _elf_node_xyz(node)
 end
 
 """
-Wall-shell and frame self-weight lumped onto story elevations.
+Wall-shell, frame, and drop-panel self-weight, item by item, at the story elevations.
 
-Returns `(lumps, total_kN)`. `lumps` is a dict of millimetre elevation key to
-`(weight_kN, weight·x, weight·y)`. `total_kN` is the sum before lumping.
+Each item is `(key, weight_kN, a, b)`: a weight on story key `key` (millimetres)
+spread uniformly along the plan segment from `a` to `b` [m]. A point is
+`a == b`. Returns `(items, total_kN)`, `total_kN` being the sum of the sources.
 
 # Engineering judgment
 ASCE 7-22 §12.7.2 (corpus: asce-7-22, PDF page 184) includes the dead load
@@ -394,10 +461,14 @@ at and above the level. User decision 2026-10-31: half of each wall, and half
 of each frame member, goes to the story elevation at each end. A beam has
 both ends at one elevation, so this places its whole weight on that floor.
 The share that lands on the base elevation is not above the base.
+A wall's half lies along its plan length, the segment whose centroid is the
+plan midpoint; the wall's mass does not move in plan over the story.
+
+Curtain-wall weight uses the same split. See [`_deposit_cladding!`](@ref).
 """
-function _elf_self_weight(struc, elevs, allowed)
+function _elf_weight_items(struc, elevs)
     _require_wall_shells_accounted(struc)
-    acc = Dict{Int, NTuple{3, Float64}}()
+    items = Tuple{Int, Float64, NTuple{2, Float64}, NTuple{2, Float64}}[]
     total = 0.0
 
     for pier in struc.wall_mesh.piers
@@ -410,14 +481,10 @@ function _elf_self_weight(struc, elevs, allowed)
         for sh in pier.shells
             w += _shell_self_weight_kN(sh)
         end
-        x = (span.x1 + span.x2) / 2
-        y = (span.y1 + span.y2) / 2
-        k_bot = _elf_elevation_key(span.z_bot, elevs)
-        k_top = _elf_elevation_key(span.z_top, elevs)
-        # Half the pier to the floor at each end. Both halves act at the
-        # plan midpoint: the wall's mass does not move in plan over the story.
-        _elf_deposit!(acc, k_bot, 0.5 * w, x, y, allowed)
-        _elf_deposit!(acc, k_top, 0.5 * w, x, y, allowed)
+        a = (span.x1, span.y1)
+        b = (span.x2, span.y2)
+        push!(items, (_elf_elevation_key(span.z_bot, elevs), 0.5 * w, a, b))
+        push!(items, (_elf_elevation_key(span.z_top, elevs), 0.5 * w, a, b))
         total += w
     end
 
@@ -427,12 +494,45 @@ function _elf_self_weight(struc, elevs, allowed)
         w = _gravity_load_weight_kN(ld)
         x1, y1, z1 = _elf_node_xyz(ld.element.nodeStart)
         x2, y2, z2 = _elf_node_xyz(ld.element.nodeEnd)
-        k1 = _elf_elevation_key(z1, elevs)
-        k2 = _elf_elevation_key(z2, elevs)
-        _elf_deposit!(acc, k1, 0.5 * w, x1, y1, allowed)
-        _elf_deposit!(acc, k2, 0.5 * w, x2, y2, allowed)
+        push!(items, (_elf_elevation_key(z1, elevs), 0.5 * w, (x1, y1), (x1, y1)))
+        push!(items, (_elf_elevation_key(z2, elevs), 0.5 * w, (x2, y2), (x2, y2)))
         total += w
     end
+    # Fire-protection coating is dead load on the same members, lumped the same way.
+    for ld in unfactored_fire_coating_loads(model)
+        w = abs(ustrip(u"N/m", ld.value[3])) * ustrip(u"m", length(ld.element)) / 1000
+        x1, y1, z1 = _elf_node_xyz(ld.element.nodeStart)
+        x2, y2, z2 = _elf_node_xyz(ld.element.nodeEnd)
+        push!(items, (_elf_elevation_key(z1, elevs), 0.5 * w, (x1, y1), (x1, y1)))
+        push!(items, (_elf_elevation_key(z2, elevs), 0.5 * w, (x2, y2), (x2, y2)))
+        total += w
+    end
+    # Drop panels hang below the slab at the column top, so all of each
+    # drop's weight goes to that floor elevation.
+    for ld in unfactored_drop_panel_loads(struc)
+        w = abs(ustrip(u"kN", ld.value[3]))
+        x, y, z = _elf_node_xyz(ld.node)
+        push!(items, (_elf_elevation_key(z, elevs), w, (x, y), (x, y)))
+        total += w
+    end
+    return items, total
+end
+
+"""
+Wall-shell and frame self-weight lumped onto story elevations.
+
+Returns `(lumps, total_kN)`. `lumps` is a dict of millimetre elevation key to
+`(weight_kN, weight·x, weight·y)`, with each item at its plan centroid.
+`total_kN` is the sum before lumping. See [`_elf_weight_items`](@ref).
+"""
+function _elf_self_weight(struc, elevs, allowed)
+    items, total = _elf_weight_items(struc, elevs)
+    acc = Dict{Int, NTuple{3, Float64}}()
+    for (key, w, a, b) in items
+        _elf_deposit!(acc, key, w, 0.5 * (a[1] + b[1]), 0.5 * (a[2] + b[2]), allowed)
+    end
+
+    total += _deposit_cladding!(acc, struc, elevs, allowed)
 
     lumped = 0.0
     for (w, _, _) in values(acc)
@@ -440,7 +540,7 @@ function _elf_self_weight(struc, elevs, allowed)
     end
     abs(lumped - total) <= 1e-6 || throw(ArgumentError(
         "elf_story_analysis: lumped self-weight $(lumped) kN does not match " *
-        "the wall and frame sources $(total) kN."))
+        "the wall, frame, and cladding sources $(total) kN."))
     return acc, total
 end
 
@@ -541,14 +641,7 @@ function _elf_levels(struc, axis::NTuple{2, Float64}=(1.0, 0.0))
             bounds=(a1min, a1max, a2min, a2max),
             outline=outline))
     end
-    isempty(raw) && throw(ArgumentError(
-        "elf_story_analysis: the skeleton has no story with faces."))
-
-    z_base = minimum(item.z for item in raw)
-    above = [item for item in raw if item.z > z_base + 1e-6]
-    isempty(above) && throw(ArgumentError(
-        "elf_story_analysis: no story sits above the base elevation $(z_base) m."))
-    sort!(above; by=item -> item.z)
+    z_base, above = _stories_above_base(raw, "elf_story_analysis")
     for item in above
         item.omitted_floor && throw(ArgumentError(
             "elf_story_analysis: story $(item.idx) at $(item.z) m has a :grade or " *
@@ -572,14 +665,9 @@ function _elf_levels(struc, axis::NTuple{2, Float64}=(1.0, 0.0))
     for (i, item) in enumerate(above)
         item.n_cells > 0 || throw(ArgumentError(
             "elf_story_analysis: story $(item.idx) is above the base and has no load cells."))
-        zk = round(Int, item.z * 1000)
-        haskey(master_at, zk) || throw(ArgumentError(
-            "elf_story_analysis: story $(item.idx) at $(item.z) m has no rigid-diaphragm master."))
+        master = _level_master(struc, master_at, item.z, item.idx, "elf_story_analysis")
         z_below = i == 1 ? z_base : above[i - 1].z
-        hsx = item.z - z_below
-        hsx > 0 || throw(ArgumentError(
-            "elf_story_analysis: story height below story $(item.idx) is $(hsx) m."))
-        master = master_at[zk]
+        hsx = _story_height_below(item.z, z_below, item.idx, "elf_story_analysis")
         key = _elf_elevation_key(item.z, elevs)
         w_sw, mx, my = get(lumps, key, (0.0, 0.0, 0.0))
         w_cell = item.weight
@@ -636,25 +724,27 @@ function _elf_moments(levels, Fx, direction, torsion)
 end
 
 """
-Nodal force along the unit plan vector `d`, and the torsional moment when it
-is nonzero, at each master.
+Nodal force along the unit plan vector `d`.
+
+A rigid diaphragm also takes the torsional moment when it is nonzero.
+A flexible diaphragm does not. ASCE 7-22 §12.8.4.2.1 (corpus: asce-7-22,
+PDF page 187) applies accidental torsion only where diaphragms are not flexible.
+`flexible_accidental_torsion` adds it anyway, as a couple between the two
+farthest wall lines, on top of the tributary split.
 """
-function _elf_loads(levels, Fx, Mz, d::NTuple{2, Float64})
-    loads = Asap.AbstractLoad[]
-    z = 0.0 * u"kN"
-    for i in eachindex(levels)
-        fx = Fx[i] * d[1] * u"kN"
-        fy = Fx[i] * d[2] * u"kN"
-        if Fx[i] != 0.0
-            push!(loads, Asap.NodeForce(levels[i].master, [fx, fy, z], :elf_story))
-        end
-        if Mz[i] != 0.0
-            push!(loads, Asap.NodeMoment(levels[i].master,
-                [0.0 * u"kN*m", 0.0 * u"kN*m", Mz[i] * u"kN*m"], :elf_torsion))
+function _elf_loads(struc, levels, Fx, Mz, d::NTuple{2, Float64};
+                    flexible_accidental_torsion::Bool=false)
+    Fxg = [Fx[i] * d[1] for i in eachindex(Fx)]
+    Fyg = [Fx[i] * d[2] for i in eachindex(Fx)]
+    loads = diaphragm_story_loads(struc, levels, Fxg, Fyg, Mz;
+        force_id=:elf_story, moment_id=:elf_torsion)
+    if flexible_accidental_torsion && struc.diaphragm_layout isa FlexibleDiaphragmLayout
+        for i in eachindex(levels)
+            append!(loads, _flexible_couple_loads(struc, levels[i].elevation_m, Mz[i],
+                :elf_torsion, "accidental torsion: level $(levels[i].story)",
+                "ASCE 7-22 §12.8.4.2 (corpus: asce-7-22, PDF page 187)"))
         end
     end
-    isempty(loads) && throw(ArgumentError(
-        "elf_story_analysis: a case produced no story force and no torsion."))
     return loads
 end
 
@@ -674,10 +764,34 @@ function _elf_disp_at(u, master, x, y, d::NTuple{2, Float64})
     return ux * d[1] + uy * d[2]
 end
 
-"""Elastic and design drift, θ, and Ax for one solved case."""
-function _elf_recover(case, levels, u, Ie, Cd, β, Ω0, axis::NTuple{2, Float64}=(1.0, 0.0))
+"""
+Elastic and design drift, θ, and Ax for one solved case.
+
+A rigid floor reads each level at its own center of mass from the master.
+A flexible floor reads it between the wall lines of `layout`
+([`_flexible_disp_at`](@ref)), and the story below at the vertical projection
+of this level's center of mass. Ax is left unset on a flexible floor: the
+torsional irregularity ratio does not apply to flexible diaphragms (ASCE 7-22
+§12.3.2.1.1, corpus: asce-7-22, PDF page 181).
+
+A semirigid floor reads each level, and the edges for Ax, from the plan rigid
+motion fitted to its seismic-system wall tops ([`_semirigid_disp_at`](@ref)).
+"""
+function _elf_recover(case, levels, u, Ie, Cd, β, Ω0, axis::NTuple{2, Float64}=(1.0, 0.0),
+                      layout=nothing)
+    flexible = levels[1].master === nothing
+    if flexible
+        any(lv -> lv.master !== nothing, levels) && throw(ArgumentError(
+            "elf_story_analysis: some levels have a rigid master and some do not."))
+        layout === nothing && throw(ArgumentError(
+            "elf_story_analysis: a floor without a rigid master needs its wall " *
+            "lines (flexible) or its seismic-system walls (semirigid) to read " *
+            "the center-of-mass drift."))
+    end
+    semirigid = layout isa SemirigidDiaphragmLayout
     d = plan_axis_vector(axis, case.direction)
-    other = plan_axis_vector(axis, case.direction === :x ? :y : :x)
+    cross_dir = case.direction === :x ? :y : :x
+    other = plan_axis_vector(axis, cross_dir)
     n = length(levels)
     elastic = Vector{Float64}(undef, n)
     design = Vector{Float64}(undef, n)
@@ -694,36 +808,47 @@ function _elf_recover(case, levels, u, Ie, Cd, β, Ω0, axis::NTuple{2, Float64}
 
     for i in 1:n
         lv = levels[i]
-        ex, ey = lv.center_of_mass
-        δe = _elf_disp_at(u, lv.master, ex, ey, d)
+        cm = lv.center_of_mass
+        if flexible
+            # ASCE 7-22 §12.8.6.5 (corpus: asce-7-22, PDF page 188): where the
+            # centers of mass do not align, the bottom of the story may be read
+            # at the vertical projection of the center of mass at the top.
+            δe = _floor_disp_at(u, layout, lv.elevation_m, case.direction, cm)
+            δe_below = i == 1 ? 0.0 :
+                _floor_disp_at(u, layout, levels[i - 1].elevation_m, case.direction, cm)
+            δc = _floor_disp_at(u, layout, lv.elevation_m, cross_dir, cm)
+            δc_below = i == 1 ? 0.0 :
+                _floor_disp_at(u, layout, levels[i - 1].elevation_m, cross_dir, cm)
+        else
+            δe = _elf_disp_at(u, lv.master, cm[1], cm[2], d)
+            δe_below = i == 1 ? 0.0 : elastic[i - 1]
+            δc = _elf_disp_at(u, lv.master, cm[1], cm[2], other)
+            δc_below = cross_below
+            cross_below = δc
+        end
         # The same center of mass, read along the other axis. This is what the
         # §12.5.1.2 combinations add as the 30% share of story drift.
-        δc = design_earthquake_displacement(Cd, _elf_disp_at(u, lv.master, ex, ey, other), Ie, 0.0)
-        cross_drift[i] = design_story_drift(δc, cross_below)
-        cross_below = δc
-        # δdi = 0: in-plane diaphragm deformation is neglected.
+        cross_drift[i] = design_story_drift(
+            design_earthquake_displacement(Cd, δc, Ie, 0.0),
+            design_earthquake_displacement(Cd, δc_below, Ie, 0.0))
+        # δdi = 0: in-plane diaphragm deformation is neglected, which
+        # §12.8.6.5 and commentary C12.8.6 (PDF page 729) permit for drift.
         # ASCE 7-22 Eq. 12.8-16 (corpus: asce-7-22, PDF page 187).
         δDE = design_earthquake_displacement(Cd, δe, Ie, 0.0)
+        δDE_below = design_earthquake_displacement(Cd, δe_below, Ie, 0.0)
         elastic[i] = δe
         design[i] = δDE
-        if i == 1
-            δe_below = 0.0
-            δDE_below = 0.0
-        else
-            δe_below = elastic[i - 1]
-            δDE_below = design[i - 1]
-        end
         # Story drift is the difference of the displacements at the top and
         # bottom of the story. The design difference is §12.8.6.5 at the
         # center of mass (corpus: asce-7-22, PDF page 188).
         Δe = δe - δe_below
-        ΔDE = design_story_drift(δDE, δDE_below)
         elastic_drift[i] = Δe
-        design_drift[i] = ΔDE
+        design_drift[i] = design_story_drift(δDE, δDE_below)
 
         if case.purpose == :drift
-            # Eq. 12.8-18 uses the elastic story drift. The sign is the
-            # direction of motion; the coefficient uses the magnitude.
+            # Eq. 12.8-18 uses the elastic story drift at the §12.8.6.5
+            # location. The sign is the direction of motion; the coefficient
+            # uses the magnitude.
             θ = stability_coefficient(lv.px_kN, lv.story_height_m, case.Vx_kN[i], abs(Δe))
             theta[i] = θ
             mult[i] = pdelta_displacement_multiplier(θ, θmax)
@@ -732,14 +857,16 @@ function _elf_recover(case, levels, u, Ie, Cd, β, Ω0, axis::NTuple{2, Float64}
             mult[i] = nothing
         end
 
-        d1, d2 = _elf_edge_drifts(u, levels, i, case.direction, axis)
+        Ax[i] = nothing
+        flexible && !semirigid && continue
+        d1, d2 = semirigid ?
+            _semirigid_edge_drifts(u, layout, levels, i, case.direction, axis) :
+            _elf_edge_drifts(u, levels, i, case.direction, axis)
         δmax = max(d1, d2)
         δavg = 0.5 * (d1 + d2)
         if δavg > 0 && δmax >= 0
             # ASCE 7-22 Eq. 12.8-15, computed at Ax = 1 (corpus: asce-7-22, PDF page 187).
             Ax[i] = torsional_amplification(δmax, δavg)
-        else
-            Ax[i] = nothing
         end
     end
 

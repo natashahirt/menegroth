@@ -7,12 +7,12 @@ title: FEA flat plate remeshes when a column grows; fenced column zones are the 
 node_label: Remesh on column growth
 tags: fea,punching,mesh,speed,tier2
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-dbe32898
 created_at: '2026-11-02T22:45:01.601437+00:00'
-updated_at: '2026-11-02T22:45:01.601437+00:00'
+updated_at: '2026-11-03T18:06:11.272396+00:00'
 has_child_rationale: Gate and profile run on 2026-11-02 found the medium-office FEA
   floors failing on punching.
 ---

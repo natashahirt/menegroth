@@ -455,6 +455,14 @@ const PreCureShape = NamedTuple{(:M_ref, :V_ref, :w_ref),
     Tuple{typeof(1.0u"N*m"), typeof(1.0u"N"), typeof(1.0u"N/m")}}
 
 """
+Area-load extrema under one tributary pressure, plus the extrema of a uniform
+1 N/m on the same model. The width may vary along the beam.
+"""
+const PreCureSplit = NamedTuple{(:M_area, :V_area, :p_ref, :M_line, :V_line),
+    Tuple{typeof(1.0u"N*m"), typeof(1.0u"N"), typeof(1.0u"Pa"),
+          typeof(1.0u"N*m"), typeof(1.0u"N")}}
+
+"""
 One beam's exact sagging demand field and per-side tributary profiles.
 
 `demand_of_s(s)` returns the signed moment (sagging positive). `breakpoints`
@@ -475,7 +483,7 @@ struct BeamSaggingField{F}
     breakpoints::Vector{Float64}
     L_beam::Union{Nothing, typeof(1.0u"m")}
     slab::Union{Nothing, AbstractSlabOnBeam}
-    pre_cure::Union{Nothing, PreCureShape}
+    pre_cure::Union{Nothing, PreCureShape, PreCureSplit}
     supports::Vector{Float64}
 end
 
@@ -609,7 +617,10 @@ end
 """Copy `ctx` with this beam's analysis dead-load shape on the pre-cure stage."""
 function _context_with_pre_cure(ctx::CompositeContext, shape)
     shape === nothing && return ctx
-    stage = construction_with_shape(ctx.construction, shape.M_ref, shape.V_ref, shape.w_ref)
+    stage = haskey(shape, :p_ref) ?
+        construction_with_split(ctx.construction, shape.M_area, shape.V_area, shape.p_ref,
+                                shape.M_line, shape.V_line) :
+        construction_with_shape(ctx.construction, shape.M_ref, shape.V_ref, shape.w_ref)
     return CompositeContext(ctx.slab, ctx.anchor, ctx.L_beam;
                             shored = ctx.shored, Lb_const = ctx.Lb_const,
                             Asr = ctx.Asr, Fysr = ctx.Fysr,

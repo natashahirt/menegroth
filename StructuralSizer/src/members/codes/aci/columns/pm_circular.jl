@@ -560,74 +560,82 @@ function design_circular_column_reinforcement(
     bar_sizes = [6, 7, 8, 9, 10, 11],
     n_bars_options = [6, 8, 10, 12, 14, 16, 20],
     min_rho::Float64 = 0.01,
-    max_rho::Float64 = 0.08
+    max_rho::Float64 = 0.08,
+    Muy::Real = 0.0,
+    geometry = nothing,
+    βdns::Real = 0.6,
 )
-    D_in = ustrip(u"inch", uconvert(u"inch", D))
+    D_in = ustrip(u"inch", D)
     Ag = π * D_in^2 / 4
 
-    # Standard bar areas (ASTM A615)
-    bar_areas = Dict(
-        3 => 0.11, 4 => 0.20, 5 => 0.31, 6 => 0.44,
-        7 => 0.60, 8 => 0.79, 9 => 1.00, 10 => 1.27,
-        11 => 1.56, 14 => 2.25, 18 => 4.00
-    )
-
-    # Minimum number of bars (ACI 10.7.3.1)
+    # ACI 318-11 §10.9.2: at least 6 bars inside a spiral, 4 inside circular ties.
     min_bars = tie_type == :spiral ? 6 : 4
 
-    # Generate candidates sorted by steel area (ascending = minimum weight first)
-    candidates = Tuple{Int, Int, Float64}[]  # (bar_size, n_bars, As)
-
-    for bar_size in bar_sizes
-        Ab = get(bar_areas, bar_size, 0.0)
-        Ab > 0 || continue
-        for n_bars in n_bars_options
-            n_bars >= min_bars || continue
-
-            As = n_bars * Ab
-            ρ = As / Ag
-
-            # Skip if outside ACI limits
-            (min_rho ≤ ρ ≤ max_rho) || continue
-
-            push!(candidates, (bar_size, n_bars, As))
-        end
+    # (bar_size, n_bars, As) within the §10.9.1 ρg limits, least steel first.
+    candidates = Tuple{Int, Int, Float64}[]
+    for bar_size in bar_sizes, n_bars in n_bars_options
+        n_bars >= min_bars || continue
+        As = n_bars * ustrip(u"inch^2", rebar(bar_size).A)
+        min_rho ≤ As / Ag ≤ max_rho || continue
+        push!(candidates, (bar_size, n_bars, As))
     end
-
-    # Sort by steel area (minimum first)
     sort!(candidates, by = x -> x[3])
 
-    # Convert demands to ACI units
-    Pu_kip = ustrip(to_kip(Pu))
-    Mu_kipft = ustrip(to_kipft(Mu))
+    Pu_kip = to_kip(Pu)
+    Mu_kipft = to_kipft(Mu)
+    Muy_kipft = to_kipft(Muy)
 
-    # Try each candidate
-    for (bar_size, n_bars, As) in candidates
-        try
-            section = RCCircularSection(
-                D = D,
-                bar_size = bar_size,
-                n_bars = n_bars,
-                cover = cover,
-                tie_type = tie_type
-            )
-
-            # Check P-M capacity using the diagram
-            diagram = generate_PM_diagram(section, mat; n_intermediate = 10)
-            result = check_PM_capacity(diagram, Pu_kip, Mu_kipft)
-
-            if result.adequate
-                return section
-            end
+    # Only a layout that does not fit the diameter is skipped; any other
+    # error is a bug and propagates.
+    for (bar_size, n_bars, _) in candidates
+        section = try
+            RCCircularSection(D = D, bar_size = bar_size, n_bars = n_bars,
+                              cover = cover, tie_type = tie_type)
         catch e
+            e isa ArgumentError || rethrow()
             @debug "Skipping bar arrangement" n_bars bar_size exception = (e, catch_backtrace())
             continue
         end
+        _reinforcement_adequate(section, mat, Pu_kip, Mu_kipft, Muy_kipft;
+                                geometry, βdns) && return section
     end
 
-    # No valid combination found
+    muy_note = abs(Muy_kipft) > _COLUMN_MUY_TOL ? ", Muy=$(Muy_kipft) kip-ft" : ""
     error("Cannot design reinforcement for D=$(round(D_in, digits=1))\" circular column " *
-          "with Pu=$(Pu_kip) kip, Mu=$(Mu_kipft) kip-ft. Consider larger diameter.")
+          "with Pu=$(Pu_kip) kip, Mu=$(Mu_kipft) kip-ft$(muy_note). Consider larger diameter.")
+end
+
+"""
+    _reinforcement_adequate(section::RCCircularSection, mat, Pu, Mu, Muy; geometry=nothing, βdns=0.6) -> Bool
+
+True when the circular `section` resists `(Pu, Mu, Muy)`. The section is
+axisymmetric, so the two axis moments are combined into their resultant and
+checked on the single interaction diagram.
+
+With `geometry`, each axis moment is first magnified by the nonsway procedure,
+as for the rectangular section: single curvature (`M1 = −M2`, `Cm = 1.0`),
+δns above the ACI 318-19 §6.2.5.3 limit fails, and on a slender axis with no
+moment the minimum moment is checked alone rather than added to the
+resultant (R6.6.4.5.4). `mat` must then carry rebar properties
+([`to_material_tuple`](@ref)).
+"""
+function _reinforcement_adequate(section::RCCircularSection, mat, Pu, Mu, Muy;
+                                 geometry = nothing, βdns::Real = 0.6)
+    Mx, My = abs(Mu), abs(Muy)
+    diagram = generate_PM_diagram(section, mat; n_intermediate = 10)
+    if geometry !== nothing
+        mt = to_material_tuple(mat)
+        rx = magnify_moment_nonsway(section, mt, geometry, Pu, -Mx, Mx, StrongAxis(); βdns)
+        ry = magnify_moment_nonsway(section, mt, geometry, Pu, -My, My, WeakAxis(); βdns)
+        (rx.permitted && ry.permitted) || return false
+        Mx = rx.Mc
+        if My > _COLUMN_MUY_TOL
+            My = ry.Mc
+        elseif ry.slender
+            check_PM_capacity(diagram, Pu, ry.Mc).adequate || return false
+        end
+    end
+    return check_PM_capacity(diagram, Pu, hypot(Mx, My)).adequate
 end
 
 # ==============================================================================
@@ -653,27 +661,64 @@ as the new diameter and redesigns reinforcement via P-M interaction.
 - `section`: Original RCCircularSection (used for cover and tie_type defaults)
 - `new_b`, `new_c`: New column dimensions (both = diameter for circular)
 - `Pu`, `Mu`: Design demands (kip, kip-ft)
-- `mat`: Concrete material
+- `Muy`: Moment about the other axis (kip-ft). A circular section is
+  axisymmetric, so the diagram is checked at the resultant moment.
+- `mat`: Concrete material (with rebar properties when `geometry` is given)
+- `geometry`, `βdns`: When `geometry` is given, each axis moment is magnified
+  for nonsway slenderness before the check (see
+  [`_reinforcement_adequate`](@ref)).
 - `kwargs`: Passed to design_circular_column_reinforcement
 
 # Returns
-New RCCircularSection with properly designed reinforcement
+New RCCircularSection with properly designed reinforcement. As for the
+rectangular section, when no arrangement passes, the original bars placed in
+the larger diameter are kept if they pass; otherwise the error propagates.
 """
 function resize_column_with_reinforcement(
     section::RCCircularSection,
     new_b::Length, new_c::Length,
     Pu::Real, Mu::Real,
     mat;
+    Muy::Real = 0.0,
+    geometry = nothing,
+    βdns::Real = 0.6,
     kwargs...
 )
-    # For circular columns, new_b and new_c both represent the diameter
     new_D = max(uconvert(u"inch", new_b), uconvert(u"inch", new_c))
-    design_circular_column_reinforcement(
-        new_D, Pu, Mu, mat;
-        cover = section.cover,
-        tie_type = section.tie_type,
-        kwargs...
-    )
+    kw = merge((bar_sizes = [6, 7, 8, 9, 10, 11, 14, 18],), kwargs)
+    try
+        return design_circular_column_reinforcement(
+            new_D, Pu, Mu, mat;
+            Muy, geometry, βdns,
+            cover = section.cover,
+            tie_type = section.tie_type,
+            kw...
+        )
+    catch e
+        e isa ErrorException || rethrow()
+        kept = _same_bars_in_outline(section, new_D)
+        if !isnothing(kept) &&
+           _reinforcement_adequate(kept, mat, Pu, Mu, Muy; geometry, βdns)
+            return kept
+        end
+        rethrow()
+    end
+end
+
+"""
+`section`'s bar count and size placed in a circle of diameter `D`, or
+`nothing` when that layout is not valid (e.g. ρg below the ACI minimum).
+"""
+function _same_bars_in_outline(section::RCCircularSection, D::Length)
+    isempty(section.bars) && return nothing
+    try
+        return RCCircularSection(; D, bar_size = _bar_size_for_area(section.bars[1].As),
+                                 n_bars = length(section.bars),
+                                 cover = section.cover, tie_type = section.tie_type)
+    catch e
+        e isa ArgumentError || rethrow()
+        return nothing
+    end
 end
 
 # ==============================================================================

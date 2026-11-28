@@ -740,3 +740,96 @@ function _allowable_drift_ratio(risk_category, system)::Float64
     throw(ArgumentError(
         "system must be :lowrise_interior_walls, :masonry_cantilever, :masonry_other, or :other; got $(repr(system))"))
 end
+
+# ==============================================================================
+# ASCE 7-22 §11.6 — Seismic Design Category
+# ==============================================================================
+
+"Seismic Design Category symbols in increasing severity, ASCE 7-22 §11.6."
+const _SDC_SEVERITY = (:A, :B, :C, :D, :E, :F)
+
+"""The more severe of two Seismic Design Categories (ASCE 7-22 §11.6)."""
+function _more_severe_sdc(a::Symbol, b::Symbol)
+    ia = findfirst(==(a), _SDC_SEVERITY)
+    ib = findfirst(==(b), _SDC_SEVERITY)
+    return _SDC_SEVERITY[max(ia, ib)]
+end
+
+"""
+Table 11.6-1 category from `SDS`. `high` is `true` for Risk Category IV, `false`
+for Risk Category I, II, or III (the two table columns).
+
+ASCE 7-22 Table 11.6-1 (corpus: asce-7-22, PDF page 169): lower bounds are
+inclusive. The table maxes out at D; E and F come only from the §11.6 S1 rule.
+"""
+function _sdc_table_11_6_1(SDS::Float64, high::Bool)
+    if SDS < 0.167
+        return :A
+    elseif SDS < 0.33          # 0.167 ≤ SDS < 0.33
+        return high ? :C : :B
+    elseif SDS < 0.50          # 0.33 ≤ SDS < 0.50
+        return high ? :D : :C
+    else                       # 0.50 ≤ SDS
+        return :D
+    end
+end
+
+"""
+Table 11.6-2 category from `SD1`. `high` is `true` for Risk Category IV.
+
+ASCE 7-22 Table 11.6-2 (corpus: asce-7-22, PDF page 169): lower bounds are
+inclusive. Both columns of the `0.20 ≤ SD1` row are D (the table maximum; every
+Risk Category IV cell is at least its I/II/III cell and no cell exceeds D).
+"""
+function _sdc_table_11_6_2(SD1::Float64, high::Bool)
+    if SD1 < 0.067
+        return :A
+    elseif SD1 < 0.133         # 0.067 ≤ SD1 < 0.133
+        return high ? :C : :B
+    elseif SD1 < 0.20          # 0.133 ≤ SD1 < 0.20
+        return high ? :D : :C
+    else                       # 0.20 ≤ SD1
+        return :D
+    end
+end
+
+"""
+    seismic_design_category(; SDS, SD1, S1, risk_category) -> Symbol
+
+The Seismic Design Category (`:A`–`:F`) per ASCE 7-22 §11.6.
+
+`risk_category` is `:I`, `:II`, `:III`, or `:IV`. `SDS`, `SD1`, and `S1` are the
+design short-period and 1-s spectral response accelerations and the mapped 1-s
+`MCE_R` spectral acceleration, all dimensionless (g), all `≥ 0`.
+
+Rule (§11.6):
+- Where `S1 ≥ 0.75`, a Risk Category I/II/III structure is assigned `:E` and a
+  Risk Category IV structure `:F`, irrespective of `SDS`/`SD1`.
+- Otherwise the category is the **more severe** of Table 11.6-1 (on `SDS`) and
+  Table 11.6-2 (on `SD1`).
+
+The §11.6 permission to use Table 11.6-1 alone — available where `S1 < 0.75` and
+the four period/diaphragm conditions hold — is deliberately **not** applied:
+this function cannot verify those conditions, so it always takes the more severe
+of both tables, which is conservative and always permitted.
+
+# Citation
+ASCE 7-22 §11.6, Table 11.6-1 and Table 11.6-2 (corpus: asce-7-22, PDF page
+169). SDC severity order `A < B < C < D < E < F`.
+"""
+function seismic_design_category(; SDS, SD1, S1, risk_category::Symbol)
+    _require_risk_category(risk_category)
+    SDS = _as_finite("SDS", SDS)
+    SD1 = _as_finite("SD1", SD1)
+    S1 = _as_finite("S1", S1)
+    SDS >= 0 || throw(ArgumentError("SDS must be ≥ 0; got $SDS"))
+    SD1 >= 0 || throw(ArgumentError("SD1 must be ≥ 0; got $SD1"))
+    S1 >= 0 || throw(ArgumentError("S1 must be ≥ 0; got $S1"))
+    # ASCE 7-22 §11.6 (corpus: asce-7-22, PDF page 169): the S1 ≥ 0.75 rule
+    # governs irrespective of the fundamental period and of SDS/SD1.
+    if S1 >= 0.75
+        return risk_category === :IV ? :F : :E
+    end
+    high = risk_category === :IV
+    return _more_severe_sdc(_sdc_table_11_6_1(SDS, high), _sdc_table_11_6_2(SD1, high))
+end

@@ -1,32 +1,28 @@
 """
-    set_slab_openings!(struc, polygons)
+    set_slab_openings!(struc, polygons; stories=nothing)
 
-Openings cut from the slab, in plan meters. Each polygon is a list of `(x, y)`
-points. A beam's effective width on a side stops at the first opening that side's
-perpendicular ray hits.
+Replace the skeleton's slab openings with `polygons`, each a list of `(x, y)`
+points in plan meters, on every story in `stories` (default: all stories). Use
+[`add_slab_opening!`](@ref) to add a single opening on chosen stories.
+
+Cell spans and net areas read the openings when cells are created, so set them
+before `initialize!`. A beam's effective width on a side stops at the first
+opening on its story that the side's perpendicular ray hits.
 
 AISC 360-22 Commentary I3.1, trenches (corpus: aisc-360-22, PDF pp. 512–513):
 a trench that replaces the concrete is a complete discontinuity in the flange,
 and a trench parallel to the beam sets the effective width from the trench position.
 """
-function set_slab_openings!(struc::BuildingStructure, polygons)
-    mesh = _composite_mesh!(struc)
-    mesh[:openings] = _opening_polygons(polygons)
-    return struc
-end
-
-function _opening_polygons(raw)
-    polys = Vector{Vector{NTuple{2, Float64}}}()
-    for poly in raw
-        pts = NTuple{2, Float64}[]
-        for p in poly
-            x = p[1] isa Unitful.Quantity ? ustrip(u"m", p[1]) : Float64(p[1])
-            y = p[2] isa Unitful.Quantity ? ustrip(u"m", p[2]) : Float64(p[2])
-            push!(pts, (x, y))
-        end
-        length(pts) >= 3 && push!(polys, pts)
+function set_slab_openings!(struc::BuildingStructure, polygons; stories=nothing)
+    skel = struc.skeleton
+    levels = stories === nothing ? sort(collect(keys(skel.stories))) : stories
+    empty!(skel.openings)
+    for poly in polygons
+        add_slab_opening!(skel, poly, levels)
     end
-    return polys
+    isempty(struc.cells) ||
+        @warn "Slab openings changed after cells were created; cell spans and areas keep the old geometry until `initialize!` runs again." maxlog=1
+    return struc
 end
 
 function _point_in_polygon(x, y, poly)
@@ -174,10 +170,12 @@ function _clip_one_profile(profile, axis, sign, openings)
 end
 
 function _clip_profiles_at_openings(struc, verts, seg_len_m, left, right)
-    mesh = _composite_mesh(struc)
-    mesh === nothing && return (left, right)
-    openings = get(mesh, :openings, nothing)
-    (openings === nothing || isempty(openings)) && return (left, right)
+    skel = struc.skeleton
+    (isempty(skel.openings) || isempty(verts)) && return (left, right)
+    level = story_index_at(skel, vertex_coords(skel, first(verts)).z)
+    level === nothing && return (left, right)
+    openings = [op.loop for op in skel.openings if op.story == level]
+    isempty(openings) && return (left, right)
     axis = _beam_plan_axis(struc, verts, seg_len_m)
     return (_clip_one_profile(left, axis, 1.0, openings),
             _clip_one_profile(right, axis, -1.0, openings))

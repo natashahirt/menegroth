@@ -45,6 +45,8 @@ D_opt, ρ_opt = result.minimizer
 """
 struct RCCircularNLPProblem <: AbstractNLPProblem
     demand::RCColumnDemand
+    # Every load case. One entry for a single demand. Scalars below start the solver.
+    cases::Vector{RCColumnDemand}
     geometry::ConcreteMemberGeometry
     opts::NLPColumnOptions
 
@@ -70,19 +72,34 @@ function RCCircularNLPProblem(
     geometry::ConcreteMemberGeometry,
     opts::NLPColumnOptions
 )
+    return _assemble_rc_circular_nlp(
+        RCColumnDemand[demand], demand, geometry, opts,
+        Float64(to_kip(demand.Pu)), Float64(to_kipft(demand.Mux)))
+end
+
+function _assemble_rc_circular_nlp(cases::Vector{RCColumnDemand}, demand::RCColumnDemand,
+                                  geometry::ConcreteMemberGeometry, opts::NLPColumnOptions,
+                                  Pu_kip::Float64, Mux_kipft::Float64)
     mat = to_material_tuple(opts.material, fy_ksi(opts.rebar_material), Es_ksi(opts.rebar_material))
-
-    Pu_kip = to_kip(demand.Pu)
-    Mux_kipft = to_kipft(demand.Mux)
-
     D_min = ustrip(u"inch", opts.min_dim)
     D_max = ustrip(u"inch", opts.max_dim)
-
-    RCCircularNLPProblem(
-        demand, geometry, opts, mat,
+    return RCCircularNLPProblem(
+        demand, cases, geometry, opts, mat,
         Pu_kip, Mux_kipft,
-        D_min, D_max
+        D_min, D_max,
     )
+end
+
+function RCCircularNLPProblem(
+    set::RCColumnDemandSet,
+    geometry::ConcreteMemberGeometry,
+    opts::NLPColumnOptions,
+)
+    cases = _unique_rc_nlp_cases(set.cases)
+    Pu = maximum(Float64(to_kip(d.Pu)) for d in cases)
+    Mux = maximum(abs(Float64(to_kipft(d.Mux))) for d in cases)
+    rep = cases[argmax([Float64(to_kip(d.Pu)) for d in cases])]
+    return _assemble_rc_circular_nlp(cases, rep, geometry, opts, Pu, Mux)
 end
 
 # ==============================================================================
@@ -157,15 +174,19 @@ end
 # AbstractNLPProblem Interface: Constraints
 # ==============================================================================
 
-"""Single constraint: P-M interaction utilization."""
-n_constraints(::RCCircularNLPProblem) = 1
+"""One P-M row per load case."""
+n_constraints(p::RCCircularNLPProblem) = length(p.cases)
 
 """Constraint name for solver diagnostics."""
-constraint_names(::RCCircularNLPProblem) = ["P-M utilization"]
+function constraint_names(p::RCCircularNLPProblem)
+    length(p.cases) == 1 && return ["P-M utilization"]
+    return ["P-M utilization case $i" for i in eachindex(p.cases)]
+end
 
 """Constraint bounds: P-M utilization ≤ 1.0."""
 function constraint_bounds(p::RCCircularNLPProblem)
-    return ([-Inf], [1.0])
+    n = n_constraints(p)
+    return (fill(-Inf, n), fill(1.0, n))
 end
 
 """
@@ -175,90 +196,132 @@ Evaluate smooth P-M utilization for circular column at design point `x`.
 Includes optional ACI 318 slenderness magnification (moment magnifier δns).
 """
 function constraint_fns(p::RCCircularNLPProblem, x::Vector{Float64})
+    db = ustrip(u"inch", rebar(p.opts.bar_size).diameter)
+    shared = (
+        cover = 1.5 + (p.opts.tie_type == :spiral ? 0.375 : 0.5) + db / 2.0,
+        Ec_ksi = 57.0 * sqrt(p.mat.fc * 1000.0),
+        Lu_in = ustrip(u"inch", p.geometry.Lu),
+    )
+    return [_rc_circular_nlp_util(p, x, d; shared) for d in p.cases]
+end
+
+"""Smooth P-M utilization of one circular-column load case."""
+function _rc_circular_nlp_util(p::RCCircularNLPProblem, x::Vector{Float64}, demand::RCColumnDemand;
+                              shared=nothing)
     D, ρ = x
+    Pu_kip = Float64(to_kip(demand.Pu))
+    Mux_kipft = Float64(to_kipft(demand.Mux))
 
     # Effective cover to bar centroid (inches)
-    db = ustrip(u"inch", rebar(p.opts.bar_size).diameter)
-    cover = 1.5 + (p.opts.tie_type == :spiral ? 0.375 : 0.5) + db / 2.0
+    if shared === nothing
+        db = ustrip(u"inch", rebar(p.opts.bar_size).diameter)
+        shared = (
+            cover = 1.5 + (p.opts.tie_type == :spiral ? 0.375 : 0.5) + db / 2.0,
+            Ec_ksi = 57.0 * sqrt(p.mat.fc * 1000.0),
+            Lu_in = ustrip(u"inch", p.geometry.Lu),
+        )
+    end
+    cover = shared.cover
 
     # Number of bars for smooth P-M (match typical circular arrangement)
     n_bars = p.opts.tie_type == :spiral ? 12 : 8
 
-    # Slenderness magnification (smooth analytical version)
-    Mux_design = p.Mux_kipft
+    # Slenderness. Same simplified stiffness and §6.2.5.3 cap as the
+    # rectangular NLP. A circular section has one radius; the larger of kx
+    # and ky governs. The as-built checker applies the §6.2.5.1 neglect test.
+    # `demand.magnify == false` skips §6.6 when the moments already include
+    # second-order effects (ACI 318-19 §6.7).
+    Mux_design = Mux_kipft
     stab = 0.0
-    if p.opts.include_slenderness
+    δ_ratio = 0.0
+    if p.opts.include_slenderness && demand.magnify
         R = D / 2.0
         Ig = π * R^4 / 4.0   # in⁴
-        Ec_ksi = 57.0 * sqrt(p.mat.fc * 1000.0)
+        Ec_ksi = shared.Ec_ksi
+        # ACI 318-19 §6.6.4.4.4(a) (corpus: aci-318-19, printed page 79).
         EI = 0.4 * Ec_ksi * Ig / (1.0 + p.opts.βdns)
 
-        Lu_in = ustrip(u"inch", p.geometry.Lu)
-        # Circular sections are axisymmetric, so kx and ky give the same
-        # geometry; use kx to mirror the convention in the rectangular NLP.
-        k = Float64(p.geometry.kx)
+        Lu_in = shared.Lu_in
+        k = max(Float64(p.geometry.kx), Float64(p.geometry.ky), 1e-6)
         Pc = π^2 * EI / (k * Lu_in)^2
 
-        M1x = to_kipft(p.demand.M1x)
-        M2x = to_kipft(p.demand.M2x)
-        Cm = abs(M2x) > 1e-6 ? max(0.6 - 0.4 * M1x / M2x, 0.4) : 1.0
+        Cm = calc_Cm(to_kipft(demand.M1x), to_kipft(demand.M2x);
+                     transverse_load=demand.transverse_load)
 
-        # ACI 318-11 §10.10.6 Eq. (10-12). See `_rc_nlp_delta_ns`.
-        stab = p.Pu_kip / (0.75 * max(Pc, 1e-6))
+        # ACI 318-19 §6.6.4.5.2. See `_rc_nlp_delta_ns` for the smooth pole.
+        stab = Pu_kip / (0.75 * max(Pc, 1e-6))
         δns = _rc_nlp_delta_ns(Cm, stab)
-        Mux_design = δns * p.Mux_kipft
+        δ_ratio = δns / SECOND_ORDER_MOMENT_RATIO_LIMIT
+        Mux_design = δns * Mux_kipft
     end
 
     # Smooth analytical P-M utilization (replaces piecewise-linear P-M diagram)
-    util = _smooth_rc_pm_util(D, ρ, p.Pu_kip, Mux_design, p.mat;
+    util = _smooth_rc_pm_util(D, ρ, Pu_kip, Mux_design, p.mat;
                                     cover, n_bars, tie_type=p.opts.tie_type)
-    # Eq. (10-12) is undefined for Pu ≥ 0.75 Pc.
+    # ACI 318-19 §6.2.5.3: δns ≤ 1.4. Eq. (6.6.4.5.2) is undefined for
+    # Pu ≥ 0.75 Pc; that ratio stays in the same row.
+    if δ_ratio >= 1.0
+        util = _smooth_max(util, δ_ratio; k=80.0)
+    end
     if stab >= 1.0
         util = _smooth_max(util, stab; k=80.0)
     end
-    return [util]
+    return util
 end
 
 # ==============================================================================
 # Helper: Build Trial Circular Section from Continuous Variables
 # ==============================================================================
 
-"""
-    _build_nlp_trial_circular_section(D_in, ρg, opts) -> Union{RCCircularSection, Nothing}
+"""Bar centers fall inside the section. Matches the spiral-diameter assumption in `RCCircularSection`."""
+function _circular_bars_fit(D_in::Real, opts::NLPColumnOptions)
+    cover = ustrip(u"inch", opts.cover)
+    db = ustrip(u"inch", rebar(opts.bar_size).diameter)
+    R_bar = D_in / 2 - cover - 0.5 - db / 2
+    return R_bar > 0
+end
 
-Build an `RCCircularSection` from continuous design variables (D, ρg).
-Returns `nothing` if the configuration is invalid.
 """
-function _build_nlp_trial_circular_section(
-    D_in::Real, ρg::Real,
-    opts::NLPColumnOptions
-)
+    _circular_trial_bar_count(D_in, ρg, opts) -> Int
+
+Even bar count for `ρg` at diameter `D_in` (inches): `ceil(ρg·Ag / A_bar)`,
+at least the tie-type minimum, then capped at `RC_COLUMN_NLP_MAX_BARS`.
+"""
+function _circular_trial_bar_count(D_in::Real, ρg::Real, opts::NLPColumnOptions)
+    Ag = π * D_in^2 / 4
+    As_bar = ustrip(u"inch^2", rebar(opts.bar_size).A)
+    n_bars = max(_nlp_min_bars(opts), ceil(Int, ρg * Ag / As_bar))
+    n_bars = iseven(n_bars) ? n_bars : n_bars + 1
+    return min(n_bars, RC_COLUMN_NLP_MAX_BARS)
+end
+
+"""
+    _build_nlp_circular_section(D_in, n_bars, opts) -> Union{RCCircularSection, Nothing}
+
+`nothing` when the bars do not fit or the constructor rejects the layout.
+"""
+function _build_nlp_circular_section(D_in::Real, n_bars::Int, opts::NLPColumnOptions)
+    n_bars <= RC_COLUMN_NLP_MAX_BARS || return nothing
+    n_bars >= _nlp_min_bars(opts) || return nothing
+    _circular_bars_fit(D_in, opts) || return nothing
     try
-        Ag = π * D_in^2 / 4
-        As_required = ρg * Ag
-
-        bar = rebar(opts.bar_size)
-        As_bar = ustrip(u"inch^2", bar.A)
-
-        min_bars = opts.tie_type == :spiral ? 6 : 4
-        n_bars_raw = As_required / As_bar
-        n_bars = max(min_bars, ceil(Int, n_bars_raw))
-
-        # Round to even for symmetric placement
-        n_bars = iseven(n_bars) ? n_bars : n_bars + 1
-
-        n_bars = min(n_bars, 32)
-
         return RCCircularSection(
             D = D_in * u"inch",
             bar_size = opts.bar_size,
             n_bars = n_bars,
             cover = opts.cover,
-            tie_type = opts.tie_type
+            tie_type = opts.tie_type,
         )
-    catch e
+    catch
         return nothing
     end
+end
+
+function _build_nlp_trial_circular_section(
+    D_in::Real, ρg::Real,
+    opts::NLPColumnOptions
+)
+    return _build_nlp_circular_section(D_in, _circular_trial_bar_count(D_in, ρg, opts), opts)
 end
 
 # ==============================================================================

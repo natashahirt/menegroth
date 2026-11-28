@@ -145,16 +145,19 @@ function get_I_cracked_negative(section::ISymmSection, Asr; d_rebar=0.0u"m")
 end
 
 """
-    composite_negative_inertia(section, ctx::CompositeContext; d_rebar=0.0u"m")
+    composite_negative_inertia(section, ctx::CompositeContext; d_rebar=nothing)
 
 `I_neg` for Eq. C-I3-5 from the context: [`get_I_cracked_negative`](@ref) when
 `ctx.neg_moment` is set and `ctx.Asr > 0` (anchors in the negative region and
 developed bars, §I3.2b), otherwise the steel `I_s`.
+
+`d_rebar` defaults to `ctx.d_rebar`. Passing it overrides that height for this call.
 """
 function composite_negative_inertia(section::ISymmSection, ctx::CompositeContext;
-                                    d_rebar=0.0u"m")
+                                    d_rebar=nothing)
     ctx.neg_moment || return section.Ix
-    return get_I_cracked_negative(section, ctx.Asr; d_rebar=d_rebar)
+    d = d_rebar === nothing ? ctx.d_rebar : d_rebar
+    return get_I_cracked_negative(section, ctx.Asr; d_rebar=d)
 end
 
 """

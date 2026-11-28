@@ -7,7 +7,7 @@ title: 'Cracked service shell: three passes, then span scoring'
 node_label: Cracked service shell
 tags: story-shell,deflection,aci-318,cracking
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: StructuralSizer/src/slabs/codes/concrete/story_shell_service.jl@ed14a42, StructuralSynthesizer/src/analyze/slabs/slabs/story_shell_service.jl@ed14a42,
   StructuralSynthesizer/src/analyze/slabs/slabs/story_shell.jl@ed14a42, StructuralSynthesizer/src/analyze/members/members/size_beams.jl@b3090e3,
@@ -15,7 +15,7 @@ files: StructuralSizer/src/slabs/codes/concrete/story_shell_service.jl@ed14a42, 
   StructuralSynthesizer/src/analyze/members/members/demands.jl@ed14a42
 session_id: sess-b1b56ec8
 created_at: '2026-11-04T16:00:15.350132+00:00'
-updated_at: '2026-11-04T16:00:15.350132+00:00'
+updated_at: '2026-11-05T00:06:36.736201+00:00'
 ---
 Build the cracked service shell on the existing story mesh and hand its spans to sizing.
 

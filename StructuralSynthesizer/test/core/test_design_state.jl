@@ -20,8 +20,8 @@ using Asap  # registers u"kgCO2e" and Asap unit module
 ENV["SS_ENABLE_VISUALIZATION"] = "false"
 
 @testset "DesignState + corpus grounding" begin
-    # Small DDM-applicable flat-plate building (2×2 bays, 1 story → 9 columns).
-    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 2, 2, 1)
+    # Three continuous spans each way (ACI 318-11 §13.6.1.1): 3×3 bays, 16 columns.
+    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 3, 3, 1)
     struc = BuildingStructure(skel)
     params = DesignParameters(
         name               = "harness_p1_medium_office",
@@ -169,7 +169,7 @@ ENV["SS_ENABLE_VISUALIZATION"] = "false"
         # Every element carries a deterministic string id "type/index".
         @test !isempty(ds["elements"])
         cols = filter(e -> e["type"] == "column", ds["elements"])
-        @test length(cols) == 9
+        @test length(cols) == 16
         @test all(e -> e["id"] == string(e["type"], "/", e["index"]), ds["elements"])
         # At least one element explicitly references its governing corpus citation.
         @test any(e -> !isempty(e["citation_ids"]), ds["elements"])
@@ -547,7 +547,10 @@ ENV["SS_ENABLE_VISUALIZATION"] = "false"
             cr.interaction_ratio = NaN
             cr.ok                = false
 
-            model = isnothing(design.asap_model) ? struc.asap_model : design.asap_model
+            # `design_building` leaves the caller's structure untouched. The
+            # designed frame model is the copy on `design.structure`. The
+            # visualization model, when built, replaces it for this call.
+            model = isnothing(design.asap_model) ? design.structure.asap_model : design.asap_model
             @test !isnothing(model)  # the FE model exists even when skip_visualization=true
             model.processed || Asap.process!(model)
             isempty(model.u) && Asap.solve!(model)

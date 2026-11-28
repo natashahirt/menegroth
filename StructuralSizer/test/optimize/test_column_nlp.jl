@@ -225,7 +225,9 @@ end
         
         @test result isa RCColumnNLPResult
         @test result.section isa RCColumnSection
-        @test result.status in [:optimal, :feasible]
+        # :converged is an iteration-limit or slow-progress stop. It is
+        # acceptable only because the as-built check below still has to pass.
+        @test result.status in [:optimal, :feasible, :converged]
         
         # The optimal section should be within bounds
         @test 14.0 <= result.b_final <= 36.0
@@ -551,8 +553,8 @@ end
     end
 
     @testset "Placeable-steel constraint and bar cap" begin
-        # The constraint is ρ·b·h / (N_MAX·A_bar), dimensionless, last row,
-        # with b, h in inches and A_bar in in².
+        # The constraint is ρ·b·h / (n_fit·A_bar). n_fit is the bars that
+        # fit the faces, capped at N_MAX, not N_MAX itself.
         geometry = ConcreteMemberGeometry(4.0; k=1.0, braced=true)
         @test N_MAX_BARS == 32
         for (bar_size, Muy) in ((8, 0.0), (6, 0.0), (10, 150.0))
@@ -563,16 +565,20 @@ end
             for x in ([20.0, 20.0, 0.08], [14.0, 22.0, 0.025], [30.0, 30.0, 0.01])
                 g = constraint_fns(problem, x)
                 @test length(g) == n_constraints(problem)
-                @test g[end] ≈ x[3] * x[1] * x[2] / (N_MAX_BARS * A_bar) rtol=1e-12
+                n_fit = StructuralSizer._rc_column_nlp_fit_bars(x[1], x[2], opts)
+                @test n_fit <= N_MAX_BARS
+                @test g[end] ≈ x[3] * x[1] * x[2] / (n_fit * A_bar) rtol=1e-12
             end
         end
-        # #8 = 0.79 in²: 20×20 at ρ=0.08 asks for 32 in² against 25.28 in²
-        # placeable — the continuous point the old gate accepted.
+        # #8 (d_b = 1.0 in., 0.79 in²) in 20×20: bar centers 2.5 in. from each
+        # face leave 15 in. faces; §25.2.3 pitch = 1.0 + 1.5 = 2.5 in., so at
+        # most 2·(15 + 15)/2.5 = 24 bars = 18.96 in² fit. ρ=0.08 asks for 32 in².
         p8 = RCColumnNLPProblem(
             RCColumnDemand(1; Pu=600.0, Mux=500.0, βdns=0.6), geometry,
             NLPColumnOptions(bar_size=8, max_dim=20.0u"inch", ρ_max=0.08))
-        @test constraint_fns(p8, [20.0, 20.0, 0.08])[end] ≈ 32.0 / 25.28 rtol=1e-12
-        @test constraint_fns(p8, [20.0, 20.0, 0.0632])[end] ≈ 1.0 rtol=1e-12
+        @test StructuralSizer._rc_column_nlp_fit_bars(20.0, 20.0, p8.opts) ≈ 24.0
+        @test constraint_fns(p8, [20.0, 20.0, 0.08])[end] ≈ 32.0 / 18.96 rtol=1e-12
+        @test constraint_fns(p8, [20.0, 20.0, 0.0474])[end] ≈ 1.0 rtol=1e-12
 
         # The builder never exceeds N_MAX bars, at any ρ or size.
         for bar_size in (6, 8, 10), tie in (:tied, :spiral)
@@ -580,26 +586,34 @@ end
             for b in (10.0, 20.0, 36.0, 48.0), h in (10.0, 24.0, 48.0),
                     ρ in (0.01, 0.04, 0.08, 0.2)
                 sec = StructuralSizer._build_nlp_trial_section(b, h, ρ, opts)
-                @test !isnothing(sec)
-                @test length(sec.bars) <= N_MAX_BARS
-                @test length(sec.bars) ==
-                      StructuralSizer._nlp_trial_bar_count(b, h, ρ, opts)
+                n_fit = StructuralSizer._nlp_max_buildable_bars(b, h, opts)
+                if n_fit < StructuralSizer._nlp_min_bars(opts)
+                    # Even the tie-type minimum violates §25.2.3. No section.
+                    @test isnothing(sec)
+                else
+                    @test !isnothing(sec)
+                    @test length(sec.bars) <= N_MAX_BARS
+                    @test length(sec.bars) ==
+                          StructuralSizer._nlp_trial_bar_count(b, h, ρ, opts)
+                end
             end
             @test isnothing(StructuralSizer._build_nlp_column_section(
                 20.0, 20.0, N_MAX_BARS + 2, opts))
         end
-        # Critic's case: 40 #8 wanted, capped at 32 (ρg = 25.28/400 = 0.0632).
+        # 40 #8 wanted; §25.2.3 allows 5 interior bars per 15 in. face, so 24
+        # build (ρg = 18.96/400 = 0.0474). The old 32-bar cap was not placeable.
         sec_cap = StructuralSizer._build_nlp_trial_section(
             20.0, 20.0, 0.08, NLPColumnOptions(bar_size=8))
-        @test length(sec_cap.bars) == 32
-        @test sec_cap.ρg ≈ 0.0632 rtol=1e-12
+        @test length(sec_cap.bars) == 24
+        @test sec_cap.ρg ≈ 0.0474 rtol=1e-12
+        @test isnothing(StructuralSizer._build_nlp_column_section(
+            20.0, 20.0, 26, NLPColumnOptions(bar_size=8)))
     end
 
     @testset "Regression: 20×20 #8 high-ρ case is checked as built" begin
-        # Bounds force Ipopt toward ρ ≈ 0.08 at 20×20. The bar cap places only
-        # 32 #8 (ρg = 0.0632), so the continuous-ρ check used to accept a
-        # section with less steel than the solver assumed. Any acceptable
-        # result must now pass the real checker as built.
+        # Bounds force Ipopt toward ρ ≈ 0.08 at 20×20. The faces hold 24 #8
+        # (ρg ≈ 0.0474), less steel than that ratio. Any acceptable result
+        # must pass the real checker as built.
         geometry = ConcreteMemberGeometry(4.0; k=1.0, braced=true)
         opts = NLPColumnOptions(max_dim=20.0u"inch", ρ_max=0.08, bar_size=8)
         result = size_rc_column_nlp(600.0kip, 500.0kip * u"ft", geometry, opts)
@@ -774,6 +788,31 @@ end
             problem_cap, StructuralSizer._rc_column_nlp_checker(opts_cap), at_cap))
     end
 
+    @testset "Repair lowers a ρ_max start instead of skipping the size" begin
+        # Ipopt stops at ρ_opt = ρ_max = 0.06. Snapped to 10 × 10 in, the
+        # even count is 8 #8 (ρg = 0.0632 > ρ_max) and the clear spacing is
+        # 1.5 in, so ACI 318-19 §25.2.3 accepts it. Repair used to skip every
+        # size until the 32-bar cap held ρg under 0.06, returning 18 × 24 in
+        # with 32 #8.
+        geometry = ConcreteMemberGeometry(4.0; k=1.0, braced=true)
+        opts = NLPColumnOptions(
+            material=NWC_4000, rebar_material=Rebar_60,
+            min_dim=8.0u"inch", max_dim=30.0u"inch", include_slenderness=false)
+        problem = RCColumnNLPProblem(
+            RCColumnDemand(1; Pu=180.0, Mux=74.0, βdns=opts.βdns), geometry, opts)
+        sec = StructuralSizer._build_nlp_trial_section(10.0, 10.0, 0.06, opts)
+        @test length(sec.bars) == 8
+        @test sec.ρg > opts.ρ_max
+        start = RCColumnNLPResult(sec, 10.0, 9.4, 0.06, 10.0, 10.0, 100.0, :optimal, 1)
+        checker = StructuralSizer._rc_column_nlp_checker(opts)
+        repaired = StructuralSizer._rc_column_nlp_repair(problem, checker, start)
+        @test !isnothing(repaired)
+        @test StructuralSizer._rc_column_as_built_ok(problem, checker, repaired.section)
+        @test repaired.section.ρg <= opts.ρ_max
+        @test length(repaired.section.bars) < StructuralSizer.RC_COLUMN_NLP_MAX_BARS
+        @test repaired.area <= 12.0 * 18.0
+    end
+
     @testset "ρ_max rejects a minimum bar layout above the cap" begin
         # Tied 8×8, 4 #8: ρg ≈ 0.049. ACI 318-19 §10.6.1.1 allows it
         # (0.01 ≤ ρg ≤ 0.08), but opts.ρ_max = 0.01 does not. Do not raise
@@ -793,8 +832,8 @@ end
         checker = StructuralSizer._rc_column_nlp_checker(opts)
         @test !StructuralSizer._rc_column_as_built_ok(problem, checker, sec)
         start = RCColumnNLPResult(sec, 8.0, 8.0, 0.01, 8.0, 8.0, 64.0, :optimal, 1)
-        # The first trial count is those 4 bars, already over the cap, so
-        # repair must not accept them. max_dim blocks growth.
+        # Even the 4-bar minimum is over the cap, so repair must not accept
+        # this size. max_dim blocks growth.
         @test isnothing(StructuralSizer._rc_column_nlp_repair(problem, checker, start))
         dead = StructuralSizer._rc_column_nlp_verify_as_built(problem, start)
         @test dead.status === :infeasible
@@ -888,6 +927,36 @@ end
         @test marked.status === :infeasible
         @test marked.minimizer == r.minimizer
         @test !nlp_acceptable(marked.status)
+    end
+
+    @testset "Circular NLP uses the same 1.4 magnifier cap" begin
+        # 30 m, 12 in diameter: kℓu/r is far past §6.2.5.1 and Pu is past
+        # 0.75 Pc, so Eq. (6.6.4.5.2) is undefined and the row must exceed 1.
+        demand = RCColumnDemand(1; Pu=400.0, Mux=50.0, M1x=0.0, M2x=50.0, βdns=0.6)
+        geometry = ConcreteMemberGeometry(30.0; k=1.0, braced=true)
+        opts = NLPColumnOptions(tie_type=:spiral, include_slenderness=true)
+        problem = RCCircularNLPProblem(demand, geometry, opts)
+        @test constraint_fns(problem, [12.0, 0.02])[1] > 1.0
+    end
+
+    @testset "Circular NLP rechecks the built section" begin
+        # 30 m and 400 kip put a 12 in section past 0.75 Pc. The gate must
+        # not return that section as acceptable.
+        demand = RCColumnDemand(1; Pu=400.0, Mux=50.0, M1x=0.0, M2x=50.0, βdns=0.6)
+        geometry = ConcreteMemberGeometry(30.0; k=1.0, braced=true)
+        opts = NLPColumnOptions(tie_type=:spiral, include_slenderness=true,
+                                min_dim=12.0u"inch", max_dim=36.0u"inch")
+        problem = RCCircularNLPProblem(demand, geometry, opts)
+        section = StructuralSizer._build_nlp_trial_circular_section(12.0, 0.02, opts)
+        @test section isa RCCircularSection
+        built = RCCircularNLPResult(section, 12.0, 0.02, 12.0, π * 36.0, :optimal, 1)
+        checked = StructuralSizer._rc_circular_nlp_verify_as_built(problem, built)
+        checker = StructuralSizer._rc_column_nlp_checker(opts)
+        @test StructuralSizer._rc_circular_as_built_ok(problem, checker, checked.section) ||
+              checked.status === :infeasible
+        if checked.status !== :infeasible
+            @test checked.D_final > 12.0
+        end
     end
 
 end

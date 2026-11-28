@@ -43,6 +43,9 @@ function size!(
     size_foundations::Bool = true,
     verbose::Bool = true,
 )
+    design.finalized && throw(ArgumentError(
+        "size! cannot mutate a finalized BuildingDesign. Start a new " *
+        "DesignSession or call design_building with updated parameters."))
     struc = design.structure
     params = design.params
 
@@ -92,29 +95,16 @@ function size!(
         # --- Size beams ---
         size_beams!(struc, beam_opts; reanalyze = false, member_group_overrides = mgo,
                     I_factor = params.beam_I_factor,
+                    gravity_factor = member_self_weight_acceleration(params),
                     composite_concrete = resolve_slab_concrete(params.materials),
                     composite_option_kwargs(beam_opts)...)
-
-        # --- Re-analyze with updated beam self-weight ---
-        # Topology unchanged; only sections/loads differ → lightweight reprocess
-        if struc.asap_model.processed
-            Asap.update!(struc.asap_model)
-        else
-            Asap.process!(struc.asap_model)
-        end
-        Asap.solve!(struc.asap_model)
+        update_analysis!(struc, :stiffness)
 
         # --- Size columns with updated demands ---
         size_columns!(struc, column_opts; reanalyze = false,
-                      I_factor = params.column_I_factor)  # ACI 318-11 §10.10.4.1
-
-        # --- Re-analyze with updated column sections ---
-        if struc.asap_model.processed
-            Asap.update!(struc.asap_model)
-        else
-            Asap.process!(struc.asap_model)
-        end
-        Asap.solve!(struc.asap_model)
+                      I_factor = params.column_I_factor,  # ACI 318-11 §10.10.4.1
+                      gravity_factor = member_self_weight_acceleration(params))
+        update_analysis!(struc, :stiffness)
 
         # --- Check convergence ---
         _extract_column_demands!(curr_demands, struc)
@@ -171,7 +161,7 @@ function _update_design_results!(design::BuildingDesign)
     for (col_idx, col) in enumerate(struc.columns)
         if !isnothing(col.base.section)
             result = get(design.columns, col_idx, ColumnDesignResult())
-            result.section_size = string(col.base.section)
+            result.section_size = _section_label(col.base.section)
             result.section_obj = col.base.section
             design.columns[col_idx] = result
         end
@@ -181,7 +171,7 @@ function _update_design_results!(design::BuildingDesign)
     for (beam_idx, beam) in enumerate(struc.beams)
         if !isnothing(beam.base.section)
             result = get(design.beams, beam_idx, BeamDesignResult())
-            result.section_size = string(beam.base.section)
+            result.section_size = _section_label(beam.base.section)
             result.section_obj = beam.base.section
             design.beams[beam_idx] = result
         end

@@ -124,7 +124,8 @@ construction_with_width(stage::ConstructionStage, b_trib) =
     ConstructionStage(stage.cp_class, stage.p_Cp, stage.p_concrete,
                       uconvert(u"m", b_trib), stage.p_L,
                       stage.w_D_extra, stage.w_Cd, stage.w_Cfml,
-                      stage.M_ref, stage.V_ref, stage.w_ref)
+                      stage.M_ref, stage.V_ref, stage.w_ref,
+                      stage.M_line, stage.V_line, stage.p_ref)
 
 """
 Attach an analysis dead-load shape to a construction stage.
@@ -141,7 +142,30 @@ function construction_with_shape(stage::ConstructionStage, M_ref, V_ref, w_ref)
                       stage.p_L, stage.w_D_extra, stage.w_Cd, stage.w_Cfml,
                       abs(uconvert(u"N*m", M_ref)),
                       abs(uconvert(u"N", V_ref)),
-                      w)
+                      w, nothing, nothing, nothing)
+end
+
+"""
+Attach a varying-width dead-load shape to a construction stage.
+
+`M_area` and `V_area` are the extrema from one tributary pressure `p_ref` on
+the bare-steel model, widths varying along the beam. `M_line` and `V_line`
+are the extrema from a uniform 1 N/m on that same model. Area load scales
+with pressure. The steel weight, a line load, scales `M_line`.
+"""
+function construction_with_split(stage::ConstructionStage, M_area, V_area, p_ref,
+                                 M_line, V_line)
+    p = uconvert(u"Pa", p_ref)
+    ustrip(p) > 0 || throw(ArgumentError(
+        "A pre-cure tributary shape needs a positive analysis pressure."))
+    return ConstructionStage(stage.cp_class, stage.p_Cp, stage.p_concrete, stage.b_trib,
+                             stage.p_L, stage.w_D_extra, stage.w_Cd, stage.w_Cfml,
+                             abs(uconvert(u"N*m", M_area)),
+                             abs(uconvert(u"N", V_area)),
+                             nothing,
+                             abs(uconvert(u"N*m", M_line)),
+                             abs(uconvert(u"N", V_line)),
+                             p)
 end
 
 """
@@ -158,9 +182,16 @@ from a uniform analysis dead load, both are scaled by `w / w_ref`. A pinned
 beam recovers `w L^2 / 8`. A moment connection supplies its own end moment
 and end shear. The scale is valid only when the construction load has the
 same layout as that dead load. Personnel placed in a different pattern is
-not represented. Without a shape, the simple span remains: `w L^2 / 8` is
-the largest uniform-load moment among simple, propped, and fixed ends, and
-`w L / 2` is below the 5wL/8 fixed-end shear of a propped cantilever.
+not represented.
+
+ENGINEERING JUDGMENT: when the stage carries `p_ref`, the tributary width
+varies and the dead load is one pressure on that width. The area-load part
+of each equation scales `M_ref` by its pressure over `p_ref`. The steel
+weight and the line-load construction terms scale `M_line`, the moment of a
+uniform 1 N/m on the same model. Without a shape, the simple span remains:
+`w L^2 / 8` is the largest uniform-load moment among simple, propped, and
+fixed ends, and `w L / 2` is below the 5wL/8 fixed-end shear of a propped
+cantilever.
 
 ENGINEERING JUDGMENT: `p_L` defaults to zero. Eq. 2-3's `0.5L` is the
 arbitrary-point-in-time live load present during construction (SEI/ASCE 37-02
@@ -181,12 +212,36 @@ function construction_span_demand(section, material, stage::ConstructionStage, L
            1.6 * w_Cp + 0.5 * w_L
     w = max(w_22, w_23)
     equation = w_23 >= w_22 ? "2-3" : "2-2"
+    line_refs = (stage.M_line, stage.V_line, stage.p_ref)
+    if stage.p_ref !== nothing && any(isnothing, line_refs)
+        throw(ArgumentError(
+            "A varying-width pre-cure shape needs the area-load moment and shear, " *
+            "the unit line-load moment and shear, and the analysis pressure."))
+    end
     refs = (stage.M_ref, stage.V_ref, stage.w_ref)
-    if any(!isnothing, refs) && any(isnothing, refs)
+    if stage.p_ref === nothing && any(!isnothing, refs) && any(isnothing, refs)
         throw(ArgumentError(
             "Pre-cure moment shape needs the analysis moment, shear, and line load together."))
     end
-    if stage.M_ref === nothing
+    if stage.p_ref !== nothing
+        # Area load follows the tributary width. Line load does not.
+        # SEI/ASCE 37-02 §2.2.3: C_VML, C_P, and 0.5L are pressures; D, C_D,
+        # and C_FML are line loads. The governing equation may differ for
+        # moment and for shear; `equation` names the moment's.
+        p22 = 1.4 * stage.p_concrete
+        p23 = 1.4 * stage.p_concrete + 1.6 * stage.p_Cp + 0.5 * stage.p_L
+        w22 = 1.4 * w_D + 1.4 * stage.w_Cd + 1.2 * stage.w_Cfml
+        w23 = 1.2 * w_D + 1.2 * stage.w_Cd + 1.2 * stage.w_Cfml
+        w1 = 1.0u"N/m"
+        Mu22 = stage.M_ref * (p22 / stage.p_ref) + stage.M_line * (w22 / w1)
+        Mu23 = stage.M_ref * (p23 / stage.p_ref) + stage.M_line * (w23 / w1)
+        Vu22 = stage.V_ref * (p22 / stage.p_ref) + stage.V_line * (w22 / w1)
+        Vu23 = stage.V_ref * (p23 / stage.p_ref) + stage.V_line * (w23 / w1)
+        Mu = max(Mu22, Mu23)
+        Vu = max(Vu22, Vu23)
+        equation = Mu23 >= Mu22 ? "2-3" : "2-2"
+        moment_model = :analysis_tributary
+    elseif stage.M_ref === nothing
         Mu = w * L_m^2 / 8
         Vu = w * L_m / 2
         moment_model = :simple_span

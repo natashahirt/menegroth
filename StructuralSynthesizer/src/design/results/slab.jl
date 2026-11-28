@@ -78,6 +78,9 @@ Base.@kwdef mutable struct SlabDesignResult
     # Floor result type flags (survive restore! — slab.result gets reverted to initial estimate)
     is_vault::Bool = false
     vault_rise::Union{Nothing, typeof(1.0u"m")} = nothing
+    # Vault springing stress and half-span thrust-line kern (true for other floors).
+    vault_stress_ok::Bool = true
+    vault_kern_ok::Bool = true
 
     # Full StructuralSizer result captured before restore! wipes slab.result.
     # Used by engineering_report and any downstream that needs the rich sizing detail.
@@ -92,19 +95,53 @@ Base.@kwdef mutable struct SlabDesignResult
     method_requested::Union{Nothing, StructuralSizer.FlatPlateAnalysisMethod} = nothing
     method_used::Union{Nothing, StructuralSizer.FlatPlateAnalysisMethod} = nothing
     method_fallback_reasons::Vector{String} = String[]
+
+    # "not_analyzed" when only a minimum thickness was set and no moment
+    # analysis ran. Empty when the floor type does not report it.
+    analysis_status::String = ""
+
+    # Wood-Armer bars of this slab's panels from the story shell, one field
+    # per panel. Empty when the story shell did not design the slab.
+    shell_reinforcement::Vector{StructuralSizer.ElementRebarField} =
+        StructuralSizer.ElementRebarField[]
 end
+
+"""
+    _slab_design_ok(sr::SlabDesignResult) -> Bool
+
+The slab passes: the design converged and deflection, punching and the
+§13.3.8.5 integrity bars in both directions are satisfied, and a vault passes
+its stress and kern checks. Every pass count and status flag uses this.
+"""
+_slab_design_ok(sr::SlabDesignResult) =
+    sr.converged && sr.deflection_ok && sr.punching_ok && sr.integrity_ok &&
+    sr.vault_stress_ok && sr.vault_kern_ok
+
+"""
+True when a deflection check stored a demand, a limit, or a ratio.
+
+A `SlabDesignResult` defaults every deflection field to zero and
+`deflection_ok` to true. That default is not a computed pass. A check that
+ran records a limit, or a non-zero demand or ratio.
+"""
+slab_deflection_measured(sr::SlabDesignResult) =
+    sr.deflection_limit_in > 0 || sr.deflection_in > 0 || sr.deflection_ratio > 0
 
 """
     slab_diagnostic_governing_check(sr::SlabDesignResult) -> String
 
-Canonical limit-state key for `/diagnose` and design summaries. When the slab passes API-style
-`ok` (`converged && deflection_ok && punching_ok`), returns whichever of deflection vs slab
+Canonical limit-state key for `/diagnose` and design summaries. When the slab passes
+(`_slab_design_ok`), returns whichever of deflection vs slab
 punching has the higher ratio. When it fails, prefers the sizer's `failing_check` and
 `failure_reason` (e.g. Whitney / rebar inadequacy reports `section_inadequate` and
 `reinforcement_design`) so diagnostics are not mislabeled as deflection or punching alone.
 """
 function slab_diagnostic_governing_check(sr::SlabDesignResult)::String
-    if sr.converged && sr.deflection_ok && sr.punching_ok
+    if _slab_design_ok(sr)
+        # An unmeasured deflection is the default zero, not the governing pass.
+        if !slab_deflection_measured(sr)
+            return sr.punching_max_ratio > 0 ? "punching_shear_slab" : ""
+        end
         return sr.deflection_ratio >= sr.punching_max_ratio ? "deflection" : "punching_shear_slab"
     end
     fc = strip(sr.failing_check)
@@ -122,11 +159,14 @@ function slab_diagnostic_governing_check(sr::SlabDesignResult)::String
     if !sr.converged
         return "non_convergence"
     end
+    sr.vault_stress_ok || return "vault_stress"
+    sr.vault_kern_ok || return "vault_kern"
     if !sr.punching_ok
         return "punching_shear_slab"
     end
     if !sr.deflection_ok
         return "deflection"
     end
+    sr.integrity_ok || return "structural_integrity"
     return sr.deflection_ratio >= sr.punching_max_ratio ? "deflection" : "punching_shear_slab"
 end

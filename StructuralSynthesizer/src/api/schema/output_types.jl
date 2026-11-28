@@ -44,6 +44,9 @@ Base.@kwdef struct APIColumnResult
     axial_ratio::Union{Float64, Nothing} = 0.0
     interaction_ratio::Union{Float64, Nothing} = 0.0
     ok::Bool = true
+    # Row F frame check. `nothing` ratio when this column was not in that check.
+    seismic_frame_ratio::Union{Float64, Nothing} = nothing
+    seismic_frame_check::String = ""
 end
 
 """Beam result for JSON output."""
@@ -56,6 +59,8 @@ Base.@kwdef struct APIBeamResult
     flexure_ratio::Float64 = 0.0
     shear_ratio::Float64 = 0.0
     ok::Bool = true
+    seismic_frame_ratio::Union{Float64, Nothing} = nothing
+    seismic_frame_check::String = ""
 end
 
 """Foundation result for JSON output."""
@@ -133,6 +138,18 @@ Base.@kwdef struct APIVisualizationFrameElement
     section_polygon::Vector{Vector{Float64}} = []  # [[y1, z1], [y2, z2], ...]
     # Inner boundary for hollow sections (HSS rect/round); empty for solid sections
     section_polygon_inner::Vector{Vector{Float64}} = []  # [[y1, z1], [y2, z2], ...]
+    # Longitudinal bar centres for RC columns, same frame and units as section_polygon;
+    # empty for sections without rebar. rebar_diameter is the equivalent-area bar diameter.
+    rebar_positions::Vector{Vector{Float64}} = []  # [[y1, z1], [y2, z2], ...]
+    rebar_diameter::Float64 = 0.0
+    # Headed studs on a composite beam. Each stud is [[s, y, z], ...] in the
+    # same length unit as section_polygon. s is the distance from node_start
+    # along the element. y and z are the shank base in the section frame:
+    # y across the flange, z at the top of steel. The shank runs stud_length
+    # in the +z direction. Empty when the element carries no studs.
+    stud_positions::Vector{Vector{Float64}} = []  # [[s, y, z], ...]
+    stud_diameter::Float64 = 0.0
+    stud_length::Float64 = 0.0
     # Interpolated deflected curve (cubic interpolation from FEA)
     original_points::Vector{Vector{Float64}} = []   # [[x,y,z], ...] original positions in display length units
     displacement_vectors::Vector{Vector{Float64}} = []  # [[dx,dy,dz], ...] displacements at each point in display length units
@@ -275,6 +292,8 @@ Base.@kwdef struct APISeismicStoryDrift
     drift_m::Float64 = 0.0
     allowable_m::Float64 = 0.0
     passes::Bool = false
+    "`independent`, or the ASCE 7-22 §12.5.1.2 combination the drift came from."
+    effect::String = "independent"
 end
 
 """Top-level output payload."""
@@ -293,6 +312,8 @@ Base.@kwdef struct APIOutput
     foundations::Vector{APIFoundationResult} = APIFoundationResult[]
     walls::Vector{APIWallCheck} = APIWallCheck[]
     seismic_story_drift::Vector{APISeismicStoryDrift} = APISeismicStoryDrift[]
+    # What the design did not cover. Informational; not failures.
+    scope_notes::Vector{String} = String[]
     geometry_hash::String = ""
     visualization::Union{APIVisualization, Nothing} = nothing
 end

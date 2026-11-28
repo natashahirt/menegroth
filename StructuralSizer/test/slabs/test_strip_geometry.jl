@@ -75,8 +75,7 @@ import Meshes
     end
     
     @testset "L-shaped panel" begin
-        # L-shaped: 10×2 bottom + 6×4 top = 20 + 24 = 44 m² (approx)
-        # Note: straight skeleton area may differ slightly from simple calculation
+        # L-shaped: 10×2 bottom + 4×4 top = 36 m²
         verts = [
             Meshes.Point(0.0, 0.0, 0.0),
             Meshes.Point(10.0, 0.0, 0.0),

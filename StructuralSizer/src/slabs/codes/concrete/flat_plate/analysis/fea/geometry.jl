@@ -9,26 +9,53 @@
 """
     _get_slab_face_boundary(struc, slab) -> (boundary_vis, all_vis, interior_edge_vis)
 
-Ordered boundary vertex indices, all vertex indices, and interior cell-edge
-vertex pairs for a slab.
+Ordered exterior boundary vertex indices, all vertex indices, and interior
+cell-edge vertex pairs for a slab.
 
 Single-cell slabs: boundary = face polygon, interior edges = empty.
-Multi-cell slabs: boundary edges (count=1) chained into polygon; interior
-edges (count≥2) returned as vertex pairs.
+Multi-cell slabs: edges used by one cell are the boundary. When a bay is
+missing, that boundary is the exterior plus one loop per courtyard. The
+exterior is the loop of largest area. Courtyard loops are
+[`slab_void_loops`](@ref), not part of this polygon.
 """
 function _get_slab_face_boundary(struc, slab)
+    exterior, all_verts, interior_edge_vis, _ = _slab_boundary_topology(struc, slab)
+    return (exterior, all_verts, interior_edge_vis)
+end
+
+"""
+    slab_void_loops(struc, slab) -> Vector{Vector{NTuple{2,Float64}}}
+
+Courtyard holes of `slab`, in plan metres. Each loop is clockwise (the
+solid floor is to the left of a directed edge). A courtyard is a bay missing
+from the slab, or a beam network nested inside one of its faces
+(`skel.face_holes`). Empty when the slab has neither. These are framed voids,
+not [`slab_opening_loops`](@ref).
+"""
+function slab_void_loops(struc, slab)
+    skel = struc.skeleton
+    _, _, _, holes = _slab_boundary_topology(struc, slab)
+    out = [[_vertex_xy_m(skel, vi) for vi in loop] for loop in holes]
+    hasproperty(skel, :face_holes) || return out
+    nested = getfield(skel, :face_holes)
+    for ci in slab.cell_indices, loop in get(nested, struc.cells[ci].face_idx, ())
+        push!(out, reverse(loop))
+    end
+    return out
+end
+
+function _slab_boundary_topology(struc, slab)
     skel = struc.skeleton
 
     if length(slab.cell_indices) == 1
         face_idx = struc.cells[first(slab.cell_indices)].face_idx
         boundary = collect(skel.face_vertex_indices[face_idx])
-        return (boundary, Set(boundary), Tuple{Int,Int}[])
+        _ensure_ccw_vis!(boundary, skel)
+        return (boundary, Set(boundary), Tuple{Int,Int}[], Vector{Int}[])
     end
 
-    # Count how many slab cells reference each skeleton edge
     edge_count = Dict{Int, Int}()
     all_verts = Set{Int}()
-
     for ci in slab.cell_indices
         face_idx = struc.cells[ci].face_idx
         union!(all_verts, skel.face_vertex_indices[face_idx])
@@ -39,33 +66,77 @@ function _get_slab_face_boundary(struc, slab)
 
     boundary_edge_vis = Tuple{Int,Int}[skel.edge_indices[ei] for (ei, c) in edge_count if c == 1]
     interior_edge_vis = Tuple{Int,Int}[skel.edge_indices[ei] for (ei, c) in edge_count if c >= 2]
-
     isempty(boundary_edge_vis) && error("Could not find slab boundary — all edges are shared.")
 
-    # Chain boundary edges into an ordered polygon
+    loops = _closed_boundary_loops(boundary_edge_vis)
+    isempty(loops) && error("Could not close the slab boundary.")
+    areas = [abs(_loop_area(skel, loop)) for loop in loops]
+    k = argmax(areas)
+    exterior = loops[k]
+    _ensure_ccw_vis!(exterior, skel)
+    holes = Vector{Int}[]
+    for (i, loop) in enumerate(loops)
+        i == k && continue
+        _ensure_ccw_vis!(loop, skel)
+        reverse!(loop)  # clockwise courtyard
+        push!(holes, loop)
+    end
+    return (exterior, all_verts, interior_edge_vis, holes)
+end
+
+"""Closed loops of an undirected edge set. Each edge is used once."""
+function _closed_boundary_loops(pairs::Vector{Tuple{Int,Int}})
     adj = Dict{Int, Vector{Int}}()
-    for (a, b) in boundary_edge_vis
+    for (a, b) in pairs
         push!(get!(adj, a, Int[]), b)
         push!(get!(adj, b, Int[]), a)
     end
-
-    start = boundary_edge_vis[1][1]
-    boundary = [start]
-    prev = 0
-    current = start
-    for _ in 1:length(boundary_edge_vis)
-        neighbors = adj[current]
-        next = first(n for n in neighbors if n != prev)
-        next == start && break
-        push!(boundary, next)
-        prev = current
-        current = next
+    used = Set{NTuple{2,Int}}()
+    loops = Vector{Int}[]
+    for (a, bs) in adj
+        for b0 in bs
+            key0 = a < b0 ? (a, b0) : (b0, a)
+            key0 in used && continue
+            loop = Int[a]
+            prev, cur = a, b0
+            closed = false
+            for _ in 1:(length(pairs) + 1)
+                push!(used, prev < cur ? (prev, cur) : (cur, prev))
+                if cur == a
+                    closed = true
+                    break
+                end
+                push!(loop, cur)
+                nxt = 0
+                found = false
+                for n in adj[cur]
+                    n == prev && continue
+                    k2 = cur < n ? (cur, n) : (n, cur)
+                    k2 in used && continue
+                    nxt = n
+                    found = true
+                    break
+                end
+                found || break
+                prev, cur = cur, nxt
+            end
+            closed && length(loop) >= 3 && push!(loops, loop)
+        end
     end
+    length(used) == length(pairs) ||
+        error("slab boundary edges did not form closed loops")
+    return loops
+end
 
-    # Ensure CCW (Delaunay triangulator requires positive orientation)
-    _ensure_ccw_vis!(boundary, skel)
-
-    return (boundary, all_verts, interior_edge_vis)
+function _loop_area(skel, loop::Vector{Int})
+    vc = skel.geometry.vertex_coords
+    area = 0.0
+    n = length(loop)
+    for i in 1:n
+        j = mod1(i + 1, n)
+        area += vc[loop[i], 1] * vc[loop[j], 2] - vc[loop[j], 1] * vc[loop[i], 2]
+    end
+    return 0.5 * area
 end
 
 """
@@ -87,9 +158,37 @@ function _ensure_ccw_vis!(vis::Vector{Int}, skel)
     return vis
 end
 
-"""Build an Asap section for a column stub, delegating to `column_asap_section`."""
-_col_asap_sec(col, Ec, ν; I_factor=0.70) =
-    column_asap_section(col.c1, col.c2, col_shape(col), Ec, ν; I_factor=I_factor)
+"""
+`(c1, c2)` of a column that has been sized, or `nothing`.
+
+A stored `RCColumnSection` is the section that was designed. Otherwise the
+column's own `c1` and `c2` are used when both are set. The caller supplies
+the column below as a fallback.
+"""
+function _sized_column_section(col)
+    if hasproperty(col, :base) && hasproperty(col.base, :section)
+        section = col.base.section
+        if section isa RCColumnSection
+            return (section.b, section.h)
+        end
+    end
+    hasproperty(col, :c1) || return nothing
+    c1, c2 = col.c1, col.c2
+    (c1 === nothing || c2 === nothing) && return nothing
+    (c1 > zero(c1) && c2 > zero(c2)) || return nothing
+    return (c1, c2)
+end
+
+"""
+Build an Asap section for a column stub.
+
+`fallback` is the section of the column below when `col` has not been sized.
+"""
+function _col_asap_sec(col, Ec, ν; I_factor=0.70, fallback=nothing)
+    sec = _sized_column_section(col)
+    c1, c2 = sec === nothing ? fallback : sec
+    return column_asap_section(c1, c2, col_shape(col), Ec, ν; I_factor=I_factor)
+end
 
 # =============================================================================
 # Edge-Beam Section (FEA perimeter line elements)
@@ -303,7 +402,7 @@ of the cross-section (c1 along local-x, c2 along local-y).
 function _column_face_offset_m(col, d::NTuple{2,Float64})
     cshape = col_shape(col)
     if cshape == :circular
-        return ustrip(u"m", col.c1) / 2   # D/2 in any direction
+        return _edge_m(col.c1) / 2   # D/2 in any direction
     end
 
     # Rotate d from global frame into the column's local frame.
@@ -315,8 +414,8 @@ function _column_face_offset_m(col, d::NTuple{2,Float64})
     dl_x = cosθ * d[1] + sinθ * d[2]
     dl_y = -sinθ * d[1] + cosθ * d[2]
 
-    c1_m = ustrip(u"m", col.c1)
-    c2_m = ustrip(u"m", col.c2)
+    c1_m = _edge_m(col.c1)
+    c2_m = _edge_m(col.c2)
     tx = abs(dl_x) > 1e-9 ? c1_m / (2 * abs(dl_x)) : Inf
     ty = abs(dl_y) > 1e-9 ? c2_m / (2 * abs(dl_y)) : Inf
     return min(tx, ty)

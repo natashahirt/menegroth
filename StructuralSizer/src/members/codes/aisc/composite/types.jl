@@ -94,15 +94,34 @@ the composite section's elastic neutral axis and `I_transformed`).
 - `n`:      Modular ratio Es/Ec
 - `hr`:     Nominal rib height
 - `wr`:     Average rib width
-- `deck_orientation`: `:perpendicular` or `:parallel` to beam
+- `deck_orientation`: `:perpendicular`, `:parallel`, or `:skewed`, classified
+  from `rib_angle` (see below)
 - `beam_spacing_left`, `beam_spacing_right`, `edge_dist_left`, `edge_dist_right`: as `SolidSlabOnBeam`
 - `e_mid_ht`: distance from the stud shank edge to the deck web, at mid-height
   of the rib, in the load-bearing direction of the stud (AISC 360-22 §I8.2a,
   corpus: aisc-360-22, PDF p. 182). `nothing` means unknown and keeps
-  `Rp = 0.6` for perpendicular deck.
+  `Rp = 0.6` for perpendicular deck. On skewed deck it is measured
+  perpendicular to the rib, never along the beam.
 - `anchorage_spacing`: spacing of the deck attachments to the supporting
   member (§I3.2c(d), PDF p. 170). `nothing` means not supplied; the limit is
   then reported as unchecked, not as passing.
+- `rib_angle`: angle between the deck ribs and the beam axis, radians in
+  `[0, π/2]`. `0` is parallel, `π/2` perpendicular.
+- `rib_pitch`: center-to-center rib spacing measured perpendicular to the
+  ribs, or `nothing` when unknown. Studs on non-parallel deck can sit only
+  where a low flute crosses the flange, `rib_pitch / sin(rib_angle)` apart
+  along the beam.
+
+# Skewed ribs
+
+AISC 360-22 §I3.2c and §I8.2a (corpus: aisc-360-22, PDF pp. 170, 182) give
+rules for deck parallel or perpendicular to the beam only. Any angle other
+than parallel takes the perpendicular rules: rib concrete neglected, and the
+perpendicular `Rg`/`Rp`, which are no larger than the parallel values.
+ENGINEERING JUDGMENT, supported by push-out tests at 45° and 90°
+(Jakovljević, Spremić & Marković, ce/papers 2022, doi:10.1002/cepa.1821;
+Eng. Struct. 303 (2024) 117574) in which stud resistance rose as the angle
+fell from 90° to 45°. Below 45° no tests were found.
 """
 struct DeckSlabOnBeam{T_P<:Pressure, T_D<:Density} <: AbstractSlabOnBeam
     t_slab::typeof(1.0u"m")
@@ -119,24 +138,85 @@ struct DeckSlabOnBeam{T_P<:Pressure, T_D<:Density} <: AbstractSlabOnBeam
     edge_dist_right::Union{typeof(1.0u"m"), Nothing}
     e_mid_ht::Union{typeof(1.0u"m"), Nothing}
     anchorage_spacing::Union{typeof(1.0u"m"), Nothing}
+    rib_angle::Float64
+    rib_pitch::Union{typeof(1.0u"m"), Nothing}
 end
 
 _opt_m(x) = x === nothing ? nothing : uconvert(u"m", x)
 
+"""Floating-point tolerance, in radians, for calling a rib angle exactly
+parallel or perpendicular. It is not an engineering snap: only ribs that are
+truly parallel get the parallel rules."""
+const RIB_ANGLE_TOL = 1e-3
+
+"""
+    rib_orientation(θ) -> Symbol
+
+`:parallel` for `θ ≈ 0`, `:perpendicular` for `θ ≈ π/2`, otherwise `:skewed`,
+within [`RIB_ANGLE_TOL`](@ref).
+"""
+function rib_orientation(θ::Real)
+    θ <= RIB_ANGLE_TOL && return :parallel
+    θ >= π / 2 - RIB_ANGLE_TOL && return :perpendicular
+    return :skewed
+end
+
+"""
+    rib_angle_between(rib_dir, beam_dir) -> Float64
+
+Acute angle in `[0, π/2]` between two plan directions `(x, y)`. Either may
+point either way along its line.
+"""
+function rib_angle_between(rib_dir, beam_dir)
+    a = hypot(rib_dir[1], rib_dir[2])
+    b = hypot(beam_dir[1], beam_dir[2])
+    (a > 0 && b > 0) || throw(ArgumentError("Rib and beam directions must be nonzero."))
+    c = abs(rib_dir[1] * beam_dir[1] + rib_dir[2] * beam_dir[2]) / (a * b)
+    return acos(clamp(c, 0.0, 1.0))
+end
+
+"""
+    DeckSlabOnBeam(t_slab, fc′, Ec, wc, Es, hr, wr, deck_orientation,
+                   beam_spacing_left, beam_spacing_right;
+                   edge_dist_left=nothing, edge_dist_right=nothing,
+                   e_mid_ht=nothing, anchorage_spacing=nothing,
+                   rib_angle=nothing, rib_pitch=nothing)
+
+`deck_orientation` is `:perpendicular` or `:parallel` when `rib_angle` is not
+given. With `rib_angle` (radians), the orientation is classified from the
+angle and `deck_orientation` must match that classification.
+"""
 function DeckSlabOnBeam(t_slab, fc′, Ec, wc, Es,
                         hr, wr, deck_orientation,
                         beam_spacing_left, beam_spacing_right;
                         edge_dist_left=nothing, edge_dist_right=nothing,
-                        e_mid_ht=nothing, anchorage_spacing=nothing)
-    deck_orientation in (:perpendicular, :parallel) ||
-        throw(ArgumentError("deck_orientation must be :perpendicular or :parallel, got :$deck_orientation"))
+                        e_mid_ht=nothing, anchorage_spacing=nothing,
+                        rib_angle=nothing, rib_pitch=nothing)
+    θ = if rib_angle === nothing
+        deck_orientation === :perpendicular ? π / 2 :
+        deck_orientation === :parallel ? 0.0 :
+        throw(ArgumentError("deck_orientation :$deck_orientation needs rib_angle; " *
+                            "without it use :perpendicular or :parallel."))
+    else
+        Float64(rib_angle)
+    end
+    0.0 <= θ <= π / 2 + 1e-12 ||
+        throw(ArgumentError("rib_angle must lie in [0, π/2] radians, got $θ."))
+    θ = min(θ, π / 2)
+    derived = rib_orientation(θ)
+    deck_orientation === derived || throw(ArgumentError(
+        "deck_orientation :$deck_orientation does not match rib_angle " *
+        "$(round(rad2deg(θ); digits=3))° (:$derived)."))
+    pitch = _opt_m(rib_pitch)
+    pitch === nothing || pitch > 0u"m" ||
+        throw(ArgumentError("rib_pitch must be positive, got $rib_pitch."))
     n = ustrip(u"Pa", Es) / ustrip(u"Pa", Ec)
     DeckSlabOnBeam(uconvert(u"m", t_slab), fc′, Ec, wc, n,
-                   uconvert(u"m", hr), uconvert(u"m", wr), deck_orientation,
+                   uconvert(u"m", hr), uconvert(u"m", wr), derived,
                    uconvert(u"m", beam_spacing_left),
                    uconvert(u"m", beam_spacing_right),
                    _opt_m(edge_dist_left), _opt_m(edge_dist_right),
-                   _opt_m(e_mid_ht), _opt_m(anchorage_spacing))
+                   _opt_m(e_mid_ht), _opt_m(anchorage_spacing), θ, pitch)
 end
 
 # ==============================================================================
@@ -243,6 +323,21 @@ struct ConstructionStage
     M_ref::Union{Nothing, typeof(1.0u"N*m")}
     V_ref::Union{Nothing, typeof(1.0u"N")}
     w_ref::Union{Nothing, typeof(1.0u"N/m")}
+    # A varying tributary width at one pressure. `M_ref` and `V_ref` are the
+    # area-load extrema under `p_ref`. `M_line` and `V_line` are the extrema
+    # under a uniform 1 N/m on the same bare-steel model. `nothing` keeps the
+    # uniform-line-load scale above.
+    M_line::Union{Nothing, typeof(1.0u"N*m")}
+    V_line::Union{Nothing, typeof(1.0u"N")}
+    p_ref::Union{Nothing, typeof(1.0u"Pa")}
+end
+
+"""A stage with no varying-width shape. The eleven analysis fields are unchanged."""
+function ConstructionStage(cp_class, p_Cp, p_concrete, b_trib, p_L,
+                           w_D_extra, w_Cd, w_Cfml, M_ref, V_ref, w_ref)
+    return ConstructionStage(cp_class, p_Cp, p_concrete, b_trib, p_L,
+                             w_D_extra, w_Cd, w_Cfml, M_ref, V_ref, w_ref,
+                             nothing, nothing, nothing)
 end
 
 # ==============================================================================
@@ -336,6 +431,7 @@ This struct is built once per beam group and passed to the composite `is_feasibl
 - `construction`: Pre-cure loads (SEI/ASCE 37-02). Built from the slab when omitted.
 - `L_twist`:    Spacing of points that restrain twist, for the hogging Chapter F check and Commentary Eq. C-F1-5. `nothing` uses the member span.
 - `deck_attachment`: Fastener pattern and optional diaphragm strength for a deck slab. `nothing` on a solid slab. A deck defaults to the 36/4 pattern.
+- `d_rebar`:    Height of the negative-reinforcement centroid above the top of the steel. `0` puts the bars on the top flange and gives the smallest cracked `I_neg`.
 
 # Notes
 - The `AISCChecker` uses this to decide between bare-steel and composite capacity paths.
@@ -357,6 +453,7 @@ struct CompositeContext{S<:AbstractSlabOnBeam, A<:AbstractSteelAnchor,
     ΣQn_neg::Union{Nothing, Unitful.Quantity}
     L_twist::Union{Nothing, typeof(1.0u"m")}
     deck_attachment::Union{Nothing, DeckAttachment}
+    d_rebar::typeof(1.0u"m")
 end
 
 """
@@ -385,7 +482,8 @@ function CompositeContext(slab, anchor, L_beam;
                           cp_class::Union{Symbol, Nothing}=:medium,
                           construction=nothing,
                           L_twist=nothing,
-                          deck_attachment=:auto)
+                          deck_attachment=:auto,
+                          d_rebar=0.0u"m")
     stage = construction === nothing ?
         construction_stage(slab; cp_class = cp_class) : construction
     lb = Lb_const === nothing ? default_construction_Lb(slab, L_beam) : Lb_const
@@ -397,7 +495,8 @@ function CompositeContext(slab, anchor, L_beam;
         (slab isa DeckSlabOnBeam ? DeckAttachment() : nothing) : deck_attachment
     CompositeContext(slab, anchor, uconvert(u"m", L_beam), shored,
                      uconvert(u"m", lb), Asr, Fysr, neg_moment,
-                     slip_checked, stage, ΣQn_neg, _opt_m(L_twist), att)
+                     slip_checked, stage, ΣQn_neg, _opt_m(L_twist), att,
+                     uconvert(u"m", d_rebar))
 end
 
 # ==============================================================================

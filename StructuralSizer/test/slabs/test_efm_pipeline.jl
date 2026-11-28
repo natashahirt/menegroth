@@ -312,30 +312,15 @@ using StructuralSizer
     @testset "Face-of-Support Moment Reduction" begin
         # From Table 5: centerline moment at first interior support = 83.91 kip-ft
         # From Table 6: face-of-support moment = 66.99 kip-ft
-        # 
-        # The reduction formula: M_face = M_cl - V × (c/2)
-        # Where V is shear at face of support
-        
-        # StructurePoint Table 5 values for end span:
-        # M_centerline (int neg) = 83.91 kip-ft
-        # V (right of span 1-2) = 26.39 kips (from equilibrium)
-        
-        M_cl = 83.91kip*u"ft"
-        V = 26.39kip
-        c = 16u"inch"
-        
-        M_face = StructuralSizer.face_of_support_moment(M_cl, V, c, l1)
-        M_face_kft = ustrip(kip*u"ft", M_face)
-        
-        # SP Table 6 reports 66.99 kip-ft for this location
-        # Our calculation: 83.91 - 26.39 × (16/12/2) = 83.91 - 17.59 = 66.32 kip-ft
-        # Small difference due to SP's more detailed shear calculation
-        println("\n=== Face-of-Support Moment ===")
-        println("M_centerline = $(ustrip(kip*u"ft", M_cl)) kip-ft")
-        println("V = $(ustrip(kip, V)) kips")
-        println("M_face = $(round(M_face_kft, digits=2)) kip-ft (SP: 66.99)")
-        
-        @test M_face_kft ≈ 66.32 rtol=0.03
+        # V (right of span 1-2) = 26.39 kips. The exterior moment below is
+        # chosen so the span's statics reproduce that shear.
+        w = qu * l2
+        M_int = 83.91kip*u"ft"
+        M_ext = M_int - (26.39kip - w * l1 / 2) * l1
+        x = StructuralSizer.efm_face_offset(16u"inch", l1)
+        _, M_face = StructuralSizer.span_face_moments(M_ext, M_int, w, l1, x, x)
+
+        @test ustrip(kip*u"ft", M_face) ≈ 66.99 atol=0.1
     end
     
     # =========================================================================

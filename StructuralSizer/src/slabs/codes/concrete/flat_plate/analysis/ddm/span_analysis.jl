@@ -174,10 +174,13 @@ function run_moment_analysis(
     edge_beam_βt::Float64 = 0.0,    # API parity (DDM uses βt directly)
     col_I_factor::Float64 = 0.70,  # API parity (unused by DDM)
     tc = nothing,
+    column_concrete = nothing,     # API parity (unused by DDM)
 )
     # Shared setup: l1, l2, ln, span_axis, c1_avg, qD, qL, qu, M0
     setup = _moment_analysis_setup(struc, slab, supporting_columns, h, γ_concrete)
     (; l1, l2, ln, span_axis, c1_avg, qD, qL, qu, M0) = setup
+    # A wall along the span and on the slab edge is the §13.6.3.3 edge beam.
+    βt = βt_with_parallel_wall(βt, struc, slab, supporting_columns, span_axis)
     
     # For flat slabs with drop panels, the DDM static moment M0 must account
     # for the additional dead load from the drop panel projection.
@@ -237,7 +240,11 @@ function run_moment_analysis(
             M_neg_int = ACI_DDM_LONGITUDINAL.interior_span.neg * M0
         end
     end
-    
+    # Column flexure keeps the column-edge coefficient. A fully restrained
+    # wall raises only the slab exterior negative (§13.6.3.3 Column 5).
+    M_neg_ext_column = M_neg_ext
+    M_neg_ext = _slab_exterior_negative(M_neg_ext, M0, supporting_columns)
+
     if verbose
         variant_name = method.variant == :simplified ? "MDDM (Simplified)" : "DDM (Full ACI)"
         @debug "═══════════════════════════════════════════════════════════════════"
@@ -254,7 +261,7 @@ function run_moment_analysis(
     # Interior unbalanced moment per ACI 318-11 §13.6.9.2 Eq. (13-7)
     # with factored q_Du/q_Lu (corpus: aci-318-11, page 258).
     column_moments, column_shears, unbalanced_moments = _compute_column_demands_ddm(
-        struc, supporting_columns, M_neg_ext, M_neg_int, M_pos,
+        struc, supporting_columns, M_neg_ext_column, M_neg_int, M_pos,
         qu, qD, qL, l2, ln, span_axis, M0;
         slab = slab, γ = γ_concrete, design_drop = q_drop, tc = tc,
     )
@@ -280,8 +287,51 @@ function run_moment_analysis(
         column_moments,  # Already in kip*ft from _compute_column_demands_from_spans
         column_shears,   # Already in kip
         unbalanced_moments,  # Already in kip*ft
-        Vu_max
+        Vu_max;
+        wall_transfer = _ddm_wall_transfer(struc, slab, span_axis, M0, qD, qL, l2, ln),
     )
+end
+
+"""
+    _ddm_wall_transfer(struc, slab, span_axis, M0, qD, qL, l2, ln) -> Vector
+
+Moment the slab transfers to each wall across `span_axis`, `(seg, M)`, from
+the DDM coefficients scaled per unit width (`M0 / l2`) to the wall length:
+
+- slab on one face: the slab's end moment at a fully restrained exterior
+  support, ACI 318-11 §13.6.3.3 Column (5), `0.65 M0` (aci-318-11, page 254);
+- slab on both faces: §13.6.9.2 Eq. (13-7) (aci-318-11, page 258) with the
+  same span on both sides.
+
+ENGINEERING JUDGMENT: §13.6.3.3 and §13.6.9.2 are written for frame strips
+and columns; taking them per unit width along a wall of any length, and
+using Eq. (13-7) at a wall, extends them to walls.
+"""
+function _ddm_wall_transfer(struc, slab, span_axis, M0, qD, qL, l2, ln)
+    slab === nothing && return Any[]
+    ax = _span_unit_axis(span_axis)
+    ax === nothing && return Any[]
+    segs = supporting_wall_segments(struc, slab)
+    isempty(segs) && return Any[]
+    in_slab = _slab_plan_contains(struc, slab)
+    in_slab === nothing && return Any[]
+    m_end = ACI_DDM_LONGITUDINAL.end_span_fully_restrained.ext_neg * M0 / l2
+    m_int = governing_interior_unbalanced_moment(qD, qL, l2, ln, qD, qL, l2, ln) / l2
+    out = Any[]
+    for seg in segs
+        _wall_parallel_to_axis(seg, ax) && continue
+        L = hypot(seg[2][1] - seg[1][1], seg[2][2] - seg[1][2])
+        L < 1e-3 && continue
+        thick = _wall_thickness(struc, seg)
+        off = (thick === nothing ? 0.0 : ustrip(u"m", thick)) / 2 + 0.05
+        mid = ((seg[1][1] + seg[2][1]) / 2, (seg[1][2] + seg[2][2]) / 2)
+        sides = count(dir -> in_slab((mid[1] + dir * off * ax[1], mid[2] + dir * off * ax[2])),
+                      (-1.0, 1.0))
+        sides == 0 && continue
+        m = sides == 1 ? m_end : m_int
+        push!(out, (seg = seg, M = uconvert(kip * u"ft", m * L * u"m")))
+    end
+    return out
 end
 
 # =============================================================================
@@ -309,6 +359,7 @@ function run_secondary_moment_analysis(
     # Secondary setup: l1↔l2 swapped, perpendicular span axis, c2 for clear span
     setup = _secondary_moment_analysis_setup(struc, slab, supporting_columns, h, γ_concrete)
     (; l1, l2, ln, span_axis, c1_avg, qD, qL, qu, M0) = setup
+    βt = βt_with_parallel_wall(βt, struc, slab, supporting_columns, span_axis)
 
     # Same drop-panel dead load as the primary direction, factored per
     # combination inside `_eq137_with_drop` and carried in qD for Eq. (13-7).
@@ -343,12 +394,15 @@ function run_secondary_moment_analysis(
             M_neg_int = ACI_DDM_LONGITUDINAL.interior_span.neg * M0
         end
     end
+    M_neg_ext_column = M_neg_ext
+    M_neg_ext = _slab_exterior_negative(M_neg_ext, M0, supporting_columns)
+    wall_transfer = _ddm_wall_transfer(struc, slab, span_axis, M0, qD, qL, l2, ln)
 
     # Column demands in the perpendicular direction.  `span_axis` is already
     # rotated, so Eq. (13-7) sees the panels on each side of that axis
     # (ACI 318-11 §13.6.9.2, corpus: aci-318-11, page 258).
     column_moments, column_shears, unbalanced_moments = _compute_column_demands_ddm(
-        struc, supporting_columns, M_neg_ext, M_neg_int, M_pos,
+        struc, supporting_columns, M_neg_ext_column, M_neg_int, M_pos,
         qu, qD, qL, l2, ln, span_axis, M0;
         slab = slab, γ = γ_concrete, design_drop = q_drop, tc = tc,
     )
@@ -374,6 +428,19 @@ function run_secondary_moment_analysis(
         unbalanced_moments,
         Vu_max;
         pattern_loading = false,  # DDM doesn't use pattern loading
+        wall_transfer = wall_transfer,
     )
+end
+
+"""
+Slab exterior negative moment, raised when a support is a full-edge wall.
+
+ACI 318-11 §13.6.3.3 Column (5) (aci-318-11, page 254) gives that end
+0.65M0. The column keeps the moment from the column-edge coefficients.
+A support that is not a wall leaves `M_neg_ext` unchanged.
+"""
+function _slab_exterior_negative(M_neg_ext, M0, supporting_columns)
+    any(_support_is_wall_fixed, supporting_columns) || return M_neg_ext
+    return ACI_DDM_LONGITUDINAL.end_span_fully_restrained.ext_neg * M0
 end
 

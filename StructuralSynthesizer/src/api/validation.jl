@@ -166,6 +166,20 @@ function validate_input(input::APIInput)
         end
     end
 
+    # ─── Openings (if provided) ──────────────────────────────────────────
+    for (j, poly) in enumerate(input.openings)
+        if length(poly) < 3
+            _push_range!(errors, "openings[$j]", length(poly),
+                "Opening $j has $(length(poly)) vertices (need >= 3).")
+        end
+        for (k, coord) in enumerate(poly)
+            if length(coord) != 3
+                _push_general!(errors, "openings[$j].vertex[$k]", length(coord),
+                    "Opening $j vertex $k has $(length(coord)) coords (expected 3).")
+            end
+        end
+    end
+
     # ─── Params ──────────────────────────────────────────────────────────
     p = input.params
     # Legacy Grasshopper Element Params used wire value "mip" for catalog (MIP) sizing; API expects "discrete".
@@ -344,11 +358,25 @@ function validate_input(input::APIInput)
         end
     end
 
-    if !(lowercase(strip(p.column_sizing_strategy)) in API_SIZING_STRATEGIES)
+    column_strategy = lowercase(strip(p.column_sizing_strategy))
+    beam_strategy = lowercase(strip(p.beam_sizing_strategy))
+    if !(column_strategy in API_SIZING_STRATEGIES)
         _push_enum!(errors, "column_sizing_strategy", p.column_sizing_strategy, API_SIZING_STRATEGIES)
     end
-    if !(lowercase(strip(p.beam_sizing_strategy)) in API_SIZING_STRATEGIES)
+    if !(beam_strategy in API_SIZING_STRATEGIES)
         _push_enum!(errors, "beam_sizing_strategy", p.beam_sizing_strategy, API_SIZING_STRATEGIES)
+    end
+    if column_strategy == "nlp" && p.column_type == "pixelframe"
+        _push_compat!(errors, "column_sizing_strategy", p.column_sizing_strategy,
+            "NLP sizing is not implemented for pixelframe columns; use \"discrete\".")
+    end
+    if beam_strategy == "nlp" && p.beam_type in ("rc_rect", "rc_tbeam", "pixelframe")
+        _push_compat!(errors, "beam_sizing_strategy", p.beam_sizing_strategy,
+            "NLP sizing is not implemented for beam_type \"$(p.beam_type)\"; use \"discrete\".")
+    end
+    if beam_strategy == "nlp" && p.composite
+        _push_compat!(errors, "beam_sizing_strategy", p.beam_sizing_strategy,
+            "Composite steel beam sizing requires the discrete checker path; use \"discrete\".")
     end
 
     if p.fire_rating ∉ (0.0, 1.0, 1.5, 2.0, 3.0, 4.0)
@@ -365,6 +393,9 @@ function validate_input(input::APIInput)
     end
     if !haskey(REBAR_MAP, p.materials.rebar)
         _push_lookup!(errors, "materials.rebar", p.materials.rebar, keys(REBAR_MAP))
+    end
+    if !(p.materials.rebar_coating in REBAR_COATING_NAMES)
+        _push_lookup!(errors, "materials.rebar_coating", p.materials.rebar_coating, REBAR_COATING_NAMES)
     end
     if !haskey(STEEL_MAP, p.materials.steel)
         _push_lookup!(errors, "materials.steel", p.materials.steel, keys(STEEL_MAP))
@@ -393,6 +424,36 @@ function validate_input(input::APIInput)
                 if !(am in API_MAT_ANALYSIS_METHODS)
                     _push_enum!(errors, "foundation_options.mat_params.analysis_method",
                         fo.mat_params.analysis_method, API_MAT_ANALYSIS_METHODS)
+                end
+            end
+            if fo.strip_params !== nothing && fo.strip_params.analysis_method !== nothing
+                am = lowercase(strip(fo.strip_params.analysis_method))
+                if !(am in API_STRIP_ANALYSIS_METHODS)
+                    _push_enum!(errors, "foundation_options.strip_params.analysis_method",
+                        fo.strip_params.analysis_method, API_STRIP_ANALYSIS_METHODS)
+                end
+            end
+            if fo.stability !== nothing
+                st = fo.stability
+                # Bowles Table 4-5 ranges (corpus: textbook-bowles-foundation-
+                # analysis-design-5e, PDF pages 252–253): 0.5 ≤ δ/φ ≤ 1 and
+                # 0.6 ≤ cₐ/c ≤ 1. The counteracting dead factor is a fraction.
+                if st.delta_ratio !== nothing && !(0.5 <= st.delta_ratio <= 1.0)
+                    _push_range!(errors, "foundation_options.stability.delta_ratio",
+                        st.delta_ratio, "Must be between 0.5 and 1 (Bowles Table 4-5).")
+                end
+                if st.ca_ratio !== nothing && !(0.6 <= st.ca_ratio <= 1.0)
+                    _push_range!(errors, "foundation_options.stability.ca_ratio",
+                        st.ca_ratio, "Must be between 0.6 and 1 (Bowles Table 4-5 Note 3).")
+                end
+                if st.dead_counteracting_factor !== nothing &&
+                        !(0.0 < st.dead_counteracting_factor <= 1.0)
+                    _push_range!(errors, "foundation_options.stability.dead_counteracting_factor",
+                        st.dead_counteracting_factor, "Must be in (0, 1].")
+                end
+                if st.concrete_unit_weight_pcf !== nothing && st.concrete_unit_weight_pcf <= 0.0
+                    _push_range!(errors, "foundation_options.stability.concrete_unit_weight_pcf",
+                        st.concrete_unit_weight_pcf, "Must be positive.")
                 end
             end
         end

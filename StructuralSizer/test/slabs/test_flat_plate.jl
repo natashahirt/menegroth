@@ -363,8 +363,8 @@ using StructuralSizer
     end
 
     @testset "Column span minimum switch" begin
-        on  = FlatPlateOptions(max_column_size = 16u"inch")
-        off = FlatPlateOptions(max_column_size = 16u"inch", column_span_minimum = false)
+        on  = FlatPlateOptions(max_column_size = 16u"inch", column_span_minimum = true)
+        off = FlatPlateOptions(max_column_size = 16u"inch")
         @test on.column_span_minimum
         @test !off.column_span_minimum
         # span/15 is clamped to the cap

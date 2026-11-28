@@ -9,7 +9,8 @@ shear, axial-flexure, bearing, and each minimum-reinforcement limit.
 - `wall_index::Int`: index into `BuildingStructure.walls`.
 - `story::Int`: 0-based story index, matching `Wall.story` (ground = 0).
   `WallLine.story` is 1-based and is not this field.
-- `direction::Symbol`: plan direction of the pier, `:X` or `:Y`.
+- `direction::Symbol`: plan direction of the pier, `:X` or `:Y` along the
+  lateral design's plan axes, or `:skew` for a pier on neither axis.
 - `case::Symbol`: basic case the combination was built from (`:D`, `:wind`, `:QE`, ...).
 - `combination::Symbol`: strength combination.
 - `alternative::Symbol`: `:only`, or `:L` / `:W` when combination 3 is split.

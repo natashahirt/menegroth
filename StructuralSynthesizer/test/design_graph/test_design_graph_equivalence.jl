@@ -13,11 +13,11 @@
 # dropped node, missing/extra `sync_asap!`) would trip these assertions.
 #
 # Cases:
-#   1. flat-plate DDM — stage 2 = `_reconcile_columns!` (needs_sync=false).
+#   1. flat-plate DDM — stage 2 = `_design_flat_plate_members!` (needs_sync=false).
 #   2. beam/column (vault floor) — stage 2 = `_size_beams_columns!`
 #      (needs_sync=true), exercising the second sync branch.
 #   3. flat-plate DDM with `uniform_column_sizing=:per_story`, so
-#      `harmonize_uniform_column_sizes!` runs and mutates columns.
+#      `harmonize_uniform_column_sizes!` runs inside stage 2 and mutates columns.
 #
 # Run standalone:
 #   julia --project=StructuralSynthesizer \
@@ -43,9 +43,9 @@ const _INVARIANT_COLS = (
     :fdn_max_B_ft, :fdn_max_L_ft, :fdn_max_D_in, :fdn_max_util,
 )
 
-# One small flat-plate building (2×2 bays, 1 story → DDM-applicable, 9 columns).
+# Smallest DDM-applicable flat plate: three continuous spans in each direction.
 function _build_verify_building()
-    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 2, 2, 1)
+    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 3, 3, 1)
     struc = BuildingStructure(skel)
     params = DesignParameters(
         name               = "verify_design_graph",
@@ -80,9 +80,9 @@ end
 # Flat-plate building with per-story column harmonization, so
 # `harmonize_uniform_column_sizes!` runs and mutates columns (a 2×2×1 building's
 # 9 columns carry different demands → at least one is enlarged to the governing
-# size). Confirms graph==legacy including the post-pipeline harmonize step.
+# size). Confirms graph==legacy including the member-stage harmonize step.
 function _build_per_story_building()
-    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 2, 2, 1)
+    skel  = gen_medium_office(54.0u"ft", 42.0u"ft", 10.0u"ft", 3, 3, 1)
     struc = BuildingStructure(skel)
     params = DesignParameters(
         name                  = "verify_design_graph_per_story",
@@ -106,10 +106,6 @@ function _run_reference_path(struc::BuildingStructure, params::DesignParameters)
     for stage in build_pipeline(params)
         stage.fn(struc)
         stage.needs_sync && sync_asap!(struc; params=params)
-    end
-    if params.uniform_column_sizing !== :off
-        n = _SS.harmonize_uniform_column_sizes!(struc, params)
-        n > 0 && sync_asap!(struc; params=params)
     end
     design = capture_design(struc, params)
     restore!(struc; geometry_is_centerline=params.geometry_is_centerline)

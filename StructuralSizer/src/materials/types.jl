@@ -67,6 +67,8 @@ Parametric metal type supporting different steel categories via type tags.
 - `ecc`: Embodied carbon [kgCO₂e/kg]
 - `cost`: Unit cost [USD/kg] (NaN if not set; required for MinCost optimization)
 - `color`: Optional display color as hex string (e.g. "#6E6E6E")
+- `coating`: Bar coating, one of [`REBAR_COATINGS`](@ref). `:uncoated` for
+  structural steel. It sets ψe in ACI 318-19 development and lap lengths.
 """
 struct Metal{K<:MetalType, T_P, T_D} <: AbstractMaterial
     E::T_P      # Young's modulus
@@ -78,7 +80,25 @@ struct Metal{K<:MetalType, T_P, T_D} <: AbstractMaterial
     ecc::CarbonPerMassQuantity  # Embodied carbon [kgCO₂e/kg], typed via Asap `𝐗` dimension
     cost::Float64 # Unit cost [$/kg] (NaN = not set)
     color::Union{Nothing, String} # Optional display color hex (or nothing)
+    coating::Symbol
 end
+
+"""
+Bar coatings, matching the epoxy-factor rows of ACI 318-19 Table 25.4.2.5
+(corpus: aci-318-19, printed p. 474): `:uncoated` and `:galvanized` (zinc-coated)
+have ψe = 1.0; `:epoxy` and `:zinc_epoxy` (zinc and epoxy dual-coated) have
+ψe = 1.2, or 1.5 when clear cover is under 3d_b or clear spacing under 6d_b.
+"""
+const REBAR_COATINGS = (:uncoated, :galvanized, :epoxy, :zinc_epoxy)
+
+function _check_coating(coating::Symbol)
+    coating in REBAR_COATINGS || throw(ArgumentError(
+        "coating must be one of $(REBAR_COATINGS) (got :$coating)."))
+    return coating
+end
+
+"""True for the epoxy rows of Table 25.4.2.5 (`:epoxy` and `:zinc_epoxy`)."""
+is_epoxy_coated(coating::Symbol) = _check_coating(coating) in (:epoxy, :zinc_epoxy)
 
 """Alias for `Metal{StructuralSteelType}` — rolled/welded structural steel."""
 const StructuralSteel{T_P, T_D} = Metal{StructuralSteelType, T_P, T_D}
@@ -95,11 +115,23 @@ _normalize_ecc(x::Real) = Float64(x) * u"kgCO2e/kg"
 
 """Construct a `StructuralSteel` from elastic constants, strengths, density, and ECC."""
 StructuralSteel(E, G, Fy, Fu, ρ, ν, ecc; cost=NaN, color=nothing) = Metal{StructuralSteelType, typeof(E), typeof(ρ)}(
-    E, G, Fy, Fu, ρ, Float64(ν), _normalize_ecc(ecc), Float64(cost), isnothing(color) ? nothing : String(color))
+    E, G, Fy, Fu, ρ, Float64(ν), _normalize_ecc(ecc), Float64(cost), isnothing(color) ? nothing : String(color),
+    :uncoated)
 
-"""Construct a `RebarSteel` from elastic constants, strengths, density, and ECC."""
-RebarSteel(E, G, Fy, Fu, ρ, ν, ecc; cost=NaN, color=nothing) = Metal{RebarType, typeof(E), typeof(ρ)}(
-    E, G, Fy, Fu, ρ, Float64(ν), _normalize_ecc(ecc), Float64(cost), isnothing(color) ? nothing : String(color))
+"""Construct a `RebarSteel` from elastic constants, strengths, density, ECC, and coating."""
+RebarSteel(E, G, Fy, Fu, ρ, ν, ecc; cost=NaN, color=nothing, coating::Symbol=:uncoated) =
+    Metal{RebarType, typeof(E), typeof(ρ)}(
+        E, G, Fy, Fu, ρ, Float64(ν), _normalize_ecc(ecc), Float64(cost),
+        isnothing(color) ? nothing : String(color), _check_coating(coating))
+
+"""
+    with_coating(rebar::RebarSteel, coating) -> RebarSteel
+
+Same rebar grade with a different coating. Mass and carbon are unchanged; the
+coating only changes ψe in development and lap lengths.
+"""
+with_coating(m::RebarSteel, coating::Symbol) =
+    RebarSteel(m.E, m.G, m.Fy, m.Fu, m.ρ, m.ν, m.ecc; cost=m.cost, color=m.color, coating=coating)
 
 # =============================================================================
 # Concrete

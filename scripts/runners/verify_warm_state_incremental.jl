@@ -195,11 +195,11 @@ function main()
     # re-sync reuses the factor. With K unchanged both must be bit-identical.
     SS.sync_asap!(warm.struc; params = params_mem, loads_only = false)
     model = warm.struc.asap_model
-    forces_full = [copy(el.forces) for el in model.elements]
+    forces_full = [copy(el.forces) for el in model.frame_elements]
     u_full = copy(model.u)
 
     SS.sync_asap!(warm.struc; params = params_mem, loads_only = true)
-    forces_lo = [copy(el.forces) for el in model.elements]
+    forces_lo = [copy(el.forces) for el in model.frame_elements]
     u_lo = copy(model.u)
 
     forces_match = length(forces_full) == length(forces_lo) &&

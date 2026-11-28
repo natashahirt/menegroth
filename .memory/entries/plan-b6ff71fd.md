@@ -7,12 +7,12 @@ title: 'Phase 3 implementation: wall storage, :walls member init, enclosure at i
 node_label: 'Phase 3 implementation: wall storage, :walls membe'
 tags: ''
 status: active
-open_threads: 3
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-f3dde776
 created_at: '2026-10-22T15:54:31.132828+00:00'
-updated_at: '2026-10-22T15:54:39.893322+00:00'
+updated_at: '2026-10-22T17:54:54.559137+00:00'
 ---
 Phase 3 of plan-a2a6128f, scoped to the data model and the construction-time bridge. Not the lateral pipeline (Phase 6/7).
 

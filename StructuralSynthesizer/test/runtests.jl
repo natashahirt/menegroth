@@ -16,7 +16,10 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("core/test_walls_bridge.jl")
         include("core/test_design_api.jl")
         include("core/test_api_units_faces.jl")
+        include("core/test_ingest_geometry.jl")
         include("core/test_courtyard_void.jl")
+        include("core/test_slab_openings.jl")
+        include("core/test_opening_framing.jl")
         include("core/test_api_scoped_overrides_payload.jl")
         include("core/test_api_sizing_strategy_contract.jl")
         include("core/test_chat_api.jl")
@@ -37,6 +40,7 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("design_graph/test_design_graph_topology.jl")
         include("design_graph/test_design_graph_equivalence.jl")
         include("design_graph/test_design_graph_incremental.jl")
+        include("core/test_flat_plate_member_stage.jl")
     end
 
     # ─── Analysis ────────────────────────────────────────────────────────
@@ -44,20 +48,37 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("analyze/test_drape.jl")
         include("analyze/test_pattern_loading.jl")
         include("analyze/test_pattern_live_three_quarter.jl")
+        include("analyze/test_wave2_sensitivity.jl")
+        include("analyze/test_design_equilibrium.jl")
+        include("analyze/test_drop_panel_loads.jl")
         include("analyze/test_structural_offset.jl")
         include("analyze/test_corner_kind.jl")
         include("analyze/test_mesh_refinement.jl")
         include("analyze/test_member_group_demands.jl")
+        include("analyze/test_section_floor.jl")
         include("analyze/test_foundation_demands.jl")
+        include("analyze/test_foundation_stability_wiring.jl")
+        include("analyze/test_foundation_stability_e2e.jl")
         include("analyze/test_column_populate_ltb.jl")
         include("analyze/test_wall_phase5_assembly.jl")
         include("analyze/test_wall_cuts.jl")
+        include("analyze/test_wall_joints.jl")
+        include("analyze/test_wall_openings.jl")
+        include("analyze/test_wall_pier_checks.jl")
+        include("analyze/test_support_tributaries.jl")
         include("analyze/test_seismic_wall_gates.jl")
         include("analyze/test_wall_story_cuts.jl")
         include("analyze/test_story_pdelta.jl")
+        include("analyze/test_story_stability_records.jl")
         include("analyze/test_wall_combinations.jl")
         include("analyze/test_wall_ordinary.jl")
         include("analyze/test_ordinary_wall_stage.jl")
+        include("analyze/test_special_boundary_stage.jl")
+        include("analyze/test_special_shear_stage.jl")
+        include("analyze/test_frame_section_floors.jl")
+        include("analyze/test_row_f_resize.jl")
+        include("analyze/test_column_case_sets.jl")
+        include("analyze/test_wall_detailing.jl")
         include("analyze/test_skew_plan_walls.jl")
         include("analyze/test_lateral_approaches.jl")
         include("analyze/test_node_rotations.jl")
@@ -65,6 +86,28 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
         include("analyze/test_elf_story_cases.jl")
         include("analyze/test_wind_story_cases.jl")
         include("analyze/test_composite_context.jl")
+        include("analyze/test_story_shell.jl")
+        include("analyze/test_story_shell_beams.jl")
+        include("analyze/test_story_shell_walls.jl")
+        include("analyze/test_rib_grillage.jl")
+        include("analyze/test_rib_deflection.jl")
+        include("analyze/test_modular_ribs.jl")
+        include("analyze/test_joist_openings.jl")
+        include("analyze/test_joist_hosts.jl")
+        include("analyze/test_joist_strip_equivalence.jl")
+        include("analyze/test_opening_downstream.jl")
+        include("analyze/test_beam_rings.jl")
+        include("analyze/test_solid_head_check.jl")
+        include("analyze/test_slab_joint_demand.jl")
+        include("analyze/test_solid_head_story.jl")
+        include("analyze/test_column_heads.jl")
+        include("analyze/test_service_deflection.jl")
+        include("analyze/test_framing_levels.jl")
+    end
+
+    # ─── Scene packets (web viewer) ──────────────────────────────────────
+    @testset "Scene" begin
+        include("visualization/test_scene.jl")
     end
 
     # ─── Visualization ───────────────────────────────────────────────────
@@ -93,7 +136,9 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
     # ─── Slab Sizing (non-report tests) ──────────────────────────────────
     @testset "Slab Sizing" begin
         include("sizing/slabs/test_floor_design_contracts.jl")
+        include("sizing/slabs/test_panel_classification.jl")
         include("sizing/slabs/test_flat_plate_pure_methods.jl")
+        include("sizing/slabs/test_flat_plate_joint_search.jl")
         include("sizing/slabs/test_vault_pipeline.jl")
         include("sizing/slabs/test_fea_remesh.jl")
     end
@@ -111,6 +156,9 @@ using Asap  # ensures `u"kip"`, `u"ksi"`, etc resolve via Asap unit module
     # ─── Workflow Integration ────────────────────────────────────────────
     @testset "Workflow Integration" begin
         include("integration/test_structuralsizer_workflow_integration.jl")
+        include("integration/test_deck_floor_building.jl")
+        include("integration/test_slab_system_regression.jl")
+        include("integration/test_building_detailing.jl")
     end
 
 end

@@ -284,10 +284,17 @@ function _translate_openings(openings, xy)
     return out
 end
 
-"""Floor `|M| − Vu·|e|` at zero. ACI 318-11 R11.11.7.2 (corpus: aci-318-11, page 210)."""
+"""
+Moment at the critical-section centroid, `sign(M)·(|M| − Vu·|e|)`.
+
+ACI 318-11 R11.11.7.2 (corpus: aci-318-11, page 210) takes `Mu` at the
+centroidal axis. When `Vu·|e| > |M|` the result changes sign; the general
+engine takes the peak stress over every vertex, so the far face (CD) then
+governs. An axis with no moment stays at zero (§11.11.7.1, page 209).
+"""
 function _shift_moment(M, Vu, e)
-    mag = abs(ustrip(u"N*m", M)) - abs(ustrip(u"N*m", Vu * e))
-    return sign(ustrip(u"N*m", M)) * max(mag, 0.0) * u"N*m"
+    m = ustrip(u"N*m", M)
+    return sign(m) * (abs(m) - abs(ustrip(u"N*m", Vu * e))) * u"N*m"
 end
 
 """
@@ -309,7 +316,7 @@ function punching_check_reduced(points, closed, reaction, openings, column_xy,
                                span_axis = (1.0, 0.0),
                                αs::Int = 40,
                                shape::Symbol = :rectangular,
-                               λ::Float64 = 1.0, ϕ::Float64 = 0.75,
+                               λ::Float64 = 1.0, λs::Float64 = 1.0, ϕ::Float64 = 0.75,
                                Mub_out = M_span)
     (openings === nothing || column_xy === nothing || isempty(openings)) && return nothing
     local_ops = _translate_openings(openings, column_xy)
@@ -336,9 +343,9 @@ function punching_check_reduced(points, closed, reaction, openings, column_xy,
                                  _shift_moment(Muy_g, Vu, props.xc), d, fc, reduced.points;
                                  closed = false, segments = reduced.segments,
                                  β = punching_β(c1, c2; shape = shape),
-                                 αs = αs, λ = λ, ϕ = ϕ)
+                                 αs = αs, λ = λ, λs = λs, ϕ = ϕ)
     return (ok = res.ok, ratio = res.utilization, vu = res.vu, φvc = res.ϕvc,
-            b0 = res.b0, Jc = res.J1, Mub = Mub_out)
+            b0 = res.b0, Jc = res.J1, Mub = Mub_out, direction = res.direction)
 end
 
 # ── Drop-panel outline (the reaction area at the outer critical section) ──
@@ -348,6 +355,69 @@ function _clip_segment(a, b, point, normal)
     gb = (b[1] - point[1]) * normal[1] + (b[2] - point[2]) * normal[2]
     t = ga / (ga - gb)
     return (a[1] + t * (b[1] - a[1]), a[2] + t * (b[2] - a[2]))
+end
+
+"""Where two face lines meet. Parallel faces have no corner."""
+function _plane_meet(p1, n1, p2, n2)
+    det = n1[1] * n2[2] - n1[2] * n2[1]
+    abs(det) < 1e-15 && return nothing
+    b1 = n1[1] * p1[1] + n1[2] * p1[2]
+    b2 = n2[1] * p2[1] + n2[2] * p2[2]
+    return ((b1 * n2[2] - n1[2] * b2) / det, (n1[1] * b2 - b1 * n2[1]) / det)
+end
+
+"""The point where segment `a`–`b` crosses the face, or `nothing`."""
+function _cross_plane(a, b, point, normal)
+    ga = (a[1] - point[1]) * normal[1] + (a[2] - point[2]) * normal[2]
+    gb = (b[1] - point[1]) * normal[1] + (b[2] - point[2]) * normal[2]
+    crosses = (ga >= -1e-9 && gb < -1e-9) || (ga < -1e-9 && gb >= -1e-9)
+    crosses || return nothing
+    abs(ga - gb) < 1e-15 && return nothing
+    t = ga / (ga - gb)
+    return (a[1] + t * (b[1] - a[1]), a[2] + t * (b[2] - a[2]))
+end
+
+"""
+Drop rectangle with the re-entrant notch removed.
+
+A convex corner keeps the slab on the inward side of both free faces. A
+re-entrant corner is the other way around: the void is the notch beyond both
+faces, and the slab fills the rest. The two new edges lie on the faces, so
+the critical section still treats them as free.
+"""
+function _rect_minus_notch(poly, plane1, plane2)
+    (p1, n1) = plane1
+    (p2, n2) = plane2
+    g1(p) = (p[1] - p1[1]) * n1[1] + (p[2] - p1[2]) * n1[2]
+    g2(p) = (p[1] - p2[1]) * n2[1] + (p[2] - p2[2]) * n2[2]
+    in_notch(p) = g1(p) < -1e-9 && g2(p) < -1e-9
+    any(in_notch, poly) || return poly
+    corner = _plane_meet(p1, n1, p2, n2)
+    corner === nothing && return poly
+    out = NTuple{2, Float64}[]
+    m = length(poly)
+    entered = false
+    for i in 1:m
+        a = poly[i]
+        b = poly[mod1(i + 1, m)]
+        an, bn = in_notch(a), in_notch(b)
+        if !an && !bn
+            push!(out, b)
+        elseif !an && bn
+            hit = _cross_plane(a, b, p1, n1)
+            hit === nothing && (hit = _cross_plane(a, b, p2, n2))
+            hit === nothing || push!(out, hit)
+            entered = true
+        elseif an && !bn
+            entered && push!(out, corner)
+            hit = _cross_plane(a, b, p1, n1)
+            hit === nothing && (hit = _cross_plane(a, b, p2, n2))
+            hit === nothing || push!(out, hit)
+            push!(out, b)
+            entered = false
+        end
+    end
+    return out
 end
 
 """Keep the part of `poly` on the inward side of one half-plane."""
@@ -541,7 +611,8 @@ function _offset_drop_section(poly, d::Length, planes)
 end
 
 """
-    drop_outline(c1, c2, a1, a2, position, column_θ, span_axis; swapped=false)
+    drop_outline(c1, c2, a1, a2, position, column_θ, span_axis; swapped=false,
+                 corner_kind=:convex)
         -> NamedTuple
 
 The drop panel in plan. `polygon` and `centroid` are metres with the column
@@ -549,14 +620,16 @@ centre at the origin.
 
 The rectangle is `±a1` along `span_axis` and `±a2` along its left normal.
 An edge or corner column is clipped at the free edge, which passes through
-the column face, so the drop stops where the slab stops. That polygon is the
-region the shell thickens, and the outline the critical section is offset
-from (ACI 318-11 §11.11.1.2, corpus: aci-318-11, page 200; drop extents
+the column face, so the drop stops where the slab stops. A convex corner
+keeps the one quadrant inside both faces. A re-entrant corner keeps every
+quadrant except the notch beyond both faces. That polygon is the region the
+shell thickens, and the outline the critical section is offset from
+(ACI 318-11 §11.11.1.2, corpus: aci-318-11, page 200; drop extents
 ACI 318-11 §13.2.5).
 """
 function drop_outline(c1::Length, c2::Length, a1::Length, a2::Length,
                      position::Symbol, column_θ::Float64, span_axis;
-                     swapped::Bool = false)
+                     swapped::Bool = false, corner_kind::Symbol = :convex)
     φ = atan(_unit_axis(span_axis)[2], _unit_axis(span_axis)[1])
     ax, ay = ustrip(u"m", a1), ustrip(u"m", a2)
     rect = [_rot2(x, y, φ) for (x, y) in ((-ax, -ay), (ax, -ay), (ax, ay), (-ax, ay))]
@@ -572,9 +645,14 @@ function drop_outline(c1::Length, c2::Length, a1::Length, a2::Length,
     if position === :corner
         push!(planes, (_rot2(0.0, hy, ang), _rot2(0.0, -1.0, ang)))
     end
-    polygon = rect
-    for (pt, nrm) in planes
-        polygon = _clip_halfplane(polygon, pt, nrm)
+    polygon = if position === :corner && corner_kind === :reentrant && length(planes) == 2
+        _rect_minus_notch(rect, planes[1], planes[2])
+    else
+        clipped = rect
+        for (pt, nrm) in planes
+            clipped = _clip_halfplane(clipped, pt, nrm)
+        end
+        clipped
     end
     length(polygon) < 3 && throw(ArgumentError(
         "the drop panel lies outside the slab; the free edges remove it"))
@@ -582,7 +660,8 @@ function drop_outline(c1::Length, c2::Length, a1::Length, a2::Length,
 end
 
 """
-    drop_plan_section(c1, c2, a1, a2, d, position, column_θ, span_axis; swapped=false)
+    drop_plan_section(c1, c2, a1, a2, d, position, column_θ, span_axis; swapped=false,
+                      corner_kind=:convex)
         -> NamedTuple
 
 `area` is the area inside the critical section (the `b1·b2` used to remove
@@ -598,8 +677,9 @@ outside the drop.
 """
 function drop_plan_section(c1::Length, c2::Length, a1::Length, a2::Length, d::Length,
                           position::Symbol, column_θ::Float64, span_axis;
-                          swapped::Bool = false)
-    outline = drop_outline(c1, c2, a1, a2, position, column_θ, span_axis; swapped = swapped)
+                          swapped::Bool = false, corner_kind::Symbol = :convex)
+    outline = drop_outline(c1, c2, a1, a2, position, column_θ, span_axis;
+                          swapped = swapped, corner_kind = corner_kind)
     reaction = outline.polygon
     section, closed = _offset_drop_section(reaction, d, outline.planes)
     pts = [(p[1] * u"m", p[2] * u"m") for p in section]
@@ -618,12 +698,13 @@ drop centroid (ACI 318-11 §11.11.6.1, corpus: aci-318-11, page 209).
 function drop_opening_b0(c1::Length, c2::Length, a1::Length, a2::Length, d::Length,
                         h::Length, position::Symbol, openings, column_xy;
                         column_θ::Float64 = 0.0, span_axis = (1.0, 0.0),
-                        swapped::Bool = false, flat_slab::Bool = false,
+                        swapped::Bool = false, corner_kind::Symbol = :convex,
+                        flat_slab::Bool = false,
                         column_strips = nothing,
                         column_strip_half::Union{Nothing, Length} = nothing)
     (openings === nothing || column_xy === nothing || isempty(openings)) && return nothing
     sec = drop_plan_section(c1, c2, a1, a2, d, position, column_θ, span_axis;
-                           swapped = swapped)
+                           swapped = swapped, corner_kind = corner_kind)
     pts, closed, reaction, origin = sec.points, sec.closed, sec.reaction, sec.centroid
     local_ops = _translate_openings(openings, column_xy)
     strips = column_strips === nothing ?

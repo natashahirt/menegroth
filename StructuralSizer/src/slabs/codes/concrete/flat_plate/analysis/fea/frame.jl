@@ -124,4 +124,183 @@ function _extract_cell_moments(
     )
 end
 
+"""
+    _fea_wall_face_moments(cache, struc, slab, span_axis)
+
+Hogging at the face of each wall perpendicular to `span_axis`.
+
+The cut is `_integrate_design_faces`, the same integration the column faces
+use. Only elements whose centroids lie along the wall are included, so the
+integral is the wall length and not the whole floor. A transverse window is
+not passed: that window would scale the wall's average up to every element
+in the band. Both sides of the wall are sampled and the side that has slab
+elements governs. A wall parallel to the span belongs to the other direction.
+"""
+function _fea_wall_face_moments(cache, struc, slab, span_axis)
+    out = NamedTuple[]
+    for cut in _wall_face_cuts(cache, struc, slab, span_axis)
+        best = 0.0
+        for pos in cut.faces
+            faces = _integrate_design_faces(cache, cut.along, pos, cut.ax, _WALL_FACE_BAND_M)
+            best = max(best, faces.hogging)
+        end
+        best > 0 || continue
+        push!(out, (x = cut.mid[1], y = cut.mid[2], L = cut.L, M = best * u"N*m"))
+    end
+    return out
+end
+
+"""Width of the δ-band cut at a wall face, in metres."""
+const _WALL_FACE_BAND_M = 0.20
+
+"""
+    _wall_face_cuts(cache, struc, slab, span_axis) -> Vector{NamedTuple}
+
+The faces of each wall perpendicular to `span_axis` that have slab elements.
+
+Each entry is `(seg, mid, L, ax, along, faces)`. `along` holds the elements
+whose centroids lie along the wall, `faces` the band centres half a band
+off each wall face that has slab, and `ax` the unit span axis. A wall
+parallel to the span belongs to the other direction.
+"""
+function _wall_face_cuts(cache, struc, slab, span_axis)
+    out = NamedTuple[]
+    ax = _span_unit_axis(span_axis)
+    ax === nothing && return out
+    segs = supporting_wall_segments(struc, slab)
+    tris = collect(Int, eachindex(cache.element_data))
+    (isempty(segs) || isempty(tris)) && return out
+    δ = _WALL_FACE_BAND_M
+    for seg in segs
+        _wall_parallel_to_axis(seg, ax) && continue
+        L = hypot(seg[2][1] - seg[1][1], seg[2][2] - seg[1][2])
+        L < 1e-3 && continue
+        along = _elements_along_wall(cache.element_data, tris, seg, ax)
+        isempty(along) && continue
+        thick = _wall_thickness(struc, seg)
+        t = thick === nothing ? 0.0 : ustrip(u"m", thick)
+        mid = ((seg[1][1] + seg[2][1]) / 2, (seg[1][2] + seg[2][2]) / 2)
+        off = t / 2 + 0.5 * δ
+        faces = NTuple{2,Float64}[]
+        for dir in (-1.0, 1.0)
+            pos = (mid[1] + dir * off * ax[1], mid[2] + dir * off * ax[2])
+            _count_band_elements(cache.element_data, along, pos, ax, δ) == 0 && continue
+            push!(faces, pos)
+        end
+        isempty(faces) && continue
+        push!(out, (seg = seg, mid = mid, L = L, ax = ax, along = along, faces = faces))
+    end
+    return out
+end
+
+"""
+    _fea_wall_face_parts(cache, struc, slab, span_axis) -> Vector{SlabWallFaceMoment}
+
+Dead and live parts of the moment at every wall face
+[`_fea_wall_face_moments`](@ref) cuts. `D` and `L` are N·m, top tension
+positive, and the coordinates are the wall's plan line.
+
+`D` is the band integral of the unfactored dead tensor. `L` is the largest
+band integral of the unfactored live tensor over the live arrangements
+[`_combo_tensor`](@ref) envelopes: full live, then each pattern when the
+per-cell live solves exist. The integral is linear in the tensor, so a
+combination with factors `αD` and `αL ≥ 0` gives that face
+`max(αD·D + αL·L, 0)` over those arrangements. Over `_LOAD_COMBOS` the
+largest of these is the stored wall moment. Empty without a D/L split.
+"""
+function _fea_wall_face_parts(cache, struc, slab, span_axis)
+    out = SlabWallFaceMoment[]
+    (isempty(cache.element_data_D) || isempty(cache.element_data_L)) && return out
+    δ = _WALL_FACE_BAND_M
+    cells = _pattern_cell_order(cache)
+    patterns = isempty(cache.cell_live_moments) ? Vector{Symbol}[] :
+               generate_load_patterns(length(cells))
+    for cut in _wall_face_cuts(cache, struc, slab, span_axis)
+        for pos in cut.faces
+            band(m) = _integrate_at(cache.element_data, cut.along, pos, cut.ax, δ;
+                                    tensor_at = k -> (m[k].Mxx, m[k].Myy, m[k].Mxy))
+            D = band(cache.element_data_D)
+            L = band(cache.element_data_L)
+            if !isempty(patterns)
+                # A cell without its own live solve adds nothing, as in `_combo_tensor`.
+                cell_L = map(cells) do ci
+                    moms = get(cache.cell_live_moments, ci, nothing)
+                    moms === nothing ? 0.0 : band(moms)
+                end
+                for pat in patterns
+                    L = max(L, sum((cell_L[j] for (j, s) in enumerate(pat)
+                                    if s === :dead_plus_live); init = 0.0))
+                end
+            end
+            seg = cut.seg
+            push!(out, SlabWallFaceMoment(D, L, seg[1][1], seg[1][2], seg[2][1], seg[2][2]))
+        end
+    end
+    return out
+end
+
+"""
+    _paired_wall_face_parts(cache, struc, slab, span_axis, M_wall) -> Vector{SlabWallFaceMoment}
+
+[`_fea_wall_face_parts`](@ref) when they reproduce `M_wall` over
+`_LOAD_COMBOS`, otherwise empty. A mismatch means the cache no longer holds
+the analysis `M_wall` came from, and a reader then pairs by pressure.
+"""
+function _paired_wall_face_parts(cache, struc, slab, span_axis, M_wall)
+    parts = _fea_wall_face_parts(cache, struc, slab, span_axis)
+    isempty(parts) && return parts
+    env = maximum(p -> maximum(c -> max(c[1] * p.D + c[2] * p.L, 0.0), _LOAD_COMBOS), parts)
+    target = ustrip(u"N*m", abs(M_wall))
+    isapprox(env, target; rtol = 1e-6, atol = 1e-6) && return parts
+    @debug "Wall-face D/L parts do not reproduce the stored wall moment" env target
+    return SlabWallFaceMoment[]
+end
+
+"""Largest wall-face hogging perpendicular to `span_axis`, in the units of `sample`."""
+function _max_wall_face_moment(cache, struc, slab, span_axis, sample)
+    faces = _fea_wall_face_moments(cache, struc, slab, span_axis)
+    isempty(faces) && return zero(sample)
+    return maximum(f -> uconvert(unit(sample), f.M), faces)
+end
+
+"""
+    _fea_wall_transfer(cache, struc, slab, span_axis) -> Vector
+
+Moment the slab transfers to each wall perpendicular to `span_axis`, as
+`(seg, M)`. The cut on each face with slab is the one
+`_fea_wall_face_moments` uses, taken per design combination. With slab on
+one face the transfer is that face's moment; with slab on both it is the
+difference of the two faces in the same combination. The largest over the
+combinations is kept.
+"""
+function _fea_wall_transfer(cache, struc, slab, span_axis)
+    n_combo = _n_design_combos(cache)
+    out = Any[]
+    for cut in _wall_face_cuts(cache, struc, slab, span_axis)
+        best = 0.0
+        for i in 1:n_combo
+            I = [_integrate_at(cache.element_data, cut.along, pos, cut.ax, _WALL_FACE_BAND_M;
+                               tensor_at = k -> _combo_tensor(cache, k, i)) for pos in cut.faces]
+            best = max(best, length(I) == 2 ? abs(I[1] - I[2]) : abs(I[1]))
+        end
+        push!(out, (seg = cut.seg, M = best * u"N*m"))
+    end
+    return out
+end
+
+"""Element indices whose centroids fall along `seg`, measured across the span."""
+function _elements_along_wall(element_data, tris, seg, ax)
+    perp = (-ax[2], ax[1])
+    t1 = seg[1][1] * perp[1] + seg[1][2] * perp[2]
+    t2 = seg[2][1] * perp[1] + seg[2][2] * perp[2]
+    lo, hi = minmax(t1, t2)
+    out = Int[]
+    for k in tris
+        ed = element_data[k]
+        t = ed.cx * perp[1] + ed.cy * perp[2]
+        lo - 1e-6 <= t <= hi + 1e-6 && push!(out, k)
+    end
+    return out
+end
+
 # Note: _check_bandwidth_convergence has been moved to bandwidth.jl

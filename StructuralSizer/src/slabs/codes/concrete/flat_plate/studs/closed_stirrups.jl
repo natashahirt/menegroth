@@ -141,10 +141,14 @@ function design_closed_stirrups(
 
     # ─── Concrete contribution with stirrups (§11.11.3.1) ───
     # Vc ≤ 2λ√f'c (lower than studs which get 3λ√f'c)
-    vc_a = (2 + 4 / β) * λ * sqrt_fc               # Eq. (11-31)
-    vc_b = (αs * d_in / b0_in + 2) * λ * sqrt_fc   # Eq. (11-32)
-    vc_c = 4 * λ * sqrt_fc                          # Eq. (11-33)
-    vcs = min(min(vc_a, vc_b, vc_c), 2.0 * λ * sqrt_fc)  # §11.11.3.1 cap
+    # ACI 318-19 Table 22.6.6.1: concrete terms carry λs (Eq. 22.5.5.1.3) and
+    # √f'c ≤ 100 psi (§22.6.3.1). λs = 1 is permitted by §22.6.6.2 and not used.
+    λs_v = size_effect_factor(d)
+    sqrt_fc_v = _shear_sqrt_fc(fc)
+    vc_a = (2 + 4 / β) * λs_v * λ * sqrt_fc_v               # Eq. (11-31)
+    vc_b = (αs * d_in / b0_in + 2) * λs_v * λ * sqrt_fc_v   # Eq. (11-32)
+    vc_c = 4 * λs_v * λ * sqrt_fc_v                          # Eq. (11-33)
+    vcs = min(min(vc_a, vc_b, vc_c), 2.0 * λs_v * λ * sqrt_fc_v)  # Table 22.6.6.1(a)
 
     # ─── Required steel contribution ───
     vs_reqd = max(vu_psi / φ - vcs, 0.0)

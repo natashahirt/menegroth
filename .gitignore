@@ -19,6 +19,7 @@ secrets/
 
 # Transient run artifacts (test/smoke logs, scratch files, Python caches)
 logs/
+/build/
 # Per-machine Julia preferences (e.g. dev_precompile.jl workload toggles)
 LocalPreferences.toml
 .tmp_*
@@ -37,6 +38,10 @@ scripts/runners/review_verify_*
 
 # Documenter.jl build output
 docs/build/
+
+# Web viewer
+viewer/node_modules/
+viewer/dist/
 
 # Grasshopper (.NET) build artifacts
 grasshopper/Menegroth.GH/obj/

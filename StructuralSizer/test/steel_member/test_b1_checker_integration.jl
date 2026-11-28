@@ -28,7 +28,7 @@ println("Testing B1 Moment Amplification in AISCChecker...")
         demand_low_P = MemberDemand(1;
             Pu_c = 50.0u"kN",  # Low compression
             Mux = 50.0u"kN*m",
-            M1x = 0.0u"kN*m",   # Conservative single curvature
+            M1x = 0.0u"kN*m",   # Eq. A-8-4 at M1/M2 = 0 gives Cm = 0.6
             M2x = 50.0u"kN*m",
         )
         
@@ -115,6 +115,133 @@ println("Testing B1 Moment Amplification in AISCChecker...")
         feasible = StructuralSizer.is_feasible(checker, cache, 1, section, material, demand_defaults, geometry)
         @test (feasible || !feasible)  # Completes without error
         println("  Defaults case feasible: $feasible")
+    end
+
+    @testset "Array sizing keeps the curvature the checker uses" begin
+        # AISC 360-16 App. 8 §8.2.1 (corpus: aisc-360-16, PDF page 306).
+        z = [0.0]
+        bare = StructuralSizer._steel_array_demand(
+            1, [1.0e5], z, [2.0e4], [2.0e4], [2.0e4], z, z, z, z, [1.0],
+            nothing, nothing, nothing, nothing, nothing, nothing)
+        @test bare.M1x == 0.0
+        @test bare.M2x == 2.0e4
+        @test bare.transverse_load == false
+        @test compute_Cm(bare.M1x, bare.M2x) == 0.6
+
+        curved = StructuralSizer._steel_array_demand(
+            1, [1.0e5], z, [2.0e4], [2.0e4], [2.0e4], z, z, z, z, [1.0],
+            [-2.0e4], [2.0e4], nothing, nothing, false, nothing)
+        @test curved.M1x == -2.0e4
+        @test curved.M2x == 2.0e4
+        @test compute_Cm(curved.M1x, curved.M2x) == 1.0
+
+        spanned = StructuralSizer._steel_array_demand(
+            1, [1.0e5], z, [2.0e4], [2.0e4], [2.0e4], z, z, z, z, [1.0],
+            [1.5e4], [2.0e4], nothing, nothing, true, nothing)
+        @test spanned.transverse_load
+        @test compute_Cm(spanned.M1x, spanned.M2x; transverse_loading=true) == 1.0
+
+        # Single curvature (Cm = 1.0) amplifies more than M1/M2 = 0 (Cm = 0.6).
+        # W14X22 is weak-axis slender at 12 ft, so Pe1 about the y-axis is near
+        # the compressive strength and B1 can leave the 1.0 floor. Strong-axis
+        # Pe1 is several times φPn, so the same sweep on Mux never crosses.
+        # AISC 360-16 App. 8 §8.2.1(a), Eq. A-8-4 (corpus: aisc-360-16, PDF page 306).
+        n_flip = 0
+        n_reverse = 0
+        for pu in (100.0, 140.0, 180.0, 220.0, 260.0)
+            for muy in (2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 15.0, 18.0, 22.0, 28.0)
+                demand_zero = MemberDemand(1; Pu_c=pu * u"kN", Muy=muy * u"kN*m",
+                                           M1y=0.0u"kN*m", M2y=muy * u"kN*m")
+                demand_single = MemberDemand(1; Pu_c=pu * u"kN", Muy=muy * u"kN*m",
+                                             M1y=-muy * u"kN*m", M2y=muy * u"kN*m")
+                ok_zero = StructuralSizer.is_feasible(checker, cache, 1, section, material,
+                                                      demand_zero, geometry)
+                ok_single = StructuralSizer.is_feasible(checker, cache, 1, section, material,
+                                                        demand_single, geometry)
+                if ok_zero && !ok_single
+                    n_flip += 1
+                elseif !ok_zero && ok_single
+                    n_reverse += 1
+                end
+            end
+        end
+        println("  weak-axis curvature: flip=$n_flip reverse=$n_reverse")
+        @test n_flip > 0
+        @test n_reverse == 0
+    end
+
+    @testset "B2 (P-Δ sway) amplification routes through is_feasible" begin
+        # is_feasible now applies AISC 360-16 Appendix 8 Eqs. A-8-1/A-8-2 through
+        # the shared `_aisc_amplified_forces` core when a `story` is supplied:
+        # Mr = B1·Mnt + B2·Mlt, Pr = Pnt + B2·Plt. Only the dimensionless B2 and
+        # the sway flag flow into the SI amplification, so a kip/in story record
+        # is fine. AISC Design Examples V15.1 story → B2 ≈ 1.13.
+        sway = StoryStability(; ΣPu = 2000.0, V = 50.0, Δ = 0.36, L = 144.0,
+                                Pmf = 2000.0)
+        @test StructuralSizer.is_sway_frame(sway)
+        @test story_B2(sway) > 1.1
+        braced_story = StoryStability(; ΣPu = 2000.0, V = 50.0, Δ = 0.001, L = 144.0)
+        @test !StructuralSizer.is_sway_frame(braced_story)
+
+        # Raw SI (N, N·m): is_feasible normalizes via to_newtons/to_newton_meters,
+        # so a bare-Float demand is interpreted as SI. (Avoids a Unitful promotion
+        # quirk when a LateralTranslation mixes unitful + Float64-zero defaults.)
+        # A column whose strong-axis moment comes from lateral translation (lt):
+        # a sway story amplifies that Mlt by B2 (Eq. A-8-1); a braced story / no
+        # story leaves B2 = 1. Sweeping the lt moment across the strong-axis
+        # flexural boundary, the sway case must never be *more* feasible than the
+        # no-story case, and must flip at least one case to infeasible.
+        n_flip = 0
+        n_reverse = 0
+        for mlt in 20.0e3:2.0e3:70.0e3     # 20 → 70 kN·m in N·m
+            dem = MemberDemand(1; Pu_c = 150.0e3, Mux = 5.0e3,
+                               M1x = 0.0, M2x = 5.0e3,
+                               lt = LateralTranslation(; M2ltx = mlt))
+            ok_nostory = StructuralSizer.is_feasible(checker, cache, 1, section,
+                                                     material, dem, geometry)
+            ok_sway = StructuralSizer.is_feasible(checker, cache, 1, section,
+                                                  material, dem, geometry; story = sway)
+            if ok_nostory && !ok_sway
+                n_flip += 1
+            elseif !ok_nostory && ok_sway
+                n_reverse += 1
+            end
+        end
+        println("  B2 sway amplification: flip=$n_flip reverse=$n_reverse")
+        @test n_reverse == 0
+        @test n_flip > 0
+
+        # No-op contract: a braced (non-sway) story is byte-identical to no story
+        # (B2 collapses to 1), for a demand that carries an lt split.
+        dem2 = MemberDemand(1; Pu_c = 150.0e3, Mux = 5.0e3, M1x = 0.0, M2x = 5.0e3,
+                            lt = LateralTranslation(; M2ltx = 40.0e3))
+        @test StructuralSizer.is_feasible(checker, cache, 1, section, material,
+                                          dem2, geometry; story = braced_story) ==
+              StructuralSizer.is_feasible(checker, cache, 1, section, material,
+                                          dem2, geometry)
+    end
+
+    @testset "B2 flows into explain_feasibility (governing ratio)" begin
+        # explain_feasibility now mirrors is_feasible's Appendix 8 B1/B2 path when
+        # a `story` is supplied, so the reported governing ratio tracks the sway
+        # amplification and matches the is_feasible pass/fail verdict.
+        sway = StoryStability(; ΣPu = 2000.0, V = 50.0, Δ = 0.36, L = 144.0, Pmf = 2000.0)
+        braced_story = StoryStability(; ΣPu = 2000.0, V = 50.0, Δ = 0.001, L = 144.0)
+        dem = MemberDemand(1; Pu_c = 150.0e3, Mux = 5.0e3, M1x = 0.0, M2x = 5.0e3,
+                           lt = LateralTranslation(; M2ltx = 40.0e3))
+        e_nostory = StructuralSizer.explain_feasibility(checker, cache, 1, section,
+                                                        material, dem, geometry)
+        e_sway = StructuralSizer.explain_feasibility(checker, cache, 1, section,
+                                                     material, dem, geometry; story = sway)
+        e_braced = StructuralSizer.explain_feasibility(checker, cache, 1, section,
+                                                       material, dem, geometry; story = braced_story)
+        # Sway amplifies Mlt (Eq. A-8-1) → governing ratio not below the no-story one.
+        @test e_sway.governing_ratio >= e_nostory.governing_ratio - 1e-9
+        # Braced (non-sway) story is the no-op path: identical to no story.
+        @test e_braced.governing_ratio ≈ e_nostory.governing_ratio
+        # explain.passed tracks the is_feasible verdict under the same story.
+        @test e_sway.passed == StructuralSizer.is_feasible(checker, cache, 1, section,
+                                                           material, dem, geometry; story = sway)
     end
 end
 

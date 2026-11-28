@@ -18,6 +18,7 @@ println("Testing new design API...")
         @test FlatPlateOptions()  isa AbstractFloorOptions
         @test FlatSlabOptions()   isa AbstractFloorOptions
         @test OneWayOptions()     isa AbstractFloorOptions
+        @test TwoWayOptions()     isa AbstractFloorOptions
         @test VaultOptions()      isa AbstractFloorOptions
         @test CompositeDeckOptions() isa AbstractFloorOptions
         @test TimberOptions()     isa AbstractFloorOptions
@@ -26,6 +27,7 @@ println("Testing new design API...")
         @test StructuralSizer.floor_symbol(FlatPlateOptions()) == :flat_plate
         @test StructuralSizer.floor_symbol(FlatSlabOptions())  == :flat_slab
         @test StructuralSizer.floor_symbol(OneWayOptions())    == :one_way
+        @test StructuralSizer.floor_symbol(TwoWayOptions())    == :two_way
         @test StructuralSizer.floor_symbol(VaultOptions())     == :vault
     end
 
@@ -119,6 +121,31 @@ println("Testing new design API...")
         @test resolved isa FlatPlateOptions
         @test resolved.material.concrete == NWC_5000
         @test resolved.material.rebar == Rebar_75
+
+        # A coated rebar is a project material like any grade.
+        epoxy75 = with_coating(Rebar_75, :epoxy)
+        params_epoxy = DesignParameters(materials = MaterialOptions(rebar = epoxy75))
+        @test resolve_rebar(params_epoxy).coating === :epoxy
+        @test resolve_rc_material(params_epoxy).rebar.Fy == Rebar_75.Fy
+    end
+
+    @testset "API rebar_coating" begin
+        SS = StructuralSynthesizer
+        api = SS.APIParams()
+        @test api.materials.rebar_coating == "uncoated"
+        @test SS._resolve_rebar(api) === Rebar_60
+
+        api.materials.rebar_coating = "zinc_epoxy"
+        reb = SS._resolve_rebar(api)
+        @test reb.coating === :zinc_epoxy && reb.Fy == Rebar_60.Fy
+        @test SS._resolve_materials(api)[2].coating === :zinc_epoxy
+
+        api.materials.rebar_coating = "paint"
+        @test_throws ErrorException SS._resolve_rebar(api)
+
+        parsed = SS.JSON3.read("""{"materials": {"rebar_coating": "epoxy"}}""", SS.APIParams)
+        @test parsed.materials.rebar_coating == "epoxy"
+        @test parsed.materials.rebar == "Rebar_60"
     end
 
     # ─── with() helper ────────────────────────────────────────────────────

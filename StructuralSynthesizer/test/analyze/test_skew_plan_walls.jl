@@ -8,6 +8,7 @@
 # wiring, the same as the axis-aligned stage tests.
 
 using Test
+using LinearAlgebra: dot
 using Unitful
 using Asap
 using StructuralSynthesizer
@@ -89,24 +90,29 @@ end
     @test ustrip(u"m", on_plan.primary) ≈ 5.0
     @test ustrip(u"m", on_plan.secondary) ≈ 6.0
 
-    # Column.θ is the plan angle. The roll adds it to Asap's default Ψ.
-    # A column drawn upward turns by +α, one drawn downward by -α. θ = 0
-    # leaves Ψ alone, and a beam is not a column.
+    # Column.θ is the plan angle of c1. The roll replaces Asap's default Ψ:
+    # a column drawn upward gets +α, one drawn downward -α, θ = 0 gives 0,
+    # and a beam is not a column.
     sec = Asap.Section(1.0u"m^2", 1.0u"Pa", 1.0u"Pa", 2.0u"m^4", 1.0u"m^4", 1.0u"m^4")
     node(x, y, z) = Asap.Node([x * u"m", y * u"m", z * u"m"], :free)
     up = Asap.Element(node(0, 0, 0), node(0, 0, 4), sec)
     down = Asap.Element(node(1, 0, 4), node(1, 0, 0), sec)
     beam = Asap.Element(node(0, 0, 4), node(6, 0, 4), sec)
-    Ψ0 = up.Ψ
+    Ψ0 = beam.Ψ
     StructuralSynthesizer._apply_column_roll!(up, α)
     StructuralSynthesizer._apply_column_roll!(down, α)
     StructuralSynthesizer._apply_column_roll!(beam, α)
-    @test up.Ψ ≈ Ψ0 + α
-    @test down.Ψ ≈ Ψ0 - α
+    @test up.Ψ ≈ α
+    @test down.Ψ ≈ -α
     @test beam.Ψ == Ψ0
-    keep = Asap.Element(node(0, 0, 0), node(0, 0, 4), sec)
-    StructuralSynthesizer._apply_column_roll!(keep, 0.0)
-    @test keep.Ψ == Ψ0
+    zero_roll = Asap.Element(node(0, 0, 0), node(0, 0, 4), sec)
+    StructuralSynthesizer._apply_column_roll!(zero_roll, 0.0)
+    @test zero_roll.Ψ == 0.0
+    # Both drawing directions put local y (the axis Ix acts with) along c2.
+    for el in (up, down)
+        Asap.lcs!(el, el.Ψ)
+        @test abs(dot(el.LCS[2], [-sin(α), cos(α), 0.0])) ≈ 1.0
+    end
 
     # The bounding-box corner of a rotated floor is outside the floor.
     polys = [StructuralSynthesizer._face_plan_vertices(skel, f) for f in skel.stories[1].faces]
@@ -118,6 +124,35 @@ end
     on_edge = StructuralSizer.WallLine(2, polys[1][1][1], polys[1][1][2], 0.0, 1.0, 1)
     @test StructuralSynthesizer.assert_walls_on_floor!(
         skel, skel.stories[1], [on_edge]) === nothing
+end
+
+@testset "a rolled column sways along c1 on c2·c1³/12" begin
+    # RCColumnSection convention: b = c1 (section x), h = c2, Ix = b·h³/12.
+    # Cantilever tip deflection is P·L³/(3·E·I) with I about the axis normal
+    # to the sway, so sway along c1 uses Iy = c2·c1³/12.
+    E, L, P = 25e9, 3.0, 1000.0
+    c1, c2 = 0.3, 0.6
+    Ix, Iy = c1 * c2^3 / 12, c2 * c1^3 / 12
+    function tip(θ, dir)
+        base = Asap.Node([0.0, 0.0, 0.0] .* u"m", :fixed)
+        top = Asap.Node([0.0, 0.0, L] .* u"m", :free)
+        sec = Asap.Section(c1 * c2 * u"m^2", E * u"Pa", (E / 2.4) * u"Pa",
+                           Ix * u"m^4", Iy * u"m^4", (Ix + Iy) * u"m^4", 2400.0u"kg/m^3")
+        el = Asap.Element(base, top, sec)
+        StructuralSynthesizer._apply_column_roll!(el, θ)
+        load = Asap.NodeForce(top, [P * dir[1], P * dir[2], 0.0] .* u"N", :p)
+        model = Asap.Model([base, top], Asap.Element[el], Asap.AbstractLoad[load])
+        Asap.solve!(model)
+        d = [ustrip(u"m", x) for x in top.displacement[1:2]]
+        return d[1] * dir[1] + d[2] * dir[2]
+    end
+    δ(I) = P * L^3 / (3 * E * I)
+    for θ in (0.0, deg2rad(30))
+        along_c1 = (cos(θ), sin(θ))
+        along_c2 = (-sin(θ), cos(θ))
+        @test tip(θ, along_c1) ≈ δ(Iy) rtol = 1e-9
+        @test tip(θ, along_c2) ≈ δ(Ix) rtol = 1e-9
+    end
 end
 
 @testset "a tributary_axis override reaches load routing" begin
@@ -220,7 +255,7 @@ end
     el = rot.asap_model.frame_elements[eidx]
     za = ustrip(u"m", el.nodeStart.position[3])
     zb = ustrip(u"m", el.nodeEnd.position[3])
-    @test el.Ψ ≈ π / 2 + sign(zb - za) * α
+    @test el.Ψ ≈ sign(zb - za) * α
 
     @test !r1.type5_horizontal_irregularity
     @test isempty(r1.nonparallel_elements)

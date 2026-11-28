@@ -3,6 +3,7 @@
 include("interface.jl")
 include("systems/walls_seismic_system.jl")
 include("systems/interactive_shear_wall_frame_system.jl")
+include("systems/dual_system.jl")
 include("systems/outrigger_system.jl")
 include("assignment/building_unit.jl")
 include("assignment/isolated_wall_share.jl")

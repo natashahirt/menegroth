@@ -93,7 +93,8 @@ using StructuralSizer
         bb_int = StructuralSizer.effective_slab_width(c2, h; position=:interior)
         @test ustrip(u"inch", bb_int) ≈ 37 rtol=0.01
         
-        # Edge column: bb = c2 + 1.5h = 16 + 1.5×7 = 26.5 in (ACI 8.4.2.3.3)
+        # One-sided band: the moment that runs along a free edge, and a corner.
+        # The moment perpendicular to an edge is the interior width, c2 + 3h.
         bb_edge = StructuralSizer.effective_slab_width(c2, h; position=:edge)
         @test ustrip(u"inch", bb_edge) ≈ 26.5 rtol=0.01
         
@@ -553,6 +554,43 @@ println("\n✓ Shear and moment transfer tests complete!")
 
         # Circular should have higher utilization (less b₀)
         @test result.utilization > result_rect.utilization
+    end
+
+    # =========================================================================
+    # R11.11.7.2 face CD: the centroid shift reverses a small edge moment
+    # =========================================================================
+    @testset "Edge moment reversed by the centroid shift — face CD governs" begin
+        # StructurePoint exterior column geometry (16×16, d = 5.75 in):
+        # b1 = 18.875, b2 = 21.75, cAB = b1²/(2b1 + b2) = 5.988, e = 4.887 in.
+        c1 = c2 = 16u"inch"
+        d = 5.75u"inch"
+        fc = 4000u"psi"
+        Vu = 21.70kip
+        M = 3.0kip*u"ft"
+        g = StructuralSizer.punching_geometry_edge(c1, c2, d)
+        e = StructuralSizer.eccentricity_to_critical_centroid(g.b1, c1, g.cAB)
+        @test ustrip(u"inch", e) ≈ 4.887 atol = 0.005
+        Mc = M - Vu * e                                # −5.84 kip·ft: reversed
+        @test ustrip(u"kip*ft", Mc) ≈ 3.0 - 21.70 * 4.887 / 12 atol = 0.01
+        γv = StructuralSizer.gamma_v(g.b1, g.b2)
+        Jc = StructuralSizer.polar_moment_Jc_edge(g.b1, g.b2, d, g.cAB)
+        cCD = g.b1 - g.cAB
+        v_direct = uconvert(u"psi", Vu / (g.b0 * d))
+        v_CD = uconvert(u"psi", γv * abs(Mc) * cCD / Jc)
+        # The other assignment puts M on the symmetry axis.
+        γv_p = StructuralSizer.gamma_v(g.b2, g.b1)
+        Jc_p = StructuralSizer.polar_moment_Jc_edge_perpendicular(g.b1, g.b2, d)
+        v_sym = uconvert(u"psi", γv_p * M * (g.b2 / 2) / Jc_p)
+        res = StructuralSizer.punching_check(Vu, M, 0.0kip*u"ft", d, fc, c1, c2; position = :edge)
+        @test res.vu ≈ v_direct + max(v_CD, v_sym) rtol = 1e-9
+        @test res.vu > v_direct                        # the old floor at zero gave v_direct
+        # A larger moment that the shift only reduces keeps face AB.
+        M_big = 46.65kip*u"ft"
+        v_AB = uconvert(u"psi", γv * (M_big - Vu * e) * g.cAB / Jc)
+        @test StructuralSizer.shifted_moment_stress(γv, M_big, Vu, e, g.cAB, cCD, Jc) ≈ v_AB
+        # No moment about an axis transfers nothing about it (§11.11.7.1).
+        @test StructuralSizer.shifted_moment_stress(γv, 0.0kip*u"ft", Vu, e, g.cAB, cCD, Jc) ==
+              0.0u"psi"
     end
 end
 

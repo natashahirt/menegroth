@@ -94,6 +94,57 @@ Base.@kwdef struct WinklerFEA <: AbstractMatMethod
 end
 
 # =============================================================================
+# Global Stability Options (sliding / overturning / uplift)
+# =============================================================================
+
+"""
+    StabilityParams
+
+Knobs for the ASCE 7-22 global-stability checks (sliding, overturning, net
+uplift) of a shallow footing. Supplying one to a footing param block turns
+the checks on; leaving the footing param block's `stability` field `nothing`
+(the default) reproduces the pre-stability behaviour exactly.
+
+# Demand basis
+The checks run over the **allowable-stress (service)** combinations, which
+include the counteracting combinations that govern stability:
+ASCE 7-22 §2.4.1 comb. 7a `0.6D + 0.6(W or WT)` and §2.4.5 comb. 10
+`0.6D − 0.7Ev + 0.7Eh` (corpus: asce-7-22, PDF pages 69–70). No separate
+factor of safety is applied — the `0.6D` dead-load reduction is the margin.
+The worst combination governs each check. IBC 1807.2.3 (the 1.5-factor
+basis) is intentionally not used: it is not in the corpus.
+
+# Resistance basis (Bowles 5e Eq. (4-3) and Table 4-5; corpus:
+# textbook-bowles-foundation-analysis-design-5e, PDF pages 252–253, 268)
+Sliding resistance = `V·tanδ + cₐ·A + Pp`, where `δ` is the base–soil
+friction angle and `cₐ` the base adhesion. Uplift is resisted by the
+factored footing self-weight.
+
+# Fields
+- `delta_ratio`: `δ = delta_ratio · φ`. Bowles Table 4-5 gives the range
+  `0.5φ ≤ δ ≤ φ`; the default `0.5` is the conservative low end of that
+  cited range (ENGINEERING JUDGMENT — a defensible default, not a code value).
+- `ca_ratio`: `cₐ = ca_ratio · c`. Bowles Table 4-5 Note 3 gives
+  `cₐ ≈ 0.6c … 1.0c`; the default `0.6` is the conservative low end
+  (ENGINEERING JUDGMENT).
+- `include_passive`: include the passive-pressure term `Pp` on the embedded
+  face (Bowles Eq. (4-3)). Requires intimate base–soil contact (Bowles p.269).
+  Default `true` (the user-selected resistance set).
+- `concrete_unit_weight`: unit weight of the footing concrete for the uplift
+  self-weight resistance. Default `23.6 kN/m³` (≈150 pcf, standard normal-
+  weight reinforced concrete — ENGINEERING JUDGMENT, not a code value).
+- `dead_counteracting_factor`: factor applied to the stabilizing footing
+  self-weight, matching the `0.6D` of ASCE 7-22 comb. 7a. Default `0.6`.
+"""
+Base.@kwdef struct StabilityParams
+    delta_ratio::Float64 = 0.5
+    ca_ratio::Float64    = 0.6
+    include_passive::Bool = true
+    concrete_unit_weight::Union{Unitful.Quantity, Nothing} = 23.6u"kN/m^3"
+    dead_counteracting_factor::Float64 = 0.6
+end
+
+# =============================================================================
 # Spread Footing Options
 # =============================================================================
 
@@ -137,7 +188,10 @@ Base.@kwdef struct SpreadParams
     # Checks to perform
     check_bearing::Bool      = true              # ACI 22.8 bearing at column-footing joint
     check_dowels::Bool       = true              # Design dowel reinforcement
-    check_development::Bool  = true              # Verify Ld ≤ available anchorage
+    check_development::Bool  = true              # ACI 318-11 §12.2 / §15.6.3
+
+    # Global stability (sliding/overturning/uplift). `nothing` → skip (legacy).
+    stability::Union{Nothing, StabilityParams} = nothing
 
     # Objective for optimization
     objective::AbstractObjective = MinVolume()
@@ -167,8 +221,19 @@ Base.@kwdef struct StripParams
     width_increment::Length   = 3.0u"inch"
     max_depth_ratio::Float64  = 0.5              # Widen B if h > ratio × B (typical h/B ≈ 0.3–0.5)
 
-    # Analysis
-    analysis::Symbol         = :rigid            # :rigid (K_r > 0.5) — only option for now
+    # Analysis method — typed, shared with MatParams for one consistent surface.
+    #   RigidMat()   — linear soil pressure, rigid statics. Column strips use
+    #                  this; a wall uses it when Kr ≥ 0.5 (ACI 336.2R §5.2).
+    #   WinklerFEA() — force a straight wall onto the §5.4 beam-on-elastic-
+    #                  foundation model regardless of Kr (needs Soil.ks). Not
+    #                  supported for column strips or corners.
+    #   ShuklaAFM()  — a 2-D mat plate method; rejected for 1-D strips/walls.
+    analysis_method::AbstractMatMethod = RigidMat()
+    # With analysis_method = RigidMat(), a wall whose relative stiffness is
+    # below 0.5 (ACI 336.2R §5.2) is redesigned as a beam on elastic foundation
+    # (§5.4) when this is `:fallback`, matching slab `on_inapplicable`; `:error`
+    # refuses.
+    on_inapplicable::Symbol  = :fallback
 
     # Strength reduction
     ϕ_flexure::Float64       = 0.90
@@ -180,13 +245,16 @@ Base.@kwdef struct StripParams
     fc_col::Union{Pressure, Nothing} = nothing
 
     # Checks to perform
-    check_development::Bool  = true              # ACI 25.4.2 development length
+    check_development::Bool  = true              # ACI 318-11 §12.2 / §15.6.3
     check_bearing::Bool      = true              # ACI 22.8 bearing at column-footing joint
     check_dowels::Bool       = true              # Design dowel reinforcement if bearing insufficient
 
     # Auto-merge thresholds (spread → strip)
     merge_gap_factor::Float64    = 2.5           # Merge when gap < factor × D_max
     eccentricity_limit::Float64  = 0.15          # Merge when e/L > limit
+
+    # Global stability (sliding/overturning/uplift). `nothing` → skip (legacy).
+    stability::Union{Nothing, StabilityParams} = nothing
 
     # Objective
     objective::AbstractObjective = MinVolume()
@@ -211,15 +279,24 @@ Base.@kwdef struct MatParams
     # Geometry
     min_depth::Length         = 24.0u"inch"      # Mats typically thicker
     depth_increment::Length   = 1.0u"inch"
+    size_increment::Length    = 3.0u"inch"      # Grow the overhang when bars do not develop
     edge_overhang::Union{Length, Nothing} = nothing  # nothing → auto (d or 0.5× avg span)
+    # Flexural bars, ACI 318-11 §12.2 and §15.6.3. Dowel embedment is separate.
+    check_development::Bool   = true
 
     # Analysis method
     analysis_method::AbstractMatMethod = RigidMat()
+    # Rigid mat outside ACI 336.2R §6.1.2 Step 3: `:fallback` redesigns with
+    # `WinklerFEA` and records it, `:error` refuses. Same choice as slabs.
+    on_inapplicable::Symbol  = :fallback
 
     # Strength reduction
     ϕ_flexure::Float64       = 0.90
     ϕ_shear::Float64         = 0.75
     λ::Union{Float64, Nothing} = nothing
+
+    # Global stability (sliding/overturning/uplift). `nothing` → skip (legacy).
+    stability::Union{Nothing, StabilityParams} = nothing
 
     # Objective
     objective::AbstractObjective = MinVolume()

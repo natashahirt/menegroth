@@ -83,6 +83,16 @@ using Asap: kip, ksi
             bar_size=9, n_bars=3,
         )
 
+        # A flange that is the web, added to a zero length in metres, converts
+        # a few ulps under 12 in and 24 in. That is still the web.
+        for bw in (12.0u"inch", 24.0u"inch")
+            sec_web = RCTBeamSection(
+                bw = bw, h = 30u"inch", bf = bw + 0.0u"m", hf = 2.5u"inch",
+                bar_size = 5, n_bars = 2,
+            )
+            @test sec_web.bf == sec_web.bw
+        end
+
         # hf ≥ h should throw
         @test_throws ArgumentError RCTBeamSection(
             bw=12u"inch", h=24u"inch", bf=48u"inch", hf=24u"inch",
@@ -293,6 +303,27 @@ using Asap: kip, ksi
         @test all(s -> s isa RCTBeamSection, cat)
         @test all(s -> ustrip(u"inch", s.bf) ≈ 48.0, cat)
         @test all(s -> ustrip(u"inch", s.hf) ≈ 5.0, cat)
+
+        # The building caller passes bf as a function of the candidate web.
+        per_web = standard_rc_tbeams(
+            flange_width = bw -> 4 * bw,
+            flange_thickness = 5u"inch",
+            web_widths = [12, 16],
+            depths = [20],
+            bar_sizes = [8],
+            n_bars_range = 2:2,
+        )
+        @test length(per_web) > 0
+        @test all(s -> ustrip(u"inch", s.bf) ≈ 4 * ustrip(u"inch", s.bw), per_web)
+        wider_than_flange = standard_rc_tbeams(
+            flange_width = _ -> 10u"inch",
+            flange_thickness = 5u"inch",
+            web_widths = [12],
+            depths = [20],
+            bar_sizes = [8],
+            n_bars_range = 2:2,
+        )
+        @test isempty(wider_than_flange)
     end
 
     # =================================================================
@@ -353,6 +384,92 @@ using Asap: kip, ksi
         @test asap_sec.A > A_web * u"m^2"
     end
 
+    @testset "T-beam weighs only its stem; the flange is the slab" begin
+        sec = RCTBeamSection(
+            bw=12u"inch", h=24u"inch", bf=48u"inch", hf=5u"inch",
+            bar_size=9, n_bars=3,
+        )
+        mat = NWC_4000
+        stem = 12u"inch" * (24u"inch" - 5u"inch")
+        @test self_weight_area(sec) ≈ stem
+        @test section_area(sec) ≈ stem + 48u"inch" * 5u"inch"
+
+        # Asap frame self-weight is ρ·A·g: it must equal the stem's weight.
+        asap_sec = to_asap_section(sec, mat)
+        @test asap_sec.ρ * asap_sec.A ≈ uconvert(u"kg/m", mat.ρ * stem)
+        @test asap_sec.A ≈ uconvert(u"m^2", section_area(sec))
+
+        rect = RCBeamSection(b=12u"inch", h=24u"inch", bar_size=9, n_bars=3)
+        @test self_weight_area(rect) == section_area(rect)
+    end
+
+end
+
+@testset "§10.5.3 waives As,min when the bars already exceed the analysis steel" begin
+    # A deep web with two #5 bars is under §10.5.1. A small moment needs far
+    # less than three-quarters of that steel, so §10.5.3 (ACI 318-11 p. 145)
+    # passes the section. A moment that needs more than that does not.
+    sec = RCTBeamSection(bw = 12u"inch", h = 24u"inch", bf = 48u"inch", hf = 5u"inch",
+                         bar_size = 5, n_bars = 2)
+    opts = ConcreteBeamOptions(material = NWC_4000, rebar_material = Rebar_60)
+    geom = ConcreteMemberGeometry(20.0u"ft")
+    light = StructuralSizer.check_tbeam_section(sec, 10.0u"kip*ft", 2.0u"kip", geom, opts;
+                                               Mu_neg = 0.0u"kip*ft")
+    minr = only(c for c in light.checks if c.name == "min_reinforcement")
+    @test minr.passed
+    @test minr.code_clause == "ACI 318-11 10.5.3"
+    heavy = StructuralSizer.check_tbeam_section(sec, 80.0u"kip*ft", 2.0u"kip", geom, opts;
+                                               Mu_neg = 0.0u"kip*ft")
+    minr = only(c for c in heavy.checks if c.name == "min_reinforcement")
+    @test !minr.passed
+    @test minr.code_clause == "ACI 318-11 10.5.1"
+end
+
+@testset "discrete sizing meets As,min when §10.5.3 would waive the section" begin
+    # The published check accepts this section. Discrete sizing must not pick
+    # it: the waiver is legal for this moment, and the next pass can drop it.
+    function pair(make, width)
+        short = make(2)
+        As_min = beam_min_reinforcement(width(short), short.d, NWC_4000.fc′, Rebar_60.Fy)
+        Ab = ustrip(u"inch^2", rebar(short.bar_size).A)
+        n = ceil(Int, ustrip(u"inch^2", As_min) / Ab - 1e-12)
+        n > short.n_bars || error("two #5 bars are no longer under As,min")
+        return short, make(n), As_min
+    end
+    t_short, t_ok, t_min = pair(n -> RCTBeamSection(
+        bw = 12u"inch", h = 24u"inch", bf = 48u"inch", hf = 5u"inch",
+        bar_size = 5, n_bars = n), s -> s.bw)
+    r_short, r_ok, r_min = pair(n -> RCBeamSection(
+        b = 12u"inch", h = 24u"inch", bar_size = 5, n_bars = n), s -> s.b)
+    @test t_short.As < t_min <= t_ok.As
+    @test r_short.As < r_min <= r_ok.As
+
+    opts = ConcreteBeamOptions(material = NWC_4000, rebar_material = Rebar_60,
+                               deflection_limit = nothing)
+    geom = ConcreteMemberGeometry(20.0u"ft")
+    Mu = [10.0u"kip*ft"]
+    Vu = [2.0u"kip"]
+    published = StructuralSizer.check_tbeam_section(t_short, Mu[1], Vu[1], geom, opts;
+                                                   Mu_neg = 0.0u"kip*ft")
+    @test published.passed
+    @test only(c for c in published.checks if c.name == "min_reinforcement").code_clause ==
+        "ACI 318-11 10.5.3"
+
+    @test_throws ArgumentError size_tbeams(Mu, Vu, [geom], opts;
+        flange_width = 48u"inch", flange_thickness = 5u"inch",
+        Mu_neg = [0.0u"kip*ft"], catalog = [t_short])
+    picked = size_tbeams(Mu, Vu, [geom], opts;
+        flange_width = 48u"inch", flange_thickness = 5u"inch",
+        Mu_neg = [0.0u"kip*ft"], catalog = [t_short, t_ok])
+    @test only(picked.sections).n_bars == t_ok.n_bars
+    @test only(picked.sections).As >= t_min
+
+    @test_throws ArgumentError size_beams(Mu, Vu, [geom], opts;
+        Mu_neg = [0.0u"kip*ft"], catalog = [r_short])
+    rect = size_beams(Mu, Vu, [geom], opts;
+                      Mu_neg = [0.0u"kip*ft"], catalog = [r_short, r_ok])
+    @test only(rect.sections).n_bars == r_ok.n_bars
+    @test only(rect.sections).As >= r_min
 end
 
 println("\n✓ RC T-Beam tests passed")

@@ -65,7 +65,7 @@ A dictionary mapping face group names to face-coordinate polylines:
 | `mip_time_limit_sec` | `Union{Float64, Nothing}` | `nothing` | Optional MIP time limit in seconds for discrete sizing. If omitted/`null`, the server uses 30 seconds. |
 | `beam_type` | `String` | `"steel_w"` | `"steel_w"`, `"steel_hss"`, `"rc_rect"`, `"rc_tbeam"`, or `"pixelframe"` |
 | `beam_catalog` | `String` | `"large"` | RC beam catalog (when `beam_type` is RC): `"standard"`, `"small"`, `"large"`, `"xlarge"`, `"all"`, or `"custom"`. Ignored for steel and pixelframe. |
-| `beam_sizing_strategy` | `String` | `"discrete"` | `"discrete"` (catalog/MIP) or `"nlp"` (continuous Ipopt). Applies to RC and steel beams (pixelframe uses a fixed catalog). |
+| `beam_sizing_strategy` | `String` | `"discrete"` | `"discrete"` (catalog/MIP) or `"nlp"` (continuous Ipopt). NLP is supported only for non-composite steel W/HSS beams; RC, PixelFrame, and composite beams require discrete sizing. |
 | `beam_catalog_bounds` | `Union{APIBeamCatalogBounds, Nothing}` | `nothing` | Required when `beam_catalog == "custom"`; bounds and resolution (inches) for generating a custom RC beam catalog. |
 | `pixelframe_options` | `Union{APIPixelFrameOptions, Nothing}` | `nothing` | Optional PixelFrame concrete strength settings. If omitted/`null`, the server uses the `"standard"` preset. |
 | `fire_rating` | `Float64` | `0.0` | Fire resistance in hours. Accepted values are `0`, `1`, `1.5`, `2`, `3`, or `4`. |
@@ -457,6 +457,11 @@ Example snippet (abbreviated) showing beamless-state and one drop-panel patch:
 | `orientation_angle` | `Float64` | Cross-section rotation about the element axis (radians, CCW from global X). Non-zero for rotated columns; beams are typically 0. |
 | `section_polygon` | `Vector{Vector{Float64}}` | Section polygon in local `[y,z]` coordinates (in `length_unit`) |
 | `section_polygon_inner` | `Vector{Vector{Float64}}` | Inner boundary for hollow sections (HSS rect/round); empty for solid sections |
+| `rebar_positions` | `Vector{Vector{Float64}}` | Longitudinal bar centres for RC columns (rectangular and circular), in the same local `[y,z]` frame and `length_unit` as `section_polygon`; empty for sections without rebar. Rotate by `orientation_angle` like the polygon. |
+| `rebar_diameter` | `Float64` | Equivalent-area longitudinal bar diameter (in `length_unit`); 0 for sections without rebar |
+| `stud_positions` | `Vector{Vector{Float64}}` | Headed studs on this composite-beam element, `[[s, y, z], ...]` in `length_unit`. `s` is the distance from `node_start` along the element. `y` and `z` are the shank base in the `section_polygon` frame: `y` across the flange, `z` at the top of steel. Draw the shank `stud_length` in the `+z` direction. Empty when the element carries no studs. |
+| `stud_diameter` | `Float64` | Stud shank diameter (in `length_unit`); 0 when `stud_positions` is empty |
+| `stud_length` | `Float64` | Stud length from the top of steel to the top of the head (in `length_unit`); 0 when `stud_positions` is empty |
 | `original_points` | `Vector{Vector{Float64}}` | Interpolated points along the element centerline `[x,y,z]` |
 | `displacement_vectors` | `Vector{Vector{Float64}}` | Displacements at each interpolated point `[dx,dy,dz]` |
 | `max_axial_force` | `Float64` | Signed axial extremum (+ tension, − compression), in **newtons (N)** |

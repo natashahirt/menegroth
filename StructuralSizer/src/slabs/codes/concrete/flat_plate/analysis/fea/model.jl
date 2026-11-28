@@ -52,6 +52,8 @@ function build_slab_shell_patches(
     patch_stiffness_factor::Float64 = 100.0,
     vertex_set::Union{Nothing, Set{Int}} = nothing,
     span_axis::NTuple{2, Float64} = (1.0, 0.0),
+    fixed_mesh::Bool = false,
+    fixed_mesh_cap::Union{Nothing, Length} = nothing,
 )
     skel = struc.skeleton
     h_m = section.thickness
@@ -63,12 +65,31 @@ function build_slab_shell_patches(
     )
     patches = Asap.ShellPatch[]
 
+    # Fixed mesh: every column patch is the cap square, oriented with the
+    # column. The mesh then covers the whole growth range; `_update_and_resolve!`
+    # carves the current footprint out of the cap zone by re-tagging triangles.
+    cap_m = fixed_mesh && fixed_mesh_cap !== nothing ? ustrip(u"m", fixed_mesh_cap) : nothing
+
     for col in columns
         vi = col.vertex_idx
         isnothing(vertex_set) || vi in vertex_set || continue
         xy = _column_xy_m(skel, col)
         cshape = col_shape(col)
-        if cshape == :circular
+        if fixed_mesh && cap_m !== nothing
+            # Cap-sized oriented square patch (shape/size leave the mesh here).
+            c1_m = cap_m
+            c2_m = cap_m
+            θ = col_orientation(col)
+            cosθ = cos(θ); sinθ = sin(θ)
+            hx = c1_m / 2; hy = c2_m / 2
+            corners_local = ((-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy))
+            verts = Tuple{Float64, Float64}[
+                (xy[1] + cosθ*lx - sinθ*ly, xy[2] + sinθ*lx + cosθ*ly)
+                for (lx, ly) in corners_local
+            ]
+            push!(patches, Asap.ShellPatch(verts, (xy[1], xy[2]),
+                                           patch_section, :col_patch))
+        elseif cshape == :circular
             D_m = ustrip(u"m", col.c1)
             eq_side = D_m * sqrt(π / 4)
             push!(patches, Asap.ShellPatch(xy[1], xy[2], eq_side, eq_side,
@@ -117,30 +138,147 @@ function build_slab_shell_patches(
     return patches
 end
 
+# =============================================================================
+# Fixed-mesh patch re-tagging (audit #1 / direction 7.8)
+# =============================================================================
+
+"""
+    _in_oriented_rect(px, py, cx, cy, θ, c1_m, c2_m; tol=1e-9) -> Bool
+
+True when the plan point `(px, py)` lies in the rectangle centred at `(cx, cy)`,
+rotated by `θ`, with full widths `c1_m` (local x) and `c2_m` (local y). The
+rotation matches [`build_slab_shell_patches`](@ref): global = R(θ)·local, so the
+inverse maps the point into the column's local axes.
+"""
+function _in_oriented_rect(px, py, cx, cy, θ, c1_m, c2_m; tol = 1e-9)
+    dx = px - cx; dy = py - cy
+    cosθ = cos(θ); sinθ = sin(θ)
+    lx =  cosθ * dx + sinθ * dy
+    ly = -sinθ * dx + cosθ * dy
+    return abs(lx) <= c1_m / 2 + tol && abs(ly) <= c2_m / 2 + tol
+end
+
+"""
+    _point_in_current_col(px, py, col, struc) -> Bool
+
+True when `(px, py)` is inside column `col`'s *current* footprint — the oriented
+rectangle `c1×c2`, or the equal-area square for a circular column (the fenced
+zone is re-tagged with square cells, see the module note).
+"""
+function _point_in_current_col(px, py, col, struc)
+    xy = _column_xy_m(struc.skeleton, col)
+    θ = col_orientation(col)
+    if col_shape(col) === :circular
+        s = ustrip(u"m", col.c1) * sqrt(π / 4)
+        return _in_oriented_rect(px, py, xy[1], xy[2], θ, s, s)
+    end
+    return _in_oriented_rect(px, py, xy[1], xy[2], θ,
+                             ustrip(u"m", col.c1), ustrip(u"m", col.c2))
+end
+
+"""
+    _owning_cap_column(px, py, columns, struc, cap_m) -> Union{Nothing, Int}
+
+Index of the column whose cap footprint (`cap_m × cap_m`, oriented) contains
+`(px, py)`. When caps overlap (columns closer than the cap apart), the nearest
+column centre wins. `nothing` when the point is in no cap zone.
+"""
+function _owning_cap_column(px, py, columns, struc, cap_m)
+    best = nothing
+    best_d2 = Inf
+    for (ci, col) in enumerate(columns)
+        xy = _column_xy_m(struc.skeleton, col)
+        _in_oriented_rect(px, py, xy[1], xy[2], col_orientation(col), cap_m, cap_m) || continue
+        d2 = (px - xy[1])^2 + (py - xy[2])^2
+        if d2 < best_d2
+            best_d2 = d2
+            best = ci
+        end
+    end
+    return best
+end
+
+"""
+    _assign_and_retag_fixed_patches!(shells, columns, struc, cap, E_slab, t_slab) -> Vector{Tuple{Int,Int}}
+
+Build the fixed-mesh re-tag map and set the seed state before the first solve.
+For every `:col_patch` triangle (the cap-sized fenced zone), record
+`(shell_index, owning_column)`, then carve the current footprint: a triangle
+whose centroid is *outside* the current column becomes ordinary slab
+(`:slab`, `E_slab`, `t_slab`); inside stays `:col_patch` (rigid, `E×factor`).
+"""
+function _assign_and_retag_fixed_patches!(shells, columns, struc, cap, E_slab, t_slab)
+    cap_m = ustrip(u"m", cap)
+    patch_zone = Tuple{Int, Int}[]
+    for (k, tri) in enumerate(shells)
+        tri isa Asap.ShellTri3 || continue
+        tri.id === :col_patch || continue
+        tc = Asap.shell_centroid(tri)
+        ci = _owning_cap_column(tc.x, tc.y, columns, struc, cap_m)
+        ci === nothing && continue
+        push!(patch_zone, (k, ci))
+        if !_point_in_current_col(tc.x, tc.y, columns[ci], struc)
+            tri.id = :slab
+            tri.E = E_slab
+            tri.thickness = t_slab
+        end
+    end
+    return patch_zone
+end
+
+"""
+    _retag_fixed_patches!(cache, columns, struc) -> Nothing
+
+Re-tag the fixed-mesh fenced zone to the *current* column footprints before a
+value-only update. Only the shell `id` is set here; [`_update_and_resolve!`](@ref)'s
+by-`id` loop then applies the patch vs slab modulus. Geometry and node numbering
+are untouched, so the stiffness pattern is reused.
+"""
+function _retag_fixed_patches!(cache::FEAModelCache, columns, struc)
+    shells = cache.model.shell_elements
+    @inbounds for (k, ci) in cache.patch_zone
+        tri = shells[k]
+        ed = cache.element_data[k]
+        tri.id = _point_in_current_col(ed.cx, ed.cy, columns[ci], struc) ? :col_patch : :slab
+    end
+    return nothing
+end
+
 """Clipped drop outline in the column-centre frame. Interior columns stay the full rectangle."""
 function _column_drop_outline(col, drop_panel::DropPanelGeometry, span_axis)
     position = hasproperty(col, :position) ? col.position : :interior
     swapped = position === :edge && _infer_free_edge_parallel(col) === :c1
+    kind = hasproperty(col, :corner_kind) ? col.corner_kind : :convex
     return drop_outline(col.c1, col.c2, drop_panel.a_drop_1, drop_panel.a_drop_2,
-                        position, col_orientation(col), span_axis; swapped = swapped)
+                        position, col_orientation(col), span_axis;
+                        swapped = swapped, corner_kind = kind)
 end
 
-"""Plan loops of the unframed openings that meet this slab's faces. `face_idx` keeps one face."""
+"""
+Plan loops of the unframed openings that meet this slab's faces. `face_idx`
+keeps one face. An opening inside a nested beam network (`skel.face_holes`)
+belongs to the slab within that network and is left out; the network's
+outline itself is a framed void, see [`slab_void_loops`](@ref).
+"""
 function slab_opening_loops(struc, slab; face_idx::Union{Nothing, Int} = nothing)
     skel = struc.skeleton
     hasproperty(skel, :openings) || return Vector{NTuple{2, Float64}}[]
     ops = getfield(skel, :openings)
     isempty(ops) && return Vector{NTuple{2, Float64}}[]
+    nested = hasproperty(skel, :face_holes) ? getfield(skel, :face_holes) : nothing
     face_loops = Vector{NTuple{2, Float64}}[]
+    holes = Vector{NTuple{2, Float64}}[]
     for ci in slab.cell_indices
         f = struc.cells[ci].face_idx
         (face_idx === nothing || f == face_idx) || continue
         push!(face_loops, NTuple{2, Float64}[_vertex_xy_m(skel, vi) for vi in skel.face_vertex_indices[f]])
+        nested === nothing || append!(holes, get(nested, f, ()))
     end
     out = Vector{NTuple{2, Float64}}[]
     seen = Set{Vector{Tuple{Int, Int}}}()
     for op in ops
         _opening_meets_face(op.loop, face_loops) || continue
+        any(h -> all(p -> _pip_xy(p[1], p[2], h), op.loop), holes) && continue
         key = [(round(Int, 1e6 * p[1]), round(Int, 1e6 * p[2])) for p in op.loop]
         key in seen && continue
         push!(seen, key)
@@ -232,6 +370,16 @@ function column_opening_punching(struc, slab, col)
 end
 
 """
+    punching_axis_kwargs(struc, slab, col) -> NamedTuple
+
+Keywords for `check_punching_for_column` / `check_punching`: the slab span
+direction, so the unbalanced moments meet the column's own `c1` / `c2`, plus
+the opening data from [`column_opening_punching`](@ref).
+"""
+punching_axis_kwargs(struc, slab, col) =
+    merge((span_axis = _get_span_axis(slab),), column_opening_punching(struc, slab, col))
+
+"""
     build_slab_shell_mesh(struc, slab, columns, section;
         target_edge=nothing, drop_panel=nothing,
         patch_stiffness_factor=100.0, id=:slab,
@@ -240,6 +388,13 @@ end
 Build triangulated shell elements for a slab with ShellPatch mesh conformity at
 each column.  This is the **single source of truth** for slab shell meshing —
 used by both the FEA design pipeline and the visualization analysis model.
+
+The centerline polygon is the frame. Outside it, and inside a courtyard, a
+band of triangles runs out to the largest column face on each straight edge.
+Those elements are part of `shells`, so the caller's single area load covers
+the strip. Column nodes and edge-beam nodes stay on the centerline. A column
+that grows changes [`fea_mesh_key`](@ref), and the rebuilt mesh carries the
+new width.
 
 Returns a NamedTuple `(shells, patches, interior_nodes, node_map, target_edge)`.
 The caller is responsible for adding column stubs, loads, and assembling/solving.
@@ -252,6 +407,8 @@ function build_slab_shell_mesh(
     id::Symbol = :slab,
     edge_support_type = :free,
     node_map::Union{Nothing, Dict{Int, Asap.Node}} = nothing,
+    fixed_mesh::Bool = false,
+    fixed_mesh_cap::Union{Nothing, Length} = nothing,
 )
     skel = struc.skeleton
 
@@ -284,7 +441,9 @@ function build_slab_shell_mesh(
         drop_panel=drop_panel,
         patch_stiffness_factor=patch_stiffness_factor,
         vertex_set=vertex_set,
-        span_axis=_get_span_axis(slab))
+        span_axis=_get_span_axis(slab),
+        fixed_mesh=fixed_mesh,
+        fixed_mesh_cap=fixed_mesh_cap)
 
     # ─── 4. Interior nodes + conforming nodes along interior cell edges ───
     boundary_set = Set(boundary_vis)
@@ -312,16 +471,27 @@ function build_slab_shell_mesh(
     end
 
     # ─── 5. Refinement edge length ───
-    min_col_dim_m = if !isempty(columns)
-        minimum(min(ustrip(u"m", col.c1), ustrip(u"m", col.c2)) for col in columns)
+    # Fixed mesh: a fine fenced zone (~1 in) around each cap patch, independent
+    # of the current column so growth never changes the mesh. The fine edge
+    # keeps the re-tagged patch boundary close to the true column face (the
+    # 0.15–0.3 m conforming mesh was too coarse to re-tag; deci-202e97fd).
+    # Conforming mesh: refinement follows the smallest column.
+    refine_edge = if fixed_mesh
+        min(0.0254, target_m / 2.0) * u"m"
     else
-        target_m
+        min_col_dim_m = if !isempty(columns)
+            minimum(min(ustrip(u"m", col.c1), ustrip(u"m", col.c2)) for col in columns)
+        else
+            target_m
+        end
+        clamp(min_col_dim_m / 2.0, 0.04, target_m / 2.0) * u"m"
     end
-    refine_edge = clamp(min_col_dim_m / 2.0, 0.04, target_m / 2.0) * u"m"
 
     # ─── 6. Build shell mesh ───
+    # Openings cut into a face, plus bays that were never a slab (a core shaft).
+    holes = vcat(slab_opening_loops(struc, slab), slab_void_loops(struc, slab))
     shells = Asap.Shell(corner_nodes, section;
-                        holes=slab_opening_loops(struc, slab),
+                        holes=holes,
                         id=id,
                         interior_nodes=interior_nodes,
                         interior_patches=patches,
@@ -330,8 +500,220 @@ function build_slab_shell_mesh(
                         target_edge_length=target_edge,
                         refinement_edge_length=refine_edge)
 
+    # Slab past the centerline, out to the largest column face. The area load
+    # is built from `shells`, so the strip is loaded with the rest of the slab.
+    _append_flat_plate_edge_strip!(shells, section, struc, slab, node_map, boundary_vis)
+
     return (shells=shells, patches=patches, interior_nodes=interior_nodes,
             node_map=node_map, target_edge=target_edge)
+end
+
+"""
+    _append_flat_plate_edge_strip!(shells, section, struc, slab, node_map, boundary_vis)
+
+Add the centerline-to-slab-edge band along the slab's free edges.
+
+The band is the floor's slab edge ([`floor_slab_edges`](@ref)), so it matches
+the story shell: a straight run is as wide as the largest column face on it,
+anywhere on the floor. An edge shared with another slab gets no band, and
+neither does an opening. No sized column leaves the mesh unchanged.
+"""
+function _append_flat_plate_edge_strip!(shells, section, struc, slab, node_map, boundary_vis)
+    isempty(boundary_vis) && return shells
+    skel = struc.skeleton
+    z = _edge_m(skel.geometry.vertex_coords[first(boundary_vis), 3])
+    off = slab_edge_offsets(floor_slab_edges(struc, z))
+    isempty(off.side) && return shells
+    _, _, _, holes = _slab_boundary_topology(struc, slab)
+    nodes = _slab_mesh_nodes(shells)
+    outer = Dict{Int, Asap.Node}()
+    for loop in Iterators.flatten(((boundary_vis,), holes))
+        n = length(loop)
+        for i in 1:n
+            va, vb = loop[i], loop[mod1(i + 1, n)]
+            side = get(off.side, minmax(va, vb), nothing)
+            side === nothing && continue
+            haskey(node_map, va) && haskey(node_map, vb) || continue
+            _append_edge_strip_segment!(shells, section, nodes, outer, off.shift, side,
+                                        skel, va, vb, node_map)
+        end
+    end
+    return shells
+end
+
+"""
+Band triangles on the boundary edge `va`→`vb`, walked with the slab on the left.
+
+An end vertex moves by `shift` (a corner goes to the outline corner); a mesh
+node inside the edge moves along the run's outward normal by its width. The
+centerline nodes are not moved. `outer` shares the moved vertex nodes between
+the two edges that meet there.
+"""
+function _append_edge_strip_segment!(shells, section, nodes, outer, shift, side,
+                                     skel, va, vb, node_map)
+    a = _vertex_xy_m(skel, va)
+    b = _vertex_xy_m(skel, vb)
+    sa = get(shift, va, (0.0, 0.0))
+    sb = get(shift, vb, (0.0, 0.0))
+    hypot(sa...) < 1e-6 && hypot(sb...) < 1e-6 && return shells
+    chain = collect(Asap.Node, _nodes_along(nodes, node_map[va], node_map[vb]))
+    outers = Asap.Node[_moved_vertex_node!(outer, va, node_map[va], a, sa)]
+    for node in @view chain[2:end-1]
+        if side.width < 1e-6
+            push!(outers, node)
+        else
+            x = ustrip(u"m", node.position[1]) + side.outward[1] * side.width
+            y = ustrip(u"m", node.position[2]) + side.outward[2] * side.width
+            push!(outers, Asap.Node([x * u"m", y * u"m", 0.0u"m"], :free))
+        end
+    end
+    push!(outers, _moved_vertex_node!(outer, vb, node_map[vb], b, sb))
+    n_quads = length(chain) - 1
+    for i in 1:n_quads
+        b0, b1 = chain[i], chain[i + 1]
+        o0, o1 = outers[i], outers[i + 1]
+        _node_span(b0, b1) < 1e-6 && continue
+        # A moved end vertex can slide along the next boundary run when that
+        # run has no band. Mesh nodes of that run then sit on the band's end
+        # edge; fanning through them keeps the mesh conforming.
+        start = i == 1 ? _nodes_along(nodes, b0, o0) : (b0, o0)
+        stop = i == n_quads ? _nodes_along(nodes, b1, o1) : (b1, o1)
+        for k in 1:(length(start) - 1)
+            _push_band_tri!(shells, section, (start[k], start[k + 1], b1))
+        end
+        for k in 1:(length(stop) - 1)
+            _push_band_tri!(shells, section, (o0, stop[k + 1], stop[k]))
+        end
+    end
+    return shells
+end
+
+"""
+`from`, the mesh nodes strictly inside the segment `from`→`to` in order, then
+`to`. Just the two ends when the segment has no length.
+"""
+function _nodes_along(nodes, from::Asap.Node, to::Asap.Node)
+    _node_span(from, to) < 1e-6 && return (from, to)
+    a = _xy_m(from)
+    b = _xy_m(to)
+    hits = Tuple{Float64, Asap.Node}[]
+    for node in nodes
+        s = _segment_station(_xy_m(node), a, b; tol = 1e-4)
+        (s === nothing || s <= 1e-5 || s >= 1 - 1e-5) && continue
+        push!(hits, (s, node))
+    end
+    isempty(hits) && return (from, to)
+    sort!(hits; by = first)
+    return (from, (last(h) for h in hits)..., to)
+end
+
+_xy_m(node::Asap.Node) = (ustrip(u"m", node.position[1]), ustrip(u"m", node.position[2]))
+
+"""Add one band triangle, unless its three corners are collinear or coincide."""
+function _push_band_tri!(shells, section, tri)
+    p1, p2, p3 = _xy_m.(tri)
+    twice_area = (p2[1] - p1[1]) * (p3[2] - p1[2]) - (p3[1] - p1[1]) * (p2[2] - p1[2])
+    abs(twice_area) < 2e-9 && return shells
+    push!(shells, Asap.ShellTri3(
+        tri, section.thickness * u"m", section.E * u"Pa", section.ν;
+        ρ = section.ρ, id = :slab_edge))
+    return shells
+end
+
+"""
+The node at boundary vertex `v` moved to the slab edge, made once per vertex.
+A vertex that does not move keeps its centerline `node`, so the mesh stays joined.
+"""
+function _moved_vertex_node!(outer, v::Int, node, xy, shift)
+    hypot(shift[1], shift[2]) < 1e-6 && return node
+    get!(outer, v) do
+        Asap.Node([(xy[1] + shift[1]) * u"m", (xy[2] + shift[2]) * u"m", 0.0u"m"], :free)
+    end
+end
+
+"""Plan distance between two nodes, in metres."""
+_node_span(a::Asap.Node, b::Asap.Node) = hypot(
+    ustrip(u"m", a.position[1]) - ustrip(u"m", b.position[1]),
+    ustrip(u"m", a.position[2]) - ustrip(u"m", b.position[2]))
+
+"""Distinct shell nodes, in first-seen order."""
+function _slab_mesh_nodes(shells)
+    seen = IdDict{Asap.Node, Nothing}()
+    nodes = Asap.Node[]
+    for el in shells
+        for node in el.nodes
+            haskey(seen, node) && continue
+            seen[node] = nothing
+            push!(nodes, node)
+        end
+    end
+    return nodes
+end
+
+"""
+Join slab nodes on each wall to a wall shell. The slab nodes are not fixed.
+
+ACI 318-11 R13.6.3.3 (corpus: aci-318-11, page 254) is a direct-design moment
+coefficient for an edge cast with a stiff wall. It is not a support. The
+wall hangs `drop_m` below the slab. Its base translations are held and its
+rotations are not. The wall shell uses the slab analysis section's modulus.
+
+Returns the number of slab nodes joined, and the new base nodes. Wall
+triangles are appended to `shells` with id `:wall`.
+"""
+function _attach_slab_walls!(shells, struc, slab, section)
+    piers = flat_plate_wall_piers(struc, slab)
+    isempty(piers) && return 0, Asap.Node[]
+    nodes = _slab_mesh_nodes(shells)
+    bases = Dict{NTuple{3, Int}, Asap.Node}()
+    joined = IdDict{Asap.Node, Nothing}()
+    E = section.E * u"Pa"
+    for pier in piers
+        seg = ((pier.x1, pier.y1), (pier.x2, pier.y2))
+        seen = IdDict{Asap.Node, Nothing}()
+        d = (pier.x2 - pier.x1, pier.y2 - pier.y1)
+        L2 = d[1] * d[1] + d[2] * d[2]
+        L2 > 0 || continue
+        hits = Tuple{Float64, Asap.Node}[]
+        for node in nodes
+            haskey(seen, node) && continue
+            abs(ustrip(u"m", node.position[3])) > 1e-3 && continue
+            pt = (ustrip(u"m", node.position[1]), ustrip(u"m", node.position[2]))
+            _point_on_segment(pt, seg[1], seg[2]) || continue
+            seen[node] = nothing
+            s = ((pt[1] - pier.x1) * d[1] + (pt[2] - pier.y1) * d[2]) / L2
+            push!(hits, (s, node))
+        end
+        sort!(hits; by = first)
+        tops = Asap.Node[n for (_, n) in hits]
+        length(tops) < 2 && continue
+        z_local = -pier.drop_m
+        row = Asap.Node[]
+        for n in tops
+            joined[n] = nothing
+            x = ustrip(u"m", n.position[1])
+            y = ustrip(u"m", n.position[2])
+            key = (round(Int, 1000 * x), round(Int, 1000 * y), round(Int, 1000 * z_local))
+            b = get(bases, key, nothing)
+            if b === nothing
+                b = Asap.Node([x * u"m", y * u"m", z_local * u"m"], :free)
+                b.dof = Bool[false, false, false, true, true, true]
+                bases[key] = b
+            end
+            push!(row, b)
+        end
+        t = pier.thickness_m * u"m"
+        for i in 1:(length(tops) - 1)
+            dx = ustrip(u"m", tops[i + 1].position[1] - tops[i].position[1])
+            dy = ustrip(u"m", tops[i + 1].position[2] - tops[i].position[2])
+            hypot(dx, dy) < 1e-4 && continue
+            push!(shells, Asap.ShellTri3((tops[i], tops[i + 1], row[i + 1]), t, E,
+                                         section.ν; id = :wall, ρ = section.ρ))
+            push!(shells, Asap.ShellTri3((tops[i], row[i + 1], row[i]), t, E,
+                                         section.ν; id = :wall, ρ = section.ρ))
+        end
+    end
+    return length(joined), collect(values(bases))
 end
 
 """
@@ -370,6 +752,9 @@ function _build_fea_slab_model(
     edge_beam_βt::Float64 = 0.0,
     edge_beam_l2::Union{Nothing, Length} = nothing,
     edge_beam_c1_avg::Union{Nothing, Length} = nothing,
+    q_drop::Pressure = 0.0u"Pa",
+    fixed_mesh::Bool = false,
+    fixed_mesh_cap::Union{Nothing, Length} = nothing,
 )
     skel = struc.skeleton
     shell_section = Asap.ShellSection(uconvert(u"m", h), uconvert(u"Pa", Ecs), ν_concrete)
@@ -380,10 +765,23 @@ function _build_fea_slab_model(
     mesh = build_slab_shell_mesh(struc, slab, columns, shell_section;
         target_edge=target_edge, drop_panel=drop_panel,
         patch_stiffness_factor=patch_stiffness_factor,
-        id=:slab_fea, edge_support_type=edge_dofs)
+        id=:slab_fea, edge_support_type=edge_dofs,
+        fixed_mesh=fixed_mesh, fixed_mesh_cap=fixed_mesh_cap)
     shells = mesh.shells
     node_map = mesh.node_map
     target_edge = mesh.target_edge
+
+    # The slab edge is joined to the wall. It is not held in space.
+    _, wall_bases = _attach_slab_walls!(shells, struc, slab, shell_section)
+
+    # Fixed mesh: record the cap fenced zone and carve the seed footprint before
+    # the first solve, so the seed analysis is the seed column (not the full cap).
+    patch_zone = Tuple{Int, Int}[]
+    if fixed_mesh && fixed_mesh_cap !== nothing
+        patch_zone = _assign_and_retag_fixed_patches!(
+            shells, columns, struc, fixed_mesh_cap,
+            ustrip(u"Pa", Ecs), ustrip(u"m", h))
+    end
 
     # ─── Column stub frame elements ───
     col_stubs = Dict{Int, Any}()
@@ -406,6 +804,8 @@ function _build_fea_slab_model(
         push!(fixed_nodes, base_below)
         sec_below = _col_asap_sec(col, Ecc, ν_concrete; I_factor=col_I_factor)
         elem_below = Asap.Element(base_below, slab_node, sec_below, :col_below)
+        # Drawn bottom to top, roll θ puts c1 (section x) at θ from global X.
+        elem_below.Ψ = col_orientation(col)
         push!(frame_elements, elem_below)
 
         col_above = col.column_above
@@ -415,8 +815,10 @@ function _build_fea_slab_model(
             Lc_above = col_above.base.L
             base_above = Asap.Node([xy[1] * u"m", xy[2] * u"m", Lc_above], :fixed)
             push!(fixed_nodes, base_above)
-            sec_above = _col_asap_sec(col_above, Ecc, ν_concrete; I_factor=col_I_factor)
+            sec_above = _col_asap_sec(col_above, Ecc, ν_concrete;
+                I_factor=col_I_factor, fallback=(col.c1, col.c2))
             elem_above = Asap.Element(slab_node, base_above, sec_above, :col_above)
+            elem_above.Ψ = col_orientation(col_above)
             push!(frame_elements, elem_above)
         end
 
@@ -476,11 +878,18 @@ function _build_fea_slab_model(
         end
     end
 
-    # ─── Load ───
-    loads = Asap.AbstractLoad[Asap.AreaLoad(shells, uconvert(u"Pa", qu))]
+    # Slab pressure stays off the wall shells.
+    slab_shells = [s for s in shells if s.id !== :wall]
+    loads = Asap.AbstractLoad[Asap.AreaLoad(slab_shells, uconvert(u"Pa", qu))]
+    # Flat slab: the drop projection's self-weight on the drop patches only.
+    if !isnothing(drop_panel)
+        drop_shells = [s for s in shells if s.id === :drop_panel]
+        isempty(drop_shells) || push!(loads, Asap.AreaLoad(
+            drop_shells, uconvert(u"Pa", q_drop); id = FEA_DROP_LOAD_ID))
+    end
 
     # ─── Build, process, solve ───
-    all_nodes = vcat(collect(values(node_map)), fixed_nodes)
+    all_nodes = vcat(collect(values(node_map)), fixed_nodes, wall_bases)
     model = Asap.Model(all_nodes, frame_elements, shells, loads)
     Asap.process!(model)
     Asap.solve!(model)
@@ -494,7 +903,7 @@ function _build_fea_slab_model(
     end
 
     return (model=model, col_stubs=col_stubs, shells=shells,
-            edge_beam_elements=edge_beam_elements)
+            edge_beam_elements=edge_beam_elements, patch_zone=patch_zone)
 end
 
 # =============================================================================
@@ -515,11 +924,22 @@ function _update_and_resolve!(
     patch_stiffness_factor::Float64 = 100.0,
     edge_beam_l2::Union{Nothing, Length} = nothing,
     edge_beam_c1_avg::Union{Nothing, Length} = nothing,
+    q_drop::Pressure = 0.0u"Pa",
+    fixed_mesh::Bool = false,
+    struc = nothing,
 )
     model = cache.model
     t_m = ustrip(u"m", h)
     E_Pa = ustrip(u"Pa", Ecs)
     E_patch_Pa = E_Pa * patch_stiffness_factor
+
+    # Fixed mesh: re-tag the fenced zone to the current column footprints first.
+    # Only shell `id` changes here; the by-`id` loop below applies the modulus.
+    # The mesh, node numbering and stiffness pattern are untouched, so this is a
+    # value-only update (and reuses the symbolic factorization).
+    if fixed_mesh && !isempty(cache.patch_zone) && struc !== nothing
+        _retag_fixed_patches!(cache, columns, struc)
+    end
 
     # Drop panel total depth (if present)
     drop = cache.drop_panel
@@ -547,12 +967,8 @@ function _update_and_resolve!(
         end
     end
 
-    # 2. Update load magnitude
-    for load in model.loads
-        if load isa Asap.AreaLoad
-            load.pressure = uconvert(u"Pa", qu)
-        end
-    end
+    # 2. Update load magnitude (slab, and the drop patches' extra self-weight)
+    _set_fea_area_loads!(model, qu, q_drop)
 
     # 3. Update column sections
     for (i, col) in enumerate(columns)
@@ -560,7 +976,9 @@ function _update_and_resolve!(
         stubs = cache.col_stubs[i]
         stubs.below.element.section = _col_asap_sec(col, Ecc, ν_concrete; I_factor=col_I_factor)
         if !isnothing(stubs.above) && !isnothing(col.column_above)
-            stubs.above.element.section = _col_asap_sec(col.column_above, Ecc, ν_concrete; I_factor=col_I_factor)
+            stubs.above.element.section = _col_asap_sec(
+                col.column_above, Ecc, ν_concrete;
+                I_factor=col_I_factor, fallback=(col.c1, col.c2))
         end
     end
 

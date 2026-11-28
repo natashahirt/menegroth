@@ -403,7 +403,7 @@ function visualize_vault(struc::BuildingStructure;
     if show_frame && model.processed
         nan_pt = GLMakie.Point3f(NaN, NaN, NaN)
         pts = GLMakie.Point3f[]
-        for el in model.elements
+        for el in model.frame_elements
             p1, p2 = get_drawing_pts(el, 0.0)
             push!(pts, GLMakie.Point3f(p1...), GLMakie.Point3f(p2...), nan_pt)
         end

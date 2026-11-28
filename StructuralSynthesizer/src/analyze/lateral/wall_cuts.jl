@@ -4,9 +4,10 @@
 # Assemblies are geometry: piers on one story whose ends meet within the same
 # 1 mm the mesher uses to share a node.
 #
-# A cut sums K*u of the elements that cross a horizontal line, at the nodes on
-# that line. The sum is the force applied to those elements at the cut. For a
-# wall loaded only through its top, that equals the load above the cut.
+# A cut sums K*u of the elements that meet a line, at the nodes on that line.
+# On a horizontal line the shells are the ones above it, and the sum equals
+# the load above the cut. A segment top uses the shells below the line and
+# flips that sum, so it reads as the load entering the top.
 # Equilibrium is six components, one residual, on the basic load case. A
 # combination is a mix of cases that already closed, so it is not checked again.
 
@@ -41,8 +42,8 @@ end
 
 "Ends closer than this share a corner. Same 1 mm as the wall-node share."
 const WALL_CORNER_TOL_M = 1e-3
-"A node is on the cut when its elevation is within this of the cut."
-const WALL_CUT_ZTOL_M = 1e-4
+# A node is on the cut when its elevation is within WALL_CUT_ZTOL_M of the cut.
+# That constant lives with the wall mesh, which is loaded first.
 
 """Six-component resultant about `origin`, in newtons and newton-metres."""
 struct WallCut
@@ -112,24 +113,6 @@ function wall_assemblies(walls::AbstractVector; tol::Real=WALL_CORNER_TOL_M)
     end
     sort!(assemblies; by=a -> (a.story, first(a.wall_indices)))
     return assemblies
-end
-
-"""
-Throw when a joined assembly would be designed. The cut may still sum it.
-
-ACI 318-19 §18.10.5.2 (corpus: aci-318-19, PDF page 325) is the special
-structural wall flange: from the face of the web, the lesser of one-half the
-distance to an adjacent wall web and 25 percent of the total wall height
-above the section. That clause is not applied to an ordinary wall.
-"""
-function refuse_joined_wall_design(assembly::WallAssembly)
-    assembly.joined || return nothing
-    throw(ArgumentError(
-        "Joined wall assembly on story $(assembly.story) (walls " *
-        "$(join(assembly.wall_indices, ", "))) is not designed. ACI 318-19 " *
-        "§18.10.5.2 gives the effective flange width for a special structural " *
-        "wall (corpus: aci-318-19, PDF page 325). It is not applied to an " *
-        "ordinary wall."))
 end
 
 """
@@ -203,25 +186,59 @@ function check_story_cut_equilibrium(model, u::AbstractVector{<:Real}, mesh::Wal
         end
     end
     append!(contrib, _frame_cut_contributions(model, u, z; qmap=qmap))
-    isempty(contrib) && throw(ArgumentError(
-        "check_story_cut_equilibrium: no wall or frame element crosses z = $(z) m."))
-    origin = _cut_origin(contrib, z)
-    cut6 = _sum_about(contrib, origin)
-    applied6 = _loads_above(loads, origin, z)
-    react6 = _reactions_above(model, reactions, origin, z)
-    applied6 = ntuple(i -> applied6[i] + react6[i], 6)
-    if geometric_stiffness !== nothing
-        geo6 = _geometric_above(model, geometric_stiffness, u, origin, z)
-        applied6 = ntuple(i -> applied6[i] + geo6[i], 6)
+    return _finish_cut_equilibrium(
+        contrib, model, u, loads, z;
+        reactions=reactions, geometric_stiffness=geometric_stiffness,
+        rtol=rtol, atol_force=atol_force, atol_moment=atol_moment,
+        what="check_story_cut_equilibrium")
+end
+
+"""
+    check_opening_row_equilibrium(model, u, mesh, loads, z_m; kwargs...) -> StoryCutEquilibrium
+
+Free-body check at an elevation that cuts through a wall, not only at a pier base.
+
+Shells with a node on `z_m` and the rest of their nodes above it are the wall
+side of the cut. Frame elements that cross the line are included, as in
+[`check_story_cut_equilibrium`](@ref). The six components are compared with
+the loads strictly above the line. `passed` is false when a component misses
+the numerical tolerance. A false result withholds the stacks that have an
+opening row at this elevation. This function does not apply a strength check.
+
+A shell that has nodes both above and below the line has no face on the cut.
+The mesh does not conform to this elevation, and the cut is refused.
+"""
+function check_opening_row_equilibrium(model, u::AbstractVector{<:Real}, mesh::WallMesh,
+                                      loads, z_m::Real;
+                                      rtol::Real=1e-6, atol_force::Real=1.0,
+                                      atol_moment::Real=1.0,
+                                      fixed_end_from_loads::Bool=false,
+                                      geometric_stiffness=nothing)
+    z = Float64(z_m)
+    qmap = fixed_end_from_loads ? _fixed_end_by_element(loads) : nothing
+    reactions = fixed_end_from_loads ? _case_reactions(model, u, qmap) : model.reactions
+    shells = Asap.ShellTri3[]
+    for pier in mesh.piers
+        for sh in pier.shells
+            side = _shell_cut_side(sh, z)
+            if side === :straddle
+                throw(ArgumentError(
+                    "opening-row cut: a wall shell crosses z = $(z) m with nodes " *
+                    "both above and below the line. The mesh does not conform to " *
+                    "this elevation, so the cut is not taken."))
+            end
+            side === :above || continue
+            any(nd -> abs(_node_xyz(nd)[3] - z) <= WALL_CUT_ZTOL_M, sh.nodes) || continue
+            push!(shells, sh)
+        end
     end
-    residual = ntuple(i -> cut6[i] - applied6[i], 6)
-    scale = max(maximum(abs, cut6), maximum(abs, applied6))
-    passed = true
-    for i in 1:6
-        atol = i <= 3 ? Float64(atol_force) : Float64(atol_moment)
-        abs(residual[i]) <= atol + Float64(rtol) * scale || (passed = false)
-    end
-    return StoryCutEquilibrium(z, origin, cut6, applied6, residual, passed)
+    contrib = _cut_contributions(shells, u, z; qmap=qmap)
+    append!(contrib, _frame_cut_contributions(model, u, z; qmap=qmap))
+    return _finish_cut_equilibrium(
+        contrib, model, u, loads, z;
+        reactions=reactions, geometric_stiffness=geometric_stiffness,
+        rtol=rtol, atol_force=atol_force, atol_moment=atol_moment,
+        what="check_opening_row_equilibrium")
 end
 
 # ------------------------------------------------------------------------------
@@ -348,7 +365,7 @@ function _node_xyz(nd)
     return (ustrip(u"m", p[1]), ustrip(u"m", p[2]), ustrip(u"m", p[3]))
 end
 
-function _cut_contributions(shells, u, z::Float64; qmap=nothing)
+function _nodal_cut_contributions(keep::Function, shells, u; qmap=nothing)
     out = NamedTuple{(:x, :y, :z, :fx, :fy, :fz, :mx, :my, :mz),
                      NTuple{9, Float64}}[]
     for sh in shells
@@ -356,7 +373,7 @@ function _cut_contributions(shells, u, z::Float64; qmap=nothing)
         f = _element_nodal_force(sh, u; Qfixed=Q)
         for (k, nd) in enumerate(sh.nodes)
             x, y, zz = _node_xyz(nd)
-            abs(zz - z) <= WALL_CUT_ZTOL_M || continue
+            keep(x, y, zz) || continue
             i0 = (k - 1) * 6
             fx, fy, fz, mx, my, mz = _interface_at_cut_node(f, Q, i0)
             push!(out, (x=x, y=y, z=zz,
@@ -365,6 +382,62 @@ function _cut_contributions(shells, u, z::Float64; qmap=nothing)
     end
     return out
 end
+
+function _cut_contributions(shells, u, z::Float64; qmap=nothing)
+    _nodal_cut_contributions(shells, u; qmap=qmap) do x, y, zz
+        abs(zz - z) <= WALL_CUT_ZTOL_M
+    end
+end
+
+"""
+`:above` when every node is on or above `z` and one is above it.
+`:below` when every node is on or below `z` and one is below it.
+`:straddle` when the shell has nodes on both sides. `:on` when every node
+lies on the line.
+"""
+function _shell_cut_side(sh, z::Float64)
+    above = false
+    below = false
+    for nd in sh.nodes
+        zz = _node_xyz(nd)[3]
+        if zz > z + WALL_CUT_ZTOL_M
+            above = true
+        elseif zz < z - WALL_CUT_ZTOL_M
+            below = true
+        end
+    end
+    above && below && return :straddle
+    above && return :above
+    below && return :below
+    return :on
+end
+
+function _finish_cut_equilibrium(contrib, model, u, loads, z::Float64;
+                                reactions, geometric_stiffness,
+                                rtol, atol_force, atol_moment, what::AbstractString)
+    isempty(contrib) && throw(ArgumentError(
+        "$what: no wall or frame element crosses z = $(z) m."))
+    origin = _cut_origin(contrib, z)
+    cut6 = _sum_about(contrib, origin)
+    applied6 = _loads_above(loads, origin, z)
+    react6 = _reactions_above(model, reactions, origin, z)
+    applied6 = ntuple(i -> applied6[i] + react6[i], 6)
+    if geometric_stiffness !== nothing
+        geo6 = _geometric_above(model, geometric_stiffness, u, origin, z)
+        applied6 = ntuple(i -> applied6[i] + geo6[i], 6)
+    end
+    residual = ntuple(i -> cut6[i] - applied6[i], 6)
+    scale = max(maximum(abs, cut6), maximum(abs, applied6))
+    passed = true
+    for i in 1:6
+        atol = i <= 3 ? Float64(atol_force) : Float64(atol_moment)
+        abs(residual[i]) <= atol + Float64(rtol) * scale || (passed = false)
+    end
+    return StoryCutEquilibrium(z, origin, cut6, applied6, residual, passed)
+end
+
+"Negate a six-component resultant. Moments stay about the same origin."
+_negate6(f::NTuple{6, Float64}) = ntuple(i -> -f[i], 6)
 
 function _frame_cut_contributions(model, u, z::Float64; qmap=nothing)
     out = NamedTuple{(:x, :y, :z, :fx, :fy, :fz, :mx, :my, :mz),

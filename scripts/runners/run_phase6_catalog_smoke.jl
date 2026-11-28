@@ -1,13 +1,11 @@
-# Phase 6 smoke test — MemberGroup.catalog_override + selector `catalog` kwarg
+# Catalog smoke — size_member_group! `catalog` kwarg and FramingLevel.beam_options
 # + size_member_group! routing seam.
 #
-# Exercises the catalog-override plumbing added in Phase 6 of the
-# joists-roles-materials plan:
-#   1. MemberGroup carries a `catalog_override` field (back-compat constructors).
+# Exercises catalog selection:
+#   1. MemberGroup constructors.
 #   2. The StructuralSizer steel selector honours an explicit `catalog` kwarg.
-#   3. size_member_group! routes a group's `catalog_override` to the selector:
-#      `nothing` → material default catalog; non-nothing → the override wins.
-#   4. FramingLevel.catalog_override (Phase 4) can hold a non-nothing value.
+#   3. size_member_group! honours its `catalog` keyword.
+#   4. FramingLevel.beam_options holds a level's sizing options.
 #
 # Run:
 #   SS_ENABLE_VISUALIZATION=false \
@@ -47,7 +45,7 @@ function _build_beam_struc()
     model.nodes[id2].dof = [true,  true,  false, true,  true,  true]
 
     w_si = uconvert(u"N/m", 2.8u"kip/ft")
-    push!(model.loads, Asap.LineLoad(model.elements[e1], [0.0u"N/m", 0.0u"N/m", -w_si]))
+    push!(model.loads, Asap.LineLoad(model.frame_elements[e1], [0.0u"N/m", 0.0u"N/m", -w_si]))
     Asap.process!(model)
     Asap.solve!(model)
     return struc, e1
@@ -61,27 +59,13 @@ end
     custom2 = [W("W21X44"), W("W24X68")]
     custom_names = Set(s.name for s in custom2)
 
-    @testset "MemberGroup.catalog_override field + constructors" begin
+    @testset "MemberGroup constructors" begin
         gid = UInt64(42)
-
-        # 1-arg convenience: default override is nothing.
         g0 = MemberGroup(gid)
-        @test g0.catalog_override === nothing
         @test g0.member_indices == Int[]
         @test g0.section === nothing
-
-        # kwarg form: carries a non-nothing override.
-        g1 = MemberGroup(gid; catalog_override = custom2)
-        @test g1.catalog_override === custom2
-
-        # 3-arg back-compat positional constructor still works (override → nothing).
         g2 = MemberGroup(gid, Int[1, 2], nothing)
-        @test g2.catalog_override === nothing
         @test g2.member_indices == [1, 2]
-
-        # Mutable: settable after construction (how Phase 5 will wire it).
-        g0.catalog_override = custom2
-        @test g0.catalog_override === custom2
     end
 
     @testset "Selector honours explicit `catalog` kwarg (StructuralSizer.size_beams)" begin
@@ -101,12 +85,10 @@ end
         @test res_ovr.sections[1].name == "W21X44"
     end
 
-    @testset "size_member_group! — default catalog when catalog_override === nothing" begin
+    @testset "size_member_group! — default catalog" begin
         struc, _ = _build_beam_struc()
-        # Establish the group, leave catalog_override at its default (nothing).
         build_member_groups!(struc; member_type = :beams)
         gid = first(keys(struc.member_groups))
-        @test struc.member_groups[gid].catalog_override === nothing
 
         size_member_group!(struc, gid; member_edge_group = :beams,
                            material = A992_Steel, reanalyze = true)
@@ -121,35 +103,30 @@ end
         @test ustrip(u"N*m", Mu) <= ustrip(u"N*m", ϕMn)
     end
 
-    @testset "size_member_group! — honours catalog_override when set" begin
+    @testset "size_member_group! — honours the catalog keyword" begin
         struc, _ = _build_beam_struc()
         build_member_groups!(struc; member_type = :beams)
         gid = first(keys(struc.member_groups))
 
-        # Phase-5-style wiring: set the group override before sizing.
-        struc.member_groups[gid].catalog_override = custom2
-
         size_member_group!(struc, gid; member_edge_group = :beams,
-                           material = A992_Steel, reanalyze = true)
+                           material = A992_Steel, reanalyze = true,
+                           catalog = custom2)
 
         selected = struc.member_groups[gid].section
         @test selected !== nothing
         @test selected.name ∈ custom_names
         @test selected.name == "W21X44"
-
-        # Override survived the member_group_demands rebuild (build_member_groups!
-        # preserves catalog_override across the empty!/recreate cycle).
-        @test struc.member_groups[gid].catalog_override === custom2
     end
 
-    @testset "FramingLevel.catalog_override holds a non-nothing value (Phase 4 regression)" begin
+    @testset "FramingLevel.beam_options holds sizing options" begin
+        opts = StructuralSizer.SteelBeamOptions(custom_catalog = custom2, composite = false)
         fl = FramingLevel{Float64}(
             slab_idx = 1, level = 1,
             pattern  = LinearAxisPattern{Float64}((1.0, 0.0), ustrip(u"m", 4.0u"ft"), nothing),
             role     = :joist,
             material = A992_Steel,
-            catalog_override = custom2,
+            beam_options = opts,
         )
-        @test fl.catalog_override === custom2
+        @test fl.beam_options === opts
     end
 end

@@ -214,4 +214,178 @@ using Asap: kip, ksi
 
 end
 
+@testset "NLP column sizing constrains each load case" begin
+    geom = ConcreteMemberGeometry(3.0u"m"; k = 1.0, braced = true)
+    nlp_opts = NLPColumnOptions(
+        material = NWC_4000,
+        min_dim = 10.0u"inch",
+        max_dim = 36.0u"inch",
+        include_slenderness = false,
+        maxiter = 150,
+        n_multistart = 0,
+    )
+    # A section can pass the envelope (largest P with largest M) and fail the
+    # low-axial case with that same moment. Below the balance point, less
+    # compression means less moment capacity (ACI 318-19 §22.4).
+    catalog = standard_rc_columns(; sizes = 12:4:24)
+    checker = ACIColumnChecker(; include_slenderness = false, include_biaxial = true,
+                               fy_ksi = 60.0, Es_ksi = 29000.0)
+    cache = create_cache(checker, length(catalog))
+    precompute_capacities!(checker, cache, catalog, NWC_4000, MinVolume())
+    found = nothing
+    for (j, s) in enumerate(catalog), Pu_hi in (150.0, 300.0, 500.0, 800.0),
+        Mu in 40.0:40.0:280.0, Pu_lo in (0.0, 15.0, 40.0)
+        hi = RCColumnDemand(1; Pu = Pu_hi, Mux = Mu, Muy = 0.0)
+        lo = RCColumnDemand(1; Pu = Pu_lo, Mux = Mu, Muy = 0.0)
+        is_feasible(checker, cache, j, s, NWC_4000, hi, geom) || continue
+        is_feasible(checker, cache, j, s, NWC_4000, lo, geom) && continue
+        found = (hi, lo, j, s)
+        break
+    end
+    @test found !== nothing
+    hi, lo, jweak, weak = found
+    set = RCColumnDemandSet(1, [hi, lo])
+    @test !is_feasible(checker, cache, jweak, weak, NWC_4000, set, geom)
+
+    problem = RCColumnNLPProblem(set, geom, nlp_opts)
+    @test length(problem.cases) == 2
+    @test n_constraints(problem) == 3
+    @test constraint_names(problem)[end] == "placeable steel"
+    @test problem.Pu_kip ≈ hi.Pu
+    @test problem.Mux_kipft ≈ hi.Mux
+    dup = RCColumnNLPProblem(RCColumnDemandSet(1, [hi, hi]), geom, nlp_opts)
+    @test length(dup.cases) == 1
+    @test n_constraints(dup) == 2
+
+    # Same forces with magnification off are a different case. Row F moments
+    # already include story P-delta (ACI 318-19 §6.7), so the NLP must not
+    # apply §6.6 on top of them.
+    bare = RCColumnDemand(1; Pu=200.0, Mux=40.0, Muy=0.0)
+    rowf = RCColumnDemand(1; Pu=200.0, Mux=40.0, Muy=0.0, magnify=false)
+    long = ConcreteMemberGeometry(12.0u"m"; k=1.0, braced=true)
+    slender = NLPColumnOptions(material=NWC_4000, include_slenderness=true,
+                               maxiter=1, n_multistart=0)
+    noslender = NLPColumnOptions(material=NWC_4000, include_slenderness=false,
+                                 maxiter=1, n_multistart=0)
+    p_on = RCColumnNLPProblem(bare, long, slender)
+    p_rowf = RCColumnNLPProblem(rowf, long, slender)
+    p_off = RCColumnNLPProblem(bare, long, noslender)
+    u_on = StructuralSizer._rc_rect_nlp_case_rows(p_on, 12.0, 12.0, 0.02, bare)[1]
+    u_rowf = StructuralSizer._rc_rect_nlp_case_rows(p_rowf, 12.0, 12.0, 0.02, rowf)[1]
+    u_off = StructuralSizer._rc_rect_nlp_case_rows(p_off, 12.0, 12.0, 0.02, bare)[1]
+    @test u_rowf ≈ u_off
+    @test u_on > u_rowf
+    @test length(RCColumnNLPProblem(RCColumnDemandSet(1, [bare, rowf]), long, slender).cases) == 2
+    @test n_constraints(RCCircularNLPProblem(set, geom, nlp_opts)) == 2
+
+    # The envelope demand is the one the old path would have solved. It is not
+    # a stand-in for the low-axial case, which the section above already fails.
+    both = size_rc_column_nlp(hi.Pu, lo.Mux, geom, nlp_opts; demand = set)
+    @test both.status in (:optimal, :feasible, :converged)
+    both_cache = create_cache(checker, 1)
+    precompute_capacities!(checker, both_cache, [both.section], NWC_4000, MinVolume())
+    @test is_feasible(checker, both_cache, 1, both.section, NWC_4000, hi, geom)
+    @test is_feasible(checker, both_cache, 1, both.section, NWC_4000, lo, geom)
+
+    solved = size_columns([set], [geom], ConcreteColumnOptions(
+        material = NWC_4000, sizing_strategy = :nlp, include_slenderness = false,
+        nlp_maxiter = 150, nlp_n_multistart = 0, max_depth = 36.0u"inch"))
+    @test solved.status == :nlp_complete
+    @test solved.sections[1] isa RCColumnSection
+end
+
+# ACI 318-19 §22.4: below the balance point, less compression means less moment
+# capacity. The envelope (largest P with largest M) is a different demand from
+# the cases that produced those peaks. These checks are the map of that
+# surface, so a later change that makes axial load monotone, or that sizes
+# the envelope instead of the cases, fails here.
+@testset "Column strength follows the interaction surface" begin
+    geom = ConcreteMemberGeometry(3.0u"m"; k = 1.0, braced = true)
+    catalog = standard_rc_columns(; sizes = 12:4:24)
+    checker = ACIColumnChecker(; include_slenderness = false, include_biaxial = true,
+                               fy_ksi = 60.0, Es_ksi = 29000.0)
+    cache = create_cache(checker, length(catalog))
+    precompute_capacities!(checker, cache, catalog, NWC_4000, MinVolume())
+    passes(j, s, Pu, Mu; Muy = 0.0) = is_feasible(
+        checker, cache, j, s, NWC_4000,
+        RCColumnDemand(1; Pu = Pu, Mux = Mu, Muy = Muy), geom)
+
+    # At one axial load, a larger moment never brings a failed section back.
+    moments = (20.0, 80.0, 200.0, 400.0)
+    for (j, s) in enumerate(catalog), Pu in (20.0, 200.0, 800.0)
+        j % 8 == 1 || continue
+        failed = false
+        for Mu in moments
+            ok = passes(j, s, Pu, Mu)
+            failed && @test !ok
+            failed |= !ok
+        end
+    end
+
+    # Same moment: some section passes a higher compression and fails a lower one.
+    split = nothing
+    for (j, s) in enumerate(catalog), Pu_hi in (150.0, 300.0, 500.0, 800.0),
+        Mu in 40.0:40.0:280.0, Pu_lo in (0.0, 15.0, 40.0)
+        passes(j, s, Pu_hi, Mu) || continue
+        passes(j, s, Pu_lo, Mu) && continue
+        split = (j, s, Pu_hi, Pu_lo, Mu)
+        break
+    end
+    @test split !== nothing
+    j, s, Pu_hi, Pu_lo, Mu = split
+    @test passes(j, s, Pu_hi, Mu)
+    @test !passes(j, s, Pu_lo, Mu)
+
+    # Adding the other axis does not make a failed uniaxial case pass.
+    @test !passes(j, s, Pu_lo, Mu; Muy = 40.0)
+
+    # The two real cases and their envelope are not the same demand.
+    hi = RCColumnDemand(1; Pu = 800.0, Mux = 30.0, Muy = 0.0)
+    lo = RCColumnDemand(1; Pu = 40.0, Mux = 250.0, Muy = 0.0)
+    env = RCColumnDemand(1; Pu = 800.0, Mux = 250.0, Muy = 0.0)
+    envelope_misses_low = false
+    cases_miss_envelope = false
+    for (jj, ss) in enumerate(catalog)
+        ok_hi = passes(jj, ss, hi.Pu, hi.Mux)
+        ok_lo = passes(jj, ss, lo.Pu, lo.Mux)
+        ok_env = passes(jj, ss, env.Pu, env.Mux)
+        envelope_misses_low |= ok_env && !ok_lo
+        cases_miss_envelope |= ok_hi && ok_lo && !ok_env
+        (envelope_misses_low || cases_miss_envelope) && break
+    end
+    @test envelope_misses_low || cases_miss_envelope
+
+    nlp_opts = NLPColumnOptions(
+        material = NWC_4000,
+        min_dim = 10.0u"inch",
+        max_dim = 36.0u"inch",
+        include_slenderness = false,
+        maxiter = 150,
+        n_multistart = 0,
+    )
+    set = RCColumnDemandSet(1, [hi, lo])
+    both = size_rc_column_nlp(hi.Pu, lo.Mux, geom, nlp_opts; demand = set)
+    @test both.status in (:optimal, :feasible, :converged)
+    both_cache = create_cache(checker, 1)
+    precompute_capacities!(checker, both_cache, [both.section], NWC_4000, MinVolume())
+    @test is_feasible(checker, both_cache, 1, both.section, NWC_4000, hi, geom)
+    @test is_feasible(checker, both_cache, 1, both.section, NWC_4000, lo, geom)
+
+    # A section sized for the larger moment still carries the smaller one.
+    soft = size_rc_column_nlp(300.0, 40.0, geom, nlp_opts;
+        demand = RCColumnDemand(1; Pu = 300.0, Mux = 40.0, Muy = 0.0))
+    hard = size_rc_column_nlp(300.0, 200.0, geom, nlp_opts;
+        demand = RCColumnDemand(1; Pu = 300.0, Mux = 200.0, Muy = 0.0))
+    @test soft.status in (:optimal, :feasible, :converged)
+    @test hard.status in (:optimal, :feasible, :converged)
+    pair = [soft.section, hard.section]
+    pair_cache = create_cache(checker, 2)
+    precompute_capacities!(checker, pair_cache, pair, NWC_4000, MinVolume())
+    soft_d = RCColumnDemand(1; Pu = 300.0, Mux = 40.0, Muy = 0.0)
+    hard_d = RCColumnDemand(1; Pu = 300.0, Mux = 200.0, Muy = 0.0)
+    @test is_feasible(checker, pair_cache, 1, soft.section, NWC_4000, soft_d, geom)
+    @test is_feasible(checker, pair_cache, 2, hard.section, NWC_4000, hard_d, geom)
+    @test is_feasible(checker, pair_cache, 2, hard.section, NWC_4000, soft_d, geom)
+end
+
 println("\n✅ All size_columns NLP adapter tests passed!")

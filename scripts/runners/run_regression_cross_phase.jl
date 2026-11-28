@@ -112,7 +112,7 @@ end
 @testset "Cross-phase regression: populate_levels! + :rigid + sync_asap!" begin
     struc, grounds, stories = build_cross_phase_bay()
     params = DesignParameters(materials =
-        MaterialOptions(steel = A992_Steel, beam = A992_Steel))
+        MaterialOptions(steel = A992_Steel))
 
     # Phase 5 opts — auto-generate steel joists perpendicular to the span axis.
     # spacing = 2 m, so on an 8x6 bay with span axis (1,0) joists lie along ±y
@@ -156,7 +156,7 @@ end
 
         # Frame elements: girders (subdivided into sub-segments per landing),
         # + auto-generated joists + 4 columns.
-        n_frame = length(struc.asap_model.elements)
+        n_frame = length(struc.asap_model.frame_elements)
         @test n_frame >= n_host_beams + length(joists) + 4
     end
 

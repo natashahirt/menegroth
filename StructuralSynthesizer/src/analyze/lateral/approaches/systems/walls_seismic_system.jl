@@ -24,17 +24,12 @@ seismic_members(struc, ::WallsSeismicSystem) =
     system_checks(struc, ::WallsSeismicSystem; seismic_design_category)
 
 ASCE 7-22 §12.12.4 Deformation Compatibility for Seismic Design Categories D
-through F (corpus: asce-7-22, PDF page 195). For A, B, or C it does not apply
-and nothing is returned. For D, E, or F it throws: the check is not built.
+through F (corpus: asce-7-22, PDF page 195). For A, B, or C it does not apply.
+For D, E, or F the ordinary-wall stage calculates the forces from δDE.
+§18.14.3.2 applies when they do not exceed the design strength, and
+§18.14.3.3 otherwise. Nothing is returned here.
 """
 function system_checks(struc, ::WallsSeismicSystem; seismic_design_category::Symbol)
-    sdc = _require_sdc(seismic_design_category)
-    sdc in (:D, :E, :F) || return Any[]
-    throw(ArgumentError(
-        "WallsSeismicSystem does not yet check ASCE 7-22 §12.12.4 " *
-        "(corpus: asce-7-22, PDF page 195). For Seismic Design Category D, E, " *
-        "or F, a component outside the seismic force-resisting system must be " *
-        "designed for its gravity effects and for the forces from the Design " *
-        "Earthquake Displacements (δDE) of §12.8.6. A reinforced concrete frame " *
-        "member outside the system follows ACI 318 §18.14."))
+    _require_sdc(seismic_design_category)
+    return Any[]
 end

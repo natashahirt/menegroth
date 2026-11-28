@@ -171,15 +171,63 @@ end
     # V at right of span 1-2 = 26.39 kips
     # c = 16 in = 16/12 ft
     
-    M_cl = 83.91kip*u"ft"
-    V = 26.39kip
-    c = 16u"inch"
+    # The span's far-end moment is chosen so the statics give V = 26.39 kips
+    # at the interior support: V = w l1/2 − (M_left − M_right)/l1.
+    w = 193psf * 14u"ft"
     l1 = 18u"ft"
-    
-    M_face = face_of_support_moment(M_cl, V, c, l1)
-    M_face_kipft = ustrip(kip*u"ft", M_face)
-    
-    # Expected: M_face = 83.91 - 26.39 × (16/12/2) ≈ 66.32 ft-kip
-    # StructurePoint reports 66.99 ft-kip (slightly different due to rounding)
-    @test isapprox(M_face_kipft, 66.32, rtol=0.03)
+    M_int = 83.91kip*u"ft"
+    M_ext = M_int - (26.39kip - w * l1 / 2) * l1
+    x = efm_face_offset(16u"inch", l1)
+    _, M_face = span_face_moments(M_ext, M_int, w, l1, x, x)
+
+    # StructurePoint Table 6 reports 66.99 ft-kip; M_cl − V x alone is 66.32.
+    @test ustrip(kip*u"ft", M_face) ≈ 66.99 atol=0.1
+end
+
+@testset "EFM joint stiffness follows the frame" begin
+    # ACI 318-11 §13.7.4: a rectangular column bends in the frame plane, so
+    # its depth is c1 along the span.
+    @test column_moment_of_inertia(24u"inch", 12u"inch") ≈ 12u"inch" * (24u"inch")^3 / 12
+
+    l1, l2, h = 18u"ft", 14u"ft", 7u"inch"
+    c1, c2 = 24u"inch", 12u"inch"
+    Ecs = 3834u"ksi"
+    Ecc = 4696u"ksi"
+    H = 9u"ft"
+    Is = StructuralSizer.slab_moment_of_inertia(l2, h)
+    sf = StructuralSizer.pca_slab_beam_factors(c1, l1, c2, l2)
+    Ksb = StructuralSizer.slab_beam_stiffness_Ksb(Ecs, Is, l1, c1, c2; k_factor = sf.k)
+    spans = [StructuralSizer.EFMSpanProperties(i, i, i + 1, l1, l2, l1 - c1, h,
+                                               c1, c2, c1, c2, Is, Ksb, sf.m, sf.COF, sf.k)
+             for i in 1:2]
+
+    # §13.7.5.1(a): the torsional member is as wide as c1, not c2.
+    C = StructuralSizer.torsional_constant_C(h, c1)
+    Kt = StructuralSizer.torsional_member_stiffness_Kt(Ecs, C, l2, c2)
+    one = StructuralSizer._joint_ΣKt(spans, 1, [:edge, :interior, :edge], Ecs;
+                                     column_shape = :rectangular, torsion_l2 = nothing)
+    @test one ≈ Kt
+
+    # R13.7.4: an interior frame has a panel on each side, so its end column
+    # (a building edge column) has two members. An edge frame has one.
+    interior = StructuralSizer._joint_ΣKt(spans, 1, [:edge, :interior, :edge], Ecs;
+                                          column_shape = :rectangular, torsion_l2 = (l2, l2))
+    @test interior ≈ 2 * Kt
+    edge = StructuralSizer._joint_ΣKt(spans, 2, [:edge, :edge, :edge], Ecs;
+                                      column_shape = :rectangular, torsion_l2 = (0.0u"m", l2))
+    @test edge ≈ Kt
+    # R13.7.5: each member uses the transverse span on its own side.
+    uneven = StructuralSizer._joint_ΣKt(spans, 1, [:edge, :interior, :edge], Ecs;
+                                        column_shape = :rectangular, torsion_l2 = (l2, 2l2))
+    @test uneven ≈ Kt + StructuralSizer.torsional_member_stiffness_Kt(Ecs, C, 2l2, c2)
+    @test_throws ArgumentError StructuralSizer._joint_ΣKt(
+        spans, 1, [:edge, :interior, :edge], Ecs;
+        column_shape = :rectangular, torsion_l2 = (0.0u"m", 0.0u"m"))
+
+    # The Kec of an interior frame's end joint is stiffer with both members.
+    Kec_pos = StructuralSizer._compute_joint_Kec(spans, [:edge, :interior, :edge], H, Ecs, Ecc)
+    Kec_frame = StructuralSizer._compute_joint_Kec(spans, [:edge, :interior, :edge], H, Ecs, Ecc;
+                                                   torsion_l2 = (l2, l2))
+    @test Kec_frame[1] > Kec_pos[1]
+    @test Kec_frame[2] ≈ Kec_pos[2]
 end

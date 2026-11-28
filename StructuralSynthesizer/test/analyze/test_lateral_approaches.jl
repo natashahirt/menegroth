@@ -8,7 +8,8 @@ using StructuralSynthesizer
 function _girder_struc(; release_start=:default, with_wall=true)
     girder = Beam([1], 4.0u"m"; role=:girder)
     joist = Beam([2], 4.0u"m"; role=:joist)
-    segs = [Segment(1, 4.0u"m"; release_start=release_start), Segment(2, 4.0u"m")]
+    segs = [StructuralSynthesizer.Segment(1, 4.0u"m"; release_start=release_start),
+            StructuralSynthesizer.Segment(2, 4.0u"m")]
     walls = with_wall ? [Wall([3], 4.0u"m"; thickness=0.3u"m", x2=5.0)] : Wall{typeof(1.0u"m")}[]
     return (beams=[girder, joist], segments=segs, walls=walls)
 end
@@ -18,6 +19,8 @@ end
     @test_throws ArgumentError WallsSeismicSystem()
     @test_throws ArgumentError WallsSeismicSystem(:F)
     @test WallsSeismicSystem(:B6).row === :B6
+    @test WallsSeismicSystem(:A1).row === :A1
+    @test WallsSeismicSystem(:B4).row === :B4
     design = LateralDesign(; system=WallsSeismicSystem(:A3), assignment=BuildingUnit())
     @test DesignParameters(lateral=design).lateral.system isa WallsSeismicSystem
     @test design.system_x.row === :A3 && design.system_y.row === :A3
@@ -31,6 +34,18 @@ end
     @test_throws ArgumentError LateralDesign(; system_x=WallsSeismicSystem(:A3),
                                             system_y=WallsSeismicSystem(:B6),
                                             assignment=BuildingUnit())
+    @test_throws ArgumentError LateralDesign(; system_x=WallsSeismicSystem(:A1),
+                                            system_y=WallsSeismicSystem(:B4),
+                                            assignment=BuildingUnit())
+    both_bearing = LateralDesign(; system_x=WallsSeismicSystem(:A1),
+                                 system_y=WallsSeismicSystem(:A3),
+                                 assignment=BuildingUnit())
+    @test both_bearing.system_x.row === :A1
+    @test both_bearing.system_y.row === :A3
+    both_frames = LateralDesign(; system_x=WallsSeismicSystem(:B4),
+                                system_y=WallsSeismicSystem(:B6),
+                                assignment=BuildingUnit())
+    @test both_frames.system_x.row === :B4
     @test_throws ArgumentError StructuralSynthesizer._elf_direction_factors(
         :y, 4.0, 4.0, 2.5, 5.0, nothing, 2.5)
     Ry, Cy, Ωy = StructuralSynthesizer._elf_direction_factors(
@@ -68,8 +83,7 @@ end
                                                       WallsSeismicSystem(:A3))
 
     @test isempty(system_checks(struc, WallsSeismicSystem(:A3); seismic_design_category=:C))
-    @test_throws ArgumentError system_checks(struc, WallsSeismicSystem(:A3);
-                                             seismic_design_category=:D)
+    @test isempty(system_checks(struc, WallsSeismicSystem(:A3); seismic_design_category=:D))
     @test_throws ArgumentError system_checks(struc, WallsSeismicSystem(:A3);
                                              seismic_design_category=:G)
 
@@ -80,4 +94,85 @@ end
     @test_throws ArgumentError IsolatedWallShare(0)
     @test_throws ArgumentError IsolatedWallShare(1.5)
     @test_throws ArgumentError assign_lateral_demands(share, nothing, nothing, Float64[])
+end
+
+@testset "DualSystem classification + validation" begin
+    # ASCE 7-22 Table 12.2-1 Sections D/E (corpus: asce-7-22, PDF pages 174-175).
+    # Steel SMF + RC special-wall core → composite special shear walls, row D.9.
+    steel_core = DualSystem(; moment_frame=:steel_smf, wall=:special_rc)
+    @test steel_core.row === :D9
+    @test DualSystem(; moment_frame=:composite_smf, wall=:special_rc).row === :D9
+    @test DualSystem(; moment_frame=:steel_smf, wall=:composite_special).row === :D9
+    # Composite plate shear walls → D.8 for any special moment frame.
+    @test DualSystem(; moment_frame=:steel_smf, wall=:composite_plate).row === :D8
+    @test DualSystem(; moment_frame=:rc_smf, wall=:composite_plate).row === :D8
+    # Concrete SMF + special RC walls → all-concrete row D.3.
+    @test DualSystem(; moment_frame=:rc_smf, wall=:special_rc).row === :D3
+    # Intermediate moment frame + ordinary RC walls → Section E row E.8.
+    @test DualSystem(; moment_frame=:rc_imf, wall=:ordinary_rc).row === :E8
+
+    # Validated override: an explicit recognized dual row is honored.
+    @test DualSystem(; moment_frame=:steel_smf, wall=:special_rc, row=:D3).row === :D3
+    @test_throws ArgumentError DualSystem(; moment_frame=:steel_smf, wall=:special_rc,
+                                          row=:A1)   # not a dual row
+
+    # Unrecognized vocabulary and unclassified pairings throw.
+    @test_throws ArgumentError DualSystem(; moment_frame=:steel_x, wall=:special_rc)
+    @test_throws ArgumentError DualSystem(; moment_frame=:steel_smf, wall=:timber)
+    @test_throws ArgumentError DualSystem(; moment_frame=:rc_imf, wall=:special_rc)  # IMF needs ordinary RC
+
+    # The carried row resolves to the correct R/Ω₀/Cd via the sizer lookup, and
+    # the SDC permission is enforced there.
+    d9 = dual_seismic_system(steel_core.row, :D)   # re-exported from StructuralSizer
+    @test d9.R == 7.0 && d9.Ω0 == 2.5 && d9.Cd == 6.0
+
+    # LateralDesign integration: same dual system on both axes reads back; two
+    # different dual rows on the two axes do not silently agree.
+    same = LateralDesign(; system=steel_core, assignment=BuildingUnit())
+    @test same.system isa DualSystem && same.system.row === :D9
+    diff = LateralDesign(; system_x=steel_core,
+                         system_y=DualSystem(; moment_frame=:rc_smf, wall=:special_rc),
+                         assignment=BuildingUnit())
+    @test_throws ArgumentError diff.system
+end
+
+@testset "DualSystem behavior hooks" begin
+    dual = DualSystem(; moment_frame=:steel_smf, wall=:special_rc)   # row :D9
+    dstruc = (walls=[1], beams=[1, 2], columns=[1, 2])
+
+    # prepare_lateral_model! accepts a complete dual building, refuses a missing half.
+    @test prepare_lateral_model!(dstruc, dual) === dstruc
+    @test_throws ArgumentError prepare_lateral_model!((walls=Int[], beams=[1], columns=[1]), dual)
+    @test_throws ArgumentError prepare_lateral_model!((walls=[1], beams=Int[], columns=[1]), dual)
+    @test_throws ArgumentError prepare_lateral_model!((walls=[1], beams=[1], columns=Int[]), dual)
+
+    # The whole dual system is the SFRS; the carried Table 12.2-1 row reads back.
+    @test seismic_members(dstruc, dual) == (walls=[1], beams=[1, 2], columns=[1, 2])
+    @test StructuralSynthesizer.table_12_2_1_row(dual) === :D9
+
+    # Deformation-compatibility gate mirrors the other systems: A/B/C pass, D/E/F
+    # refuse (not built), a bad category throws.
+    @test isempty(system_checks(dstruc, dual; seismic_design_category=:B))
+    @test isempty(system_checks(dstruc, dual; seismic_design_category=:C))
+    @test_throws ArgumentError system_checks(dstruc, dual; seismic_design_category=:D)
+    @test_throws ArgumentError system_checks(dstruc, dual; seismic_design_category=:G)
+
+    # Moment-frame designation: auto (girders) by default, user override wins.
+    gird = Beam([1], 4.0u"m"; role=:girder)
+    joist = Beam([2], 4.0u"m"; role=:joist)
+    auto = StructuralSynthesizer.moment_frame_members((beams=[gird, joist], columns=[1, 2], walls=[1]))
+    @test auto.beams == [1] && auto.columns == [1, 2] && auto.source === :auto
+    jmf = Beam([2], 4.0u"m"; role=:joist, lateral_role=:moment_frame)
+    over = StructuralSynthesizer.moment_frame_members((beams=[gird, jmf], columns=[1], walls=[1]))
+    @test over.beams == [2] && over.source === :override
+
+    # §12.2.5.1 25% story-shear-share proxy.
+    ok = StructuralSynthesizer.moment_frame_25pct_share([30.0, 25.0], [100.0, 100.0])
+    @test ok.satisfies && ok.min_share ≈ 0.25 && ok.worst_story == 2
+    bad = StructuralSynthesizer.moment_frame_25pct_share([20.0, 30.0], [100.0, 100.0])
+    @test !bad.satisfies && bad.worst_story == 1 && bad.min_share ≈ 0.20
+    # A story with no total shear carries no requirement and is skipped.
+    @test StructuralSynthesizer.moment_frame_25pct_share([50.0], [0.0]).satisfies
+    @test_throws ArgumentError StructuralSynthesizer.moment_frame_25pct_share([1.0], [1.0, 2.0])
+    @test_throws ArgumentError StructuralSynthesizer.moment_frame_25pct_share(Float64[], Float64[])
 end

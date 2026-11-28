@@ -20,5 +20,5 @@ Select CLT panel for given span and load.
 function _size_span_floor(::CLT, span::L, sdl::F, live::F;
                     material::AbstractMaterial=NWC_4000,
                     fire_rating::Int=1) where {L, F}
-    error("CLT sizing not yet implemented")
+    throw(UnsupportedFloorSystemError(CLT))
 end

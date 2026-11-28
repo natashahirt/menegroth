@@ -98,12 +98,14 @@ function _compute_story_props(struc, cols, story::Int; concrete::StructuralSizer
     # --- Sum of factored axial loads (ΣPu) ---
     # Get from ASAP results if available, otherwise estimate from tributary
     ΣPu = 0.0kip
+    drop_weights = nothing
     for col in cols
         # Try to get from analysis results first
         Pu = _get_column_axial_from_analysis(struc, col)
         if isnothing(Pu)
             # Estimate from tributary area if analysis not available
-            Pu = _estimate_column_axial(struc, col)
+            drop_weights = something(drop_weights, drop_panel_weights_by_vertex(struc))
+            Pu = _estimate_column_axial(struc, col; drop_weights)
         end
         ΣPu += Pu
     end
@@ -160,7 +162,7 @@ function _get_column_axial_from_analysis(struc, col)
         edge_idx = seg.edge_idx
         edge_idx > 0 || continue
 
-        el = model.elements[edge_idx]
+        el = model.frame_elements[edge_idx]
         el_loads = get(element_loads, el.elementID, nothing)
         isnothing(el_loads) && continue
 
@@ -175,8 +177,14 @@ function _get_column_axial_from_analysis(struc, col)
     Pu_max > 0 ? uconvert(kip, Pu_max * u"N") : nothing
 end
 
-"""Estimate column axial load from tributary area and loads. Returns Force (kip)."""
-function _estimate_column_axial(struc, col)
+"""
+Estimate column axial load from tributary area and loads. Returns Force (kip).
+
+`drop_weights` is [`drop_panel_weights_by_vertex`](@ref); pass it when
+estimating many columns so it is computed once.
+"""
+function _estimate_column_axial(struc, col;
+                                drop_weights = drop_panel_weights_by_vertex(struc))
     # Get tributary area (column_tributary_by_cell returns Dict{Int, AreaQuantity})
     trib = column_tributary_by_cell(struc, col)
     
@@ -192,7 +200,11 @@ function _estimate_column_axial(struc, col)
         
         Pu += uconvert(kip, qu * area)
     end
-    
+
+    # Drop-panel weight is dead load at the column top, outside the cell pressures.
+    γD = max(default_combo.D, strength_1_4D.D)
+    Pu += uconvert(kip, γD * get(drop_weights, col.vertex_idx, 0.0u"N"))
+
     return Pu
 end
 
@@ -215,7 +227,7 @@ function _estimate_Pc_sum(struc, cols; concrete::StructuralSizer.Concrete = NWC_
         end
         
         # Gross moment of inertia (assuming rectangular)
-        Ig = c1 * c2^3 / 12  # About weak axis (conservative)
+        Ig = min(c1 * c2^3, c2 * c1^3) / 12  # About weak axis (conservative)
         
         # Effective stiffness (simplified per ACI 6.6.4.4.4)
         EI_eff = 0.4 * Ec_val * Ig
@@ -246,7 +258,8 @@ been solved.
 function _estimate_story_shear(struc, cols, story::Int)
     model = _get_solved_model(struc)
     if isnothing(model)
-        ΣPu = sum(_estimate_column_axial(struc, col) for col in cols)
+        dw = drop_panel_weights_by_vertex(struc)
+        ΣPu = sum(_estimate_column_axial(struc, col; drop_weights=dw) for col in cols)
         return 0.05 * ΣPu
     end
 
@@ -256,9 +269,9 @@ function _estimate_story_shear(struc, cols, story::Int)
         for seg_idx in segment_indices(col)
             seg = struc.segments[seg_idx]
             eidx = seg.edge_idx
-            (eidx < 1 || eidx > length(model.elements)) && continue
+            (eidx < 1 || eidx > length(model.frame_elements)) && continue
 
-            el = model.elements[eidx]
+            el = model.frame_elements[eidx]
             isempty(el.forces) && continue
             n_dof = length(el.forces)
 
@@ -273,7 +286,8 @@ function _estimate_story_shear(struc, cols, story::Int)
 
     if Vus ≈ 0
         # No shear detected — fall back to 5% gravity estimate
-        ΣPu = sum(_estimate_column_axial(struc, col) for col in cols)
+        dw = drop_panel_weights_by_vertex(struc)
+        ΣPu = sum(_estimate_column_axial(struc, col; drop_weights=dw) for col in cols)
         return 0.05 * ΣPu
     end
 
@@ -304,7 +318,7 @@ function _compute_story_drift(struc, cols, story::Int)
         for seg_idx in segment_indices(col)
             seg = struc.segments[seg_idx]
             eidx = seg.edge_idx
-            (eidx < 1 || eidx > length(model.elements)) && continue
+            (eidx < 1 || eidx > length(model.frame_elements)) && continue
 
             v1, v2 = skel.edge_indices[eidx]
             z1, z2 = vc[v1, 3], vc[v2, 3]
@@ -353,11 +367,11 @@ end
 #   F_PΔ = ΣPu × Δ / lc   at each story level
 #
 # The iteration continues until lateral drifts converge (< tolerance) or the
-# ACI 318-11 §10.10.2.1 limit is exceeded (secondary moments > 1.4 × primary).
+# ACI 318-19 §6.2.5.3 limit is exceeded (second-order moment > 1.4 × first-order).
 #
 # Reference:
-#   ACI 318-11 §10.10.4 — Elastic second-order analysis
-#   ACI 318-11 §10.10.2.1 — Total moment ≤ 1.4 × first-order moment
+#   ACI 318-19 §6.7 — Elastic second-order analysis
+#   ACI 318-19 §6.2.5.3 — Total moment ≤ 1.4 × first-order moment
 # =============================================================================
 
 """
@@ -371,7 +385,7 @@ After the first-order solve (which must already be done), this function:
 3. Adds them as `NodeForce` loads on story-level column top nodes
 4. Re-solves the model
 5. Checks convergence (max drift change < `tol`)
-6. Checks the ACI §6.6.4.6.2 limit (drift ratio ≤ 1.4×)
+6. Checks the ACI 318-19 §6.2.5.3 limit (drift ratio ≤ 1.4×)
 
 # Keyword Arguments
 - `max_iter::Int=10`: Maximum P-Δ iterations
@@ -387,11 +401,13 @@ Named tuple:
 - `stories_needing_attention::Vector{Int}`: Stories where drift ratio > 1.4
 
 # Notes
-- The model's loads are modified in-place (P-Δ NodeForces are appended).
-  Call this once after the first-order solve; do not call repeatedly unless
-  you first remove the added P-Δ loads.
-- The original first-order loads remain unchanged — only additive P-Δ
-  forces are appended.
+- The model's loads are modified in-place: P-Δ `NodeForce`s with id
+  `:p_delta` are appended and left on the model. A later call removes them
+  and re-solves first-order before iterating again.
+- Solves honor `struc.asap_rigid_links`.
+- The design pipeline does not call this. Its columns are designed as
+  braced (nonsway magnifier), and second-order lateral effects are taken by
+  the wall stage's story geometric stiffness.
 """
 function p_delta_iterate!(struc;
     max_iter::Int = 10,
@@ -420,16 +436,21 @@ function p_delta_iterate!(struc;
         push!(columns_by_story[s], col)
     end
 
+    # Forces from an earlier call would otherwise count as first-order load.
+    n_before = length(model.loads)
+    filter!(ld -> !(ld isa Asap.NodeForce && ld.id === :p_delta), model.loads)
+    n_original_loads = length(model.loads)
+    if n_original_loads < n_before
+        Asap.update!(model)
+        _solve_struc_model!(struc)
+    end
+
     # ── Record first-order drifts (baseline) ──
     first_order_drifts = Dict{Int, Float64}()   # story → max drift (m)
     for (s, cols) in columns_by_story
         Δ = _compute_story_drift(struc, cols, s)
         first_order_drifts[s] = ustrip(u"m", Δ)
     end
-
-    # Track P-Δ loads we add so they can be identified later
-    pdelta_load_ids = Symbol[]
-    n_original_loads = length(model.loads)
 
     prev_drifts = copy(first_order_drifts)
     converged = false
@@ -453,8 +474,8 @@ function p_delta_iterate!(struc;
                 for seg_idx in segment_indices(col)
                     seg = struc.segments[seg_idx]
                     eidx = seg.edge_idx
-                    (eidx < 1 || eidx > length(model.elements)) && continue
-                    el = model.elements[eidx]
+                    (eidx < 1 || eidx > length(model.frame_elements)) && continue
+                    el = model.frame_elements[eidx]
                     isempty(el.forces) && continue
                     # Axial: el.forces[1] (start), el.forces[7] (end); negative = compression
                     P_start = el.forces[1]
@@ -496,7 +517,7 @@ function p_delta_iterate!(struc;
 
         # ── Re-solve ──
         Asap.update!(model)
-        Asap.solve!(model)
+        _solve_struc_model!(struc)
 
         # ── Check convergence ──
         curr_drifts = Dict{Int, Float64}()
@@ -524,14 +545,18 @@ function p_delta_iterate!(struc;
             @info "P-Δ iteration $iter" max_change=round(max_change, digits=4) max_drift_ratio=round(max_drift_ratio, digits=3)
         end
 
-        # ACI 318-11 §10.10.2.1: total moment ≤ 1.4 × first-order
-        # Using drift as a proxy (moments scale with drift in elastic analysis)
+        # ACI 318-19 §6.2.5.3 (corpus: aci-318-19, PDF page 72): the total
+        # moment including second-order effects shall not exceed 1.4 times
+        # the first-order moment. Drift stands in for that ratio because the
+        # added story force is linear in the drift. Above the limit the
+        # iteration stops instead of feeding that solution onward.
         if max_drift_ratio > 1.4
             attention = [s for (s, _) in columns_by_story
                          if get(curr_drifts, s, 0.0) / max(get(first_order_drifts, s, 1e-10), 1e-10) > 1.4]
             if verbose
-                @warn "P-Δ drift ratio $(round(max_drift_ratio, digits=2)) > 1.4 (ACI §6.6.4.6.2 limit)" stories=attention
+                @warn "P-Δ drift ratio $(round(max_drift_ratio, digits=2)) > 1.4 (ACI 318-19 §6.2.5.3)" stories=attention
             end
+            break
         end
 
         prev_drifts = curr_drifts
@@ -542,7 +567,16 @@ function p_delta_iterate!(struc;
         end
     end
 
-    # Update story properties with converged values
+    # The forces from a ratio above 1.4 are outside the §6.2.5.3 limit.
+    # Remove the added story forces and solve the first-order
+    # model again so later sizing does not read them.
+    if max_drift_ratio > 1.4 && length(model.loads) > n_original_loads
+        resize!(model.loads, n_original_loads)
+        Asap.update!(model)
+        Asap.solve!(model)
+    end
+
+    # Update story properties with the solution that remains
     compute_story_properties!(struc; concrete=concrete, verbose=false)
 
     if verbose
@@ -562,7 +596,7 @@ function _story_drift_m(struc, model, skel, vc, cols)
         for seg_idx in segment_indices(col)
             seg = struc.segments[seg_idx]
             eidx = seg.edge_idx
-            (eidx < 1 || eidx > length(model.elements)) && continue
+            (eidx < 1 || eidx > length(model.frame_elements)) && continue
 
             v1, v2 = skel.edge_indices[eidx]
             z1, z2 = vc[v1, 3], vc[v2, 3]
@@ -588,7 +622,7 @@ function _governing_drift_direction(struc, model, skel, vc, cols)
         for seg_idx in segment_indices(col)
             seg = struc.segments[seg_idx]
             eidx = seg.edge_idx
-            (eidx < 1 || eidx > length(model.elements)) && continue
+            (eidx < 1 || eidx > length(model.frame_elements)) && continue
 
             v1, v2 = skel.edge_indices[eidx]
             z1, z2 = vc[v1, 3], vc[v2, 3]
@@ -610,7 +644,7 @@ function _column_top_node(struc, model, skel, vc, col)
     for seg_idx in segment_indices(col)
         seg = struc.segments[seg_idx]
         eidx = seg.edge_idx
-        (eidx < 1 || eidx > length(model.elements)) && continue
+        (eidx < 1 || eidx > length(model.frame_elements)) && continue
 
         v1, v2 = skel.edge_indices[eidx]
         z1, z2 = vc[v1, 3], vc[v2, 3]

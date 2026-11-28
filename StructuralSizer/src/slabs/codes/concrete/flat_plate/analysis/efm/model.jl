@@ -3,14 +3,75 @@
 # =============================================================================
 
 """
-    build_efm_asap_model(spans, joint_positions, qu; kwargs...)
+    _efm_span_segments(sp, drop) -> Vector{NamedTuple}
 
-Build an ASAP frame model for EFM analysis using **3 sub-elements per span**
-(rigid zone – clear span – rigid zone) and explicit column stubs.
+Sub-elements of one slab-beam span, left to right. Each has a `role`, its
+end stations `x0`, `x1` from the left centerline (m), and `w_extra`, the
+drop line load on it (N/m).
+
+Flat plate: rigid zone, clear span, rigid zone. Flat slab
+(`drop = (w, a_left, a_right)`): a `:drop` segment runs from each column
+face to the drop edge. A drop that ends inside the column has no segment;
+its load is spread over the rigid zone.
+"""
+function _efm_span_segments(sp, drop)
+    m = u"m"
+    l1 = uconvert(m, sp.l1)
+    fL = uconvert(m, sp.c1_left / 2)
+    fR = l1 - uconvert(m, sp.c1_right / 2)
+    aL = drop === nothing ? 0.0m : uconvert(m, drop.a_left)
+    aR = drop === nothing ? 0.0m : uconvert(m, drop.a_right)
+    wd = drop === nothing ? 0.0u"N/m" : uconvert(u"N/m", drop.w)
+    spread(a, f) = a <= zero(a) ? zero(wd) : a >= f ? wd : wd * (a / f)
+    tol = 1e-6m
+    segs = NamedTuple[(role = :rigid_left, x0 = 0.0m, x1 = fL, w_extra = spread(aL, fL),
+                       drop_face = aL > fL + tol)]
+    eL = max(aL, fL)
+    eR = min(l1 - aR, fR)
+    aL > fL + tol && push!(segs, (role = :drop, x0 = fL, x1 = eL, w_extra = wd, drop_face = true))
+    eR > eL + tol && push!(segs, (role = :clear, x0 = eL, x1 = eR, w_extra = 0.0u"N/m",
+                                  drop_face = false))
+    l1 - aR < fR - tol && push!(segs, (role = :drop, x0 = max(eR, eL), x1 = fR, w_extra = wd,
+                                       drop_face = true))
+    push!(segs, (role = :rigid_right, x0 = fR, x1 = l1, w_extra = spread(aR, l1 - fR),
+                 drop_face = l1 - aR < fR - tol))
+    return segs
+end
+
+"""
+    _efm_segment_section(seg, sp, Ecs, ν_concrete, ρ) -> Section
+
+ACI 318-11 §13.7.3.2: gross section outside the joint, `Is` or, over a
+drop, the composite `Is_drop`. §13.7.3.3: from the centerline to the
+column face, the section at the face divided by (1 − c2/l2)².
+"""
+function _efm_segment_section(seg, sp, Ecs, ν_concrete, ρ)
+    l2, h = sp.l2, sp.h
+    I_face = seg.drop_face ? sp.Is_drop : l2 * h^3 / 12
+    I = if seg.role === :rigid_left
+        I_face / (1 - min(ustrip(Unitful.NoUnits, sp.c2_left / l2), 0.99))^2
+    elseif seg.role === :rigid_right
+        I_face / (1 - min(ustrip(Unitful.NoUnits, sp.c2_right / l2), 0.99))^2
+    else
+        I_face
+    end
+    G = Ecs / (2 * (1 + ν_concrete))
+    return Section(
+        uconvert(u"m^2", l2 * h), uconvert(u"Pa", Ecs), uconvert(u"Pa", G),
+        uconvert(u"m^4", I), uconvert(u"m^4", I / 10),
+        uconvert(u"m^4", _torsional_constant_rect(l2, h)), ρ,
+    )
+end
+
+"""
+    build_efm_asap_model(spans, joint_positions, qu; drop_loads=nothing, kwargs...)
+
+Build an ASAP frame model for EFM analysis with sub-elements per span
+([`_efm_span_segments`](@ref)) and explicit column stubs.
 
 # Slab-Beam Model (ACI 318-11 §13.7.3.3)
 
-Each span is modeled with 3 elements:
+A flat plate span is modeled with 3 elements:
 1. **Rigid zone (left)**: column center to column face, length = c₁_left/2.
    Moment of inertia amplified per §13.7.3.3:
        I_rigid = I_s / (1 - c₂/l₂)²
@@ -18,6 +79,11 @@ Each span is modeled with 3 elements:
    Gross moment of inertia: I_s = l₂ × h³ / 12.
 3. **Rigid zone (right)**: column face to column center, length = c₁_right/2.
    Same amplified I_rigid.
+
+A flat slab span (`drop_loads[s] = (w, a_left, a_right)`) adds a drop
+segment from each face to the drop edge with the composite `Is_drop`
+(§13.7.3.2), and its rigid zones amplify `Is_drop`. The drop line load
+`w` acts from each column centre to the drop edge on top of `qu × l₂`.
 
 This eliminates the need for the PCA Table A1 stiffness factor `k_slab`
 in the ASAP path — the solver computes exact stiffness, carry-over, and
@@ -43,8 +109,12 @@ Unequal columns above/below are handled naturally.
 
 # Returns
 - `model`: ASAP Model ready to solve
-- `span_elements`: Vector of slab-beam elements (3 per span)
+- `span_elements`: Vector of slab-beam elements, span by span, left to right
+  (3 per span for a flat plate)
 - `col_stubs`: Dict{Int, NamedTuple} — joint index → (below=..., above=...)
+
+`model.loads[k]` is the line load on `span_elements[k]`.
+[`_efm_span_ranges`](@ref) recovers each span's elements.
 
 # Reference
 - ACI 318-11 §13.7.3.3 — Slab-beam moment of inertia at column regions
@@ -62,104 +132,47 @@ function build_efm_asap_model(
     verbose::Bool = false,
     col_I_factor::Float64 = 0.70,
     kec_factors::Union{Nothing, Vector{Float64}} = nothing,
+    drop_loads = nothing,
 )
     n_spans = length(spans)
     n_joints = n_spans + 1
-
-    l2 = spans[1].l2
-    h  = spans[1].h
-
-    Ecs_Pa = uconvert(u"Pa", Ecs)
-    G_slab = Ecs / (2 * (1 + ν_concrete))
     ρ = ρ_concrete
-
-    # ── Build nodes ──
-    nodes = Node[]
     slab_dofs = [true, false, true, false, true, false]  # XZ plane frame
 
-    # Column-center nodes (one per joint)
+    # ── Column-center nodes (one per joint) ──
+    nodes = Node[]
     slab_node_indices = Int[]
     x_pos = 0.0u"m"
     for j in 1:n_joints
         push!(nodes, Node([x_pos, 0.0u"m", 0.0u"m"], slab_dofs))
         push!(slab_node_indices, length(nodes))
-        if j < n_joints
-            x_pos += uconvert(u"m", spans[j].l1)
-        end
+        j < n_joints && (x_pos += uconvert(u"m", spans[j].l1))
     end
 
-    # Face-of-column nodes (2 per span: left face, right face)
-    face_node_indices = Vector{NTuple{2, Int}}(undef, n_spans)
-    for i in 1:n_spans
-        sp = spans[i]
-        x_left_center = nodes[slab_node_indices[i]].position[1]
-        x_right_center = nodes[slab_node_indices[i+1]].position[1]
-
-        c1_left_half  = uconvert(u"m", sp.c1_left / 2)
-        c1_right_half = uconvert(u"m", sp.c1_right / 2)
-
-        x_left_face  = x_left_center + c1_left_half
-        x_right_face = x_right_center - c1_right_half
-
-        push!(nodes, Node([x_left_face, 0.0u"m", 0.0u"m"], slab_dofs))
-        idx_lf = length(nodes)
-        push!(nodes, Node([x_right_face, 0.0u"m", 0.0u"m"], slab_dofs))
-        idx_rf = length(nodes)
-        face_node_indices[i] = (idx_lf, idx_rf)
-    end
-
-    # ── Build slab-beam elements (3 per span) ──
+    # ── Slab-beam sub-elements and their line loads ──
     elements = Element[]
     span_elements = Element[]
-
-    Is_gross = l2 * h^3 / 12
-    A_slab   = l2 * h
-    J_slab   = _torsional_constant_rect(l2, h)
-
-    clear_sec = Section(
-        uconvert(u"m^2", A_slab),
-        Ecs_Pa,
-        uconvert(u"Pa", G_slab),
-        uconvert(u"m^4", Is_gross),
-        uconvert(u"m^4", Is_gross / 10),
-        uconvert(u"m^4", J_slab),
-        ρ
-    )
-
+    loads = AbstractLoad[]
     for i in 1:n_spans
         sp = spans[i]
-        (idx_lf, idx_rf) = face_node_indices[i]
-
-        # Rigid-zone section: ACI 318-11 §13.7.3.3
-        c2_left  = sp.c2_left
-        c2_right = sp.c2_right
-        ratio_left  = ustrip(c2_left) / ustrip(uconvert(unit(c2_left), l2))
-        ratio_right = ustrip(c2_right) / ustrip(uconvert(unit(c2_right), l2))
-        ratio_left  = min(ratio_left, 0.99)
-        ratio_right = min(ratio_right, 0.99)
-        Is_rigid_left  = Is_gross / (1 - ratio_left)^2
-        Is_rigid_right = Is_gross / (1 - ratio_right)^2
-
-        rigid_sec_left = Section(
-            uconvert(u"m^2", A_slab), Ecs_Pa, uconvert(u"Pa", G_slab),
-            uconvert(u"m^4", Is_rigid_left),
-            uconvert(u"m^4", Is_rigid_left / 10),
-            uconvert(u"m^4", J_slab), ρ
-        )
-        rigid_sec_right = Section(
-            uconvert(u"m^2", A_slab), Ecs_Pa, uconvert(u"Pa", G_slab),
-            uconvert(u"m^4", Is_rigid_right),
-            uconvert(u"m^4", Is_rigid_right / 10),
-            uconvert(u"m^4", J_slab), ρ
-        )
-
-        e_rigid_L = Element(nodes[slab_node_indices[i]], nodes[idx_lf], rigid_sec_left)
-        e_clear   = Element(nodes[idx_lf], nodes[idx_rf], clear_sec)
-        e_rigid_R = Element(nodes[idx_rf], nodes[slab_node_indices[i+1]], rigid_sec_right)
-
-        push!(elements, e_rigid_L); push!(span_elements, e_rigid_L)
-        push!(elements, e_clear);   push!(span_elements, e_clear)
-        push!(elements, e_rigid_R); push!(span_elements, e_rigid_R)
+        dl = _span_drop(drop_loads, i)
+        w_slab = uconvert(u"N/m", qu * sp.l2)
+        x_center = nodes[slab_node_indices[i]].position[1]
+        segs = _efm_span_segments(sp, dl)
+        n_left = nodes[slab_node_indices[i]]
+        for (k, seg) in enumerate(segs)
+            n_right = if k == length(segs)
+                nodes[slab_node_indices[i + 1]]
+            else
+                push!(nodes, Node([x_center + seg.x1, 0.0u"m", 0.0u"m"], slab_dofs))
+                nodes[end]
+            end
+            e = Element(n_left, n_right, _efm_segment_section(seg, sp, Ecs, ν_concrete, ρ))
+            push!(elements, e)
+            push!(span_elements, e)
+            push!(loads, LineLoad(e, [0.0u"N/m", 0.0u"N/m", -(w_slab + seg.w_extra)]))
+            n_left = n_right
+        end
     end
 
     # ── Build column stub elements (same pattern as FEA) ──
@@ -168,6 +181,13 @@ function build_efm_asap_model(
     for j in 1:n_joints
         col = columns[j]
         slab_node = nodes[slab_node_indices[j]]
+        if _support_is_wall_fixed(col)
+            # R13.1 / R13.6.3.3: little rotation at a wall cast with the slab.
+            # The XZ frame's in-plane rotation is ry (dof 5). A new vector,
+            # because the slab nodes share one dof array.
+            slab_node.dof = [true, false, false, false, false, false]
+            continue
+        end
         x_j = slab_node.position[1]
 
         # Per-joint I factor: base factor × Kec reduction (ACI 318-11 §13.7.4)
@@ -191,8 +211,10 @@ function build_efm_asap_model(
             base_above = Node([x_j, 0.0u"m", uconvert(u"m", Lc_above)], :fixed)
             push!(nodes, base_above)
 
+            sec_a = _sized_column_section(col_above)
+            c1_a, c2_a = sec_a === nothing ? (col.c1, col.c2) : sec_a
             sec_above = column_asap_section(
-                col_above.c1, col_above.c2, col_shape(col_above), Ecc, ν_concrete;
+                c1_a, c2_a, col_shape(col_above), Ecc, ν_concrete;
                 I_factor=I_j)
             elem_above = Element(slab_node, base_above, sec_above)
             push!(elements, elem_above)
@@ -211,16 +233,49 @@ function build_efm_asap_model(
         end
     end
 
-    # ── Apply loads to ALL slab elements (rigid + clear) ──
-    loads = AbstractLoad[]
-    w_N_m = uconvert(u"N/m", qu * l2)
-    for elem in span_elements
-        push!(loads, LineLoad(elem, [0.0u"N/m", 0.0u"N/m", -w_N_m]))
-    end
-
     model = Model(nodes, elements, loads)
 
     return model, span_elements, col_stubs
+end
+
+"""Drop line load of span `s`, or `nothing` for a flat plate."""
+_span_drop(drop_loads, s::Int) = drop_loads === nothing ? nothing : drop_loads[s]
+
+"""
+    _efm_span_ranges(spans, drop_loads) -> Vector{UnitRange{Int}}
+
+Indices into `span_elements` (and `model.loads`) of each span's
+sub-elements, in the order [`build_efm_asap_model`](@ref) creates them.
+"""
+function _efm_span_ranges(spans, drop_loads)
+    ranges = Vector{UnitRange{Int}}(undef, length(spans))
+    k = 0
+    for i in eachindex(spans)
+        n = length(_efm_span_segments(spans[i], _span_drop(drop_loads, i)))
+        ranges[i] = (k + 1):(k + n)
+        k += n
+    end
+    return ranges
+end
+
+"""
+    _set_efm_slab_loads!(model, spans, qu, drop_loads)
+
+Rewrite the line load on every slab-beam sub-element: `qu × l₂` (one
+pressure, or one per span under a load pattern) plus the drop line load.
+The drop is dead load and is not patterned.
+"""
+function _set_efm_slab_loads!(model, spans, qu, drop_loads)
+    k = 0
+    for i in eachindex(spans)
+        q = qu isa AbstractVector ? qu[i] : qu
+        w_slab = uconvert(u"N/m", q * spans[i].l2)
+        for seg in _efm_span_segments(spans[i], _span_drop(drop_loads, i))
+            k += 1
+            model.loads[k].value = [0.0u"N/m", 0.0u"N/m", -(w_slab + seg.w_extra)]
+        end
+    end
+    return model
 end
 
 """

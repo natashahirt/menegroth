@@ -44,6 +44,18 @@ floor_symbol(opts)  # → :flat_slab
 """
 abstract type AbstractFloorOptions end
 
+"""
+    _require_options(T, options, system) -> T
+
+Return `options` when it is a `T`. Otherwise throw: options built for another
+floor system would size `system` with silently substituted defaults.
+"""
+function _require_options(::Type{T}, options, system) where {T <: AbstractFloorOptions}
+    options isa T && return options
+    throw(ArgumentError(
+        "$(nameof(typeof(system))) floors need $(nameof(T)); got $(nameof(typeof(options)))"))
+end
+
 # floor_symbol(::AbstractFloorOptions) methods defined below each struct.
 # The generic floor_symbol(::AbstractFloorSystem) is in types.jl.
 
@@ -80,6 +92,25 @@ end
 
 """Return the canonical floor system symbol for `OneWayOptions`."""
 floor_symbol(::OneWayOptions) = :one_way
+
+"""
+    TwoWayOptions <: AbstractFloorOptions
+
+Options for a beam-supported two-way slab. The type is the floor system:
+`DesignParameters(floor = TwoWayOptions())` asks for `:two_way`.
+
+A panel with no beams is not designed with these options. Initialization
+redesigns it as a flat plate (ACI 318-11 §9.5.3.1). These fields carry the
+concrete and the bar size onto that flat plate.
+"""
+Base.@kwdef struct TwoWayOptions <: AbstractFloorOptions
+    material::ReinforcedConcreteMaterial = RC_4000_60
+    cover::Length = 19.05u"mm"
+    bar_size::Int = 5
+end
+
+"""Return the canonical floor system symbol for `TwoWayOptions`."""
+floor_symbol(::TwoWayOptions) = :two_way
 
 """
     FlatPlateOptions <: AbstractFloorOptions
@@ -128,9 +159,17 @@ Options for flat plate / flat slab / waffle / PT slab sizing per ACI 318 Chapter
 
 # Punching Shear Resolution (ACI 318-11 §11.11)
 - `punching_strategy`: *When* to apply punching reinforcement
-  - `:grow_columns` — Only grow columns; error if maxed (default)
+  - `:grow_columns` — Only grow columns; error if maxed
   - `:reinforce_last` — Try columns first, reinforce if columns max out
   - `:reinforce_first` — Try reinforcement first, grow columns if reinf. fails
+  - `:joint_search` — Choose slab thickness, column sizes, and headed studs
+    together by `objective` from one scaled analysis, then confirm with a real
+    one (docs/flat-plate-joint-sizing-plan.md). Drop panels, pattern loading,
+    and an edge-beam βt recomputed from h fall back to `:grow_columns`. (default)
+- `joint_studs`: `:joint_search` may place headed studs (default: `true`).
+  Requires a headed-stud `punching_reinforcement`.
+- `stud_weight`: Multiplier on the studs' objective term in `:joint_search`
+  (default: 1.0). Larger values make studs win less often.
 - `punching_reinforcement`: *What type* of reinforcement to use
   - `:headed_studs_generic` — Generic headed studs (π d²/4 area, §11.11.5)
   - `:headed_studs_incon` — INCON ISS catalog dimensions (§11.11.5)
@@ -140,22 +179,29 @@ Options for flat plate / flat slab / waffle / PT slab sizing per ACI 318 Chapter
   - `:column_capitals` — Flared column head enlargement (§13.1.2)
 - `max_column_size`: Maximum column size before considering reinforcement (default: 30")
 - `column_span_minimum`: Hold every column at least span/15 (StructurePoint),
-  clamped to `max_column_size` (default: `true`). `false` sizes columns from
-  axial load and P-M design, and leaves punching growth to the slab loop up
-  to `max_column_size`. Column sizing only grows, so this minimum is also
-  the smallest column a design can return.
+  clamped to `max_column_size` (default: `false`). span/15 is a
+  preliminary-design rule of thumb, not an ACI requirement. `false` sizes
+  columns from axial load and P-M design, and leaves punching growth to the
+  slab loop up to `max_column_size`. Column sizing only grows, so when `true`
+  this minimum is also the smallest column a design can return.
 - `punching_thickening`: When columns and reinforcement cannot resolve
   punching, thicken the slab (default: `true`). `false` stops the design as a
   punching failure instead, so a punching strategy can be tested on its own.
   The slab still thickens for deflection, flexure and one-way shear.
+- `moment_transfer_increase`: Raise the flexural fraction γf of the
+  unbalanced moment above Eq. (13-1) where ACI 318-11 §13.5.3.3(a)/(b)
+  permits it (default: `true`). Applied to the column-face punching check and
+  to the matching §13.5.3.2 transfer reinforcement; see
+  [`moment_transfer_gamma_f`](@ref).
 - `stud_material`: Shear stud / stirrup steel material (default: `Stud_51`)
 - `stud_diameter`: Stud diameter (default: 1/2"; ignored for non-stud types)
 - `stirrup_bar_size`: Stirrup bar size (default: 4; only used for `:closed_stirrups`)
 - `shear_studs`: **Deprecated** — backward compat alias for punching_strategy
 
 # Optimization
-- `objective`: Objective for `size_flat_plate_optimized` grid search
-  - `MinVolume()` (default), `MinWeight()`, `MinCost()`, `MinCarbon()`
+- `objective`: Objective for `:joint_search` and the `size_flat_plate_optimized`
+  grid search
+  - `MinCarbon()` (default), `MinVolume()`, `MinWeight()`, `MinCost()`
 
 # Column Cracking (FEA)
 - `col_I_factor`: Cracking reduction for FEA column stubs (default: 0.70 per ACI 318-11 §10.10.4.1).
@@ -226,6 +272,11 @@ struct FlatPlateOptions <: AbstractFloorOptions
     column_span_minimum::Bool
     # Thicken the slab when punching levers run out; false = fail instead
     punching_thickening::Bool
+    # ACI 318-11 §13.5.3.3 increase of γf at the column face
+    moment_transfer_increase::Bool
+    # :joint_search may place headed studs; weight on their objective term
+    joint_studs::Bool
+    stud_weight::Float64
 end
 
 """Valid values of `FlatPlateOptions.on_inapplicable`."""
@@ -272,27 +323,33 @@ function _build_flat_plate_options(;
     φ_shear::Float64 = 0.75,
     λ::Union{Float64, Nothing} = nothing,
     deflection_limit::Symbol = :L_360,
-    punching_strategy::Symbol = :grow_columns,
+    punching_strategy::Symbol = :joint_search,
     punching_reinforcement::Symbol = :headed_studs_generic,
     max_column_size::Length = 30.0u"inch",
     stud_material::RebarSteel = Stud_51,
     stud_diameter::Length = 0.5u"inch",
     stirrup_bar_size::Int = 4,
     min_h::Union{Length, Nothing} = nothing,
-    objective::AbstractObjective = MinVolume(),
+    objective::AbstractObjective = MinCarbon(),
     col_I_factor::Float64 = 0.70,
     on_inapplicable::Symbol = :fallback,
-    column_span_minimum::Bool = true,
+    column_span_minimum::Bool = false,
     punching_thickening::Bool = true,
+    moment_transfer_increase::Bool = true,
+    joint_studs::Bool = true,
+    stud_weight::Float64 = 1.0,
 )
     _validate_on_inapplicable(on_inapplicable)
+    validate_two_way_deflection_limit(deflection_limit)
+    stud_weight >= 0 || throw(ArgumentError("stud_weight must be ≥ 0; got $stud_weight"))
     # Call the positional (inner) constructor — field order must match struct definition
     FlatPlateOptions(material, cover, bar_size, has_edge_beam, edge_beam_βt,
                      method, grouping, φ_flexure, φ_shear, λ, deflection_limit,
                      punching_strategy, punching_reinforcement, max_column_size,
                      stud_material, stud_diameter, stirrup_bar_size,
                      min_h, objective, col_I_factor, on_inapplicable,
-                     column_span_minimum, punching_thickening)
+                     column_span_minimum, punching_thickening,
+                     moment_transfer_increase, joint_studs, stud_weight)
 end
 
 """
@@ -309,7 +366,7 @@ If both `shear_studs` and `punching_strategy` are provided, `punching_strategy` 
 """
 function FlatPlateOptions(;
     shear_studs::Union{Symbol, Nothing} = nothing,
-    punching_strategy::Symbol = isnothing(shear_studs) ? :grow_columns : _shear_studs_to_strategy(shear_studs),
+    punching_strategy::Symbol = isnothing(shear_studs) ? :joint_search : _shear_studs_to_strategy(shear_studs),
     kw...
 )
     _build_flat_plate_options(; punching_strategy=punching_strategy, kw...)
@@ -326,6 +383,7 @@ function Base.getproperty(opts::FlatPlateOptions, name::Symbol)
         strat === :grow_columns    && return :never
         strat === :reinforce_last  && return :if_needed
         strat === :reinforce_first && return :always
+        strat === :joint_search    && return getfield(opts, :joint_studs) ? :if_needed : :never
         return :never
     end
     return getfield(opts, name)
@@ -501,7 +559,6 @@ Note: Provide at most ONE of: `lambda_bounds`, `rise_bounds`, `lambda`, or `rise
 # Design Checks
 - `allowable_stress`: Max stress in MPa (default: 0.45 fc')
 - `deflection_limit`: Max rise reduction (default: span/240)
-- `check_asymmetric`: Check half-span live load (default: true)
 
 # Optimization
 - `objective`: MinVolume(), MinWeight(), MinCarbon(), MinCost()
@@ -566,7 +623,6 @@ Base.@kwdef struct VaultOptions <: AbstractFloorOptions
     # ─── Design Checks ───
     allowable_stress::Union{Real, Nothing} = nothing  # MPa (computed: 0.45 fc')
     deflection_limit::Union{Length, Nothing} = nothing  # (computed: span/240)
-    check_asymmetric::Bool = true                # check half-span live load case
     
     # ─── Optimization ───
     objective::AbstractObjective = MinVolume()
@@ -595,7 +651,7 @@ Composite deck options (steel deck + concrete fill).
 """
 Base.@kwdef struct CompositeDeckOptions <: AbstractFloorOptions
     deck_material::Metal = A992_Steel
-    fill_material::Union{Concrete, Nothing} = nothing  # Uses primary if nothing
+    fill_material::Union{Concrete, Nothing} = nothing  # NWC_4000_145 if nothing; must be 145 lb/ft³
     deck_profile::String = "2VLI"
     total_depth::Union{Nothing, Length} = nothing
     n_spans::Union{Nothing, Int} = nothing
@@ -689,15 +745,20 @@ function result_materials(::CIPSlabResult, primary_mat, opts::OneWayOptions)
     Dict{Symbol, AbstractMaterial}(:concrete => opts.material.concrete, :steel => opts.material.rebar)
 end
 
+"""Return concrete + rebar materials for a two-way CIP slab result."""
+function result_materials(::CIPSlabResult, primary_mat, opts::TwoWayOptions)
+    Dict{Symbol, AbstractMaterial}(:concrete => opts.material.concrete, :steel => opts.material.rebar)
+end
+
 """Return concrete material for a vault result (unreinforced)."""
 result_materials(::VaultResult, primary_mat, opts::VaultOptions) =
     Dict{Symbol, AbstractMaterial}(:concrete => opts.material)
 
-"""Return steel + concrete materials for a composite deck result."""
-function result_materials(::CompositeDeckResult, primary_mat, opts::CompositeDeckOptions)
+"""Return steel + concrete materials for a composite deck result (the concrete it was sized with)."""
+function result_materials(r::CompositeDeckResult, primary_mat, opts::CompositeDeckOptions)
     Dict{Symbol, AbstractMaterial}(
         :steel => opts.deck_material,
-        :concrete => something(opts.fill_material, primary_mat)
+        :concrete => something(fill_concrete(r), opts.fill_material, primary_mat)
     )
 end
 

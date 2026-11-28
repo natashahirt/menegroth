@@ -80,10 +80,26 @@ and varies with l₂/l₁ and αf. For flat plates (αf = 0), see distribute_mom
 const ACI_DDM_LONGITUDINAL = (
     # ACI 318-11 §13.6.3.3: Distribution of M₀ to negative and positive sections
     # (Same for all slab types)
+    # §13.6.3.3 Column (3): slab without beams between interior supports,
+    # without an edge beam (corpus: aci-318-11, page 254).
     end_span = (
         ext_neg = 0.26,   # Exterior negative
-        pos = 0.52,       # Positive  
+        pos = 0.52,       # Positive
         int_neg = 0.70    # Interior negative
+    ),
+    # §13.6.3.3 Column (1): exterior edge unrestrained. R13.6.3.3: the slab
+    # is simply supported on a masonry or concrete wall.
+    end_span_unrestrained = (
+        ext_neg = 0.0,
+        pos = 0.63,
+        int_neg = 0.75
+    ),
+    # §13.6.3.3 Column (5): exterior edge fully restrained. R13.6.3.3: the
+    # slab is cast integrally with a concrete wall and little rotation occurs.
+    end_span_fully_restrained = (
+        ext_neg = 0.65,
+        pos = 0.35,
+        int_neg = 0.65
     ),
     interior_span = (
         neg = 0.65,       # Negative at supports
@@ -194,6 +210,127 @@ For flat plates (αf = 0), constant at 60% regardless of l₂/l₁.
 function aci_col_strip_positive(l2_l1::Float64)
     # For αf = 0 (flat plate), it's constant at 60%
     return 0.60
+end
+
+"""Interpolate one row of a §13.6.4 table. The columns are ℓ2/ℓ1 = 0.5, 1.0, 2.0."""
+function _aci_table_l2_l1(l2_l1::Float64, at_half::Float64, at_one::Float64, at_two::Float64)
+    r = clamp(l2_l1, 0.5, 2.0)
+    if r <= 1.0
+        return at_half + (r - 0.5) / 0.5 * (at_one - at_half)
+    end
+    return at_one + (r - 1.0) * (at_two - at_one)
+end
+
+"""
+    aci_column_strip_fractions(l2_l1; stiff_beam=false, βt=0, uniform_negative=false, l1, l2)
+
+Column-strip share of the panel moment.
+
+ACI 318-11 §13.6.4.1, §13.6.4.2, and §13.6.4.4 (corpus: aci-318-11, pages 255–256).
+`stiff_beam` selects the row αf1·ℓ2/ℓ1 ≥ 1. A flat plate with no such beam stays
+on the αf = 0 row, which is what the constants above encode.
+
+`uniform_negative` is §13.6.4.3 (page 256): a wall support at least (3/4)ℓ2
+long spreads the negative moment uniformly across ℓ2, so the column strip
+takes its width over ℓ2. Positive moment stays on the table.
+
+The slab keeps the whole column-strip moment. §13.6.5.1 would give 85 percent
+of it to a beam with αf1·ℓ2/ℓ1 ≥ 1; that beam is not proportioned here, so
+§13.6.4.5 leaves the slab portion equal to the column strip.
+"""
+function aci_column_strip_fractions(l2_l1::Float64;
+                                   stiff_beam::Bool = false,
+                                   βt::Float64 = 0.0,
+                                   uniform_negative::Bool = false,
+                                   l1::Union{Nothing, Length} = nothing,
+                                   l2::Union{Nothing, Length} = nothing)
+    tβ = clamp(βt / 2.5, 0.0, 1.0)
+    cs_int = stiff_beam ? _aci_table_l2_l1(l2_l1, 0.90, 0.75, 0.45) : 0.75
+    cs_pos = stiff_beam ? _aci_table_l2_l1(l2_l1, 0.90, 0.75, 0.45) : 0.60
+    ext_stiff = _aci_table_l2_l1(l2_l1, 0.90, 0.75, 0.45)
+    # αf = 0: every ℓ2/ℓ1 column is 100% at βt = 0 and 75% at βt ≥ 2.5.
+    # αf·ℓ2/ℓ1 ≥ 1: 100% at βt = 0, and the 90/75/45 row at βt ≥ 2.5.
+    cs_ext = stiff_beam ? (1.0 - tβ * (1.0 - ext_stiff)) : (1.0 - tβ * 0.25)
+    if uniform_negative && l1 !== nothing && l2 !== nothing && ustrip(l2) > 0
+        frac = min(ustrip(l1), ustrip(l2)) / (2 * ustrip(l2))
+        cs_int = frac
+        cs_ext = frac
+    end
+    return (cs_int_neg = cs_int, cs_ext_neg = cs_ext, cs_pos = cs_pos)
+end
+
+"""
+    _column_strip_row(struc, slab, span_axis, l2) -> (; stiff, uniform)
+
+The §13.6.4 row [`slab_column_strip_fractions`](@ref) uses along `span_axis`.
+`stiff` is a wall parallel to the span (the αf1·ℓ2/ℓ1 ≥ 1 row). `uniform` is a
+wall across the span at least (3/4)ℓ2 long (§13.6.4.3).
+"""
+function _column_strip_row(struc, slab, span_axis, l2)
+    ax = _span_unit_axis(span_axis)
+    stiff = false
+    uniform = false
+    ax === nothing && return (; stiff, uniform)
+    l2_m = ustrip(u"m", l2)
+    for seg in supporting_wall_segments(struc, slab)
+        L = hypot(seg[2][1] - seg[1][1], seg[2][2] - seg[1][2])
+        if _wall_parallel_to_axis(seg, ax)
+            stiff = true
+        elseif L + 1e-6 >= 0.75 * l2_m
+            uniform = true
+        end
+    end
+    return (; stiff, uniform)
+end
+
+"""
+Column-strip fractions for one slab.
+
+A wall parallel to the span selects the αf1·ℓ2/ℓ1 ≥ 1 row of §13.6.4.
+A wall across the span at least (3/4)ℓ2 long spreads the negative moment
+(§13.6.4.3). Otherwise the flat-plate row is used.
+"""
+function slab_column_strip_fractions(struc, slab, columns, span_axis, l1, l2, βt)
+    ratio = ustrip(u"m", l2) / ustrip(u"m", l1)
+    (; stiff, uniform) = _column_strip_row(struc, slab, span_axis, l2)
+    return aci_column_strip_fractions(ratio; stiff_beam = stiff,
+                                      βt = Float64(βt),
+                                      uniform_negative = uniform,
+                                      l1 = l1, l2 = l2)
+end
+
+"""
+βt raised when a wall lies on the slab edge, parallel to the span.
+
+ACI 318-11 §13.6.3.3 (aci-318-11, page 254) treats that wall as the edge
+beam. The table is fully engaged at βt = 2.5 (`aci_ddm_longitudinal_with_edge_beam`).
+No such wall leaves `βt` unchanged. An interior wall parallel to the span
+is the stiff-beam row of §13.6.4, not this edge value.
+"""
+function βt_with_parallel_wall(βt, struc, slab, columns, span_axis)
+    β = Float64(βt)
+    ax = _span_unit_axis(span_axis)
+    ax === nothing && return β
+    perp = (-ax[2], ax[1])
+    walls = [seg for seg in supporting_wall_segments(struc, slab) if _wall_parallel_to_axis(seg, ax)]
+    isempty(walls) && return β
+    _eq137_geometry_available(struc) || return β
+    ts = Float64[]
+    for col in columns
+        col_vertex_idx(col) > 0 || continue
+        xy = _eq137_structural_xy(struc, col)
+        push!(ts, xy[1] * perp[1] + xy[2] * perp[2])
+    end
+    isempty(ts) && return β
+    for seg in walls
+        t1 = seg[1][1] * perp[1] + seg[1][2] * perp[2]
+        t2 = seg[2][1] * perp[1] + seg[2][2] * perp[2]
+        t = 0.5 * (t1 + t2)
+        lo, hi = extrema(ts)
+        min(abs(t - lo), abs(t - hi)) <= _WALL_AT_COLUMN_M || continue
+        return max(β, 2.5)
+    end
+    return β
 end
 
 """

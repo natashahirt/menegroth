@@ -12,9 +12,10 @@ success: 'null'
 files: ''
 session_id: sess-92359b08
 created_at: '2026-07-15T02:26:03.455246+00:00'
-updated_at: '2026-07-15T02:26:03.455246+00:00'
+updated_at: '2026-11-23T18:16:52.779595+00:00'
 has_child_rationale: First scope-ladder step for steel LFRS; Strut type exists with
   no sizer
+related_to: deci-ff84d1d8,plan-d9a0b107
 ---
 # H1 — Steel braced frames
 

@@ -27,8 +27,60 @@ as a patch load on the drop panel zone.
 """
 function slab_self_weight_with_drop(h_slab::Length, drop::DropPanelGeometry, ρ)
     w_slab = uconvert(psf, h_slab * ρ * GRAVITY)
-    w_drop = uconvert(psf, drop.h_drop * ρ * GRAVITY)
-    return (w_slab, w_drop)
+    return (w_slab, drop_panel_dead_pressure(drop, ρ))
+end
+
+"""
+    drop_panel_dead_pressure(drop, ρ) -> Pressure
+
+Unfactored self-weight of the drop projection per unit plan area,
+`h_drop × ρ × g`. It acts only inside the drop outline, on top of the slab's
+own `qD`.
+"""
+drop_panel_dead_pressure(drop::DropPanelGeometry, ρ) = uconvert(psf, drop.h_drop * ρ * GRAVITY)
+
+"""
+    governing_dead_factor(qD, qL) -> Float64
+
+Dead-load factor of the combination that sets `qu = max(1.2D + 1.6L, 1.4D)`
+(ASCE 7 §2.3.1 combinations 1 and 2). Loads added to the slab's own `qD`,
+such as the drop projection, take this factor so they stay in the same
+combination as `qu`.
+"""
+governing_dead_factor(qD, qL) = 1.2 * qD + 1.6 * qL >= 1.4 * qD ? 1.2 : 1.4
+
+"""
+    drop_negative_section(drop, columns, d, cs_width) -> Union{Nothing, NamedTuple}
+
+Section a drop panel gives the negative column-strip moment at a column
+face, `(b, d, x_edge)`. `drop` is oriented with `a_drop_1` along the span;
+`d` is the slab effective depth of the layer being designed.
+
+ACI 318-11 §13.3.7 (corpus: aci-318-11, page 246): "In computing required
+slab reinforcement, the thickness of the drop panel below the slab shall not
+be assumed to be greater than one-quarter the distance from the edge of drop
+panel to the face of column or column capital." The section depth is
+`d + min(h_drop, distance / 4)`.
+
+`x_edge` is the distance from the column face to the drop edge along the
+span, where the slab-only section takes over. Returns `nothing` when the
+drop does not extend past the column faces.
+
+ENGINEERING JUDGMENT (not stated by §13.3.7):
+- The compression zone of a negative-moment section is at the drop soffit,
+  so the section is only as wide as the drop: `b = min(drop width, cs_width)`.
+- The face-to-edge distance is the shorter of the two plan directions.
+- The largest column dimension in the slab locates the face for every
+  column, which gives the smallest drop thickness and the nearest drop edge.
+"""
+function drop_negative_section(drop, columns, d, cs_width)
+    (drop === nothing || isempty(columns)) && return nothing
+    c = maximum(col -> max(col.c1, col.c2), columns)
+    reach_1 = drop.a_drop_1 - c / 2
+    reach_2 = drop.a_drop_2 - c / 2
+    (reach_1 > zero(reach_1) && reach_2 > zero(reach_2)) || return nothing
+    h_eff = min(drop.h_drop, min(reach_1, reach_2) / 4)
+    return (b = min(drop_extent_2(drop), cs_width), d = d + h_eff, x_edge = reach_1)
 end
 
 """
@@ -80,13 +132,15 @@ Returns a `DropSectionProperties` with Ig about the composite centroid and yt
 - StructurePoint DE-Two-Way-Flat-Slab:
     h_total = 14.25 in., yt = 5.88 in., Ig = 53,445 in⁴
 """
-function gross_section_at_drop(l2::Length, h_slab::Length, drop::DropPanelGeometry)
+function gross_section_at_drop(l2::Length, h_slab::Length, drop::DropPanelGeometry;
+                               b_drop::Length = drop_extent_2(drop))
     # Total depth at drop = h_slab + h_drop
     h_total = h_slab + drop.h_drop
-    
-    # Width of drop panel strip (perpendicular to span)
-    b_drop = drop_extent_2(drop)  # = 2 × a_drop_2
-    
+
+    # Width of drop panel strip (perpendicular to span). A frame that ends at a
+    # slab edge passes the clipped width.
+    b_drop = min(b_drop, l2)
+
     # Slab strip: l2 × h_slab, centroid at h_total - h_slab/2 from bottom
     A_slab = l2 * h_slab
     y_slab = h_total - h_slab / 2   # from bottom of drop panel
@@ -156,7 +210,9 @@ PCA Tables A2–A5 FEM coefficients (geometry-dependent).
         + m_far  × w_drop × b_drop × l₁²
 
 Where the three m coefficients are interpolated from PCA Tables A2–A5
-based on c₁/l₁, c₂/l₂, and h_drop/h_slab.
+based on c₁/l₁, c₂/l₂, and h_drop/h_slab. The patch runs from each column
+centre to the drop edge (`a_drop_1` along the span), and `b_drop` is the
+drop width across the span (`2 a_drop_2`).
 
 # Arguments
 - `qu_slab`: Factored uniform slab load (pressure)
@@ -187,8 +243,8 @@ function fixed_end_moment_FEM(
     # Look up geometry-dependent FEM coefficients from PCA Tables A2–A5
     mc = pca_np_fem_coefficients(c1, l1, c2, l2, drop.h_drop, h_slab, drop.a_drop_1)
 
-    # Drop panel extent (full width in direction 1 for the patch load)
-    b_drop = drop_extent_1(drop)  # 2 × a_drop_1
+    # Patch line load = w_drop × width across the span
+    b_drop = drop_extent_2(drop)  # 2 × a_drop_2
 
     # Term 1: Uniform slab load on full span
     FEM_slab = mc.m_uniform * qu_slab * l2 * l1^2

@@ -32,7 +32,10 @@ using StructuralSizer
     design = design_building(struc, params)
 
     # Helper: collect vault slabs
-    vault_slabs = [s for s in struc.slabs if s.result isa StructuralSizer.VaultResult]
+    vault_slabs = [
+        slab for slab in structure(design).slabs
+        if slab.result isa StructuralSizer.VaultResult
+    ]
 
     # =====================================================================
     # 1. Slab results
@@ -201,7 +204,7 @@ using StructuralSizer
 
             d = design_building(struc_i, p)
 
-            for slab in struc_i.slabs
+            for slab in structure(d).slabs
                 if slab.result isa StructuralSizer.VaultResult
                     push!(thrusts, ustrip(u"kN/m", StructuralSizer.total_thrust(slab.result)))
                     break

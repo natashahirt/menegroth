@@ -12,9 +12,10 @@ success: 'null'
 files: ''
 session_id: sess-9bb4d72a
 created_at: '2026-07-14T01:36:50.092200+00:00'
-updated_at: '2026-07-14T01:36:50.092200+00:00'
+updated_at: '2026-11-23T18:16:52.958614+00:00'
 has_child_rationale: Long-span steel roofs/floors use trusses assembled from AISC
   members
+related_to: deci-ff84d1d8,plan-d9a0b107
 ---
 # C4 — Steel trusses
 

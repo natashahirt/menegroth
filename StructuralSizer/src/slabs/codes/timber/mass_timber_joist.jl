@@ -20,5 +20,5 @@ function _size_span_floor(::MassTimberJoist, span::L, sdl::F, live::F;
                     material::AbstractMaterial=NWC_4000,
                     spacing::L=uconvert(unit(span), 1.2u"m"),
                     deck_type::Symbol=:plywood) where {L, F}
-    error("MassTimberJoist sizing not yet implemented")
+    throw(UnsupportedFloorSystemError(MassTimberJoist))
 end

@@ -132,7 +132,7 @@ ux_of(model::Asap.Model, v_idx::Int) = model.u[model.nodes[v_idx].globalID[1]]
 
 @testset "Phase 9b — rigid diaphragm via RigidLink master/slave reduction" begin
     params = DesignParameters(materials =
-        MaterialOptions(steel = A992_Steel, beam = A992_Steel))
+        MaterialOptions(steel = A992_Steel))
 
     # ── (1) Link generator: story 0 supports produce 0 links; story 1 free
     #       vertices produce (n_free - 1) links, master = lowest index ─────

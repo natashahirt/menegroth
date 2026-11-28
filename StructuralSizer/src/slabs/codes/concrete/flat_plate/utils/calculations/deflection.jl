@@ -68,27 +68,35 @@ function frame_deflection_fixed(w, l, Ec, Ie_frame)
 end
 
 """
-    strip_deflection_fixed(Δ_frame_fixed, LDF, Ie_frame, Ig_strip)
+    strip_deflection_fixed(Δ_frame_fixed, LDF, Ig_frame, Ig_strip)
 
 Fixed-end deflection for a column or middle strip.
 
 # Formula
-    Δstrip,fixed = LDF × Δframe,fixed × (Ie_frame/Ig_strip)
+    Δstrip,fixed = LDF × Δframe,fixed × (Iframe,g / Istrip,g)
 
-The ratio Ie_frame/Ig_strip accounts for the different stiffnesses
-of the full frame vs. the individual strip.
+`Δframe,fixed` carries the cracking (it is computed with the frame's
+averaged effective I). The ratio is of **gross** moments of inertia, frame
+strip over column or middle strip. Passing the effective frame I here
+cancels the effective I of `Δframe,fixed` and returns a gross-section
+deflection.
 
 # Arguments
-- `Δ_frame_fixed`: Frame strip fixed-end deflection
+- `Δ_frame_fixed`: Frame strip fixed-end deflection (computed with Ie)
 - `LDF`: Load distribution factor for the strip
-- `Ie_frame`: Effective moment of inertia for frame strip
-- `Ig_strip`: Gross moment of inertia for the strip
+- `Ig_frame`: Gross moment of inertia of the frame strip
+- `Ig_strip`: Gross moment of inertia of the strip
 
 # Reference
-- PCA Notes on ACI 318-11 Eq. 9.5.3.4 Eq. 11
+- PCA Notes on ACI 318-11 §9.5.3.4 Eq. 11, as worked in StructurePoint
+  examples: sp-de-two-way-slab-with-beams-aci318-14 pp. 57–58
+  (0.690 × 0.0063 × 25,395.13 / 20,040.49, both gross, with Ie,avg = 22,761.52
+  used only in Δframe,fixed) and sp-de-two-way-flat-slab-drop-panels-aci318-14
+  p. 72 (0.738 × 0.0995 × 30,000 / 15,000, slab gross over strip gross, with
+  Ie,avg = 37,190 used only in Δframe,fixed).
 """
-function strip_deflection_fixed(Δ_frame_fixed, LDF::Float64, Ie_frame, Ig_strip)
-    return LDF * Δ_frame_fixed * (Ie_frame / Ig_strip)
+function strip_deflection_fixed(Δ_frame_fixed, LDF::Float64, Ig_frame, Ig_strip)
+    return LDF * Δ_frame_fixed * (Ig_frame / Ig_strip)
 end
 
 """
@@ -244,13 +252,7 @@ function estimate_column_size(
 )
     # Estimated factored axial load
     Pu = At * qu * n_stories_above
-    
-    # Required gross area, ACI 318-11 Eq. (10-2) (§10.3.6.2; corpus aci-318-11,
-    # p. 143): φPn,max = 0.80φ[0.85f'c(Ag − Ast) + fy Ast], φ = 0.65 tied,
-    # Ast = 0.01Ag (§10.9.1 minimum). The same form sizes and checks columns
-    # in the workflow, so the estimate matches the axial check.
-    ρg = 0.01
-    Ag_axial = Pu / (0.80 * 0.65 * (0.85 * fc * (1 - ρg) + fy * ρg))
+    Ag_axial = tied_column_area_for_axial(Pu, fc; fy = fy)
     
     # For flat plate design, punching shear often governs column size
     # Use span-based estimate: c ≈ span / 15 (per StructurePoint guidance)
@@ -276,6 +278,38 @@ function estimate_column_size(
         c2 = 1.5 * c1
         return (ceil(ustrip(u"inch", c1)) * u"inch", ceil(ustrip(u"inch", c2)) * u"inch")
     end
+end
+
+"""
+    tied_column_axial_strength(Ag, fc; fy=60 ksi, ρg=0.01) -> Force
+
+Maximum design axial strength of a tied column, ACI 318-11 Eq. (10-2)
+(§10.3.6.2; corpus: aci-318-11, page 143):
+
+    φPn,max = 0.80 φ [0.85 f′c (Ag − Ast) + fy Ast]
+
+with φ = 0.65 for a compression-controlled tied member (§9.3.2.2(b),
+page 127) and Ast = ρg Ag. The default ρg = 0.01 is the §10.9.1 minimum
+(page 148). Column growth, the axial check, and the recorded axial ratio
+all use this.
+"""
+function tied_column_axial_strength(Ag::Area, fc::Pressure;
+                                    fy::Pressure = 60000u"psi", ρg::Float64 = 0.01)
+    Ast = ρg * Ag
+    return 0.80 * 0.65 * (0.85 * fc * (Ag - Ast) + fy * Ast)
+end
+
+"""
+    tied_column_area_for_axial(Pu, fc; fy=60 ksi, ρg=0.01) -> Area
+
+Gross area at which [`tied_column_axial_strength`](@ref) equals `Pu`.
+Eq. (10-2) is linear in Ag, so this is `Pu` divided by the strength of
+a unit area.
+"""
+function tied_column_area_for_axial(Pu::Force, fc::Pressure;
+                                    fy::Pressure = 60000u"psi", ρg::Float64 = 0.01)
+    per_area = tied_column_axial_strength(1.0u"m^2", fc; fy, ρg) / 1.0u"m^2"
+    return Pu / per_area
 end
 
 """

@@ -1,0 +1,540 @@
+area: slabs
+nodes:
+  # ───────────────────────── L1 stage ─────────────────────────
+  - id: slab.stage
+    level: L1
+    kind: stage
+    anchor: StructuralSizer/src/slabs/sizing.jl::size_slabs!
+    summary: Dispatch each slab to _size_slab!(::FloorType); flat plates go through the SY member stage
+    reads: [slab.floor_type]
+    writes: [slab.h, cell.self_weight]
+  - id: slab.method_choice
+    level: L2
+    kind: policy
+    parent: slab.flat_plate
+    anchor: StructuralSizer/src/slabs/codes/concrete/flat_plate/utils/helpers.jl::resolve_analysis_method
+    summary: One-shot DDM/EFM applicability; fallback FEA or area shell (panel_shell) for irregular or opening panels
+    reads: [slab.geometry, column.c1, column.c2]
+    writes: [slab.method]
+    trace_labels: [":fallback"]
+
+  # ───────────────────────── Flat plate / flat slab ─────────────────────────
+  - id: slab.flat_plate
+    level: L2
+    kind: element
+    parent: slab.stage
+    anchor: StructuralSizer/src/slabs/codes/concrete/flat_plate/pipeline/iteration.jl::_size_flat_plate!
+    summary: Flat plate and flat slab designer, Phases A (depth), B (punching), C (final rebar)
+    reads: [slab.geometry, cell.sdl, cell.live_load, column.c1, column.c2, column.section]
+    writes: [slab.h, column.c1, column.c2, column.section, slab.studs, slab.drop.h_drop, cell.self_weight]
+    trace_labels: [":slab size_flat_plate! enter/exit/decision/fallback/failure"]
+  - id: slab.flat_plate.analysis.ddm
+    level: L3
+    kind: analysis
+    parent: slab.flat_plate
+    anchor: StructuralSizer/src/slabs/codes/concrete/flat_plate/analysis/ddm.jl
+    summary: Direct design method closed-form moments, ACI 318-11 §13.6
+    fidelity: ddm
+    reads: [slab.h, column.c1, column.c2, cell.qu]
+    writes: [demand.M, demand.Vu, demand.Mub]
+  - id: slab.flat_plate.analysis.efm
+    level: L3
+    kind: analysis
+    parent: slab.flat_plate
+    anchor: StructuralSizer/src/slabs/codes/concrete/flat_plate/analysis/efm.jl
+    summary: Equivalent frame, ACI 318-11 §13.7; Asap frame (EFMModelCache) or Hardy Cross
+    fidelity: efm
+    reads: [slab.h, column.c1, column.c2, cell.qu]
+    writes: [demand.M, demand.Vu, demand.Mub]
+  - id: slab.flat_plate.analysis.fea
+    level: L3
+    kind: analysis
+    parent: slab.flat_plate
+    anchor: StructuralSizer/src/slabs/codes/concrete/flat_plate/analysis/fea/precompute.jl::_build_or_update_fea!
+    summary: Shell FEA with column stubs and rigid patches; rebuild when fea_mesh_key changes (column c1/c2, shape, drop, target_edge), update when only h/E change; D/L split solves on one factor
+    fidelity: fea_fine
+    reads: [slab.h, column.c1, column.c2, column.shape, slab.drop, cell.qD, cell.qL]
+    writes: [demand.M, demand.Vu, demand.Mub, demand.Δ]
+    trace_labels: [":slab fea_rebuilds/fea_updates on exit"]
+  - id: slab.flat_plate.fea_cache_key
+    level: L3
+    kind: policy
+    parent: slab.flat_plate.analysis.fea
+    anchor: StructuralSizer/src/slabs/codes/concrete/flat_plate/analysis/fea/cache.jl::fea_mesh_key
+    summary: Mesh key = slab boundary/verts/edges, per column (xy, c1, c2, shape, position, orientation), spans, target_edge, drop (h_drop,a1,a2), span axis; h and E excluded
+    reads: [column.c1, column.c2, column.shape, slab.drop]
+    writes: []
+  - id: slab.flat_plate.thickness_jump
+    level: L3
+    kind: policy
+    parent: slab.flat_plate
+    anchor: StructuralSizer/src/slabs/codes/concrete/flat_plate/pipeline/thickness_jump.jl::propose_slab_thickness
+    summary: Thinnest 0.5in h passing all Phase A (and optionally punching) checks on demands scaled by qu(h)/qu(h0) (scale_moment_result, loads_at_thickness); refused for drop panels, pattern loading, h-dependent edge βt
+    reads: [demand.M, demand.Vu, demand.Mub, slab.h]
+    writes: [slab.h]
+  - id: slab.flat_plate.column_pm
+    level: L3
+    kind: check
+    parent: slab.flat_plate
+    anchor: StructuralSizer/src/slabs/codes/concrete/flat_plate/pipeline/column_updates.jl::_update_column_sizes!
+    summary: Column P-M from slab Pu and distributed Mu; c = max(c_span_min, c_pm, c_old)
+    clause: ACI 318-11 §13.6.9.2 (moment split to columns, cited in iteration.jl)
+    reads: [demand.Pu, demand.Mu_col, column.c1, column.c2]
+    writes: [column.c1, column.c2, column.section]
+  - id: slab.flat_plate.deflection
+    level: L3
+    kind: check
+    parent: slab.flat_plate
+    anchor: StructuralSizer/src/slabs/codes/concrete/flat_plate/pipeline/thickness_jump.jl::two_way_deflection
+    summary: Two-way deflection primary and secondary with Ie and long-term λΔ
+    clause: ACI 318-11 §9.5.3 / ACI 318-19 §24.2
+    reads: [slab.h, demand.M, demand.Δ]
+    writes: []
+  - id: slab.flat_plate.one_way_shear
+    level: L3
+    kind: check
+    parent: slab.flat_plate
+    anchor: StructuralSizer/src/slabs/codes/concrete/flat_plate/pipeline/thickness_jump.jl::phase_a_depth_passes
+    summary: One-way shear on frame strip, wall strips and secondary direction
+    clause: ACI 318-11 §11.2 / ACI 318-19 §22.5
+    reads: [slab.h, demand.Vu_max]
+    writes: []
+  - id: slab.flat_plate.flexure_tc
+    level: L3
+    kind: check
+    parent: slab.flat_plate
+    anchor: StructuralSizer/src/slabs/codes/concrete/flat_plate/pipeline/thickness_jump.jl::phase_a_depth_passes
+    summary: Tension-controlled strip flexure, primary then secondary
+    clause: ACI 318-19 §21.2.2
+    reads: [slab.h, demand.M]
+    writes: []
+  - id: slab.flat_plate.transfer_section
+    level: L3
+    kind: check
+    parent: slab.flat_plate
+    anchor: StructuralSizer/src/slabs/codes/concrete/flat_plate/pipeline/transfer_reinforcement.jl
+    summary: Moment-transfer band γf·Mub can be developed in bb
+    clause: ACI 318-11 §13.5.3
+    reads: [slab.h, demand.Mub, column.c1, column.c2]
+    writes: []
+  - id: slab.flat_plate.punching
+    level: L3
+    kind: check
+    parent: slab.flat_plate
+    anchor: StructuralSizer/src/slabs/codes/concrete/flat_plate/design/checks/punching.jl::check_punching_for_column
+    summary: Eccentric-shear punching at interior/edge/corner with centroid shift (Vu·e), Jc per PCA EB712 Fig 16-13, λs size effect; §13.5.3.3 increased γf only when Eq. (13-1) fails
+    clause: ACI 318-11 §11.11.7.1 / §11.11.7.2 (R11.11.7.2); capacity ACI 318-11 §11.11.2.1 with ACI 318-19 Eq. 22.5.5.1.3 λs
+    reads: [slab.h, column.c1, column.c2, column.position, demand.Vu, demand.Mub, demand.Muy]
+    writes: []
+  - id: slab.flat_plate.moment_transfer_gamma_f
+    level: L3
+    kind: check
+    parent: slab.flat_plate.punching
+    anchor: StructuralSizer/src/codes/aci/punching/moment_transfer.jl::moment_transfer_gamma_f
+    summary: Raise γf (corner γf=1 if Vu ≤ 0.5φVc; edge-parallel 0.75φVc; interior 1.25γf0 if Vu ≤ 0.4φVc and εt ≥ 0.010) when band develops it
+    clause: ACI 318-11 §13.5.3.3
+    reads: [demand.Vu, demand.Mub, column.c1, column.c2, slab.h]
+    writes: []
+  - id: slab.flat_plate.wall_punching
+    level: L3
+    kind: check
+    parent: slab.flat_plate
+    anchor: StructuralSizer/src/slabs/codes/concrete/flat_plate/pipeline/iteration.jl::_size_flat_plate!
+    summary: One critical section per connected wall (wall_reaction_punching); failure thickens h
+    clause: ACI 318-11 §11.11.1.2
+    reads: [slab.h, wall.geometry, demand.qu]
+    writes: [slab.h]
+  - id: slab.flat_plate.drop_edge_punching
+    level: L3
+    kind: check
+    parent: slab.flat_plate
+    anchor: StructuralSizer/src/slabs/codes/concrete/flat_plate/pipeline/punching_resolution.jl::_resolve_punching_failures!
+    summary: Flat slab punching at the drop edge; failure is h += 0.5in (drop extent not grown)
+    clause: ACI 318-11 §11.11.1.2
+    reads: [slab.h, slab.drop, demand.Vu]
+    writes: [slab.h]
+  - id: slab.flat_plate.punching_resolver
+    level: L3
+    kind: owner
+    parent: slab.flat_plate
+    anchor: StructuralSizer/src/slabs/codes/concrete/flat_plate/pipeline/punching_resolution.jl::_grow_to_passing!
+    summary: Grow column along solve_column_for_punching direction (b0_req = b0·ratio) with frozen demand until pass or c_max (30in); restores only the failing column, earlier-grown columns kept on h bump
+    reads: [column.c1, column.c2, demand.Vu, demand.Mub, slab.h]
+    writes: [column.c1, column.c2, slab.studs, slab.h]
+  - id: slab.flat_plate.joint_search
+    level: L3
+    kind: owner
+    parent: slab.flat_plate
+    anchor: StructuralSizer/src/slabs/codes/concrete/flat_plate/pipeline/joint_search.jl::joint_search
+    summary: Min material_objective over (h, per-column size ≥ installed, studs) on scaled demands; only when thickness_scale_applies and punching_strategy=:joint_search
+    reads: [demand.M, demand.Vu, demand.Mub, column.c1, column.c2, slab.h]
+    writes: [slab.h, column.c1, column.c2, slab.studs]
+  - id: slab.flat_plate.final_design
+    level: L3
+    kind: check
+    parent: slab.flat_plate
+    anchor: StructuralSizer/src/slabs/codes/concrete/flat_plate/pipeline/final_design.jl::_run_final_design
+    summary: Strip rebar (primary/secondary), secondary one-way shear on inner depth, transfer bars, wall-bar anchorage, integrity bars; needs_more_depth → h += 0.5in
+    clause: ACI 318-11 §13.7.7.1, §13.5.3, §12.12.1, §13.3.8.5; ACI 318-19 §22.5
+    reads: [slab.h, demand.M, demand.Mub]
+    writes: [slab.rebar, slab.h]
+  - id: slab.flat_plate.loop.outer
+    level: L3
+    kind: loop
+    parent: slab.flat_plate
+    anchor: StructuralSizer/src/slabs/codes/concrete/flat_plate/pipeline/iteration.jl::_size_flat_plate!
+    summary: Outer restart loop A→B→C
+    loop:
+      iterates: slab.h
+      budget: monotone_budget(max_iterations, half-inch steps to ln/10)
+      growth: grow-only
+      converges_when: Phase C converged
+      ratchet: true
+    reads: [slab.h, column.c1, column.c2]
+    writes: [slab.h, column.c1, column.c2]
+  - id: slab.flat_plate.loop.phase_a
+    level: L3
+    kind: loop
+    parent: slab.flat_plate
+    anchor: StructuralSizer/src/slabs/codes/concrete/flat_plate/pipeline/iteration.jl::_size_flat_plate!
+    summary: Depth convergence with interleaved column P-M re-analysis
+    loop:
+      iterates: slab.h, column.c1, column.c2
+      budget: monotone_budget(max_iterations, half-inch steps to ln/10)
+      growth: grow-only
+      converges_when: all Phase A checks pass with no column change > 5%
+      ratchet: true
+    reads: [demand.M, demand.Vu]
+    writes: [slab.h, column.c1, column.c2]
+    trace_labels: [":slab phase=A"]
+  - id: slab.flat_plate.loop.phase_b
+    level: L3
+    kind: loop
+    parent: slab.flat_plate
+    anchor: StructuralSizer/src/slabs/codes/concrete/flat_plate/pipeline/iteration.jl::_size_flat_plate!
+    summary: Punching resolution with re-analysis after each column growth round
+    loop:
+      iterates: column.c1, column.c2, slab.studs, slab.h
+      budget: monotone_budget(max_iterations, column steps to max_column_size)
+      growth: grow-only
+      converges_when: all column and wall punching OK
+      ratchet: true
+    reads: [demand.Vu, demand.Mub]
+    writes: [column.c1, column.c2, slab.h, slab.studs]
+    trace_labels: [":slab phase=B joint_search/joint_confirmed/all_punching_ok/punching_h_bump/wall_punching_h_bump"]
+
+  # ─────────────── Flat plate building-level (SY) ───────────────
+  - id: slab.flat_plate.member_stage
+    level: L2
+    kind: owner
+    parent: slab.stage
+    anchor: StructuralSynthesizer/src/workflow/graph_builder.jl::_design_flat_plate_members!
+    summary: Settle loop - redesign slabs checked at columns other than installed, envelope column proposals, record floors, refit columns
+    loop:
+      iterates: column.c1, column.c2, column.section
+      budget: monotone_budget(max_iterations, 48)
+      growth: free+guard
+      converges_when: no slab stale (_slab_checked_at_installed_columns)
+      ratchet: true
+    reads: [column.c1, column.c2, slab.design_details]
+    writes: [column.c1, column.c2, column.section, column.floor]
+    trace_labels: [":workflow _design_flat_plate_members! enter/decision/exit"]
+  - id: slab.flat_plate.support_envelope
+    level: L3
+    kind: sync
+    parent: slab.flat_plate.member_stage
+    anchor: StructuralSynthesizer/src/workflow/graph_builder.jl::_apply_support_envelope!
+    summary: Install governing column proposal across slabs sharing a column
+    reads: [column.c1, column.c2]
+    writes: [column.c1, column.c2, column.section]
+  - id: slab.flat_plate.column_floor
+    level: L3
+    kind: policy
+    parent: slab.flat_plate.member_stage
+    anchor: StructuralSynthesizer/src/workflow/graph_builder.jl::_raise_column_floors!
+    summary: Column that grew in a redesign round gets floors[i] = max(floor, c); raise-only for the stage
+    reads: [column.c1, column.c2]
+    writes: [column.floor]
+  - id: slab.flat_plate.column_fit
+    level: L3
+    kind: check
+    parent: slab.flat_plate.member_stage
+    anchor: StructuralSynthesizer/src/workflow/flat_plate_column_check.jl::_fit_flat_plate_columns!
+    summary: Lightest catalog section passing full-load strength, joint, and punching at trial size with stored Vu/Mub; may shrink below installed (floor = floors[i]) when uniform_column_sizing=:off and demands are stored
+    clause: ACI 318-11 §10.12 (joint sections, as cited); punching per check_punching_for_column
+    loop:
+      iterates: column.section
+      budget: monotone_budget(max_iterations, catalog length)
+      growth: free+guard
+      converges_when: no section changed
+      ratchet: false
+    reads: [column.floor, demand.Pu, demand.Vu, demand.Mub, slab.h]
+    writes: [column.section, column.c1, column.c2]
+    trace_labels: [":workflow check_flat_plate_columns! decision"]
+
+  # ───────────────────────── Two-way with beams ─────────────────────────
+  - id: slab.two_way
+    level: L2
+    kind: element
+    parent: slab.stage
+    anchor: StructuralSizer/src/slabs/sizing.jl::_size_slab!(::TwoWay)
+    summary: Minimum thickness only; ln = longer chord, β = long/short; αfm unknown → bound
+    reads: [slab.spans, slab.support_class]
+    writes: [slab.h, cell.self_weight]
+  - id: slab.two_way.support_classification
+    level: L3
+    kind: policy
+    parent: slab.two_way
+    anchor: StructuralSynthesizer/src/analyze/slabs/slabs/support_classification.jl::classify_two_way_supports
+    summary: Beamless panel → flat_plate; all walls → wall_supported; missing building-edge beam → missing_edge_beam; interior gap → throw
+    reads: [beam.edges, wall.edges]
+    writes: [slab.floor_type, slab.support_class]
+  - id: slab.two_way.min_thickness
+    level: L3
+    kind: check
+    parent: slab.two_way
+    anchor: StructuralSizer/src/slabs/codes/concrete/min_thickness.jl::min_thickness
+    summary: Eq. (9-12)/(9-13) by αfm; with alpha_fm=nothing ENGINEERING-JUDGMENT bound max(Table 9.5(c), 1.1·Eq.(9-12)@0.2, 5in); +10% missing edge beam
+    clause: ACI 318-11 §9.5.3.3 (a)-(d), Eq. (9-12), Eq. (9-13), Table 9.5(c)
+    reads: [slab.spans, slab.support_class, material.fy]
+    writes: [slab.h]
+
+  # ───────────────────────── One-way ─────────────────────────
+  - id: slab.one_way
+    level: L2
+    kind: element
+    parent: slab.stage
+    anchor: StructuralSizer/src/slabs/sizing.jl::_size_slab!(::OneWay)
+    summary: Minimum thickness by thickest support condition, cantilever override at openings; no bars
+    reads: [slab.spans, slab.support_condition]
+    writes: [slab.h, cell.self_weight]
+  - id: slab.one_way.min_thickness
+    level: L3
+    kind: check
+    parent: slab.one_way
+    anchor: StructuralSizer/src/slabs/codes/concrete/min_thickness.jl::min_thickness
+    summary: ℓ/20, ℓ/24, ℓ/28, ℓ/10 by end conditions
+    clause: ACI 318-11 Table 9.5(a) / ACI 318-19 Table 7.3.1.1
+    reads: [slab.spans]
+    writes: [slab.h]
+  - id: slab.one_way.analysis
+    level: L3
+    kind: analysis
+    parent: slab.one_way
+    anchor: StructuralSizer/src/slabs/sizing.jl::assign_panel_analysis!
+    summary: Records §8.3.3 coefficients or area shell; no demands used for sizing here
+    fidelity: closed_form
+    reads: [slab.geometry]
+    writes: [slab.method]
+
+  # ───────────────────────── Waffle / ribbed ─────────────────────────
+  - id: slab.waffle
+    level: L2
+    kind: element
+    parent: slab.stage
+    anchor: StructuralSizer/src/slabs/codes/concrete/sizing.jl::_size_span_floor(::Waffle)
+    summary: Form depth = first standard depth ≥ min_thickness(Waffle); ribs sized as beams; solid heads grown from rib bays
+    reads: [slab.spans]
+    writes: [slab.h]
+  - id: slab.waffle.heads
+    level: L3
+    kind: owner
+    parent: slab.waffle
+    anchor: StructuralSynthesizer/src/analyze/framing/solid_head_split.jl::grow_building_solid_heads!
+    summary: Start heads from level.solid_heads (or corner fraction + column bays), close tight voids, resolve, move rib beams into solid group
+    reads: [beam.section, column.c1, column.c2, slab.h]
+    writes: [slab.solid_heads, beam.section]
+  - id: slab.waffle.grillage
+    level: L3
+    kind: analysis
+    parent: slab.waffle
+    anchor: StructuralSynthesizer/src/analyze/slabs/slabs/arrangement_heads.jl::analyze_arrangement_grillage
+    summary: Asap frame of the rib arrangement with solid-head rectangles and fixed-base column stubs (stub = smallest column face, 3 m)
+    fidelity: frame
+    reads: [slab.solid_heads, beam.section, column.c1]
+    writes: [demand.Vu, demand.Mub, demand.Vu_rib, demand.Mu_hog]
+  - id: slab.waffle.loop.heads
+    level: L3
+    kind: loop
+    parent: slab.waffle
+    anchor: StructuralSynthesizer/src/analyze/slabs/slabs/arrangement_heads.jl::resolve_arrangement_heads
+    summary: Worst failing head grows one bay/ring toward the failing face; kept if its ratio falls; stuck heads retried after any growth
+    loop:
+      iterates: slab.solid_heads
+      budget: one step per bay (throws past it)
+      growth: grow-only
+      converges_when: all heads pass, or all failing heads stuck, or max_solid_fraction cap
+      ratchet: true
+    reads: [demand.Vu, demand.Mub]
+    writes: [slab.solid_heads]
+    trace_labels: ["SS_TRACE_SOLID_HEADS env line trace"]
+  - id: slab.waffle.head_punching
+    level: L3
+    kind: check
+    parent: slab.waffle
+    anchor: StructuralSynthesizer/src/analyze/slabs/slabs/arrangement_heads.jl::check_arrangement_head
+    summary: General-shape punching at d/2 outside head outline (λs default 1, αs = 40 closed / 30 open)
+    clause: ACI 421.1R-99 App. B (demand); ACI 318-11 §11.11.2.1 (capacity)
+    reads: [slab.solid_heads, demand.Vu, demand.Mub, slab.h]
+    writes: []
+  - id: slab.waffle.rib_shear
+    level: L3
+    kind: check
+    parent: slab.waffle
+    anchor: StructuralSizer/src/slabs/codes/concrete/waffle/rib_head_shear.jl::check_rib_shear_at_head
+    summary: Rib one-way shear at d from head face, concrete only
+    clause: ACI 318-11 §11.1.3.1
+    reads: [beam.bw, beam.d, demand.Vu_rib]
+    writes: []
+  - id: slab.waffle.rib_hogging
+    level: L3
+    kind: check
+    parent: slab.waffle
+    anchor: StructuralSizer/src/slabs/codes/concrete/waffle/rib_head_shear.jl::check_rib_hogging_at_head
+    summary: Stem compression under hogging at the head face (does not grow the head)
+    reads: [beam.bw, beam.d, demand.Mu_hog]
+    writes: []
+  - id: slab.waffle.rib_deflection
+    level: L3
+    kind: check
+    parent: slab.waffle
+    anchor: StructuralSizer/src/slabs/codes/concrete/waffle/rib_deflection.jl::scale_rib_deflection
+    summary: Grillage deflection scaled by Ie_frame/Ie, long-term λΔ, Table 9.5(b) limits
+    clause: ACI 318-11 §9.5.2.2, §9.5.2.3 Eq. (9-8), §9.5.2.5 Eq. (9-11), Table 9.5(b)
+    reads: [demand.Δ, beam.Ie]
+    writes: []
+  - id: slab.waffle.frame_punching_report
+    level: L3
+    kind: output
+    parent: slab.waffle
+    anchor: StructuralSynthesizer/src/analyze/slabs/slabs/solid_head_frame.jl::solid_head_frame_punching
+    summary: Building-frame punching/one-way/hogging at solid heads under full and pattern load; called at capture_results
+    clause: ACI 318-11 §11.11.1.2, §11.11.7.1, §11.1.3.1, §13.7.6
+    reads: [slab.solid_heads, demand.Vu, demand.Mub]
+    writes: []
+
+  # ───────────────────────── Composite deck ─────────────────────────
+  - id: slab.composite_deck
+    level: L2
+    kind: element
+    parent: slab.stage
+    anchor: StructuralSizer/src/slabs/codes/steel/deck_floor.jl::size_composite_deck_slab
+    summary: Exhaustive depth × gage; argmin self weight; SDL/LL max over cells; simple span always
+    reads: [slab.spans, cell.sdl, cell.live_load]
+    writes: [slab.deck, cell.self_weight]
+  - id: slab.composite_deck.candidate
+    level: L3
+    kind: check
+    parent: slab.composite_deck
+    anchor: StructuralSizer/src/slabs/codes/steel/deck_floor.jl::deck_slab_candidate
+    summary: f'c/topping minimums, unshored span, web crippling, M_asd=wL²/8 ≤ Mno/Ω, shear, live and superimposed deflection
+    clause: SDI C-2017 §2.4.B.6, §2.4.B.7, §2.4.B.9 Eq. 2.4.7, §2.4.B.15, item 13; Appendix 5
+    reads: [slab.spans, cell.sdl, cell.live_load]
+    writes: []
+  - id: slab.composite_deck.hogging
+    level: L3
+    kind: check
+    parent: slab.composite_deck
+    anchor: StructuralSizer/src/slabs/codes/steel/deck_hogging.jl::deck_coefficient_moment
+    summary: Continuous-span coefficient moments and negative steel; NOT CALLED from src
+    clause: ACI 318-19 §6.5.1-§6.5.3, §7.6.1.1, §7.7.3.8.4; SDI C-2017 item 12
+    reads: [slab.spans, demand.wu]
+    writes: []
+
+  # ───────────────────────── Vault ─────────────────────────
+  - id: slab.vault
+    level: L2
+    kind: element
+    parent: slab.stage
+    anchor: StructuralSizer/src/slabs/sizing.jl::_size_slab!(::Vault)
+    summary: Rise × thickness grid/Ipopt or fixed rise + thickness bisection (stress, kern, elastic-shortening rise loss)
+    reads: [slab.spans, cell.qu]
+    writes: [slab.t, slab.rise, demand.thrust]
+  - id: slab.vault.loop.thickness
+    level: L3
+    kind: loop
+    parent: slab.vault
+    anchor: StructuralSizer/src/slabs/codes/vault/haile_unreinforced.jl::_find_min_thickness
+    summary: Bisection on 5 mm grid assuming monotone feasibility
+    loop:
+      iterates: slab.t
+      budget: log2(n grid)
+      growth: free
+      converges_when: feasibility edge found
+      ratchet: false
+    reads: [slab.rise]
+    writes: [slab.t]
+
+edges:
+  # flat plate internal
+  - {from: slab.method_choice, to: slab.flat_plate.analysis.ddm, kind: control}
+  - {from: slab.method_choice, to: slab.flat_plate.analysis.efm, kind: control}
+  - {from: slab.method_choice, to: slab.flat_plate.analysis.fea, kind: control}
+  - {from: slab.flat_plate.fea_cache_key, to: slab.flat_plate.analysis.fea, kind: control, var: column.c1}
+  - {from: slab.flat_plate.analysis.fea, to: slab.flat_plate.punching, kind: data, var: demand.Mub}
+  - {from: slab.flat_plate.analysis.efm, to: slab.flat_plate.punching, kind: data, var: demand.Mub}
+  - {from: slab.flat_plate.analysis.ddm, to: slab.flat_plate.punching, kind: data, var: demand.Vu}
+  - {from: slab.flat_plate.analysis.fea, to: slab.flat_plate.column_pm, kind: data, var: demand.Mu_col}
+  - {from: slab.flat_plate.column_pm, to: slab.flat_plate.analysis.fea, kind: feedback, var: column.c1}
+  - {from: slab.flat_plate.deflection, to: slab.flat_plate.thickness_jump, kind: control}
+  - {from: slab.flat_plate.one_way_shear, to: slab.flat_plate.thickness_jump, kind: control}
+  - {from: slab.flat_plate.flexure_tc, to: slab.flat_plate.thickness_jump, kind: control}
+  - {from: slab.flat_plate.transfer_section, to: slab.flat_plate.thickness_jump, kind: control}
+  - {from: slab.flat_plate.thickness_jump, to: slab.flat_plate.loop.phase_a, kind: feedback, var: slab.h}
+  - {from: slab.flat_plate.punching, to: slab.flat_plate.moment_transfer_gamma_f, kind: call}
+  - {from: slab.flat_plate.punching, to: slab.flat_plate.punching_resolver, kind: control}
+  - {from: slab.flat_plate.punching, to: slab.flat_plate.joint_search, kind: control}
+  - {from: slab.flat_plate.punching_resolver, to: slab.flat_plate.loop.phase_b, kind: feedback, var: column.c1}
+  - {from: slab.flat_plate.punching_resolver, to: slab.flat_plate.loop.outer, kind: feedback, var: slab.h}
+  - {from: slab.flat_plate.joint_search, to: slab.flat_plate.loop.outer, kind: feedback, var: slab.h}
+  - {from: slab.flat_plate.wall_punching, to: slab.flat_plate.loop.outer, kind: feedback, var: slab.h}
+  - {from: slab.flat_plate.drop_edge_punching, to: slab.flat_plate.loop.outer, kind: feedback, var: slab.h}
+  - {from: slab.flat_plate.final_design, to: slab.flat_plate.loop.outer, kind: feedback, var: slab.h}
+  # flat plate building level
+  - {from: slab.flat_plate.member_stage, to: slab.flat_plate, kind: call}
+  - {from: slab.flat_plate, to: slab.flat_plate.support_envelope, kind: data, var: column.c1}
+  - {from: slab.flat_plate.support_envelope, to: slab.flat_plate.column_floor, kind: data, var: column.c1}
+  - {from: slab.flat_plate.column_floor, to: slab.flat_plate.column_fit, kind: data, var: column.floor}
+  - {from: slab.flat_plate, to: slab.flat_plate.column_fit, kind: data, var: demand.Mub}
+  - {from: slab.flat_plate.column_fit, to: slab.flat_plate.member_stage, kind: feedback, var: column.c1}
+  # cross-area: columns
+  - {from: slab.flat_plate.column_pm, to: member.column, kind: data, var: column.section}
+  - {from: slab.flat_plate.punching_resolver, to: member.column, kind: data, var: column.c1}
+  - {from: slab.flat_plate.punching_resolver, to: member.column, kind: data, var: column.c2}
+  - {from: slab.flat_plate.joint_search, to: member.column, kind: data, var: column.c1}
+  - {from: slab.flat_plate.column_fit, to: member.column, kind: data, var: column.section}
+  - {from: slab.flat_plate.member_stage, to: member.column.harmonize, kind: call}
+  - {from: member.column, to: slab.flat_plate.member_stage, kind: feedback, var: column.c1}
+  - {from: slab.flat_plate, to: member.column, kind: data, var: demand.Pu}
+  # cross-area: walls
+  - {from: wall.geometry, to: slab.flat_plate.wall_punching, kind: data, var: wall.geometry}
+  - {from: slab.flat_plate.final_design, to: wall.anchorage, kind: data, var: slab.rebar}
+  - {from: slab.flat_plate.analysis.fea, to: wall.demand, kind: data, var: demand.wall_transfer}
+  - {from: wall.edges, to: slab.two_way.support_classification, kind: data, var: wall.edges}
+  # two-way
+  - {from: slab.two_way.support_classification, to: slab.two_way.min_thickness, kind: control, var: slab.support_class}
+  - {from: member.beam, to: slab.two_way.support_classification, kind: data, var: beam.edges}
+  - {from: slab.two_way.min_thickness, to: member.beam, kind: data, var: cell.self_weight}
+  - {from: slab.two_way.support_classification, to: slab.flat_plate, kind: control, var: slab.floor_type}
+  # one-way
+  - {from: slab.one_way.min_thickness, to: member.beam, kind: data, var: cell.self_weight}
+  # waffle
+  - {from: member.beam, to: slab.waffle.heads, kind: data, var: beam.section}
+  - {from: slab.waffle.heads, to: slab.waffle.loop.heads, kind: call}
+  - {from: slab.waffle.grillage, to: slab.waffle.head_punching, kind: data, var: demand.Mub}
+  - {from: slab.waffle.grillage, to: slab.waffle.rib_shear, kind: data, var: demand.Vu_rib}
+  - {from: slab.waffle.grillage, to: slab.waffle.rib_hogging, kind: data, var: demand.Mu_hog}
+  - {from: slab.waffle.head_punching, to: slab.waffle.loop.heads, kind: feedback, var: slab.solid_heads}
+  - {from: slab.waffle.rib_shear, to: slab.waffle.loop.heads, kind: feedback, var: slab.solid_heads}
+  - {from: slab.waffle.heads, to: member.beam, kind: data, var: beam.section}
+  - {from: member.column, to: slab.waffle.grillage, kind: data, var: column.c1}
+  - {from: member.iteration, to: slab.waffle.heads, kind: call}
+  # composite deck
+  - {from: slab.composite_deck.candidate, to: slab.composite_deck, kind: data}
+  - {from: slab.composite_deck, to: member.beam, kind: data, var: cell.self_weight}
+  # vault
+  - {from: slab.vault.loop.thickness, to: slab.vault, kind: data, var: slab.t}
+  - {from: slab.vault, to: member.beam, kind: data, var: demand.thrust}
+  # pipeline
+  - {from: pipeline.member_stage, to: slab.flat_plate.member_stage, kind: call}
+  - {from: pipeline.slab_stage, to: slab.stage, kind: call}

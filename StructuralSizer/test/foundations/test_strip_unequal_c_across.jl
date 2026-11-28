@@ -28,7 +28,9 @@ const SS = StructuralSizer
     B_plan = 16.0u"ft"
     qa = (2 * Pu) / (B_plan * L_plan)
     soil = Soil(qa, 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa")
-    opts = StripParams(min_depth=12.0u"inch")
+    # Development lengthens a short end and can step the bar down, which
+    # changes d. Hold the plan so this comparison is the cantilever only.
+    opts = StripParams(min_depth=12.0u"inch", check_development=false)
 
     result = design_footing(StripFooting(), [d_small, d_large],
                             [0.0u"ft", 20.0u"ft"], soil;

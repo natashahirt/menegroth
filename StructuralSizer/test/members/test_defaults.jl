@@ -25,10 +25,11 @@ using Asap  # units
         # Asap `:joist` (OWSJ-style: pinned bending, retained GJ) selected.
         @test default_torsion_released(:joist, steel) === true
 
-        # Girder / beam: FR (moment) connections idealized as fixed — Cmt. §B3.4.
-        @test default_release(:girder, steel, :gravity) === (:fixed, :fixed)
+        # Gravity girder / beam: simple shear connections — §B3.4a / §J1.2.
+        # Moment-frame girder: FR connection idealized as fixed — Cmt. §B3.4.
+        @test default_release(:girder, steel, :gravity) === (:pinned, :pinned)
         @test default_release(:girder, steel, :moment_frame) === (:fixed, :fixed)
-        @test default_release(:beam, steel, :gravity) === (:fixed, :fixed)
+        @test default_release(:beam, steel, :gravity) === (:pinned, :pinned)
         @test default_torsion_released(:girder, steel) === false
         @test default_torsion_released(:beam, steel) === false
     end
@@ -46,8 +47,8 @@ using Asap  # units
     @testset "Timber" begin
         # Simple bearing / hanger connections (engineering judgment; NDS practice).
         @test default_release(:joist, tmb, :gravity) === (:pinned, :pinned)
-        @test default_release(:girder, tmb, :gravity) === (:fixed, :fixed)
-        @test default_release(:beam, tmb, :gravity) === (:fixed, :fixed)
+        @test default_release(:girder, tmb, :gravity) === (:pinned, :pinned)
+        @test default_release(:beam, tmb, :gravity) === (:pinned, :pinned)
         @test default_torsion_released(:joist, tmb) === false   # => :freefree
         @test default_torsion_released(:girder, tmb) === false
         @test default_torsion_released(:beam, tmb) === false

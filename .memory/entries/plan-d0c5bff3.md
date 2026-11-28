@@ -7,12 +7,12 @@ title: 'Phase 5 layout: four runs from frame placeholders to one frame-shell mod
 node_label: 'Phase 5 layout: four runs from frame placeholders '
 tags: walls,phase5,unified-model,asap,plan
 status: active
-open_threads: 0
+open_threads: 12
 success: 'null'
 files: ''
 session_id: sess-a42c0dff
 created_at: '2026-10-22T18:55:00.368643+00:00'
-updated_at: '2026-10-22T18:55:00.368643+00:00'
+updated_at: '2026-10-23T02:35:46.454866+00:00'
 ---
 Layout for todo-6a3aad1a. Four small runs, in order. Do not start 5b until 5a passes. No new ACI or ASCE factors (Phase 2 is still open). No wind or seismic magnitudes (Phase 6). No wall sizing (Phase 7). No openings or coupling beams (Phase 8). The Phase 4 stub keeps throwing until a later slice calls it on purpose.
 

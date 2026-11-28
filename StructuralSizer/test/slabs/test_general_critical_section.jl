@@ -222,6 +222,55 @@ const SS = StructuralSizer
         @test abs(gx - vy) < abs(gx - vx)
     end
 
+    @testset "The peak face follows the signed moment and vu does not" begin
+        # ACI 421.1R-99 Eq. (3.2): a positive Muy stresses +x, a positive Mux
+        # stresses +y. vu adds the absolute term, so the opposite moment has
+        # the same vu and the opposite vertex. Two corners of one face tie.
+        c1 = 16.0u"inch"; c2 = 12.0u"inch"; d = 6.0u"inch"; fc = 4000.0u"psi"
+        Vu = 40.0kip
+        Mx = 80.0kip * u"ft"
+        My = 50.0kip * u"ft"
+        h = 8.0u"inch"
+        col = (position = :interior, c1 = c1, c2 = c2, shape = :rectangular, θ = 0.0)
+        kw = (θ = 0.0, span_axis = (1.0, 0.0))
+        pos = SS.check_punching_for_column(col, Vu, Mx, d, h, fc; Muy = My, kw...)
+        neg = SS.check_punching_for_column(col, Vu, -Mx, d, h, fc; Muy = -My, kw...)
+        one = SS.check_punching_for_column(col, Vu, Mx, d, h, fc; Muy = 0.0kip * u"ft", kw...)
+        @test pos.vu ≈ neg.vu
+        @test pos.direction[1] > 0.3 && pos.direction[2] > 0.3
+        @test neg.direction[1] < -0.3 && neg.direction[2] < -0.3
+        @test one.direction === nothing
+
+        pts, _ = SS.rectangular_critical_section(c1, c2, d; position = :interior)
+        # Closed-form Mux (stress in x) is this engine's Muy. deci-6bee9104.
+        g = SS.punching_stress_general(Vu, My, Mx, pts, d)
+        back = SS.punching_stress_general(Vu, -My, -Mx, pts, d)
+        @test g.direction[1] > 0.3 && g.direction[2] > 0.3
+        @test back.direction[1] < -0.3 && back.direction[2] < -0.3
+        @test g.vu ≈ back.vu
+        @test SS.punching_stress_general(Vu, 0.0kip * u"ft", Mx, pts, d).direction === nothing
+        @test SS.punching_stress_general(Vu, 0.0kip * u"ft", 0.0kip * u"ft", pts, d).direction === nothing
+
+        # PCA edge, corpus sp-de-two-way-flat-plate-aci318-14 page 42:
+        # Mu = 46.65 kip·ft reduces to 37.81 at the centroid, so face AB
+        # (the inner face, −x) governs. One moment ties the two ends of that
+        # face. A perpendicular moment picks one end. Flipping the parallel
+        # moment does not flip the face, because the reduction uses |M|.
+        ce = 16.0u"inch"; de = 5.75u"inch"
+        edge = (position = :edge, c1 = ce, c2 = ce, shape = :rectangular, θ = 0.0)
+        ekw = (θ = 0.0, span_axis = (1.0, 0.0), free_edge_parallel = :c2)
+        plain = SS.check_punching_for_column(edge, 21.70kip, 46.65kip * u"ft", de, h, fc; ekw...)
+        plain_neg = SS.check_punching_for_column(edge, 21.70kip, -46.65kip * u"ft", de, h, fc; ekw...)
+        both = SS.check_punching_for_column(edge, 21.70kip, 46.65kip * u"ft", de, h, fc;
+                                            Muy = 20.0kip * u"ft", ekw...)
+        down = SS.check_punching_for_column(edge, 21.70kip, 46.65kip * u"ft", de, h, fc;
+                                           Muy = -20.0kip * u"ft", ekw...)
+        @test plain.direction === nothing
+        @test plain.vu ≈ plain_neg.vu
+        @test both.direction !== nothing && both.direction[1] < 0 && both.direction[2] > 0
+        @test down.direction !== nothing && down.direction[1] < 0 && down.direction[2] < 0
+    end
+
     @testset "Invariant: notching a corner can only raise stress; far below 2-sided" begin
         c1 = 16.0u"inch"; c2 = 16.0u"inch"; d = 6.0u"inch"; fc = 4000.0u"psi"
         Vu = 40.0kip; Mx = 20.0kip * u"ft"; My = 12.0kip * u"ft"
@@ -348,6 +397,32 @@ const SS = StructuralSizer
         @test res.utilization > 0
         @test ustrip(u"psi", res.vu) > 0
         @test ustrip(u"psi", res.ϕvc) > 0
+    end
+
+    @testset "Straight-line section: moment about its axis goes to flexure" begin
+        # A one-sided critical section (the corner-column head whose other faces
+        # are free edges) is a single straight segment. ACI 318-11 §11.11.7.1
+        # (corpus: aci-318-11, PDF p. 209): a moment about an axis with no
+        # eccentric-shear mechanism is carried by flexure, so its stress term is
+        # zero rather than 0/0 = NaN.
+        d = 6.0u"inch"
+        line = [(-30.0u"inch", 0.0u"inch"), (30.0u"inch", 0.0u"inch")]  # along x
+        p = SS.critical_section_properties(line, d; closed = false)
+        @test ustrip(u"inch^4", p.J1) ≈ 0 atol = 1e-9   # no depth about axis 1
+
+        # Mux is about the x-axis (the line's own axis) → J1≈0 direction.
+        r = SS.punching_check_general(40.0kip, 30.0kip * u"ft", 0.0kip * u"ft",
+                                      d, 4000.0u"psi", line; closed = false)
+        @test isfinite(r.utilization)
+        @test isfinite(ustrip(u"psi", r.vu))
+        # Only the direct shear Vu/Ac remains (the eccentric-shear term dropped).
+        @test ustrip(u"psi", r.vu) ≈ ustrip(u"psi", uconvert(u"psi", 40.0kip / p.Ac)) rtol = 1e-9
+
+        # A moment about the perpendicular axis (Muy) still transfers by shear.
+        r2 = SS.punching_check_general(40.0kip, 0.0kip * u"ft", 30.0kip * u"ft",
+                                       d, 4000.0u"psi", line; closed = false)
+        @test isfinite(r2.utilization)
+        @test ustrip(u"psi", r2.vu) > ustrip(u"psi", uconvert(u"psi", 40.0kip / p.Ac))
     end
 
 end

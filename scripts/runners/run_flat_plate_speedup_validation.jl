@@ -85,7 +85,8 @@ const SMOKE_N_BAYS   = 3
 # Method configurations — copied verbatim from the study's `ALL_METHODS`
 # (StructuralStudies/src/flat_plate_methods/flat_plate_method_comparison.jl:52-57).
 # `pattern_loading=false` for EFM and FEA keeps them comparable to DDM's fixed
-# coefficients (see the note at :46-48 of the source).
+# coefficients. The study sweep now turns pattern loading on; this harness
+# keeps it off so the committed baseline stays comparable.
 # WAVE 1B SMOKE: DDM (control, A1 has no path) + FEA frame (A1 exercised).
 const SMOKE_METHODS = [
     (key=:ddm,    name="DDM (Full)",  method=SR.DDM(:full)),
@@ -174,7 +175,7 @@ function _make_params(;
     min_h               = nothing,
     max_iterations::Int = 150,
     deflection_limit::Symbol = :L_360,
-    column_strategy::Symbol = :catalog,
+    column_strategy::Symbol = :discrete,
     concrete_label::AbstractString = "NWC_4000",
 )
     preset = _concrete_preset(concrete_label)

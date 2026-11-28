@@ -12,3 +12,4 @@ The full protocols are agent-requestable to keep per-request context small. Read
 - **Anything derived from a published code** (ACI, AISC, CSA, fib, …) or any Julia change to a code-derived factor/equation/limit → read `corpus.mdc`; `corpus.*` MCP tools first; cite `source_id` + clause + page.
 - **"Coordinate" / "run the pipeline" / agent pipeline** → read `coordinator-local.mdc` (cost guidelines), then `coordinator.mdc`. Never start a coordinator run unprompted.
 - **memory / coordinator MCP tools missing** → tell the user; see `operations.mdc`.
+- **Asap finite elements** (nodes, elements, meshing, assembly, solving, degenerate shells) → implement them in Asap. StructuralSizer and StructuralSynthesizer call that code. See `architecture-contracts.mdc`.

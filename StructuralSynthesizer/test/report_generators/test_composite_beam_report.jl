@@ -92,6 +92,7 @@ result_deck = report_composite_beam(
     Vu_const    = 30.0u"kip",
     w_const_DL  = 0.83u"kip/ft",
     δ_const_limit = 2.5u"inch",
+    reference_ΣQn = 292.0u"kip",
 )
 
 cb_sub_header("§1.2  Numerical Validation vs AISC Example I-1")
@@ -110,18 +111,27 @@ cb_table_head()
     # All checks pass
     @test result_deck.ok == true
 
-    # --- Stud-count-dependent checks ---
-    # Our solver finds the minimum stud count for ϕMn ≥ Mu (AISC I3.2d(5) 25%
-    # floor enforced).  With catalog section properties (As=15.99 vs AISC's
-    # 16.2 in²), this yields 24 studs (12/half) vs the example's 34 (17/half).
-    # Values below are validated against our solver at that operating point.
+    # Example I-1 designs the beam at ΣQn = 292 kip (17 studs per half-span,
+    # 34 total). The report also returns the minimum count with ϕMn ≥ Mu.
+    # Catalog As is 15.99 in² against the example's 16.2 in², so ϕMn uses
+    # the same tolerance as the sizer validation.
+    @test ustrip(u"kip", result_deck.reference_ΣQn) ≈ 292.0 rtol = 1e-12
+    @test ustrip(u"inch", result_deck.reference_a) ≈ 0.716 rtol = 0.01
+    @test ustrip(u"kip*ft", result_deck.reference_ϕMn) ≈ 767.0 rtol = 0.015
+    @test ustrip(u"kip*ft", result_deck.reference_ϕMn) > 687.0
+    @test result_deck.reference_n_half == 17
+    @test result_deck.reference_ok
 
-    @test result_deck.n_studs_total == 24
+    # The installed count is the minimum that carries Mu. One fewer stud
+    # per half-span falls short. Eqs. C-I3-3 and C-I3-4's 0.25 ratio is not
+    # a strength floor (AISC 360-22 Commentary §I3, page 502).
+    Mu = 687.0u"kip*ft"
+    @test result_deck.n_studs_half >= 1
+    @test ustrip(u"kip*ft", result_deck.ϕMn_comp) >= ustrip(u"kip*ft", Mu)
+    ΣQn_less = (result_deck.n_studs_half - 1) * Qn
+    ϕ_less = get_ϕMn_composite(section, material, slab_deck, result_deck.b_eff, ΣQn_less).ϕMn
+    @test ustrip(u"kip*ft", ϕ_less) < ustrip(u"kip*ft", Mu)
 
-    # ϕMn composite ≥ Mu (the design criterion)
-    @test ustrip(u"kip*ft", result_deck.ϕMn_comp) >= ustrip(u"kip*ft", 687.0u"kip*ft")
-
-    # Utilization near 1.0 (solver picks minimum studs → tighter utilization)
     @test result_deck.util_M > 0.90
     @test result_deck.util_M < 1.05
 end

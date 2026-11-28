@@ -92,17 +92,43 @@ function _elf_case_index(analysis::ElfStoryAnalysis, purpose::Symbol, direction:
 end
 
 """Story loads of one effect. Each term's ELF loads, scaled by its factor."""
-function seismic_effect_loads(analysis::ElfStoryAnalysis, effect::SeismicEffectCase)
+function seismic_effect_loads(struc, analysis::ElfStoryAnalysis, effect::SeismicEffectCase)
     loads = Asap.AbstractLoad[]
     for (j, f) in effect.terms
         c = analysis.cases[j]
-        full = _elf_loads(analysis.levels, c.Fx_kN, c.Mz_kN_m,
+        full = _elf_loads(struc, analysis.levels, c.Fx_kN, c.Mz_kN_m,
                           elf_direction_vector(analysis, c.direction))
         append!(loads, scale_story_loads(full, f))
     end
     isempty(loads) && throw(ArgumentError(
         "seismic effect $(effect.label) has no story load."))
     return loads
+end
+
+"""
+Displacement of each effect, or `nothing` when the analysis stored none.
+
+The story analysis is linear, so an effect that sums cases is the same sum
+of the stored displacements. The caller still builds the loads: element
+fixed-end forces come from the loads, not from the displacement.
+"""
+function seismic_effect_displacements(analysis::ElfStoryAnalysis,
+                                      effects::AbstractVector{SeismicEffectCase})
+    stored = analysis.displacements
+    length(stored) == length(analysis.cases) || return nothing
+    isempty(stored) && return nothing
+    n = length(stored[1])
+    (n > 0 && all(v -> length(v) == n, stored)) || return nothing
+    out = Vector{Vector{Float64}}(undef, length(effects))
+    for (k, effect) in enumerate(effects)
+        u = zeros(n)
+        for (j, f) in effect.terms
+            1 <= j <= length(stored) || return nothing
+            @. u += f * stored[j]
+        end
+        out[k] = u
+    end
+    return out
 end
 
 """

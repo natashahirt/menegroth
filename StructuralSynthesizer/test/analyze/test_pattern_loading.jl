@@ -136,7 +136,8 @@ _make_flat_plate(; sdl=20.0u"psf", ll=50.0u"psf") =
         to_asap!(struc; params)
 
         cases = StructuralSynthesizer._generate_pattern_cases(struc)
-        @test length(cases) == 3  # full, checkerboard A, checkerboard B
+        # Full, then the two §13.7.6.3 checkerboards. §6.4.2 span cases follow.
+        @test length(cases) >= 3
 
         # Full case should have the most loads (dead + all live)
         @test length(cases[1]) >= length(cases[2])
@@ -148,7 +149,12 @@ _make_flat_plate(; sdl=20.0u"psf", ll=50.0u"psf") =
                      for ci in keys(struc.cell_dead_loads))
         n_live = sum(length(get(struc.cell_live_loads, ci, Asap.TributaryLoad[]))
                      for ci in keys(struc.cell_live_loads))
-        @test length(cases[1]) == n_dead + n_live
+        # Curtain-wall line loads are dead, so every pattern case carries them.
+        clad = [ld for ld in struc.asap_model.loads
+                if ld isa Asap.LineLoad && ld.id === :cladding]
+        @test !isempty(clad)
+        @test length(cases[1]) == n_dead + n_live + length(clad)
+        @test all(ld -> ld in cases[2] && ld in cases[3], clad)
         @test length(cases[2]) < length(cases[1])  # subset of live
         @test length(cases[3]) < length(cases[1])  # subset of live
     end
@@ -310,7 +316,7 @@ _make_flat_plate(; sdl=20.0u"psf", ll=50.0u"psf") =
 
         cases = StructuralSynthesizer._pattern_demand_cases(struc, params)
         @test cases !== nothing
-        @test length(cases) == 3
+        @test length(cases) >= 3
 
         max_dMy = 0.0
         for el in struc.asap_model.frame_elements
@@ -360,9 +366,14 @@ _make_flat_plate(; sdl=20.0u"psf", ll=50.0u"psf") =
         u_full = copy(struc.asap_model.u)
         cases = StructuralSynthesizer._pattern_demand_cases(struc, params)
         @test cases !== nothing
-        @test length(cases) == 3
+        @test length(cases) >= 3
 
-        n_exceed = 0
+        # Cases 2 and 3 are the §13.7.6.3 three-quarter checkerboards.
+        # Later cases are §6.4.2 full live on alternate and adjacent spans,
+        # which is allowed to raise the support moment above the all-loaded case.
+        n_exceed_quarter = 0
+        n_exceed_full_pattern = 0
+        n_pos_drop = 0
         max_hog_env = 0.0
         beam_edges = Set(get(struc.skeleton.groups_edges, :beams, Int[]))
         for (edge_idx, el) in enumerate(struc.asap_model.frame_elements)
@@ -373,24 +384,36 @@ _make_flat_plate(; sdl=20.0u"psf", ll=50.0u"psf") =
                 el, cases[1][1], cases[1][2][eid]; resolution=40)
             _, hog_full = StructuralSynthesizer._asap_signed_My_envelopes(el, f_full.My)
             max_hog_env = max(max_hog_env, hog_full)
+            ly_z = el.LCS[2][3]
+            abs(ly_z) < 1e-8 && continue
+            s = ly_z > 0 ? 1.0 : -1.0
             for i in 2:length(cases)
                 f_pat = StructuralSynthesizer._element_forces_from_u(
                     el, cases[i][1], cases[i][2][eid]; resolution=40)
                 _, hog_pat = StructuralSynthesizer._asap_signed_My_envelopes(el, f_pat.My)
                 max_hog_env = max(max_hog_env, hog_pat)
-                ly_z = el.LCS[2][3]
-                abs(ly_z) < 1e-8 && continue
-                s = ly_z > 0 ? 1.0 : -1.0
                 for k in eachindex(f_full.My)
                     hog_k_full = max(0.0, -f_full.My[k] * s)
                     hog_k_pat  = max(0.0, -f_pat.My[k] * s)
-                    hog_k_pat > hog_k_full + 1e-6 && (n_exceed += 1)
+                    hog_k_pat > hog_k_full + 1e-6 || continue
+                    if i <= 3
+                        n_exceed_quarter += 1
+                    else
+                        n_exceed_full_pattern += 1
+                    end
+                end
+                # §6.4.2(a): a span left without live sheds positive moment.
+                if i > 3
+                    pos_full = maximum(max(0.0, f_full.My[k] * s) for k in eachindex(f_full.My))
+                    pos_pat = maximum(max(0.0, f_pat.My[k] * s) for k in eachindex(f_pat.My))
+                    pos_pat < pos_full - 1e-6 && (n_pos_drop += 1)
                 end
             end
         end
-        # §13.7.6.3 three-quarter live: checkerboard hogging stays at or
-        # below the full-load station on this beam line.
-        @test n_exceed == 0
+        # §13.7.6.3 three-quarter live stays at or below the full-load station.
+        @test n_exceed_quarter == 0
+        # §6.4.2 removes live from some spans, so some beam's positive moment drops.
+        @test n_pos_drop > 0
 
         _, dem_pat, = member_group_demands(struc; member_edge_group=:beams, params=params)
         @test struc.asap_model.u == u_full

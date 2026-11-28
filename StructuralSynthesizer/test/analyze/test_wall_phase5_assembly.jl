@@ -32,7 +32,6 @@ const _PLACEHOLDER_Iy = 11.4e-6         # m⁴
 const _PLACEHOLDER_J = 0.5e-6           # m⁴
 const _PLACEHOLDER_ρ = 7849.0           # kg/m³, 490 pcf
 
-const _FRAME_FREE = [true, true, true, false, false, false]
 const _ALL_FIXED = [false, false, false, false, false, false]
 const _ALL_FREE = [true, true, true, true, true, true]
 
@@ -227,7 +226,7 @@ end
     # ── (2–3) One story-0 wall. Its frame slot is a zero section. The
     # neighboring beam stays on the placeholder. Shells are ShellTri3 :wall.
     # Bottom corners reuse supports (all false). Top corners reuse the roof
-    # frame (translations free, rotations fixed). Mid-height and mid-length
+    # frame; a node a shell touches has every rotation free. Mid-height and mid-length
     # nodes are created free — including the node on the base elevation.
     @testset "wall edge is a zero frame; shells are free or reused" begin
         struc, eidx = _walled()
@@ -274,29 +273,31 @@ end
         sup = only(_near(frames, w.x1, w.y1, z_bot))
         upper = only(_near(frames, w.x1, w.y1, z_top))
         @test sup.dof == _ALL_FIXED
-        @test upper.dof == _FRAME_FREE
+        @test upper.dof == _ALL_FREE
         @test only(_near(shell_nodes, w.x1, w.y1, z_bot)) === sup
         @test only(_near(shell_nodes, w.x1, w.y1, z_top)) === upper
 
         # Midpoint of the pier base: no skeleton vertex, so the mesh creates it.
-        # It sits on the base elevation and is still free.
+        # It is at grade, so the base restraint fixes all six degrees of freedom.
         mx = (w.x1 + w.x2) / 2
         my = (w.y1 + w.y2) / 2
         mid = only(_near(shell_nodes, mx, my, z_bot; atol=1e-6))
         @test mid.id == :wall
-        @test mid.dof == _ALL_FREE
+        @test mid.dof == _ALL_FIXED
         @test all(n -> n !== mid, frames)
 
         created = [n for n in shell_nodes if n.id == :wall]
         # Four corners reuse the frame. Every other grid node is created.
         n_grid = (WALL_MESH_DIV + 1) * (WALL_MESH_ROWS + 1)
         @test length(created) == n_grid - 4
-        @test all(n -> n.dof == _ALL_FREE, created)
+        base_created = [n for n in created if abs(ustrip(u"m", n.position[3]) - z_bot) <= 1e-6]
+        @test length(base_created) == WALL_MESH_DIV - 1
+        @test all(n -> n.dof == _ALL_FIXED, base_created)
+        @test all(n -> n.dof == _ALL_FREE, setdiff(created, base_created))
 
         n_support = length(get(skel.groups_vertices, :support, Int[]))
         fixed_nodes = [n for n in model.nodes if n.dof == _ALL_FIXED]
-        @test length(fixed_nodes) == n_support
-        @test all(n -> n.id != :wall, fixed_nodes)
+        @test length(fixed_nodes) == n_support + length(base_created)
     end
 
     # ── (4) 1 mm node share, in 3D. 0.9 mm reuses the frame node.
@@ -335,7 +336,7 @@ end
         @test sn !== fn
         @test all(n -> n !== sn, frames)
         @test sn.id == :wall
-        @test sn.dof == _ALL_FREE
+        @test sn.dof == _ALL_FIXED
         @test _dist(fn, x0, y0, z_bot) <= 1e-8
     end
 
@@ -458,8 +459,6 @@ end
 
         # One horizontal force on a free node above the pier base. The story
         # cut is the wall plus every frame element that crosses that elevation.
-        # Roof frame nodes have their rotations fixed, so those support
-        # moments are part of the free body above the cut.
         pier = mesh.piers[1]
         z = minimum(ustrip(u"m", nd.position[3]) for sh in pier.shells for nd in sh.nodes)
         loaded = nothing

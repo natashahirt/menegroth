@@ -1,7 +1,7 @@
 # Focused check for the Phase-5 framing critic fixes:
 #   - axis alternation (level 3+ perpendicular)
 #   - level-1 axis/count deserialization
-#   - end_fixity / catalog_override schema plumbing
+#   - end_fixity schema plumbing
 #   - timber family recognition (safe, no fabricated preset)
 #   - incremental-engine state-leak guard (prepare_engine works on a copy)
 #

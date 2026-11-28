@@ -34,15 +34,15 @@
 # bearing / joist-hanger connections that transmit shear only, so both ends are
 # pinned and the connection provides no torsional restraint (`torsion_released =
 # false` => the release resolver returns `:freefree`, all rotations released).
-# Timber girders (glulam / heavy-timber primary members) are modeled with
-# moment-continuous (fixed) ends by default; a designer overrides via the
-# `Segment` release symbols for a genuinely pinned girder. These reflect common
-# NDS-practice connection idealizations; they are not read from a code clause.
+# Timber girders and beams (glulam / heavy-timber members) frame into columns and
+# each other through hangers, knife plates, or bolted brackets, which are also
+# modeled as pinned; a designer overrides via the `Segment` release symbols for a
+# genuine moment connection. These reflect common NDS-practice connection
+# idealizations; they are not read from a code clause.
 
 default_release(::Val{:joist}, ::Timber, ::Val{:gravity}) = (:pinned, :pinned)
-default_release(::Val{:girder}, ::Timber, ::Val{:gravity}) = (:fixed, :fixed)
-# Timber `:beam` and `:girder` share the same engineered-timber frame defaults.
-default_release(::Val{:beam}, ::Timber, ::Val{:gravity}) = (:fixed, :fixed)
+default_release(::Val{:girder}, ::Timber, ::Val{:gravity}) = (:pinned, :pinned)
+default_release(::Val{:beam}, ::Timber, ::Val{:gravity}) = (:pinned, :pinned)
 
 default_torsion_released(::Val{:joist}, ::Timber) = false
 default_torsion_released(::Val{:girder}, ::Timber) = false

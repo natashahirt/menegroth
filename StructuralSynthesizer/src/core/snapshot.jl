@@ -38,6 +38,10 @@ function snapshot!(struc::BuildingStructure{T, A, P}, key::Symbol = :prepare) wh
         P[cell.self_weight for cell in struc.cells],
         P[cell.live_load for cell in struc.cells],
         slab_snaps,
+        copy(struc.stage_diagnostics),
+        copy(struc.frame_section_floors),
+        Dict{UInt64, Vector{Tuple{String, Any}}}(
+            gid => copy(rows) for (gid, rows) in struc.frame_floor_demands),
     )
     return struc
 end
@@ -51,8 +55,9 @@ Restores column dimensions/sections, beam sections, cell loads, and slab
 results/design details so the structure is ready for another design run
 without re-initialization.
 
-`geometry_is_centerline` is forwarded to `update_structural_offsets!` so
-restored column dimensions produce the correct structural centerline offsets.
+`geometry_is_centerline` is forwarded to `update_structural_offsets!`.
+Restored column dimensions do not move the grid. The slab edge is recomputed
+from the restored sizes.
 
 See also: [`snapshot!`](@ref), [`sync_asap!`](@ref)
 """
@@ -90,6 +95,15 @@ function restore!(struc::BuildingStructure, key::Symbol = :prepare;
         # `_populate_slab_results!` copies those onto SlabDesignResult;
         # restoring the tuple keeps the FEA-fallback notice on the slab.
         hasproperty(slab, :design_details) && (slab.design_details = ss.design_details)
+    end
+
+    empty!(struc.stage_diagnostics)
+    merge!(struc.stage_diagnostics, snap.stage_diagnostics)
+    empty!(struc.frame_section_floors)
+    merge!(struc.frame_section_floors, snap.frame_section_floors)
+    empty!(struc.frame_floor_demands)
+    for (gid, rows) in snap.frame_floor_demands
+        struc.frame_floor_demands[gid] = copy(rows)
     end
 
     # Recompute structural offsets for restored column dimensions

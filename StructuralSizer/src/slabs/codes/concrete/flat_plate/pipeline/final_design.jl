@@ -1,4 +1,35 @@
 """
+    _efm_moments_at_face(r::MomentAnalysisResult) -> MomentAnalysisResult
+
+Design negative moments at the ACI 318-11 §13.7.7.1 critical section
+(corpus: aci-318-11, page 262). EFM fills `M_neg_ext_face`/`M_neg_int_face`
+from each span's statics; this moves them into `M_neg_ext`/`M_neg_int` and
+clears the face fields so the step cannot be applied twice. A result
+without face moments keeps its centerline values, which are larger.
+
+`M_pos` stays the frame's own midspan value: §13.7.7.1 moves the critical
+section for negative moment only.
+"""
+function _efm_moments_at_face(r::MomentAnalysisResult)
+    isnothing(r.M_neg_ext_face) && return r
+    M_unit = unit(r.M_neg_ext)
+    return MomentAnalysisResult(
+        r.M0, uconvert(M_unit, r.M_neg_ext_face), uconvert(M_unit, r.M_neg_int_face),
+        r.M_pos, r.qu, r.qD, r.qL, r.l1, r.l2, r.ln, r.c_avg,
+        r.column_moments, r.column_shears, r.unbalanced_moments, r.Vu_max;
+        secondary = r.secondary,
+        fea_Δ_panel = r.fea_Δ_panel,
+        pattern_loading = r.pattern_loading,
+        M_wall_ext = r.M_wall_ext,
+        M_wall_int = r.M_wall_int,
+        stub_moments_below = r.stub_moments_below,
+        stub_moments_above = r.stub_moments_above,
+        wall_transfer = r.wall_transfer,
+        wall_faces = r.wall_faces,
+    )
+end
+
+"""
     _run_final_design(method, struc, slab, columns, moment_results, secondary_results,
                        h, d, fc, fy, cover, sw_estimate, n_cols, punching_local,
                        local_to_global, column_opts, column_result, Pu, opts, iter,
@@ -21,78 +52,12 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
     rejected = _flat_plate_column_pm_failure(column_result, h, iter, drop_panel)
     isnothing(rejected) || return rejected
 
-    # ─── Face-of-Support Moment Reduction (ACI 8.11.6.1) ───
+    # ─── Face-of-Support Moments (ACI 318-11 §13.7.7.1) ───
     if method isa EFM
-        _c1_ext_min = typemax(typeof(columns[1].c1))
-        _c1_int_min = typemax(typeof(columns[1].c1))
-        _c2_ext_min = typemax(typeof(columns[1].c2))
-        _c2_int_min = typemax(typeof(columns[1].c2))
-        _has_ext = false; _has_int = false
-        for _col in columns
-            if _col.position == :interior
-                _col.c1 < _c1_int_min && (_c1_int_min = _col.c1)
-                _col.c2 < _c2_int_min && (_c2_int_min = _col.c2)
-                _has_int = true
-            else
-                _col.c1 < _c1_ext_min && (_c1_ext_min = _col.c1)
-                _col.c2 < _c2_ext_min && (_c2_ext_min = _col.c2)
-                _has_ext = true
-            end
-        end
-        c1_ext = _has_ext ? _c1_ext_min : moment_results.c_avg
-        c1_int = _has_int ? _c1_int_min : moment_results.c_avg
-        Vu_face = moment_results.Vu_max
-        M_unit = unit(moment_results.M0)
-        
-        # Primary direction reduction (span l1)
-        M_neg_ext_reduced = uconvert(M_unit, face_of_support_moment(
-            moment_results.M_neg_ext, Vu_face, c1_ext, moment_results.l1))
-        M_neg_int_reduced = uconvert(M_unit, face_of_support_moment(
-            moment_results.M_neg_int, Vu_face, c1_int, moment_results.l1))
-
-        # For EFM, the frame analysis already produces a consistent set of moments
-        # (M_neg_left, M_pos, M_neg_right) that satisfy equilibrium based on centerline
-        # geometry. When we reduce support moments to face-of-support, we should NOT
-        # recalculate M_pos from M0 because:
-        #   1. M0 in MomentAnalysisResult uses clear span (ln) per ACI 318-11 §13.6.2.2
-        #   2. The frame analysis uses centerline span (l1) internally
-        #   3. Re-deriving M_pos from clear-span M0 breaks the frame's equilibrium
-        # The original M_pos from the frame analysis remains valid and conservative.
-        # (ACI 8.11.6.1 only permits reducing support moments, not increasing span moments.)
-
-        verbose && @debug "FACE-OF-SUPPORT MOMENT REDUCTION (ACI 8.11.6.1)" c1_ext=c1_ext c1_int=c1_int M_neg_ext_cl=moment_results.M_neg_ext M_neg_ext_face=M_neg_ext_reduced M_neg_int_cl=moment_results.M_neg_int M_neg_int_face=M_neg_int_reduced
-
-        moment_results = MomentAnalysisResult(
-            moment_results.M0, M_neg_ext_reduced, M_neg_int_reduced,
-            moment_results.M_pos, moment_results.qu, moment_results.qD, moment_results.qL,
-            moment_results.l1, moment_results.l2, moment_results.ln, moment_results.c_avg,
-            moment_results.column_moments, moment_results.column_shears,
-            moment_results.unbalanced_moments, moment_results.Vu_max;
-            pattern_loading = moment_results.pattern_loading,
-        )
-
-        # Secondary direction reduction (span l2)
-        if !isnothing(secondary_results)
-            # Use column dimensions in the secondary span direction (c2)
-            c2_ext = _has_ext ? _c2_ext_min : secondary_results.c_avg
-            c2_int = _has_int ? _c2_int_min : secondary_results.c_avg
-            Vu_face_sec = secondary_results.Vu_max
-            
-            M_neg_ext_reduced_sec = uconvert(M_unit, face_of_support_moment(
-                secondary_results.M_neg_ext, Vu_face_sec, c2_ext, secondary_results.l1))
-            M_neg_int_reduced_sec = uconvert(M_unit, face_of_support_moment(
-                secondary_results.M_neg_int, Vu_face_sec, c2_int, secondary_results.l1))
-            
-            # Same reasoning as primary direction: keep original M_pos from frame analysis
-            secondary_results = MomentAnalysisResult(
-                secondary_results.M0, M_neg_ext_reduced_sec, M_neg_int_reduced_sec,
-                secondary_results.M_pos, secondary_results.qu, secondary_results.qD, secondary_results.qL,
-                secondary_results.l1, secondary_results.l2, secondary_results.ln, secondary_results.c_avg,
-                secondary_results.column_moments, secondary_results.column_shears,
-                secondary_results.unbalanced_moments, secondary_results.Vu_max;
-                pattern_loading = secondary_results.pattern_loading,
-            )
-        end
+        verbose && @debug "FACE-OF-SUPPORT MOMENTS (ACI 318-11 §13.7.7.1)" M_neg_ext_cl=moment_results.M_neg_ext M_neg_ext_face=moment_results.M_neg_ext_face M_neg_int_cl=moment_results.M_neg_int M_neg_int_face=moment_results.M_neg_int_face
+        moment_results = _efm_moments_at_face(moment_results)
+        isnothing(secondary_results) ||
+            (secondary_results = _efm_moments_at_face(secondary_results))
     end
 
     # ─── Strip Reinforcement Design ───
@@ -157,11 +122,22 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
                 _setup.span_axis; rebar_axis=_rebar_ax,
                 torsion_discount=_td, verbose=verbose)
         end
+        _fea_col_strips = _fea_strips
+        _fea_strips = _add_wall_face_to_strips(
+            _fea_strips, moment_results, struc, slab, columns,
+            _setup.span_axis, _setup.l1, _setup.l2, _βt_design)
         design_strip_reinforcement_fea(_fea_strips, _setup.l1, _setup.l2, h, d, fc, fy, cover;
-                                        verbose=verbose)
+            verbose=verbose,
+            drop_stations=_fea_drop_stations(
+                _fea_col_strips, _fea_strips, moment_results, columns, d,
+                _setup.l1, _setup.l2, drop_panel; βt=_βt_design,
+                struc=struc, slab=slab, span_axis=_setup.span_axis))
     else
         design_strip_reinforcement(moment_results, columns, h, d, fc, fy, cover;
-                                    βt=_βt_design, verbose=verbose)
+                                    βt=_βt_design, verbose=verbose,
+                                    struc=struc, slab=slab,
+                                    span_axis=_get_span_axis(slab),
+                                    drop=drop_panel)
     end
 
     # Check for inadequate section (Whitney block solution failed)
@@ -239,11 +215,23 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
                     _sec_setup.span_axis; rebar_axis=_sec_rebar_ax,
                     torsion_discount=_td_sec, verbose=verbose)
             end
+            _sec_col_strips = _sec_fea_strips
+            _sec_fea_strips = _add_wall_face_to_strips(
+                _sec_fea_strips, secondary_results, struc, slab, columns,
+                _sec_setup.span_axis, _sec_setup.l1, _sec_setup.l2, _βt_design)
             design_strip_reinforcement_fea(_sec_fea_strips, _sec_setup.l1, _sec_setup.l2, h, d_inner, fc, fy, cover;
-                                            verbose=verbose)
+                verbose=verbose,
+                drop_stations=_fea_drop_stations(
+                    _sec_col_strips, _sec_fea_strips, secondary_results, columns, d_inner,
+                    _sec_setup.l1, _sec_setup.l2, _transposed_drop(drop_panel);
+                    βt=_βt_design, struc=struc, slab=slab, span_axis=_sec_setup.span_axis))
         else
+            _sec_ax = _get_span_axis(slab)
             design_strip_reinforcement(secondary_results, columns, h, d_inner, fc, fy, cover;
-                                        βt=_βt_design, verbose=verbose)
+                                        βt=_βt_design, verbose=verbose,
+                                        struc=struc, slab=slab,
+                                        span_axis=(-_sec_ax[2], _sec_ax[1]),
+                                        drop=_transposed_drop(drop_panel))
         end
     else
         nothing
@@ -261,10 +249,35 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
         )
     end
 
-    # ─── Moment Transfer Reinforcement (ACI 8.4.2.3) ───
+    # ─── Secondary One-Way Shear (ACI 318-19 §22.5) on the inner-layer depth ───
+    if _has_frame_strip(secondary_results)
+        sec_shear = check_one_way_shear(secondary_results, d_inner, fc; h = h, fy = fy,
+            λ = Float64(isnothing(opts.λ) ? material.concrete.λ : opts.λ),
+            φ_shear = opts.φ_shear, verbose = verbose)
+        if !sec_shear.ok
+            verbose && @warn "Secondary one-way shear fails" ratio = sec_shear.ratio
+            return (
+                converged        = false,
+                failure_reason   = "one_way_shear",
+                failing_check    = "one_way_shear_secondary",
+                h_current        = h,
+                needs_more_depth = true,
+            )
+        end
+    end
+
+    # ─── Moment Transfer Reinforcement (ACI 318-11 §13.5.3) ───
+    d_punch = isnothing(drop_panel) ? d : d + (total_depth_at_drop(h, drop_panel) - h)
     transfer = _pipeline_transfer_reinforcement(
         columns, moment_results, secondary_results, rebar_design, h, d, fc, fy;
-        verbose = verbose)
+        verbose = verbose,
+        punching = _column_face_punching(punching_local, columns, d_punch, drop_panel),
+        d_punch = d_punch, drop = drop_panel,
+        secondary_rebar_design = secondary_rebar_design,
+        span_axis = _get_span_axis(slab),
+        d_secondary = d_inner,
+        λ = Float64(isnothing(opts.λ) ? material.concrete.λ : opts.λ),
+        φ_shear = opts.φ_shear)
     if !transfer.ok
         verbose && @warn "Transfer reinforcement failed: section inadequate at column $(transfer.column)"
         return (
@@ -277,27 +290,47 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
     end
     transfer_results = transfer.results
 
-    # ─── Structural Integrity Reinforcement (ACI 8.7.4.2) ───
-    cell = struc.cells[first(slab.cell_indices)]
-    integrity = integrity_reinforcement(cell.area, cell.sdl + sw_estimate, cell.live_load, fy)
-    cs_pos_reinf = rebar_design.column_strip_reinf[2]
-    integrity_check = check_integrity_reinforcement(cs_pos_reinf.As_provided, integrity.As_integrity)
-
-    verbose && @debug "INTEGRITY REINFORCEMENT (ACI 8.7.4.2)" As_integrity=integrity.As_integrity As_bottom=cs_pos_reinf.As_provided ok=integrity_check.ok utilization=round(integrity_check.utilization, digits=2)
-
-    if !integrity_check.ok
-        cs_width = rebar_design.column_strip_width
-        # ACI 318-11 §13.3.2 + §7.6.5 — slab-thickness-dependent s_max
-        bumped = select_bars(integrity.As_integrity, cs_width;
-                             max_spacing=max_bar_spacing(h))
-        rebar_design.column_strip_reinf[2] = StripReinforcement(
-            :pos, cs_pos_reinf.Mu, cs_pos_reinf.As_reqd, cs_pos_reinf.As_min,
-            uconvert(u"m^2", bumped.As_provided), bumped.bar_size,
-            uconvert(u"m", bumped.spacing), bumped.n_bars,
-            true  # section_adequate
+    # ACI 318-11 §12.12.1 — top bars at a wall face must develop in the wall.
+    # A failure is recorded. It does not increase the slab thickness.
+    _anch_ax = _get_span_axis(slab)
+    wall_anchorage = wall_face_bar_anchorage(
+        rebar_design, moment_results, struc, slab, columns,
+        fc, fy, material.concrete.λ, cover, _anch_ax)
+    if wall_anchorage !== nothing && !wall_anchorage.ok
+        verbose && @warn "Slab top bars do not develop in the wall" bar=wall_anchorage.bar_size available=wall_anchorage.available ldh=wall_anchorage.ldh
+        return (
+            converged        = false,
+            failure_reason   = "wall_bar_development",
+            failing_check    = "wall_bar_development",
+            h_current        = h,
+            needs_more_depth = false,
+            wall_anchorage   = wall_anchorage,
         )
-        verbose && @debug "Integrity reinforcement governs — bumped midspan bottom steel" As_before=cs_pos_reinf.As_provided As_after=bumped.As_provided As_integrity=integrity.As_integrity bar_size=bumped.bar_size n_bars=bumped.n_bars
     end
+    if !isnothing(secondary_rebar_design) && !isnothing(secondary_results)
+        sec_anchorage = wall_face_bar_anchorage(
+            secondary_rebar_design, secondary_results, struc, slab, columns,
+            fc, fy, material.concrete.λ, cover, (-_anch_ax[2], _anch_ax[1]))
+        if sec_anchorage !== nothing && !sec_anchorage.ok
+            verbose && @warn "Secondary top bars do not develop in the wall" bar=sec_anchorage.bar_size
+            return (
+                converged        = false,
+                failure_reason   = "wall_bar_development",
+                failing_check    = "wall_bar_development_secondary",
+                h_current        = h,
+                needs_more_depth = false,
+                wall_anchorage   = sec_anchorage,
+            )
+        end
+        wall_anchorage === nothing && (wall_anchorage = sec_anchorage)
+    end
+
+    # ─── Structural Integrity Bottom Bars (ACI 318-11 §13.3.8.5) ───
+    integrity_bottom_bars!(rebar_design, h)
+    secondary_rebar_design === nothing || integrity_bottom_bars!(secondary_rebar_design, h)
+    integrity_check = design_integrity_check(rebar_design, secondary_rebar_design)
+    integrity = integrity_check
+    verbose && @debug "INTEGRITY (ACI 318-11 §13.3.8.5)" integrity_check
 
     # ─── Update Cell Self-Weights ───
     sw_final = slab_sw(h)
@@ -339,16 +372,26 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
         local_to_global[i] => punching_local[i] for i in 1:n_cols
     )
 
+    face_parts, face_parts_sec = _final_wall_face_parts(
+        method, analysis_cache, struc, slab, columns, h, γ_concrete,
+        moment_results, secondary_results)
     slab_result = build_slab_result(
         h, sw_final, moment_results, rebar_design,
         deflection_result, punching_results;
         γ_concrete = γ_concrete * GRAVITY,
         secondary_rebar_design = secondary_rebar_design,
+        secondary_results = secondary_results,
+        wall_face_parts = face_parts,
+        wall_face_parts_secondary = face_parts_sec,
     )
 
     column_results = build_column_results(
         struc, columns, column_result,
-        Pu, moment_results.unbalanced_moments, punching_results
+        Pu, moment_results.unbalanced_moments, punching_results;
+        Mu_secondary = isnothing(secondary_results) ? nothing :
+                       secondary_results.unbalanced_moments,
+        stubs = stub_moments(moment_results),
+        stubs_secondary = stub_moments(secondary_results),
     )
 
     return (
@@ -365,7 +408,40 @@ function _run_final_design(method, struc, slab, columns, moment_results, seconda
         # Moment analyses at the converged thickness (both directions), for reporting
         moment_results=moment_results,
         secondary_results=secondary_results,
+        wall_anchorage=wall_anchorage,
     )
+end
+
+"""Wall-face parts stored on a moment result. Empty when that result has none."""
+function _stored_wall_faces(results)
+    results === nothing && return SlabWallFaceMoment[]
+    hasproperty(results, :wall_faces) || return SlabWallFaceMoment[]
+    return results.wall_faces
+end
+
+"""
+    _final_wall_face_parts(method, cache, struc, slab, columns, h, γ_concrete,
+                           moment_results, secondary_results) -> (primary, secondary)
+
+Dead and live wall-face parts in each span direction.
+
+A shell analysis reads them from the cache at the converged thickness. Direct
+design and the equivalent frame read the parts stored on the moment result.
+Both are empty when that direction has no wall or no dead/live split.
+"""
+function _final_wall_face_parts(method, cache, struc, slab, columns, h, γ_concrete,
+                                moment_results, secondary_results)
+    if !(method isa FEA && cache isa FEAModelCache && cache.initialized)
+        return _stored_wall_faces(moment_results), _stored_wall_faces(secondary_results)
+    end
+    ax = _moment_analysis_setup(struc, slab, columns, h, γ_concrete).span_axis
+    primary = _paired_wall_face_parts(cache, struc, slab, ax,
+                                      _stored_wall_moment(moment_results))
+    secondary_results === nothing && return primary, SlabWallFaceMoment[]
+    sec_ax = _secondary_moment_analysis_setup(struc, slab, columns, h, γ_concrete).span_axis
+    secondary = _paired_wall_face_parts(cache, struc, slab, sec_ax,
+                                        _stored_wall_moment(secondary_results))
+    return primary, secondary
 end
 
 """
@@ -374,8 +450,8 @@ end
 
 Crossing-beam deflection at the converged thickness, for reporting next to
 the FEA nodal check. `fea_Δ_panel` is cleared so `check_two_way_deflection`
-takes the PCA frame → strip → panel path with Branson `Ie` (the path DDM
-and EFM use). ACI 318-11 §9.5.2.6 (corpus: aci-318-11, page 132).
+takes the PCA frame → strip → panel path with ACI 318-19 Table 24.2.3.5 `Ie`
+(the path DDM and EFM use).
 
 Returns `nothing` if the check cannot be evaluated. The caller does not
 use the result to change thickness.
@@ -395,22 +471,11 @@ function _crossing_beam_deflection(moment_results, h, d, fc, fy, material, slab,
         fea_Δ_panel = nothing,
     )
     try
-        kwargs = (
-            limit_type = opts.deflection_limit,
-            ρ_prime = ρ_prime,
-            deflection_Ie_method = :branson,
-        )
-        if !isnothing(drop_panel)
-            return check_two_way_deflection(
-                proxy, h, d, fc, fy, Es, Ecs, slab.spans, γ_concrete, columns,
-                drop_panel; kwargs...,
-            )
-        else
-            return check_two_way_deflection(
-                proxy, h, d, fc, fy, Es, Ecs, slab.spans, γ_concrete, columns;
-                kwargs...,
-            )
-        end
+        return two_way_deflection(proxy, h, d, fc, fy, Es, Ecs, slab.spans, γ_concrete,
+                                  columns; drop_panel = drop_panel,
+                                  λ = isnothing(opts.λ) ? material.concrete.λ : opts.λ,
+                                  limit_type = opts.deflection_limit, ρ_prime = ρ_prime,
+                                  deflection_Ie_method = :aci318_19)
     catch e
         @debug "Crossing-beam deflection (report only) failed" exception=(e, catch_backtrace())
         return nothing

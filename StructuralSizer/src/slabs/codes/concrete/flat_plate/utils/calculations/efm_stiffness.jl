@@ -41,7 +41,8 @@ end
 
 Gross moment of inertia for column section.
 
-- Rectangular/square: Iᶜ = c₁ × c₂³ / 12
+- Rectangular/square: Iᶜ = c₂ × c₁³ / 12, bending in the frame plane, so the
+  depth is c₁ along the span (ACI 318-11 §13.7.4)
 - Circular: Iᶜ = π D⁴ / 64  (c1 = c2 = D)
 
 # Arguments  
@@ -60,7 +61,7 @@ function column_moment_of_inertia(c1::Length, c2::Length; shape::Symbol=:rectang
     if shape == :circular
         return circular_column_Ic(c1)
     else
-        return c1 * c2^3 / 12
+        return c2 * c1^3 / 12
     end
 end
 
@@ -73,11 +74,11 @@ Cross-sectional constant C for torsional member per ACI 318-11 Eq. (13-6).
 
 For flat plate without beams, the torsional member is a slab strip with:
 - x = slab thickness h
-- y = column dimension c2 (width of torsional member)
+- y = column dimension c1 in the span direction (§13.7.5.1(a))
 
 # Arguments
 - `x`: Smaller dimension of rectangular section (typically h)
-- `y`: Larger dimension of rectangular section (typically c2)
+- `y`: Larger dimension of rectangular section (typically c1)
 
 # Returns
 Torsional constant C (Length⁴)
@@ -314,45 +315,84 @@ function fixed_end_moment_FEM(qu::Pressure, l2::Length, l1::Length; m_factor::Fl
 end
 
 """
-    face_of_support_moment(M_centerline, V, c, l1)
+    efm_span_hogging(x, M_left, M_right, w, l1; drop=nothing)
 
-Reduce centerline moment to face-of-support for design per ACI 318-11 §13.7.7.1.
+Hogging moment at distance `x` from the left centerline of one
+equivalent-frame span, from the span's statics. `M_left` and `M_right` are
+the hogging magnitudes at the centerlines and `w` is the uniform line load.
+Sagging comes back negative.
 
-    M_face = M_centerline - V × (c/2)
+`drop = (w, a_left, a_right)` adds a flat slab's drop self-weight: line
+load `drop.w` from the left centerline to `a_left` and from `l1 − a_right`
+to the right centerline.
 
-But not less than M at 0.175×l1 from column center.
-
-# Arguments
-- `M_centerline`: Moment at column centerline from frame analysis
-- `V`: Shear at support (reaction)
-- `c`: Column dimension in span direction
-- `l1`: Span length
-
-# Returns
-Design moment at face of support
-
-# Reference
-- ACI 318-11 §13.7.7.1
-- StructurePoint Example: M_cl = 83.91 kip-ft, V = 26.39 kip, c = 16/12 ft
-  → M_face = 83.91 - 26.39 × (16/12/2) = 66.32 ft-kip
-  
-# Note
-The 0.175×l1 limit ensures the design moment is taken at a reasonable
-distance from the column center for very large columns.
+    V_left = w l1 / 2 + (M_left − M_right) / l1
+             + w_d [a_L (l1 − a_L / 2) + a_R² / 2] / l1
+    M(x)   = M_left − V_left x + w x² / 2 + (drop load left of x) × (its lever arm)
 """
-function face_of_support_moment(M_centerline, V, c::Length, l1::Length)
-    # Distance to face of support
-    d_face = c / 2
-    
-    # Maximum distance for moment reduction (ACI 318-11 §13.7.7.1)
-    d_max = 0.175 * l1
-    
-    # Use smaller of face distance or max distance
-    d_use = min(d_face, d_max)
-    
-    # Reduce moment by V × d
-    M_face = M_centerline - V * d_use
-    
-    return M_face
+function efm_span_hogging(x, M_left, M_right, w, l1; drop = nothing)
+    V = w * l1 / 2 + (M_left - M_right) / l1
+    M = M_left - V * x + w * x^2 / 2
+    drop === nothing && return M
+    wd, aL, aR = drop.w, drop.a_left, drop.a_right
+    M -= wd * (aL * (l1 - aL / 2) + aR^2 / 2) / l1 * x
+    M += x <= aL ? wd * x^2 / 2 : wd * aL * (x - aL / 2)
+    s = x - (l1 - aR)
+    s > zero(s) && (M += wd * s^2 / 2)
+    return M
 end
+
+"""The same drop seen from the other end of the span."""
+_mirror_drop(drop) = drop === nothing ? nothing :
+    (w = drop.w, a_left = drop.a_right, a_right = drop.a_left)
+
+"""
+    efm_midspan_moment(M_left, M_right, w, l1; drop=nothing)
+
+Sagging moment at midspan, `−efm_span_hogging(l1/2, …)`. Without a drop
+this is `w l1² / 8 − (M_left + M_right) / 2`.
+"""
+efm_midspan_moment(M_left, M_right, w, l1; drop = nothing) =
+    -efm_span_hogging(l1 / 2, M_left, M_right, w, l1; drop)
+
+"""
+    span_face_moments(M_left, M_right, w, l1, x_left, x_right; drop=nothing)
+        -> (M_face_left, M_face_right)
+
+Negative moments at the critical sections of one equivalent-frame span,
+from the span's own statics ([`efm_span_hogging`](@ref)). `M_left` and
+`M_right` are the hogging magnitudes at the column centerlines, `w` is the
+span's uniform line load, `x_left`, `x_right` are the distances from each
+centerline to its critical section, and `drop` is a flat slab's drop line
+load.
+
+    V_left  = w l1 / 2 + (M_left − M_right) / l1
+    M_face  = M_left − V_left x + w x² / 2
+
+The right end mirrors this. A face that falls in the sagging region
+carries no negative moment and returns zero.
+
+StructurePoint's flat-plate EFM example (first interior support, 16 in
+column, w = 0.193 ksf × 14 ft, V = 26.39 kip, M_cl = 83.91 kip-ft) reports
+66.99 kip-ft at the face; `M_cl − V x` alone gives 66.32.
+"""
+function span_face_moments(M_left, M_right, w, l1::Length, x_left::Length, x_right::Length;
+                           drop = nothing)
+    face_left = efm_span_hogging(x_left, M_left, M_right, w, l1; drop)
+    face_right = efm_span_hogging(x_right, M_right, M_left, w, l1; drop = _mirror_drop(drop))
+    z = zero(M_left)
+    return (max(uconvert(unit(M_left), face_left), z),
+            max(uconvert(unit(M_left), face_right), z))
+end
+
+"""
+    efm_face_offset(c1, l1) -> Length
+
+Distance from a column centerline to the critical section for negative
+moment: the face of the support, but not farther than 0.175 l1 from the
+center of the column. ACI 318-11 §13.7.7.1 (corpus: aci-318-11, page 262).
+`c1` is the support dimension along the span; circular and polygonal
+supports are already the equivalent square (§13.7.7.3, same page).
+"""
+efm_face_offset(c1::Length, l1::Length) = min(c1 / 2, 0.175 * l1)
 

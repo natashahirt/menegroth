@@ -249,12 +249,24 @@ end
         result = StructuralSizer.design_footing(
             StructuralSizer.StripFooting(), [d1, d2], positions, soil; opts)
         # design_footing must have used signed x_bar, not the zeroed-tension layout.
-        @test result.L_ftg ≈ L_signed atol=opts.width_increment
+        # Without the development check the plan is exactly the signed layout.
+        plan_only = StructuralSizer.design_footing(
+            StructuralSizer.StripFooting(), [d1, d2], positions, soil;
+            opts = StructuralSizer.StripParams(min_depth=12.0u"inch", check_development=false))
+        @test plan_only.L_ftg ≈ L_signed atol=opts.width_increment
+        # The tension column sits 1 ft from the end, so the longitudinal bars
+        # cannot develop from its face (ACI 318-11 §15.6.3, corpus: aci-318-11,
+        # page 274) and the strip grows in whole width increments.
+        growth = ustrip(u"inch", result.L_ftg - plan_only.L_ftg) /
+                 ustrip(u"inch", opts.width_increment)
+        @test growth >= 0
+        @test growth ≈ round(growth) atol=1e-6
         @test result.L_ftg != L_zeroed
         @test result.L_ftg > 50.0u"ft"
-        # Leftover: tensile interface steel is stored, not @info-only
-        # (ACI 318-11 §15.8.1.2(b), corpus: aci-318-11, page 275).
-        As_tensile_oracle = abs(d2.Pu) / (opts.ϕ_bearing * opts.material.rebar.Fy)
+        # The tension tie is tension-controlled, so φ = 0.90
+        # (ACI 318-11 §9.3.2.1, corpus: aci-318-11, page 126), not the
+        # bearing factor 0.65. The tie itself is §15.8.1.2(b), page 275.
+        As_tensile_oracle = abs(d2.Pu) / (opts.ϕ_flexure * opts.material.rebar.Fy)
         @test result.As_tensile ≈ uconvert(u"m^2", As_tensile_oracle) rtol=1e-8
 
         # Isolated all-uplift still skips; a mixed-sign group must not.
@@ -303,7 +315,12 @@ end
         w_incr = opts.strip_params.width_increment
         L_signed = ceil(ustrip(u"inch", L_signed) / ustrip(u"inch", w_incr)) * w_incr
         L_zeroed = 2 * (maximum(positions) - minimum(positions) + 1.0u"ft")
-        @test r.L_ftg ≈ uconvert(u"m", L_signed) atol=w_incr
+        # Development from the tension column face (ACI 318-11 §15.6.3,
+        # corpus: aci-318-11, page 274) can only lengthen the signed layout,
+        # in whole width increments.
+        growth = ustrip(u"inch", r.L_ftg - L_signed) / ustrip(u"inch", w_incr)
+        @test growth > -1e-6
+        @test growth ≈ round(growth) atol=1e-6
         @test r.L_ftg != uconvert(u"m", L_zeroed)
         @test r.L_ftg > 50.0u"ft"
         @test r.n_columns == 2
@@ -488,5 +505,33 @@ end
         @test r_x.utilization != r_y.utilization || r_x.D != r_y.D
         ux, uy = StructuralSizer.utilization(r_x), StructuralSizer.utilization(r_y)
         @test StructuralSizer.utilization(r_gov) ≥ max(ux, uy) - 1e-12
+    end
+
+    @testset "Service dead includes unfactored wall self-weight" begin
+        # The stored factored area load is not the service load. Service
+        # pressure is ρ t g, the same load the gravity basic cases add to dead.
+        a = Asap.Node([0.0u"m", 0.0u"m", 0.0u"m"], :free)
+        b = Asap.Node([1.0u"m", 0.0u"m", 0.0u"m"], :free)
+        c = Asap.Node([0.0u"m", 1.0u"m", 3.0u"m"], :free)
+        ρ = 2400.0
+        wall = Asap.ShellTri3((a, b, c), 0.3u"m", 30e9u"Pa", 0.2; id = :wall, ρ = ρ)
+        g = ustrip(u"m/s^2", Asap.GRAVITY)
+        expected = ρ * 0.3 * g * u"Pa"
+        factored = Asap.AreaLoad(Asap.ShellElement[wall], 1.2 * expected;
+                                 id = :wall_self_weight)
+        model = Asap.Model(
+            Asap.Node[a, b, c],
+            Asap.Element{Asap.FixedFixed}[],
+            Asap.ShellTri3[wall],
+            Asap.AbstractLoad[factored],
+        )
+        struc = BuildingStructure(BuildingSkeleton{Float64}())
+        struc.asap_model = model
+        loads = StructuralSynthesizer._unfactored_DL_loads(struc)
+        ww = filter(ld -> ld isa Asap.AreaLoad && ld.id === :wall_self_weight, loads)
+        @test length(ww) == 1
+        @test only(ww) !== factored
+        @test only(ww).pressure ≈ expected
+        @test wall in only(ww).shells
     end
 end

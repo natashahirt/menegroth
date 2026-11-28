@@ -7,12 +7,12 @@ title: 'Plan: complete concrete wall system (unified frame-shell, ASCE 7-22, per
 node_label: Complete wall system plan
 tags: walls,lateral,aci-318-19,asce-7-22,unified-model,performance,incremental,warm-state,plan
 status: active
-open_threads: 15
+open_threads: 19
 success: 'null'
 files: ''
 session_id: sess-8c9dc5f7
 created_at: '2026-10-21T02:02:50.951529+00:00'
-updated_at: '2026-10-22T13:28:09.638898+00:00'
+updated_at: '2026-11-06T19:17:02.600643+00:00'
 has_child_rationale: Forward-looking implementation plan for finishing the wall/LFRS
   workstream begun in plan-w0000001.
 ---

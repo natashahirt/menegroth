@@ -540,3 +540,73 @@ end
     @test I_long > I_short
     @test I_hog ≈ get_I_cracked_negative(fix.section, 1.0u"inch^2"; d_rebar = 3.0u"inch")
 end
+
+@testset "Bar height raises the cracked hogging inertia" begin
+    fix = _per_station_fixture()
+    Asr = 2.0u"inch^2"
+    d_r = 3.0u"inch"
+    ctx = CompositeContext(fix.slab, HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0u"ksi",
+                                                      51.0u"ksi", 490.0u"lb/ft^3"),
+                           30.0u"ft"; neg_moment = true, Asr = Asr, d_rebar = d_r)
+    I_up = composite_negative_inertia(fix.section, ctx)
+    I_down = composite_negative_inertia(fix.section, ctx; d_rebar = 0.0u"m")
+    @test I_up ≈ get_I_cracked_negative(fix.section, Asr; d_rebar = d_r)
+    @test I_up > I_down
+    @test I_down > fix.section.Ix
+end
+
+@testset "Solved composite deflection is not scaled again" begin
+    fix = _per_station_fixture()
+    L = 30.0u"ft"
+    anchor = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0u"ksi", 51.0u"ksi", 490.0u"lb/ft^3")
+    ctx = CompositeContext(fix.slab, anchor, L; shored = true)
+    checker = AISCChecker(; deflection_limit = 1/360, total_deflection_limit = nothing,
+                          max_depth = Inf)
+    cache = StructuralSizer.create_cache(checker, 1)
+    StructuralSizer.precompute_capacities!(checker, cache, [fix.section], fix.material, MinWeight())
+    geom = SteelMemberGeometry(L; Lb = L)
+    # Raw δ/L is L/10000, under L/360. Scaling by a huge I_ref / I_service is not.
+    δ = ustrip(u"m", L) / 10_000
+    demand = MemberDemand(1; Mux = 1.0, Mux_pos = 1.0, Mux_neg = 0.0,
+                          Vu_strong = 1.0, δ_max_LL = δ, I_ref = 1.0e3)
+    field = BeamSaggingField(nothing, nothing, _parabolic_M(1.0e3), Float64[0.0, 1.0], L, nothing)
+    psc_steel = PerStationComposite(ctx, [field])
+    psc_comp = PerStationComposite(ctx, [field], true)
+    @test StructuralSizer.is_feasible(checker, cache, 1, fix.section, fix.material,
+                                      demand, geom, psc_steel) == false
+    @test StructuralSizer.is_feasible(checker, cache, 1, fix.section, fix.material,
+                                      demand, geom, psc_comp) == true
+end
+
+@testset "Secondary sagging region sees H1" begin
+    fix = _per_station_fixture()
+    L = 60.0u"ft"
+    # The long lobe is the larger moment, on a wide flange. The short lobe is
+    # smaller, on a 50 mm flange, so its φMn stays near the steel value. Axial
+    # force then fails H1 on that face while the wide lobe still passes.
+    shape(s) = 0.0 <= s <= 0.15 ? 0.85 * sin(π * s / 0.15) :
+               0.30 <= s <= 1.0 ? sin(π * (s - 0.30) / 0.70) : -0.05
+    long_only(s) = (ss = float(s); 0.30 <= ss <= 1.0 ? sin(π * (ss - 0.30) / 0.70) : -0.02)
+    Mu = 40.0u"kip*ft"
+    demand(s) = Mu * shape(float(s))
+    demand_long(s) = Mu * long_only(float(s))
+    narrow = SideExtentProfile([0.0, 0.2, 0.3, 1.0], [0.05, 0.05, 2.5, 2.5])
+    none = SideExtentProfile([0.0, 1.0], [0.0, 0.0])
+    wide = SideExtentProfile([0.0, 1.0], [2.5, 2.5])
+    anchor = HeadedStudAnchor(0.75u"inch", 5.0u"inch", 65.0u"ksi", 51.0u"ksi", 490.0u"lb/ft^3")
+    ctx = CompositeContext(fix.slab, anchor, L; shored = true)
+    checker = AISCChecker(; deflection_limit = nothing, total_deflection_limit = nothing,
+                          max_depth = Inf)
+    cache = StructuralSizer.create_cache(checker, 1)
+    StructuralSizer.precompute_capacities!(checker, cache, [fix.section], fix.material, MinWeight())
+    geom = SteelMemberGeometry(L; Lb = L)
+    both = BeamSaggingField(narrow, none, demand, Float64[0.0, 1.0], L, nothing)
+    only_long = BeamSaggingField(wide, none, demand_long, Float64[0.0, 1.0], L, nothing)
+    env(Pu) = MemberDemand(1; Mux = 0.0, Mux_pos = 0.0, Mux_neg = 0.0,
+                           Vu_strong = 1.0, Pu_c = Pu)
+    ok(field, Pu) = StructuralSizer.is_feasible(checker, cache, 1, fix.section, fix.material,
+                                                env(Pu), geom, PerStationComposite(ctx, [field]))
+    @test ok(both, 0.0) == true
+    @test ok(only_long, 4.0e4) == true
+    @test ok(both, 4.0e4) == false
+end

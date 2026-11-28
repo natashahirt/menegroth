@@ -17,7 +17,8 @@ function _mock_design(;
     slabs = Dict{Int, StructuralSynthesizer.SlabDesignResult}(),
     params = StructuralSynthesizer.DesignParameters(),
 )
-    skel = StructuralSynthesizer.BuildingSkeleton{Float64}()
+    # Length-typed skeleton so a structure slab can carry Unitful spans.
+    skel = StructuralSynthesizer.BuildingSkeleton{typeof(1.0u"m")}()
     struc = StructuralSynthesizer.BuildingStructure(skel)
     design = StructuralSynthesizer.BuildingDesign(struc, params)
     for (k, v) in columns
@@ -70,6 +71,16 @@ function _mock_rc_column(; dim_in=16, Pu_kip=300.0, Mu_x_kipft=100.0, ratio=0.8)
     )
 end
 
+"""Put a structure slab on `design` whose span makes `limit_in` equal L/360."""
+function _attach_span!(design; limit_in=0.5)
+    span = uconvert(u"m", (limit_in * 360.0) * u"inch")
+    h = 0.2u"m"
+    result = StructuralSizer.CIPSlabResult(h, h, 4.8u"kPa")
+    spans = Asap.SpanInfo(span, span, (1.0, 0.0), span)
+    push!(design.structure.slabs, StructuralSynthesizer.Slab([1], result, spans))
+    return design
+end
+
 function _mock_slab(; thickness_m=0.2, deflection_in=0.4, limit_in=0.5, ok=true)
     StructuralSynthesizer.SlabDesignResult(
         thickness = thickness_m * u"m",
@@ -85,10 +96,13 @@ end
     @testset "list_experiments" begin
         result = StructuralSynthesizer.list_experiments()
         @test haskey(result, "experiments")
-        @test length(result["experiments"]) == 4
+        @test length(result["experiments"]) == 7
         names = [e["name"] for e in result["experiments"]]
         @test "punching" in names
         @test "pm_column" in names
+        @test "beam" in names
+        @test "punching_reinforcement" in names
+        @test "punching_column_downsize" in names
         @test "deflection" in names
         @test "catalog_screen" in names
     end
@@ -194,7 +208,7 @@ end
 
     @testset "experiment_deflection" begin
         slab = _mock_slab(deflection_in=0.4, limit_in=0.5, ok=true)
-        design = _mock_design(slabs = Dict(1 => slab))
+        design = _attach_span!(_mock_design(slabs = Dict(1 => slab)); limit_in=0.5)
 
         # Slab not found
         r = StructuralSynthesizer.experiment_deflection(design, 99)

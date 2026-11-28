@@ -1,7 +1,9 @@
 # ==============================================================================
-# ACI 318-11 Slenderness Effects (Moment Magnification)
+# ACI Slenderness Effects (Moment Magnification)
 # ==============================================================================
-# Reference: ACI 318-11 Chapter 10
+# Neglect limits and the second-order moment cap are ACI 318-19 §6.2.5
+# (corpus: aci-318-19). The nonsway magnifier equations match ACI 318-19
+# §6.6.4.5 and the earlier ACI 318-11 §10.10 wording.
 # Verified against StructurePoint spColumn Design Examples:
 # - "Slender Column Design in Non-Sway Frame - Moment Magnification Method"
 # - "Slenderness Effects for Concrete Columns in Sway Frame"
@@ -58,6 +60,51 @@ function slenderness_ratio(section::RCColumnSection, geometry,
 end
 
 """
+kℓu/r for a rectangle. `r` is 0.3 times `dim`, the same ratio
+[`slenderness_ratio`](@ref) uses. `dim` and `Lu` share a length unit.
+"""
+rectangular_kLu_over_r(dim::Real, Lu::Real, k::Real) = k * Lu / (0.3 * dim)
+
+"""
+    slenderness_effects_required(λ, braced; M1=0.0, M2=1.0) -> Bool
+
+`true` when ACI 318-19 §6.2.5.1 (corpus: aci-318-19, printed page 68) does
+not permit slenderness effects to be neglected.
+
+- Not braced against sidesway: `kℓu/r > 22` (Eq. 6.2.5.1a).
+- Braced: `kℓu/r > 34 + 12(M1/M2)` and the limit is not taken above 40
+  (Eqs. 6.2.5.1b and 6.2.5.1c). `M1/M2` is negative for single curvature
+  and positive for double curvature (R6.2.5).
+"""
+function slenderness_effects_required(λ::Real, braced::Bool; M1::Real = 0.0, M2::Real = 1.0)
+    braced || return λ > 22.0
+    M_ratio = M2 ≈ 0 ? 0.0 : M1 / M2
+    return λ > min(34.0 + 12.0 * M_ratio, 40.0)
+end
+
+"""
+    SECOND_ORDER_MOMENT_RATIO_LIMIT
+
+ACI 318-19 §6.2.5.3 (corpus: aci-318-19, printed page 70): the moment
+including second-order effects shall not exceed 1.4 times the moment due
+to first-order effects. For the nonsway magnifier `Mc = δns·M2`
+(§6.6.4.5.1, Eq. 6.6.4.5.1, printed page 80) that ratio is `δns`.
+
+ENGINEERING JUDGMENT: `M2,min` (§6.6.4.5.4) is a minimum design moment, not
+a second-order amplification. R6.2.5.3 describes 1.4 as the secondary-to-
+primary moment ratio, so the cap is `δns ≤ 1.4` and `δns` finite
+(`Pu < 0.75·Pc`, where Eq. 6.6.4.5.2 is defined). Comparing
+`M2,min / M2` would reject every slender column whose analysis moment sits
+below the minimum eccentricity.
+"""
+const SECOND_ORDER_MOMENT_RATIO_LIMIT = 1.4
+
+"""`true` when the nonsway magnifier result is allowed by §6.2.5.3."""
+function second_order_magnifier_permitted(δns::Real)
+    return isfinite(δns) && δns <= SECOND_ORDER_MOMENT_RATIO_LIMIT
+end
+
+"""
     should_consider_slenderness(section, geometry, axis=StrongAxis(); M1=0.0, M2=1.0) -> Bool
 
 Check whether slenderness effects govern per ACI 318-19 §6.2.5.1
@@ -86,19 +133,8 @@ function should_consider_slenderness(
     M1::Real = 0.0,
     M2::Real = 1.0,
 )
-    λ = slenderness_ratio(section, geometry, axis)
-
-    if geometry.braced
-        # ACI 318-19 §6.2.5.1(b), Eq. (6.2.5.1b)+(6.2.5.1c). Single curvature
-        # (M1/M2 < 0) gives the *smaller* limit (more conservative); double
-        # curvature (M1/M2 > 0) gives the *larger* limit (up to 40).
-        M_ratio = M2 ≈ 0 ? 0.0 : M1 / M2
-        limit = min(34 + 12 * M_ratio, 40)
-        return λ > limit
-    else
-        # ACI 318-19 §6.2.5.1(a)
-        return λ > 22
-    end
+    return slenderness_effects_required(
+        slenderness_ratio(section, geometry, axis), geometry.braced; M1, M2)
 end
 
 # ==============================================================================
@@ -293,6 +329,25 @@ function minimum_moment(Pu::Real, h::Real)
     return Pu * (0.6 + 0.03 * h) / 12
 end
 
+"""Shared return of both `magnify_moment_nonsway` methods.
+
+`permitted` is [`second_order_magnifier_permitted`](@ref) of `δns`. A column
+that §6.2.5.1 lets skip slenderness is permitted with `δns = 1`.
+"""
+function _nonsway_magnifier_result(slender::Bool, M2, δns, Cm, Pc, M_min)
+    slender || return (Mc=abs(M2), δns=1.0, Cm=1.0, Pc=Inf, slender=false, permitted=true)
+    return (
+        # ACI 318-11 §10.10.6.5 (corpus: aci-318-11, page 156): M2 in
+        # Eq. (10-11) is floored at M2,min before δns multiplies it.
+        Mc = δns * max(abs(M2), M_min),
+        δns = δns,
+        Cm = Cm,
+        Pc = Pc,
+        slender = true,
+        permitted = second_order_magnifier_permitted(δns),
+    )
+end
+
 """
     magnify_moment_nonsway(section, mat, geometry, Pu, M1, M2, axis=StrongAxis();
                            βdns=0.6, transverse_load=false) -> NamedTuple
@@ -324,6 +379,8 @@ NamedTuple with:
 - `Cm`:      equivalent uniform moment factor
 - `Pc`:      critical buckling load (kip)
 - `slender`: whether slenderness governed
+- `permitted`: `false` when `δns` exceeds [`SECOND_ORDER_MOMENT_RATIO_LIMIT`](@ref)
+  or is not finite (`Pu ≥ 0.75·Pc`). ACI 318-19 §6.2.5.3.
 
 # Reference
 StructurePoint: "Slender Column Design in Non-Sway Frame".
@@ -347,7 +404,7 @@ function magnify_moment_nonsway(
     # eccentricity floor is *not* a generic minimum on column moments, only a
     # check against the magnified moment when slenderness governs.
     if !slender
-        return (Mc=abs(M2), δns=1.0, Cm=1.0, Pc=Inf, slender=false)
+        return _nonsway_magnifier_result(false, M2, 1.0, 1.0, Inf, 0.0)
     end
 
     h_axis = _axis_dim(section, axis)
@@ -357,10 +414,7 @@ function magnify_moment_nonsway(
 
     # ACI 318-19 §6.6.4.5.4 — minimum eccentricity check (M_min = Pu·(15+0.03·h) mm
     # in SI; here Pu·(0.6+0.03·h)/12 in kip·ft for h in inches).
-    M_min = minimum_moment(Pu, h_axis)
-    Mc = max(δns * abs(M2), M_min)
-
-    return (Mc=Mc, δns=δns, Cm=Cm, Pc=Pc, slender=true)
+    return _nonsway_magnifier_result(true, M2, δns, Cm, Pc, minimum_moment(Pu, h_axis))
 end
 
 # ==============================================================================
@@ -480,6 +534,93 @@ A story is sway if Q > 0.05.
 function is_sway_frame(story::SwayStoryProperties)
     Q = stability_index(story)
     return Q > 0.05
+end
+
+"""
+    alignment_chart_k(ψA, ψB; sway) -> Float64
+
+Effective length factor from the Jackson and Moreland alignment chart,
+Fig. R10.10.1.1 (corpus: aci-318-11, page 150). The chart is the plot of the
+slope-deflection equations; ACI prints the figure, not the equation. The
+residuals below are those equations.
+
+Nonsway (sidesway inhibited), k in (0.5, 1):
+
+    (ψA ψB / 4) (π/k)² + ((ψA + ψB) / 2) (1 − (π/k) / tan(π/k))
+        + 2 tan(π/(2k)) / (π/k) − 1 = 0
+
+Sway (sidesway uninhibited), k > 1:
+
+    (ψA ψB (π/k)² − 36) / (6 (ψA + ψB)) = (π/k) / tan(π/k)
+
+Fixed ends are ψ = 0. A pinned end is ψ → ∞. A footing that is not rigid is
+ψ = 10, the practical value in McCormac & Brown, 9th ed., slender-column
+chapter (corpus: textbook-mccormac-reinforced-concrete-9e). A sway column
+with both ends pinned has no finite k and throws.
+
+Checked against the chart anchors: nonsway (0, 0) → 0.5, (0, ∞) → 0.7,
+(∞, ∞) → 1; sway (0, 0) → 1, (0, ∞) → 2; and the StructurePoint sway example
+ψA = 2.027, ψB = 0 → k = 1.282.
+"""
+function alignment_chart_k(ψA::Real, ψB::Real; sway::Bool)
+    a = _chart_ψ(ψA)
+    b = _chart_ψ(ψB)
+    loψ, hiψ = min(a, b), max(a, b)
+    if sway
+        loψ < 1e-4 && hiψ < 1e-4 && return 1.0
+        loψ < 1e-4 && hiψ >= 100.0 && return 2.0
+        loψ >= 100.0 && throw(ArgumentError(
+            "a sway column with both ends pinned (ψ = $ψA and $ψB) has no " *
+            "finite k on Fig. R10.10.1.1 (ACI 318-11, page 150)"))
+        # (π/k)·cot(π/k) is continuous through k = 2 (cot(π/2) = 0), so one
+        # bracket covers it. Splitting at k = 2 missed roots at ψA·ψB ≈ (12/π)².
+        root = _chart_root(k -> _sway_chart_residual(k, a, b), (1.001, 40.0))
+    else
+        hiψ < 1e-4 && return 0.5
+        loψ >= 1e5 && return 1.0
+        # Likewise continuous through k = 2/3 (cot(3π/2) = 0).
+        root = _chart_root(k -> _nonsway_chart_residual(k, a, b), (0.501, 0.999))
+    end
+    root === nothing && throw(ArgumentError(
+        "alignment chart has no root for ψ = ($ψA, $ψB), sway=$sway"))
+    return root
+end
+
+"Cap a stiffness ratio so the chart residual stays finite. ψ → ∞ is the pin."
+_chart_ψ(ψ::Real) = ψ < 0 ? throw(ArgumentError("stiffness ratio ψ must be ≥ 0; got $ψ")) :
+                    min(Float64(ψ), 1.0e6)
+
+function _sway_chart_residual(k, ψA, ψB)
+    pk = π / k
+    return (ψA * ψB * pk^2 - 36) / (6 * (ψA + ψB)) - pk / tan(pk)
+end
+
+function _nonsway_chart_residual(k, ψA, ψB)
+    pk = π / k
+    return (ψA * ψB / 4) * pk^2 +
+           ((ψA + ψB) / 2) * (1 - pk / tan(pk)) +
+           2 * tan(pk / 2) / pk - 1
+end
+
+"""First bracket in `ranges` whose ends change sign, solved by bisection."""
+function _chart_root(residual, ranges::Tuple{Float64, Float64}...)
+    for (lo, hi) in ranges
+        flo = residual(lo)
+        fhi = residual(hi)
+        isfinite(flo) && isfinite(fhi) || continue
+        flo * fhi <= 0 || continue
+        for _ in 1:60
+            mid = 0.5 * (lo + hi)
+            fm = residual(mid)
+            if flo * fm <= 0
+                hi, fhi = mid, fm
+            else
+                lo, flo = mid, fm
+            end
+        end
+        return 0.5 * (lo + hi)
+    end
+    return nothing
 end
 
 """
@@ -749,7 +890,7 @@ function magnify_moment_sway_complete(
 
         # Final design moment (ACI §10.10.7)
         M_min = minimum_moment(Pu, h)
-        Mc = max(δns * max(abs(M1), abs(M2)), M_min)
+        Mc = δns * max(abs(M1), abs(M2), M_min)   # M2,min floors M2 before δns (§10.10.6.5)
 
         length_magnified = δns > 1.0
     end
@@ -895,7 +1036,7 @@ function magnify_moment_sway_complete(
         δns = magnification_factor_nonsway(Pu, Pc; Cm=Cm)
 
         M_min = minimum_moment(Pu, D)
-        Mc = max(δns * max(abs(M1), abs(M2)), M_min)
+        Mc = δns * max(abs(M1), abs(M2), M_min)   # M2,min floors M2 before δns (§10.10.6.5)
         length_magnified = δns > 1.0
     end
     
@@ -943,16 +1084,8 @@ function should_consider_slenderness(
     M1::Real = 0.0,
     M2::Real = 1.0,
 )
-    λ = slenderness_ratio(section, geometry, axis)
-
-    if geometry.braced
-        # ACI 318-19 §6.2.5.1(b). Sign convention: M1/M2 > 0 = double curvature.
-        M_ratio = M2 ≈ 0 ? 0.0 : M1 / M2
-        limit = min(34 + 12 * M_ratio, 40)
-        return λ > limit
-    else
-        return λ > 22
-    end
+    return slenderness_effects_required(
+        slenderness_ratio(section, geometry, axis), geometry.braced; M1, M2)
 end
 
 """
@@ -1052,7 +1185,7 @@ function magnify_moment_nonsway(
     # ACI 318-19 §6.6.4.5.4 — M_min only applies inside the slenderness
     # procedure. Non-slender circular columns return |M2| unmodified.
     if !slender
-        return (Mc=abs(M2), δns=1.0, Cm=1.0, Pc=Inf, slender=false)
+        return _nonsway_magnifier_result(false, M2, 1.0, 1.0, Inf, 0.0)
     end
 
     D = to_inches(section.D)
@@ -1061,8 +1194,5 @@ function magnify_moment_nonsway(
     δns = magnification_factor_nonsway(Pu, Pc; Cm=Cm)
 
     # ACI 318-19 §6.6.4.5.4 minimum-eccentricity check on the magnified moment.
-    M_min = minimum_moment(Pu, D)
-    Mc = max(δns * abs(M2), M_min)
-
-    return (Mc=Mc, δns=δns, Cm=Cm, Pc=Pc, slender=true)
+    return _nonsway_magnifier_result(true, M2, δns, Cm, Pc, minimum_moment(Pu, D))
 end

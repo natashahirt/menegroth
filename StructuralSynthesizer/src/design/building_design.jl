@@ -76,6 +76,9 @@ mutable struct BuildingDesign{T, A, P}
     finalized::Bool
     converged::Bool
     diagnostics::Vector{String}
+    # What the design did not cover (for example, no lateral checks). These
+    # are informational and do not affect `converged`.
+    scope_notes::Vector{String}
     context_hash::String
     
     # Metadata
@@ -119,6 +122,7 @@ function BuildingDesign(struc::BuildingStructure{T, A, P}, params::DesignParamet
         false,                            # finalized
         false,                            # converged
         String[],                         # diagnostics
+        String[],                         # scope_notes
         "",                               # context_hash
         now(),
         0.0

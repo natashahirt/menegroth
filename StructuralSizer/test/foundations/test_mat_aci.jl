@@ -50,7 +50,9 @@ function run_all_methods(demands, positions, soil; min_depth=24.0u"inch")
             cover=3.0u"inch", min_depth=min_depth,
             depth_increment=1.0u"inch")
 
-    r_rigid  = design_footing(MatFoundation(), demands, positions, soil;
+    # The strip itself. design_footing(::RigidMat) applies Eq. (5-1) and
+    # §6.1.2 Step 3, and these grids are not rigid.
+    r_rigid  = StructuralSizer._design_mat_rigid(demands, positions, soil;
         opts=MatParams(; base..., analysis_method=RigidMat()))
 
     r_shukla = design_footing(MatFoundation(), demands, positions, soil;
@@ -100,6 +102,25 @@ function check_result(r, min_plan_ft; label="")
     V_exp = B_ft * L_ft * (h_in / 12.0) * 0.0283168
     V_act = ustrip(u"m^3", r.concrete_volume)
     @test abs(V_act - V_exp) / V_exp < 0.01
+end
+
+# The punching start is not allowed to open the thickness grid above
+# min_depth when the estimate itself is thinner than min_depth.
+@testset "Mat punching start does not raise min_depth" begin
+    light = [FoundationDemand(1; Pu=10.0kip, Ps=8.0kip,
+                              c1=18.0u"inch", c2=18.0u"inch")]
+    h_seed = StructuralSizer._mat_punching_h_seed(
+        light, 4000.0u"psi", 1.0, 0.75, 3.0u"inch", 0.5u"inch")
+    @test h_seed < 24.0u"inch"
+    @test StructuralSizer._mat_depth_index(24.0u"inch", 1.0u"inch", h_seed) == 0
+    @test StructuralSizer._mat_depth_index(24.0u"inch", 1.0u"inch", 24.0u"inch") == 0
+    @test StructuralSizer._mat_depth_index(24.0u"inch", 1.0u"inch", 1000.0u"inch") == 59
+
+    # Zero column load: no shear demand, seed stays at cover + db/2.
+    idle = [FoundationDemand(1; Pu=0.0kip, Ps=0.0kip)]
+    h_idle = StructuralSizer._mat_punching_h_seed(
+        idle, 4000.0u"psi", 1.0, 0.75, 3.0u"inch", 0.5u"inch")
+    @test uconvert(u"inch", h_idle) ≈ 3.5u"inch" atol=1e-6u"inch"
 end
 
 # =============================================================================
@@ -303,3 +324,63 @@ println("""
 """)
 
 println("  All scenarios passed. ✓")
+
+# =============================================================================
+# Phase D-A: flexible mat envelopes over strength combinations
+# =============================================================================
+# ShuklaAFM and WinklerFEA re-solve the plate once per ASCE 7 strength
+# combination and design the flexural/punching section to the face-by-face
+# envelope (ACI 336.2R-88 §6.1.2 Step 4 / §6.4 per combination). Adding a
+# heavier combination can only require an equal-or-thicker mat, and passing no
+# combinations reproduces the single-load design exactly.
+@testset "Flexible mat envelopes strength combinations (Phase D-A)" begin
+    spacing = 18.0u"ft"
+    Pu_g = 360.0u"kip"; Ps_g = 250.0u"kip"
+    demands = FoundationDemand[]
+    positions = NTuple{2, typeof(0.0u"ft")}[]
+    for (i, x) in enumerate((0.0u"ft", spacing)), (j, y) in enumerate((0.0u"ft", spacing))
+        push!(demands, FoundationDemand((i - 1) * 2 + j; Pu = Pu_g, Ps = Ps_g))
+        push!(positions, (x, y))
+    end
+    soil = Soil(3.0u"ksf", 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa";
+                ks = 30_000.0u"kN/m^3")
+    base = (material = RC_4000_60, bar_size_x = 8, bar_size_y = 8,
+            cover = 3.0u"inch", min_depth = 20.0u"inch", depth_increment = 1.0u"inch")
+
+    N  = length(demands)
+    PgN = ustrip(u"N", Pu_g)
+    # column_strength is indexed [column][combination].
+    grav  = [[FootingAction(:grav,  PgN,       0.0, 0.0)] for _ in 1:N]
+    heavy = [[FootingAction(:heavy, 2.0 * PgN, 0.0, 0.0)] for _ in 1:N]
+    env   = [[FootingAction(:grav,  PgN,       0.0, 0.0),
+              FootingAction(:heavy, 2.0 * PgN, 0.0, 0.0)] for _ in 1:N]
+
+    for method in (ShuklaAFM(), WinklerFEA())
+        opts = MatParams(; base..., analysis_method = method)
+        r_grav  = design_footing(MatFoundation(), demands, positions, soil;
+                                 opts = opts, column_strength = grav)
+        r_heavy = design_footing(MatFoundation(), demands, positions, soil;
+                                 opts = opts, column_strength = heavy)
+        r_env   = design_footing(MatFoundation(), demands, positions, soil;
+                                 opts = opts, column_strength = env)
+        # The envelope must satisfy every combination it contains, so it is at
+        # least as thick as either single-combination design; and the heavier
+        # (2×) combination needs at least the gravity thickness.
+        @test r_env.D   >= r_heavy.D
+        @test r_env.D   >= r_grav.D
+        @test r_heavy.D >= r_grav.D
+        @test r_env.utilization <= 1.0 + 1e-9
+    end
+
+    # Behaviour-neutral: no combinations == one combination equal to demands.Pu.
+    single = [[FootingAction(:g, PgN, 0.0, 0.0)] for _ in 1:N]
+    for method in (ShuklaAFM(), WinklerFEA())
+        opts = MatParams(; base..., analysis_method = method)
+        r_none   = design_footing(MatFoundation(), demands, positions, soil; opts = opts)
+        r_single = design_footing(MatFoundation(), demands, positions, soil;
+                                  opts = opts, column_strength = single)
+        @test r_none.D == r_single.D
+        @test r_none.As_x_bot ≈ r_single.As_x_bot rtol = 1e-9
+        @test r_none.steel_volume ≈ r_single.steel_volume rtol = 1e-9
+    end
+end

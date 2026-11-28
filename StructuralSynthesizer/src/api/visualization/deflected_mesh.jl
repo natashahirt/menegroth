@@ -130,7 +130,7 @@ function _serialize_deflected_slab_meshes(design::BuildingDesign, struc::Buildin
         thickness_ft = _to_display_length(du, slab_result.thickness)
         drop_panels = get(drop_panel_cache, slab_idx, APIDropPanelPatch[])
         ratio = max(slab_result.deflection_ratio, slab_result.punching_max_ratio)
-        ok = slab_result.deflection_ok && slab_result.punching_ok
+        ok = _slab_design_ok(slab_result)
         is_vault = slab_result.is_vault
 
         dp_geom = isnothing(slab_result) ? nothing : slab_result.drop_panel

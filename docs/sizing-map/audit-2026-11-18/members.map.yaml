@@ -1,0 +1,554 @@
+# Members map fragment — re-audit 2026-11-18 (working tree on main).
+# Tags: every node carries `tag: read | inferred`.
+area: members
+nodes:
+  # ---------------- L1 stage ----------------
+  - id: member.stage
+    level: L1
+    kind: stage
+    anchor: StructuralSynthesizer/src/workflow/member_iteration.jl::_size_beams_columns!
+    summary: Member stage dispatch — flat-plate member stage, columns-only loop, beam/column loop, or story-shell rounds
+    reads: [slab.floor_type, skeleton.groups_edges]
+    writes: [beam.section, column.section]
+    tag: read
+
+  # ---------------- L2 elements ----------------
+  - id: member.column.rc
+    level: L2
+    kind: element
+    parent: member.stage
+    anchor: StructuralSynthesizer/src/analyze/members/members/size_columns.jl::_size_columns_impl!
+    summary: RC rectangular/circular frame columns, discrete MIP or NLP, demand sets = envelope + per-case rows (both axis orientations)
+    reads: [demand.Pu, demand.Mux, demand.Muy, demand.M1, demand.M2, column.Lu, column.k]
+    writes: [column.section, column.c1, column.c2]
+    tag: read
+  - id: member.column.rc_flat_plate
+    level: L2
+    kind: element
+    parent: member.stage
+    anchor: StructuralSynthesizer/src/workflow/flat_plate_column_check.jl::check_flat_plate_columns!
+    summary: Flat-plate RC columns — lightest catalog plan group passing full-load P-M, §10.12 joint, punching at trial size; may shrink
+    reads: [demand.Pu, demand.Mub, demand.Vu, slab.h, column.floor]
+    writes: [column.section, column.c1, column.c2]
+    tag: read
+  - id: member.column.steel
+    level: L2
+    kind: element
+    parent: member.stage
+    anchor: StructuralSynthesizer/src/analyze/members/members/size_columns.jl::_size_columns_impl!
+    summary: Steel W/HSS/pipe columns, discrete MIP; envelope demand only; M1/M2 dropped so Cm = 0.6
+    reads: [demand.Pu, demand.Pu_t, demand.Mux, demand.Muy, column.Lb, column.k]
+    writes: [column.section]
+    tag: read
+  - id: member.beam.steel
+    level: L2
+    kind: element
+    parent: member.stage
+    anchor: StructuralSynthesizer/src/analyze/members/members/size_beams.jl::_size_beams_impl!
+    summary: Bare steel beams per framing level, discrete MIP (or NLP), floors via section_floor / frame floor mask
+    reads: [demand.Mu, demand.Mu_neg, demand.Vu, demand.delta, beam.Lb, beam.Cb]
+    writes: [beam.section]
+    tag: read
+  - id: member.beam.composite
+    level: L2
+    kind: element
+    parent: member.stage
+    anchor: StructuralSizer/src/members/codes/aisc/checker/composite_feasibility.jl::is_feasible
+    summary: Composite steel beams (AISC 360-22 Ch. I with 360-16 Ch. F/H), sagging regions from story shell
+    reads: [demand.Mu_pos, demand.Mu_neg, demand.Vu, slab.h, slab.fc, shell.regions, shell.spans]
+    writes: [beam.section, beam.studs]
+    tag: read
+  - id: member.beam.rc
+    level: L2
+    kind: element
+    parent: member.stage
+    anchor: StructuralSizer/src/members/codes/aci/beams/checker/checker_strength.jl::is_feasible
+    summary: RC rectangular beams (ACI 318-11), discrete or NLP; ratchet-eligible in story shell
+    reads: [demand.Mu, demand.Mu_neg, demand.Vu, demand.Nu, demand.Tu, shell.spans]
+    writes: [beam.section]
+    tag: read
+  - id: member.beam.rc_tbeam
+    level: L2
+    kind: element
+    parent: member.stage
+    anchor: StructuralSizer/src/members/codes/aci/beams/t_checker.jl
+    summary: RC T-beams with flange envelope; not floored by the story-shell ratchet
+    reads: [demand.Mu, demand.Vu, beam.bf]
+    writes: [beam.section]
+    tag: read
+  - id: member.beam.joist
+    level: L2
+    kind: element
+    parent: member.beam.rc_tbeam
+    anchor: StructuralSizer/src/members/codes/aci/beams/joist_construction.jl
+    summary: Joist construction ribs (ACI 318-11 §8.13) — geometry limits and 1.10 Vc
+    reads: [beam.rib_width, beam.rib_depth, beam.clear_spacing, slab.h]
+    writes: []
+    tag: read
+
+  # ---------------- L3 checks ----------------
+  - id: member.column.rc.pm
+    level: L3
+    kind: check
+    parent: member.column.rc
+    anchor: StructuralSizer/src/members/codes/aci/columns/checker.jl::is_feasible
+    summary: P-M interaction on cached diagrams (pm_rect / circular), biaxial when enabled
+    clause: ACI 318 P-M interaction (cached generate_PM_diagram)
+    reads: [column.section, demand.Pu, demand.Mux, demand.Muy]
+    writes: []
+    tag: read
+  - id: member.column.rc.slenderness
+    level: L3
+    kind: check
+    parent: member.column.rc
+    anchor: StructuralSizer/src/members/codes/aci/columns/checker.jl::is_feasible
+    summary: Nonsway moment magnification Cm = 0.6 - 0.4 M1/M2 from signed FEA end moments
+    clause: ACI 318-19 §6.6.4.5 (Cm; §6.6.4.5.3 transverse load)
+    reads: [demand.M1, demand.M2, column.Lu, column.k, demand.betadns]
+    writes: []
+    tag: read
+  - id: member.column.rc_flat_plate.joint
+    level: L3
+    kind: check
+    parent: member.column.rc_flat_plate
+    anchor: StructuralSizer/src/members/codes/aci/columns/floor_transmission.jl::joint_concrete_strength
+    summary: Effective joint concrete strength where slab f'c < column f'c
+    clause: ACI 318-11 §10.12
+    reads: [slab.fc, column.fc, column.section]
+    writes: []
+    tag: read
+  - id: member.column.rc_flat_plate.punching
+    level: L3
+    kind: check
+    parent: member.column.rc_flat_plate
+    anchor: StructuralSynthesizer/src/workflow/flat_plate_column_check.jl::_fit_flat_plate_columns!
+    summary: Punching at the trial plan size using stored Vu/Mub from the slab analysis at the installed size
+    clause: ACI 318-11 §11.11 (via check_punching_for_column)
+    reads: [demand.Vu, demand.Mub, column.c1, column.c2, slab.h]
+    writes: []
+    tag: read
+  - id: member.column.rc.axial_reconcile
+    level: L3
+    kind: check
+    parent: member.column.rc_flat_plate
+    anchor: StructuralSynthesizer/src/workflow/column_reconciliation.jl::_reconcile_columns!
+    summary: Grow to Ag required for frame Pu at rho_g = 0.01; compares each side to sqrt(Ag_req)
+    clause: ACI 318-11 Eq. (10-2)
+    reads: [demand.Pu, column.c1, column.c2]
+    writes: [column.c1, column.c2]
+    tag: read
+  - id: member.steel.h1
+    level: L3
+    kind: check
+    parent: member.column.steel
+    anchor: StructuralSizer/src/members/codes/aisc/checker/steel_feasibility.jl::is_feasible
+    summary: Combined axial + flexure, compression with B1-amplified moments, tension first-order
+    clause: AISC 360-16 §H1.1 Eqs. H1-1a/H1-1b; §H1.2
+    reads: [column.section, demand.Pu, demand.Mux, demand.Muy]
+    writes: []
+    tag: read
+  - id: member.steel.b1
+    level: L3
+    kind: check
+    parent: member.column.steel
+    anchor: StructuralSizer/src/members/codes/aisc/checker/steel_feasibility.jl::is_feasible
+    summary: P-delta B1 amplification; Cm from M1/M2 but M1 defaults to 0 (Cm = 0.6) on the building path; B2 not applied
+    clause: AISC 360-16 Appendix 8 Eqs. A-8-1, A-8-3
+    reads: [demand.M1, demand.M2, column.Lc]
+    writes: []
+    tag: read
+  - id: member.steel.hogging_f
+    level: L3
+    kind: check
+    parent: member.beam.steel
+    anchor: StructuralSizer/src/members/codes/aisc/checker/steel_feasibility.jl::_hogging_ltb_inputs
+    summary: Hogging bottom-flange LTB with Lb = L, Cb = 1
+    clause: AISC 360-16 §F2.2 Eq. F2-5; §I3.2b
+    reads: [demand.Mu_neg, beam.section]
+    writes: []
+    tag: read
+  - id: member.beam.composite.strength
+    level: L3
+    kind: check
+    parent: member.beam.composite
+    anchor: StructuralSizer/src/members/codes/aisc/checker/composite_feasibility.jl::is_feasible
+    summary: Composite sagging strength per region, construction stage, studs between Mmax and zeros
+    clause: AISC 360-22 §I3.1b, §I3.2b, §I8.2c
+    reads: [demand.Mu_pos, shell.regions, slab.h]
+    writes: []
+    tag: read
+  - id: member.beam.composite.deflection
+    level: L3
+    kind: check
+    parent: member.beam.composite
+    anchor: StructuralSizer/src/members/codes/aisc/checker/composite_feasibility.jl::is_feasible
+    summary: Composite live-load deflection on 0.6 I_LB + 0.4 I_neg
+    clause: AISC 360-22 Commentary Eq. C-I3-5
+    reads: [demand.delta_LL, beam.section]
+    writes: []
+    tag: read
+  - id: member.beam.steel.shell_deflection
+    level: L3
+    kind: check
+    parent: member.beam.steel
+    anchor: StructuralSizer/src/members/codes/aisc/checker/shell_deflection.jl::_steel_shell_ratio
+    summary: Story-shell live-load deflection rescaled by I_candidate / I_solved
+    clause: serviceability limit (as cited by caller)
+    reads: [shell.spans, beam.section]
+    writes: []
+    tag: read
+  - id: member.beam.rc.flexure
+    level: L3
+    kind: check
+    parent: member.beam.rc
+    anchor: StructuralSizer/src/members/codes/aci/beams/checker/checker_strength.jl::is_feasible
+    summary: Sagging and hogging flexure
+    clause: ACI 318-11 §10.2, §9.3.2
+    reads: [demand.Mu, demand.Mu_neg, beam.section]
+    writes: []
+    tag: read
+  - id: member.beam.rc.shear
+    level: L3
+    kind: check
+    parent: member.beam.rc
+    anchor: StructuralSizer/src/members/codes/aci/beams/checker/checker_strength.jl::_compute_φVn_max
+    summary: Vc (with axial), Vs,max; joist 1.10 factor
+    clause: ACI 318-11 §11.2.1.1, §11.2.1.2 Eq. (11-4), §11.2.2.3 Eq. (11-8), §11.4.7.9, §8.13.8
+    reads: [demand.Vu, demand.Nu, beam.section]
+    writes: []
+    tag: read
+  - id: member.beam.rc.strain
+    level: L3
+    kind: check
+    parent: member.beam.rc
+    anchor: StructuralSizer/src/members/codes/aci/beams/checker/checker_strength.jl::is_feasible
+    summary: Net tensile strain epsilon_t >= 0.004 and As >= As,min
+    clause: ACI 318-11 §10.3.5, §10.5.1 Eq. (10-3)
+    reads: [beam.section]
+    writes: []
+    tag: read
+  - id: member.beam.rc.torsion
+    level: L3
+    kind: check
+    parent: member.beam.rc
+    anchor: StructuralSizer/src/members/codes/aci/beams/checker/checker_strength.jl::is_feasible
+    summary: Torsion section adequacy when Tu > 0
+    clause: ACI 318-11 §11.5.3.1
+    reads: [demand.Tu, beam.section]
+    writes: []
+    tag: read
+  - id: member.beam.rc.shell_deflection
+    level: L3
+    kind: check
+    parent: member.beam.rc
+    anchor: StructuralSizer/src/members/codes/aci/beams/checker/checker_types.jl
+    summary: Story-shell deflection ratio <= 1
+    clause: ACI 318-11 §9.5.2
+    reads: [shell.spans, beam.section]
+    writes: []
+    tag: read
+  - id: member.beam.joist.geometry
+    level: L3
+    kind: check
+    parent: member.beam.joist
+    anchor: StructuralSizer/src/members/codes/aci/beams/joist_construction.jl
+    summary: Rib width >= 4 in, depth <= 3.5 x width, clear spacing <= 30 in, slab thickness
+    clause: ACI 318-11 §8.13.2, §8.13.3, §8.13.5.2, §8.13.6.1
+    reads: [beam.rib_width, beam.rib_depth, beam.clear_spacing, slab.h]
+    writes: []
+    tag: read
+  - id: member.rowf.strength
+    level: L3
+    kind: check
+    parent: member.stage
+    anchor: StructuralSynthesizer/src/analyze/lateral/interactive_checks.jl::_check_frame_member_strength
+    summary: Row-F frame member strength on per-combination/per-case demand rows (incl. second order)
+    clause: as cited by lateral area (row F)
+    reads: [demand.rows, column.section, beam.section]
+    writes: []
+    tag: read
+
+  # ---------------- analysis ----------------
+  - id: member.analysis.frame
+    level: L2
+    kind: analysis
+    parent: member.stage
+    anchor: StructuralSynthesizer/src/analyze/members/members/demands.jl::member_group_demands
+    summary: Group envelope (max P, max M across members and pattern cases, 200 stations) plus ColumnCaseRow per pattern case; signed end moments for columns only
+    fidelity: frame
+    reads: [asap_model.forces, pattern_cases]
+    writes: [demand.Pu, demand.Mux, demand.Muy, demand.M1, demand.M2, demand.Vu, demand.delta, demand.case_rows]
+    tag: read
+  - id: member.analysis.reanalyze
+    level: L2
+    kind: analysis
+    parent: member.stage
+    anchor: StructuralSynthesizer/src/workflow/member_iteration.jl::_reanalyze_after_section_change!
+    summary: Asap.update! (full reassembly) + solve + pattern-solve cache refresh after a section change
+    fidelity: frame
+    reads: [beam.section, column.section]
+    writes: [asap_model.forces]
+    tag: read
+  - id: member.analysis.story_shell
+    level: L2
+    kind: analysis
+    parent: member.stage
+    anchor: StructuralSynthesizer/src/analyze/members/members/size_beams_story_shell.jl::_gather_shell_demands!
+    summary: Whole-story shell (build_story_shell cached per level per call; solve_story_shell! each pass, service solve when on); beam demand = max(frame, shell)
+    fidelity: shell_story
+    reads: [beam.section, column.section, slab.h, shell.regions]
+    writes: [shell.demands, shell.spans, shell.regions]
+    tag: read
+  - id: member.analysis.flat_plate_joint
+    level: L2
+    kind: analysis
+    parent: member.column.rc_flat_plate
+    anchor: StructuralSynthesizer/src/workflow/flat_plate_column_check.jl::flat_plate_column_checks
+    summary: Full-load frame Pu plus slab joint moments (single curvature assumed) for flat-plate columns
+    fidelity: frame
+    reads: [asap_model.forces, slab.design_details]
+    writes: [demand.Pu, demand.Mx, demand.My]
+    tag: read
+
+  # ---------------- owners (decision functions) ----------------
+  - id: member.owner.size_columns
+    level: L2
+    kind: owner
+    parent: member.stage
+    anchor: StructuralSynthesizer/src/analyze/members/members/size_columns.jl::size_columns!
+    summary: Fresh discrete/NLP column pick per call, masked by row-F floors; no capacity cache passed
+    reads: [demand.*, struc.frame_section_floors]
+    writes: [column.section]
+    tag: read
+  - id: member.owner.size_beams
+    level: L2
+    kind: owner
+    parent: member.stage
+    anchor: StructuralSynthesizer/src/analyze/members/members/size_beams.jl::size_beams!
+    summary: Per-framing-level beam pick; section_floor and frame floor masks
+    reads: [demand.*, shell.demands, struc.frame_section_floors, section_floor]
+    writes: [beam.section]
+    tag: read
+  - id: member.owner.optimize_discrete
+    level: L2
+    kind: owner
+    parent: member.stage
+    anchor: StructuralSizer/src/optimize/solvers/discrete/model.jl::optimize_discrete
+    summary: Memo (64, objectid(catalog)) -> precompute caches -> threaded feasibility screen -> JuMP binary MIP (HiGHS/Gurobi); objectives gross Ag for RC
+    reads: [catalog, demand.*]
+    writes: [section_indices]
+    tag: read
+  - id: member.owner.fit_flat_plate
+    level: L2
+    kind: owner
+    parent: member.column.rc_flat_plate
+    anchor: StructuralSynthesizer/src/workflow/flat_plate_column_check.jl::_fit_flat_plate_columns!
+    summary: Binary search over plan-size groups; shrink allowed when uniform sizing off and punching demands stored; floored by reanalysis floors
+    reads: [column.floor, demand.Vu, demand.Mub, demand.Pu]
+    writes: [column.section, column.c1, column.c2]
+    tag: read
+  - id: member.owner.harmonize
+    level: L2
+    kind: policy
+    parent: member.stage
+    anchor: StructuralSynthesizer/src/workflow/member_iteration.jl::harmonize_uniform_column_sizes!
+    summary: Uniform sizing per story/building — RC max c1, max c2 independently; steel max area (copies volumes)
+    reads: [column.c1, column.c2, column.section]
+    writes: [column.c1, column.c2, column.section]
+    tag: read
+  - id: member.owner.raise_frame_floors
+    level: L2
+    kind: owner
+    parent: member.stage
+    anchor: StructuralSynthesizer/src/analyze/lateral/interactive_checks.jl::_raise_frame_floors!
+    summary: Walk catalog upward from heaviest current objective to first section passing row-F rows; never relaxes
+    reads: [demand.rows, column.section, beam.section]
+    writes: [struc.frame_section_floors]
+    tag: read
+  - id: member.owner.floor_overstressed
+    level: L2
+    kind: owner
+    parent: member.stage
+    anchor: StructuralSynthesizer/src/workflow/pipeline_spec.jl::_floor_overstressed_frame_columns!
+    summary: Floor each RC frame column failing envelope P-M on the wall solution at its current section
+    reads: [demand.envelope, column.section]
+    writes: [struc.frame_section_floors]
+    tag: read
+
+  # ---------------- loops ----------------
+  - id: member.loop.beams_columns
+    level: L2
+    kind: loop
+    parent: member.stage
+    anchor: StructuralSynthesizer/src/workflow/member_iteration.jl::_iterate_beams_columns!
+    summary: Gauss-Seidel beams then columns with stiffness updates; cycle -> check settle
+    loop:
+      iterates: [beam.section, column.section]
+      budget: params.max_iterations
+      growth: free
+      converges_when: no section changes; repeated state settled by _check_settle!
+      ratchet: false
+    trace_labels: ["converged", "check_settle", "check_settle_failed", "max_iterations"]
+    tag: read
+  - id: member.loop.check_settle
+    level: L2
+    kind: loop
+    parent: member.loop.beams_columns
+    anchor: StructuralSynthesizer/src/workflow/check_settle.jl::_check_settle!
+    summary: Check each cycle state on its own analysis; cheapest all-passing, else mix, else resize failing groups (3 rounds)
+    loop:
+      iterates: [beam.section, column.section]
+      budget: cycle length + 1 mix + 3 resize rounds
+      growth: free+guard
+      converges_when: every beam and column group passes its installed analysis
+      ratchet: false
+    trace_labels: ["check_settle", "check_settle_mix", "check_settle_resized"]
+    tag: read
+  - id: member.loop.story_shell_rounds
+    level: L2
+    kind: loop
+    parent: member.stage
+    anchor: StructuralSynthesizer/src/workflow/member_iteration.jl::_size_with_story_shell!
+    summary: Shell beam sizing then frame loop with shell demands held; checkable options exit to reconcile after round 1
+    loop:
+      iterates: [beam.section, column.section]
+      budget: max_rounds = 3
+      growth: grow-only
+      converges_when: shell converged, service converged, beams and columns held
+      ratchet: true
+    trace_labels: ["story_shell_round"]
+    tag: read
+  - id: member.loop.story_shell_passes
+    level: L2
+    kind: loop
+    parent: member.loop.story_shell_rounds
+    anchor: StructuralSynthesizer/src/analyze/members/members/size_beams_story_shell.jl::_story_shell_passes!
+    summary: Shell solve -> beam resize -> frame re-solve; ratchet after free_passes = 2; cycles -> _check_shell_settle!
+    loop:
+      iterates: beam.section
+      budget: max_passes = 10
+      growth: grow-only
+      converges_when: sections held, region shift <= 0.05, service on
+      ratchet: true
+    tag: read
+  - id: member.loop.story_shell_trim
+    level: L2
+    kind: loop
+    parent: member.loop.story_shell_rounds
+    anchor: StructuralSynthesizer/src/analyze/members/members/size_beams_story_shell.jl::_trim_story_shell!
+    summary: One free pick then upward passes, kept only if lighter and converged; first call only
+    loop:
+      iterates: beam.section
+      budget: one pass loop
+      growth: free+guard
+      converges_when: trimmed design converges with lower objective
+      ratchet: false
+    tag: read
+  - id: member.loop.shell_frame_reconcile
+    level: L2
+    kind: loop
+    parent: member.loop.story_shell_rounds
+    anchor: StructuralSynthesizer/src/workflow/check_settle.jl::_reconcile_shell_frame!
+    summary: Shell on installed sections; failing groups resized, passing kept (columns restored)
+    loop:
+      iterates: [beam.section, column.section]
+      budget: attempts = 4
+      growth: free+guard
+      converges_when: regions within tol, service converged, all groups pass
+      ratchet: false
+    tag: read
+  - id: member.loop.flat_plate_stage
+    level: L2
+    kind: loop
+    parent: member.stage
+    anchor: StructuralSynthesizer/src/workflow/graph_builder.jl::_design_flat_plate_members!
+    summary: Redesign slabs checked at other column sizes; record reanalysis floors; reconcile columns
+    loop:
+      iterates: [slab.design, column.section]
+      budget: monotone_budget(max_iterations, 48)
+      growth: free+guard
+      converges_when: no stale flat-plate slab
+      ratchet: true
+    tag: read
+  - id: member.loop.flat_plate_fit
+    level: L2
+    kind: loop
+    parent: member.column.rc_flat_plate
+    anchor: StructuralSynthesizer/src/workflow/flat_plate_column_check.jl::check_flat_plate_columns!
+    summary: Fit lightest passing section per column, re-solve, repeat
+    loop:
+      iterates: column.section
+      budget: monotone_budget(max_iterations, catalog length)
+      growth: free
+      converges_when: a round changes no column
+      ratchet: false
+    tag: read
+  - id: member.loop.columns_only
+    level: L2
+    kind: loop
+    parent: member.stage
+    anchor: StructuralSynthesizer/src/workflow/member_iteration.jl::_size_beams_columns!
+    summary: No-beam-edge branch — size_columns!, harmonize, coating, stiffness until sections repeat
+    loop:
+      iterates: column.section
+      budget: params.max_iterations
+      growth: free
+      converges_when: sections identical
+      ratchet: false
+    tag: read
+
+edges:
+  # demands
+  - {from: member.analysis.frame, to: member.column.rc, kind: data, var: demand.case_rows}
+  - {from: member.analysis.frame, to: member.column.steel, kind: data, var: demand.Pu}
+  - {from: member.analysis.frame, to: member.beam.steel, kind: data, var: demand.Mu}
+  - {from: member.analysis.frame, to: member.beam.rc, kind: data, var: demand.Mu}
+  - {from: member.analysis.story_shell, to: member.beam.composite, kind: data, var: shell.demands}
+  - {from: member.analysis.story_shell, to: member.beam.rc, kind: data, var: shell.spans}
+  - {from: member.analysis.story_shell, to: member.beam.steel, kind: data, var: shell.demands}
+  - {from: member.analysis.flat_plate_joint, to: member.owner.fit_flat_plate, kind: data, var: demand.Pu}
+  # owners -> elements
+  - {from: member.owner.size_columns, to: member.owner.optimize_discrete, kind: call}
+  - {from: member.owner.size_beams, to: member.owner.optimize_discrete, kind: call}
+  - {from: member.owner.optimize_discrete, to: member.column.rc.pm, kind: call}
+  - {from: member.owner.optimize_discrete, to: member.steel.h1, kind: call}
+  - {from: member.owner.optimize_discrete, to: member.beam.rc.flexure, kind: call}
+  - {from: member.owner.optimize_discrete, to: member.beam.composite.strength, kind: call}
+  - {from: member.owner.fit_flat_plate, to: member.column.rc_flat_plate.punching, kind: call}
+  - {from: member.owner.fit_flat_plate, to: member.column.rc_flat_plate.joint, kind: call}
+  # loop structure
+  - {from: member.loop.beams_columns, to: member.owner.size_beams, kind: control}
+  - {from: member.loop.beams_columns, to: member.owner.size_columns, kind: control}
+  - {from: member.loop.beams_columns, to: member.owner.harmonize, kind: control}
+  - {from: member.loop.beams_columns, to: member.loop.check_settle, kind: control}
+  - {from: member.owner.size_columns, to: member.analysis.reanalyze, kind: feedback, var: column.section}
+  - {from: member.owner.size_beams, to: member.analysis.reanalyze, kind: feedback, var: beam.section}
+  - {from: member.analysis.reanalyze, to: member.analysis.frame, kind: data, var: asap_model.forces}
+  - {from: member.loop.story_shell_rounds, to: member.loop.story_shell_passes, kind: control}
+  - {from: member.loop.story_shell_rounds, to: member.loop.beams_columns, kind: control}
+  - {from: member.loop.story_shell_rounds, to: member.loop.shell_frame_reconcile, kind: control}
+  - {from: member.loop.story_shell_passes, to: member.loop.story_shell_trim, kind: control}
+  - {from: member.loop.story_shell_passes, to: member.analysis.story_shell, kind: call}
+  - {from: member.loop.story_shell_passes, to: member.owner.size_beams, kind: feedback, var: section_floor}
+  - {from: member.loop.flat_plate_stage, to: member.loop.flat_plate_fit, kind: control}
+  - {from: member.loop.flat_plate_stage, to: member.column.rc.axial_reconcile, kind: call}
+  - {from: member.loop.flat_plate_stage, to: member.owner.fit_flat_plate, kind: feedback, var: column.floor}
+  # floors
+  - {from: member.owner.raise_frame_floors, to: member.owner.size_columns, kind: feedback, var: struc.frame_section_floors}
+  - {from: member.owner.raise_frame_floors, to: member.owner.size_beams, kind: feedback, var: struc.frame_section_floors}
+  - {from: member.owner.floor_overstressed, to: member.owner.size_columns, kind: feedback, var: struc.frame_section_floors}
+  - {from: member.rowf.strength, to: member.owner.raise_frame_floors, kind: data, var: demand.rows}
+  - {from: member.owner.harmonize, to: member.owner.fit_flat_plate, kind: control, var: shrink_disabled}
+  # cross-area
+  - {from: pipeline.stage.members, to: member.stage, kind: call}
+  - {from: member.stage, to: slab.flat_plate.design, kind: call, var: stale_slabs}
+  - {from: slab.flat_plate.design, to: member.loop.flat_plate_stage, kind: data, var: column.c1}
+  - {from: slab.flat_plate.punching, to: member.owner.fit_flat_plate, kind: data, var: demand.Vu}
+  - {from: slab.flat_plate.column_pm, to: member.column.rc_flat_plate, kind: data, var: column.section}
+  - {from: slab.story_shell.solve, to: member.analysis.story_shell, kind: call}
+  - {from: member.analysis.story_shell, to: slab.story_shell.bars, kind: data, var: shell.demands}
+  - {from: wall.ordinary.design, to: member.owner.floor_overstressed, kind: data, var: asap_model.forces}
+  - {from: pipeline.walls_member_recheck, to: member.stage, kind: feedback, var: wall.t}
+  - {from: lateral.rowf.check, to: member.rowf.strength, kind: call}
+  - {from: member.stage, to: lateral.rowf.check, kind: data, var: column.section}
+  - {from: member.stage, to: fdn.design, kind: data, var: column.section}

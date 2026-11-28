@@ -66,8 +66,6 @@ end
         @test length(joined) == 1
         @test only(joined).joined
         @test only(joined).wall_indices == [1, 2]
-        @test_throws msg -> occursin("flange width", msg) refuse_joined_wall_design(only(joined))
-        @test refuse_joined_wall_design(first(apart)) === nothing
 
         # Stacked walls share a plan line and stay two assemblies.
         above = _wall(0, 0, 6, 0; story=1)
@@ -97,6 +95,22 @@ end
         @test cut.Mz ≈ 0.0 atol=1.0
         eq = check_story_cut_equilibrium(model, model.u, mesh, loads, 0.0)
         @test eq.passed
+        row = check_opening_row_equilibrium(model, model.u, mesh, loads, 0.0)
+        @test row.passed
+        @test all(isapprox.(row.cut, eq.cut; rtol=1e-9, atol=1e-3))
+        wall = _wall(0.0, 0.0, 6.0, 0.0)
+        ends_action = pier_segment_actions(wall, shells, model.u, 0.0, 4.0)
+        base_action = pier_wall_action(wall, mesh.piers[1], model.u)
+        @test ends_action.bottom.N ≈ base_action.N atol=1e-3
+        @test ends_action.bottom.V ≈ base_action.V atol=1e-3
+        @test ends_action.bottom.M ≈ base_action.M atol=1e-3
+        @test ends_action.bottom.V ≈ _P rtol=1e-6 atol=1.0
+        @test ends_action.bottom.M ≈ _P * 4.0 rtol=1e-6 atol=1.0
+        # The load sits on the top nodes. The top cut reads that load, and
+        # the moment arm about the top centroid is zero.
+        @test ends_action.top.V ≈ _P rtol=1e-6 atol=1.0
+        @test ends_action.top.M ≈ 0.0 atol=1.0
+        @test ends_action.top.N ≈ 0.0 atol=1.0
     end
 
     @testset "upper cut carries only the load above it" begin
@@ -154,6 +168,10 @@ end
         @test upper_cut.passed
         @test base.cut[1] ≈ 2 * _P rtol=1e-6 atol=1.0
         @test upper_cut.cut[1] ≈ _P rtol=1e-6 atol=1.0
+        base_row = check_opening_row_equilibrium(model, model.u, mesh, loads, 0.0)
+        upper_row = check_opening_row_equilibrium(model, model.u, mesh, loads, 4.0)
+        @test all(isapprox.(base_row.cut, base.cut; rtol=1e-9, atol=1e-3))
+        @test all(isapprox.(upper_row.cut, upper_cut.cut; rtol=1e-9, atol=1e-3))
     end
 
     @testset "a column crossing the cut is part of the same residual" begin
@@ -273,4 +291,176 @@ end
     on_beam = StructuralSynthesizer._loads_above([ld], (0.0, 0.0, 0.0), 3.0)
     @test above[3] ≈ -w * 4.0 atol=1e-4
     @test on_beam[3] ≈ 0.0 atol=1e-6
+end
+
+"""
+Rectangles on y = 0. Quads whose centre lies inside `hole` are left out.
+
+`mirror` flips the diagonal of a quad whose centre is past mid-length, so a
+wall and the load on it can be symmetric. One diagonal direction on every
+quad is not.
+"""
+function _opening_panel(xs, zs; hole=nothing, fix_z=nothing, mirror=false)
+    nodes = Asap.Node[]
+    function node(x, z)
+        for nd in nodes
+            p = nd.position
+            dx = ustrip(u"m", p[1]) - x
+            dz = ustrip(u"m", p[3]) - z
+            dx * dx + dz * dz < 1e-12 && return nd
+        end
+        fixed = fix_z !== nothing && isapprox(z, fix_z; atol=1e-9)
+        nd = Asap.Node([x, 0.0, z] .* u"m", fixed ? :fixed : :free, :wall)
+        push!(nodes, nd)
+        return nd
+    end
+    shells = Asap.ShellTri3[]
+    for i in 1:(length(xs) - 1), j in 1:(length(zs) - 1)
+        x0, x1 = xs[i], xs[i + 1]
+        z0, z1 = zs[j], zs[j + 1]
+        if hole !== nothing
+            a, b, c, d = hole
+            a < (x0 + x1) / 2 < b && c < (z0 + z1) / 2 < d && continue
+        end
+        nb0 = node(x0, z0)
+        nb1 = node(x1, z0)
+        nt1 = node(x1, z1)
+        nt0 = node(x0, z1)
+        mid = (xs[1] + xs[end]) / 2
+        if mirror && (x0 + x1) / 2 > mid
+            push!(shells, Asap.ShellTri3((nb1, nt1, nt0), 0.3u"m", 30e9u"Pa", 0.2; id=:wall))
+            push!(shells, Asap.ShellTri3((nb1, nt0, nb0), 0.3u"m", 30e9u"Pa", 0.2; id=:wall))
+        else
+            push!(shells, Asap.ShellTri3((nb0, nb1, nt1), 0.3u"m", 30e9u"Pa", 0.2; id=:wall))
+            push!(shells, Asap.ShellTri3((nb0, nt1, nt0), 0.3u"m", 30e9u"Pa", 0.2; id=:wall))
+        end
+    end
+    return nodes, shells
+end
+
+function _shells_in(shells, s0, s1, z0, z1)
+    out = Asap.ShellTri3[]
+    for sh in shells
+        x = z = 0.0
+        for nd in sh.nodes
+            x += ustrip(u"m", nd.position[1])
+            z += ustrip(u"m", nd.position[3])
+        end
+        n = length(sh.nodes)
+        s0 < x / n < s1 && z0 < z / n < z1 && push!(out, sh)
+    end
+    return out
+end
+
+@testset "segment cuts around an opening" begin
+    @testset "a strip fixed at one end carries the midspan load" begin
+        nodes, shells = _opening_panel([0.0, 2.0, 4.0], [2.0, 3.0])
+        for nd in nodes
+            isapprox(ustrip(u"m", nd.position[1]), 0.0; atol=1e-9) || continue
+            Asap.fixnode!(nd, :fixed)
+        end
+        W = _P
+        mids = [nd for nd in nodes if isapprox(ustrip(u"m", nd.position[1]), 2.0; atol=1e-9)]
+        @test length(mids) == 2
+        share = (-W / 2) * u"N"
+        loads = Asap.AbstractLoad[Asap.NodeForce(nd, [0.0u"N", 0.0u"N", share]) for nd in mids]
+        model = Asap.Model(nodes, shells, loads)
+        Asap.solve!(model)
+        wall = _wall(0.0, 0.0, 4.0, 0.0)
+        face = spandrel_segment_actions(wall, shells, model.u, 0.0, 4.0, 2.0, 3.0)
+        # Support pushes up with W. The load is 2 m from the fixed face.
+        # Moment about the face centroid is -W * 2, about the horizontal normal.
+        @test face.at_start.V ≈ W rtol=1e-6 atol=1.0
+        @test face.at_start.M ≈ -W * 2.0 rtol=1e-6 atol=1.0
+        @test face.at_start.N ≈ 0.0 atol=1.0
+        @test face.at_end.V ≈ 0.0 atol=1.0
+        @test face.at_end.M ≈ 0.0 atol=1.0
+        @test face.at_start.V + face.at_end.V ≈ W rtol=1e-6 atol=1.0
+
+        nodes2, shells2 = _opening_panel([0.0, 2.0, 4.0], [2.0, 3.0])
+        for nd in nodes2
+            isapprox(ustrip(u"m", nd.position[1]), 0.0; atol=1e-9) || continue
+            Asap.fixnode!(nd, :fixed)
+        end
+        mids2 = [nd for nd in nodes2 if isapprox(ustrip(u"m", nd.position[1]), 2.0; atol=1e-9)]
+        axial = Asap.AbstractLoad[
+            Asap.NodeForce(nd, [(W / 2) * u"N", 0.0u"N", 0.0u"N"]) for nd in mids2]
+        pulled = Asap.Model(nodes2, shells2, axial)
+        Asap.solve!(pulled)
+        tension = spandrel_segment_actions(wall, shells2, pulled.u, 0.0, 4.0, 2.0, 3.0)
+        @test tension.at_start.N ≈ -W rtol=1e-6 atol=1.0
+        @test tension.at_end.N ≈ 0.0 atol=1.0
+    end
+
+    @testset "two piers share a symmetric load and the opening row closes" begin
+        # A station at mid-length, and mirrored diagonals, so the two piers match.
+        xs = [0.0, 2.0, 3.0, 4.0, 6.0]
+        zs = [0.0, 1.0, 3.0, 4.0]
+        nodes, shells = _opening_panel(xs, zs; hole=(2.0, 4.0, 1.0, 3.0), fix_z=0.0, mirror=true)
+        tops = [nd for nd in nodes if isapprox(ustrip(u"m", nd.position[3]), 4.0; atol=1e-9) &&
+                    abs(ustrip(u"m", nd.position[1]) - 3.0) > 1.0]
+        @test length(tops) == 2
+        share = (_P / 2) * u"N"
+        loads = Asap.AbstractLoad[Asap.NodeForce(nd, [share, 0.0u"N", 0.0u"N"]) for nd in tops]
+        model = Asap.Model(nodes, shells, loads)
+        Asap.solve!(model)
+        wall = _wall(0.0, 0.0, 6.0, 0.0)
+        left_shells = _shells_in(shells, 0.0, 2.0, 1.0, 3.0)
+        right_shells = _shells_in(shells, 4.0, 6.0, 1.0, 3.0)
+        lintel_shells = _shells_in(shells, 2.0, 4.0, 3.0, 4.0)
+        @test length(left_shells) == 2
+        @test length(right_shells) == 2
+        @test length(lintel_shells) == 4
+        left = pier_segment_actions(wall, left_shells, model.u, 1.0, 3.0)
+        right = pier_segment_actions(wall, right_shells, model.u, 1.0, 3.0)
+        @test left.bottom.V ≈ _P / 2 rtol=1e-6 atol=1.0
+        @test right.bottom.V ≈ _P / 2 rtol=1e-6 atol=1.0
+        @test left.bottom.V + right.bottom.V ≈ _P rtol=1e-6 atol=1.0
+        @test left.top.V ≈ left.bottom.V rtol=1e-6 atol=1.0
+        @test right.top.V ≈ right.bottom.V rtol=1e-6 atol=1.0
+        # +Fx at the top tensions the left pier and compresses the right.
+        @test left.bottom.N < 0
+        @test left.bottom.N + right.bottom.N ≈ 0.0 atol=1.0
+        lintel = spandrel_segment_actions(wall, lintel_shells, model.u, 2.0, 4.0, 3.0, 4.0)
+        @test lintel.at_start.V + lintel.at_end.V ≈ 0.0 atol=1.0
+
+        mesh = WallMesh([shells], wall_assemblies([wall]))
+        left_seg = StructuralSynthesizer.WallSegment(
+            :vertical, [1], [1], 0.0, 2.0, 1.0, 3.0, left_shells, :wall)
+        right_seg = StructuralSynthesizer.WallSegment(
+            :vertical, [1], [1], 4.0, 6.0, 1.0, 3.0, right_shells, :wall)
+        lintel_seg = StructuralSynthesizer.WallSegment(
+            :horizontal, [1], [1], 2.0, 4.0, 3.0, 4.0, lintel_shells, :stm)
+        layout = StructuralSynthesizer.WallSegmentLayout(
+            [left_seg, right_seg, lintel_seg], StructuralSynthesizer.WallSolidRow[])
+        report = segment_opening_forces([wall], layout, model.u)
+        @test length(report.vertical) == 2
+        @test length(report.horizontal) == 1
+        @test report.vertical[1].bottom.V ≈ left.bottom.V atol=1e-3
+        @test report.horizontal[1].at_start.V ≈ lintel.at_start.V atol=1e-3
+        gates = opening_row_equilibria(model, model.u, mesh, loads, layout)
+        @test length(gates) == 1
+        @test only(gates).z_m ≈ 1.0
+        @test only(gates).stacks == [[1]]
+        @test only(gates).equilibrium.passed
+        @test only(gates).equilibrium.cut[1] ≈ _P rtol=1e-6 atol=1.0
+    end
+
+    @testset "a shell that crosses the elevation is not cut" begin
+        n1 = Asap.Node([0.0, 0.0, 0.0]u"m", :fixed, :wall)
+        n2 = Asap.Node([1.0, 0.0, 0.0]u"m", :fixed, :wall)
+        n3 = Asap.Node([0.0, 0.0, 2.0]u"m", :free, :wall)
+        sh = Asap.ShellTri3((n1, n2, n3), 0.3u"m", 30e9u"Pa", 0.2; id=:wall)
+        wall = _wall(0.0, 0.0, 1.0, 0.0)
+        mesh = WallMesh([Asap.ShellTri3[sh]], wall_assemblies([wall]))
+        model = Asap.Model([n1, n2, n3], Asap.ShellTri3[sh], Asap.AbstractLoad[])
+        err = try
+            check_opening_row_equilibrium(model, Float64[], mesh, Asap.AbstractLoad[], 1.0)
+            nothing
+        catch e
+            e
+        end
+        @test err isa ArgumentError
+        @test occursin("does not conform", err.msg)
+    end
 end

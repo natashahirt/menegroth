@@ -15,7 +15,7 @@ using CSV
 using Reexport
 using Unitful
 using QuadGK: quadgk
-using Roots: find_zero, Brent, Order0
+using Roots: Roots, find_zero, Brent, Order0
 import Meshes  # For geometry operations in EFM
 
 # =============================================================================
@@ -96,6 +96,9 @@ end
 
 include("trace/trace.jl")
 
+# Sizing loops that only grow: how many steps they may take.
+include("iteration.jl")
+
 # =============================================================================
 # Local Modules
 # =============================================================================
@@ -134,6 +137,9 @@ include("walls/_walls.jl")
 # Foundations (types, soils, design codes)
 include("foundations/_foundations.jl")
 
+# Bar placement after sizing (after members, slabs, and foundations)
+include("detailing/_detailing.jl")
+
 # Visualization interface (traits for section geometry - no GLMakie dependency)
 include("visualization/_visualization.jl")
 
@@ -152,7 +158,7 @@ export serialize_trace_event, build_stage_timeline, filter_trace
 export AbstractMaterial, AbstractDesignCode, AbstractSection
 export AbstractStructuralSynthesizer, AbstractBuildingSkeleton, AbstractBuildingStructure
 export AbstractDemand, MemberDemand, AbstractMemberGeometry
-export AbstractObjective, MinWeight, MinVolume, MinCost, MinCarbon
+export AbstractObjective, MinWeight, MinVolume, MinCost, MinCarbon, ParetoScalarization
 export objective_value, total_objective
 export Constants
 
@@ -163,7 +169,8 @@ export strength_1_4D, strength_1_2D_1_6L, strength_1_2D_1_6Lr
 export strength_1_2D_1_0W, strength_1_2D_1_0E
 export strength_0_9D_1_0W, strength_0_9D_1_0E
 export ASD, service, default_combo
-export asce7_strength_combinations, gravity_combinations
+export asce7_strength_combinations, asce7_asd_foundation_combinations, gravity_combinations
+export FootingAction, combine_foundation_action, foundation_combination_actions
 
 # --- Gravity loads ---
 export GravityLoads, load_map
@@ -185,10 +192,29 @@ export allowable_story_drift, story_drift_is_allowed, vertical_seismic_load_effe
 export drift_live_load_factor, drift_expected_gravity_load
 export stability_coefficient, stability_coefficient_limit
 export pdelta_displacement_multiplier
+export seismic_design_category
+export OrdinaryConcreteSeismicSystem, ordinary_concrete_seismic_system
+export SpecialConcreteShearWallSystem, concrete_shear_wall_system
+export DualSeismicSystem, dual_seismic_system
+export drift_optimality_resize, DriftOptimalityResult
+export drift_optimality_resize_multi, MultiDriftOptimalityResult
+export SectionScalingLaw, fit_section_scaling_law
+export continuous_area, marginal_area, continuous_modulus
+export project_to_catalog, candidate_band, projection_gap
+export RelaxationWarmStart, relaxation_warm_start, continuation_seed
+export relaxation_lower_bound, optimality_gap, catalog_lower_envelope
+export separable_lower_bound
+export pareto_front, ParetoPoint
+export LinearCapacityCoupling, LinearSelectionConstraint
+export resize_for_drift!, DriftConstraint, DriftGovernorResult, snap_up
+export total_drift_constraint, interstory_drift_constraint
 
 # --- Directional-procedure MWFRS wind (ASCE 7-22 Chapter 27) ---
 export wind_figure_2731_roof, wind_wall_cp, wind_design_pressure, wind_surface
-export wind_rigid_eccentricity, wind_wall_resultant, wind_facade_edges
+export wind_rigid_eccentricity, wind_flexible_eccentricity, wind_wall_resultant, wind_facade_edges
+export wind_terrain_constants, wind_effective_length, approximate_frequency_permitted,
+       approximate_natural_frequency, shear_wall_natural_frequency, wind_low_rise,
+       gust_equivalent_height, gust_effect_factor_rigid, gust_effect_factor_flexible
 export wind_forces_from_pressures, wind_unit_direction, wind_principal_directions
 export wind_direction_cases
 export wind_cases_from_resultants
@@ -197,10 +223,11 @@ export WindFacadeEdge, WindWallResultant, WindMWFRSCase
 
 # --- Materials ---
 export Metal, StructuralSteel, RebarSteel, Concrete, ReinforcedConcreteMaterial
+export REBAR_COATINGS, with_coating, is_epoxy_coated
 export Timber, NDSChecker
 export material_name
 export A992_Steel, S355_Steel, Rebar_40, Rebar_60, Rebar_75, Rebar_80, Stud_51
-export NWC_3000, NWC_4000, NWC_5000, NWC_6000, NWC_GGBS, NWC_PFA, LWC_4000, LWC_4000_AL
+export NWC_3000, NWC_4000, NWC_4000_145, NWC_5000, NWC_6000, NWC_GGBS, NWC_PFA, LWC_4000, LWC_4000_AL
 export RC_3000_60, RC_4000_60, RC_5000_60, RC_6000_60, RC_5000_75, RC_6000_75
 export RC_GGBS_60, RC_LWC_4000_60, RC_LWC_4000_AL_60
 export Earthen_500, Earthen_1000, Earthen_2000, Earthen_4000, Earthen_8000
@@ -225,7 +252,8 @@ export min_dimension_fire_column, min_cover_fire_column
 export sfrm_thickness_x772, intumescent_thickness_n643, compute_surface_coating
 
 # --- Section interface ---
-export section_area, section_depth, section_width, weight_per_length, bounding_box
+export section_area, self_weight_area, section_depth, section_width, weight_per_length, bounding_box
+export centroid_from_top, soffit_to_centroid
 export Ix, Iy, Sx, Sy
 export to_asap_section, column_asap_section
 
@@ -248,13 +276,14 @@ export GlulamSection, STANDARD_GLULAM_WIDTHS, GLULAM_LAM_THICKNESS
 # --- Sections: Concrete ---
 export RCBeamSection, rho, gross_moment_of_inertia, section_modulus_bottom, is_doubly_reinforced
 export RCTBeamSection, flange_width, flange_thickness, gross_centroid_from_top
-export standard_rc_tbeams, small_rc_tbeams, large_rc_tbeams
+export standard_rc_tbeams, small_rc_tbeams, large_rc_tbeams, joist_rc_tbeams
+export joist_center_feasible, joist_fallback_center_spacing
 export RCColumnSection, RebarLocation, scale_column_section
 export RCCircularSection, circular_compression_zone
 export PixelFrameSection, generate_pixelframe_catalog
 export make_pixelframe_section, make_pixelframe_Y_section, make_pixelframe_X2_section, make_pixelframe_X4_section
 export n_arms
-export RCColumnDemand, RCBeamDemand
+export RCColumnDemand, RCColumnDemandSet, RCBeamDemand
 export standard_rc_columns, standard_rc_circular_columns
 export square_rc_columns, rectangular_rc_columns, low_capacity_rc_columns, high_capacity_rc_columns, all_rc_rect_columns
 export standard_circular_columns, low_capacity_circular_columns, high_capacity_circular_columns
@@ -311,13 +340,15 @@ export get_b_eff
 export get_Qn, validate_stud_diameter, validate_stud_length, check_stud_spacing,
        check_stud_edge_distance, check_stud_deck_projection, deck_limit_failures
 export design_shear_anchors, shear_connection_ductile
+export ShearAnchorLayout, place_shear_anchors, studs_on_interval
 export RIB_ANGLE_TOL, rib_orientation, rib_angle_between, rib_crossing_spacing,
        rib_row_bounds, deck_rib_note
 export get_Cf, get_Mn_composite, get_ϕMn_composite
 export find_required_ΣQn, get_Mn_negative
 export cb_gravity_top_flange_restrained, cb_neg_from_moment_field,
        check_construction, construction_stage, construction_span_demand,
-       construction_with_shape, default_construction_Lb, beam_panel_brace_shear
+       construction_with_shape, construction_with_split, default_construction_Lb,
+       beam_panel_brace_shear
 export construction_personnel_pressure, construction_edition
 export get_I_transformed, get_I_LB, check_composite_deflection,
        composite_service_inertia, positive_inertia_for_service,
@@ -346,6 +377,7 @@ export effective_flange_width, flange_width_at_station, governing_flange_width
 export design_tbeam_flexure
 export moment_weighted_avg_depth, effective_flange_width_from_tributary
 export Vc_beam, Vs_max_beam, Vs_required
+export JoistConstruction, check_joist_construction, joist_topping_thickness, Vc_joist
 export min_shear_reinforcement, max_stirrup_spacing
 export design_stirrups, design_beam_shear, design_beam_deflection, design_tbeam_deflection
 export torsion_section_properties, torsion_section_properties_tbeam
@@ -373,13 +405,16 @@ export generate_PM_diagrams_biaxial
 
 # --- ACI 318: column design ---
 export design_column_reinforcement, resize_column_with_reinforcement
+export design_column_shear, column_equation_a_pounds, column_tie_legs
 export slenderness_ratio, should_consider_slenderness
 export effective_stiffness, critical_buckling_load
 export magnification_factor_nonsway, calc_Cm, minimum_moment
 export magnify_moment_nonsway, magnification_factor_sway, magnify_moment_sway
-export SwayStoryProperties, stability_index, is_sway_frame
+export SwayStoryProperties, stability_index, is_sway_frame, alignment_chart_k
 export B2StoryProperties, magnification_factor_sway_Q
 export effective_stiffness_sway, critical_buckling_load_sway, magnify_moment_sway_complete
+# Shared second-order column design (bridges ACI §10.10 and AISC App.8)
+export LateralTranslation, StoryStability, story_B2, design_column_moments
 
 # --- ACI 318: biaxial bending ---
 export bresler_reciprocal_load, check_bresler_reciprocal
@@ -411,7 +446,7 @@ export get_rebar_fy, get_transverse_rebar, get_transverse_bar_diameter
 
 # --- Optimization: discrete (MIP) ---
 export optimize_discrete, optimize_binary_search, expand_catalog_with_materials
-export size_columns, size_beams, size_members
+export size_columns, size_beams, size_members, size_axial_members
 export to_steel_demands, to_rc_demands
 export to_steel_geometry, to_concrete_geometry, convert_geometries
 
@@ -448,15 +483,51 @@ export WALL_ISTIFF_UNCRACKED, WALL_ISTIFF_CRACKED
 # --- Structural walls: ACI in-plane shear checker (S1, demand-decoupled) ---
 export wall_alpha_c, wall_shear_capacity_si
 export check_wall_inplane_shear, check_wall_min_reinforcement, WALL_PHI_SHEAR
+export monolithic_shear_friction_si, check_monolithic_shear_friction
 
 # --- Structural walls: ACI in-plane axial–flexure P–M (S1, demand-decoupled) ---
 export wall_phi_flexure, wall_axial_flexure_capacity_si, wall_pure_axial_capacity_si
 export wall_pm_at_c_si, wall_moment_capacity_at_axial_si
 export check_wall_inplane_flexure, wall_pm_diagram
+export displacement_boundary_element
+export boundary_transverse_extension, boundary_element_horizontal_length
+export compression_zone_width, boundary_drift_capacity
+export stress_boundary_element, boundary_transverse_amount
+export effective_flange_overhang, flanged_boundary_element, boundary_transverse_spacing
+export transverse_spacing_so, wall_boundary_tie_spacing, boundary_element_vertical_spacing
+export floor_concrete_at_boundary, web_vertical_support_spacing
+export boundary_support_extension, boundary_bar_development, horizontal_web_termination
+export web_end_within_six_inches
+export boundary_zone_width_minimum, boundary_width_or_drift, lambda_sqrt_fc_Acv
+export horizontal_edge_anchorage, boundary_longitudinal_ratio, boundary_ratio_ties
+export boundary_hoop_spacing
+export boundary_tie_bar_size, boundary_hoop_arrangement
+export special_end_reinforcement_ratio, special_end_minimum_area, special_end_zone
+export special_end_bar_extension, boundary_end_bar_layout, boundary_end_area_si
+export wall_pm_end_bars_at_c_si, wall_end_bar_capacity_si, check_wall_end_bar_flexure
+export coupling_beam_route, coupling_beam_diagonal_strength
+export COUPLING_BEAM_DIAGONAL_PHI, COUPLING_BEAM_SHEAR_PHI
+export coupling_beam_grade, coupling_beam_dimensions, coupling_beam_hoop_spacing
+export coupling_beam_section_moment, coupling_beam_design_shear
+export coupling_beam_concrete_omitted, design_special_coupling_beam
+export design_diagonal_coupling_beam
+export gravity_frame_seismic_section, gravity_beam_transverse_limit
+export special_moment_frame_materials, special_frame_splice_notes, gravity_beam_seismic_shear
+export gravity_slab_column_shear, special_column_hoop_length
+export special_column_design_shear, special_column_probable_moments, special_column_shear_design
+export special_wall_overstrength, special_wall_dynamic_amplification
+export special_wall_design_shear, special_wall_shear_limit, wall_gross_fiber_stress
+export special_boundary_composer, boundary_minimum_thickness
+export wall_flanged_gross_section, wall_flanged_fiber_stress
+export wall_flanged_pm_at_c_si, wall_flanged_c_at_axial_si, flange_end_compressed
+export wall_two_flange_gross_section, wall_two_flange_fiber_stress
+export wall_two_flange_pm_at_c_si, wall_two_flange_c_at_axial_si
 
 # --- Structural walls: ACI out-of-plane / slender wall §11.8 (S1) ---
 export oop_slender_wall_strength_si, oop_service_deflection_si
 export oop_slender_wall_gates, check_wall_out_of_plane_slender
+# Nonsway weak-axis magnification, ACI 318-19 §6.6.4.5 (not the §11.8 method).
+export wall_modulus_si, nonsway_slenderness_moment, check_wall_out_of_plane_axial_flexure
 
 # --- Structural walls: ACI simplified / empirical bearing wall §11.5.3 (S1) ---
 export wall_empirical_k, wall_empirical_axial_capacity_si, wall_min_thickness_si
@@ -481,6 +552,7 @@ export ConcreteColumnOptions, ConcreteBeamOptions
 export NLPColumnOptions, NLPHSSOptions, NLPWOptions, NLPBeamOptions
 export ColumnOptions, BeamOptions, MemberOptions
 export steel_column_catalog, rc_column_catalog, rc_beam_catalog, rc_beam_catalog_from_bounds
+export grow_rc_beam_catalog, grow_rc_column_catalog
 export standard_rc_beams, small_rc_beams, large_rc_beams, xlarge_rc_beams, all_rc_beams
 
 # --- Floor system types ---
@@ -502,7 +574,7 @@ export AbstractJoistPattern, joist_geometry
 
 # --- Floor options ---
 export AbstractFloorOptions
-export FlatPlateOptions, FlatSlabOptions, OneWayOptions, VaultOptions, CompositeDeckOptions, TimberOptions
+export FlatPlateOptions, FlatSlabOptions, OneWayOptions, TwoWayOptions, VaultOptions, CompositeDeckOptions, TimberOptions
 export flat_slab  # convenience constructor for FlatSlabOptions
 export result_materials
 
@@ -512,6 +584,9 @@ export FloorDesignStatus, FLOOR_DESIGN_SUCCEEDED, FLOOR_DESIGN_NOT_CONVERGED, FL
 export FloorDesignDiagnostic, FloorCellLoadUpdate, FloorSupportUpdate
 export FloorDesignProposal, FloorDesignOutcome
 export UnsupportedFloorSystemError, is_installable
+export FlatPlateSpanInput, FlatPlateTopologyInput, FlatPlateCellInput
+export FlatPlateFloorInput, FlatPlateAboveSupportInput, FlatPlateSupportInput
+export FlatPlateDesignInput
 
 # --- Floor result types ---
 export AbstractFloorResult
@@ -531,23 +606,28 @@ export default_tributary_axis, resolve_tributary_axis
 export materials, material_volumes
 
 # --- Minimum thickness (ACI deflection-control tables, all CIP types) ---
-export min_thickness
+export min_thickness, one_way_support_condition, thicker_support
+export alpha_f, alpha_fm
 
 # --- Flat plate calculations (ACI 318) ---
-export clear_span
+export clear_span, eq13_4_clear_span
 export equivalent_square_column, circular_column_Ic
 export total_static_moment, distribute_moments_mddm, distribute_moments_aci
 export edge_beam_βt, aci_ddm_longitudinal_with_edge_beam, aci_col_strip_ext_neg_fraction
 export required_reinforcement, minimum_reinforcement, max_bar_spacing
 export cracked_moment_of_inertia, cracked_moment_of_inertia_tbeam
 export effective_moment_of_inertia, effective_moment_of_inertia_bischoff, cracking_moment
+export effective_moment_of_inertia_aci318_19, effective_moment_of_inertia_function
+export tension_controlled_strain, one_way_shear_capacity_without_Av
 export immediate_deflection, long_term_deflection_factor, deflection_limit
 export required_Ix_for_deflection
 export MDDM_COEFFICIENTS, ACI_DDM_LONGITUDINAL
-export estimate_column_size, estimate_column_size_from_span, face_of_support_moment
+export estimate_column_size, estimate_column_size_from_span, span_face_moments, efm_face_offset
 
 # --- Flat plate analysis methods ---
 export FlatPlateAnalysisMethod, DDM, EFM, FEA, RuleOfThumb
+export OneWayMomentCoefficients, panel_shell, StoryPanelDesign, story_panel_reinforcement, StoryLoadCases, story_load_cases, is_rectangular_panel, two_way_opening_needs_analysis
+export select_panel_analysis, approximate_one_way_moments, coefficients_permitted
 export MomentAnalysisResult
 export DDMApplicabilityError, EFMApplicabilityError
 export EFMSpanProperties, EFMJointStiffness, EFMModelCache, FEAModelCache
@@ -582,6 +662,7 @@ export design_closed_stirrups, check_punching_with_stirrups
 # --- Moment transfer / integrity reinforcement ---
 export transfer_reinforcement, additional_transfer_bars
 export integrity_reinforcement, check_integrity_reinforcement
+export integrity_bottom_bars, integrity_bottom_bars!, design_integrity_check
 
 # --- Two-way deflection ---
 export load_distribution_factor, frame_deflection_fixed, strip_deflection_fixed
@@ -591,12 +672,15 @@ export deflection_from_rotation, support_rotation, two_way_panel_deflection
 export punching_geometry_interior, punching_geometry_edge, punching_geometry_corner
 export punching_geometry, punching_αs, punching_β
 export gamma_f, gamma_v, effective_slab_width
-export polar_moment_Jc_interior, polar_moment_Jc_edge
+export polar_moment_Jc_interior, polar_moment_Jc_edge, polar_moment_Jc_edge_perpendicular
+export moment_transfer_gamma_f, transfer_band_net_tensile_strain
 # General-shape critical sections (ACI 421.1R-99 App. B; non-orthogonal,
 # re-entrant, circular, I-/odd supports via true principal axes)
 export critical_section_segments, critical_section_properties
 export gamma_v_general, punching_stress_general, circular_critical_section
 export rectangular_critical_section, reentrant_critical_section, corner_critical_section
+export wall_end_critical_section, wall_face_critical_section
+export reentrant_wall_corner_section, convex_wall_corner_section, closed_wall_loop_section
 export section_symmetry, punching_check_general
 export punching_capacity_stress, punching_capacity_interior
 export combined_punching_stress, punching_perimeter, punching_demand
@@ -606,6 +690,13 @@ export punching_check
 
 # --- Rebar catalog (ACI, shared) ---
 export bar_diameter, bar_area, infer_bar_size, select_bars
+export standard_hook, hook_centerline_length, BarSet, bar_set_mass, bar_set_ec
+export straight_development_length, hooked_bar_development_length
+export compression_development_length, tension_lap_length, compression_lap_length
+export BarGroup, MemberDetail, StripBars, StripLayout, bar_set, detail_mass, detail_ec
+export bar_schedule, stock_splices, bar_size_from_string, column_tie_spacing, column_lap_length
+export detail_flat_plate_line, detail_flat_plate_slab, detail_beam, detail_column
+export detail_spread_footing, detail_mat, detail_wall
 export select_bars_for_size, select_bars_candidates
 
 # --- EFM stiffnesses (ACI 318 Section 8.11) ---
@@ -634,7 +725,7 @@ export size_flat_plate_optimized, FlatPlateNLPProblem
 export VaultAnalysisMethod, HaileAnalytical, ShellFEA
 
 # Core analysis functions
-export vault_stress_symmetric, vault_stress_asymmetric
+export vault_stress_symmetric, vault_stress_asymmetric, vault_kern_check
 export solve_equilibrium_rise
 export parabolic_arc_length, vault_volume_per_area, get_vault_properties
 
@@ -645,7 +736,7 @@ export parabolic_arc_length, vault_volume_per_area, get_vault_properties
 using Asap: TributaryPolygon, TributaryBuffers, VertexTributary, SpanInfo
 using Asap: get_tributary_polygons, get_tributary_polygons_isotropic, get_tributary_polygons_one_way
 using Asap: compute_voronoi_tributaries
-using Asap: get_polygon_span, governing_spans, short_span, long_span, two_way_span
+using Asap: get_polygon_span, governing_spans, short_span, long_span, two_way_span, longer_axis_span
 using Asap: vertices  # Re-export for parametric → absolute coords (also extended in strips.jl)
 
 export TributaryPolygon, TributaryBuffers
@@ -653,7 +744,7 @@ export VertexTributary
 export get_tributary_polygons, get_tributary_polygons_isotropic, get_tributary_polygons_one_way
 export compute_voronoi_tributaries
 export SpanInfo, get_polygon_span, governing_spans
-export short_span, long_span, two_way_span
+export short_span, long_span, two_way_span, longer_axis_span
 export vertices
 
 # =============================================================================
@@ -686,9 +777,11 @@ export soft_clay, stiff_clay, hard_clay
 # Foundation result types
 export AbstractFoundationResult
 export SpreadFootingResult, CombinedFootingResult, StripFootingResult, MatFootingResult, PileCapResult
+export FoundationUtilizations, utilization_checks
 
 # Foundation demand
-export FoundationDemand
+export FoundationDemand, WallLineSample, WallLineDemand
+export FootingLoads, footing_loads
 
 # Type mapping
 export foundation_type, foundation_symbol
@@ -699,6 +792,7 @@ export concrete_volume, steel_volume, footprint_area, footing_length, footing_wi
 # Foundation options
 export SpreadParams, StripParams, MatParams, FoundationOptions
 export AbstractMatMethod, RigidMat, ShuklaAFM, WinklerFEA
+export StabilityParams, footing_stability_utils
 
 # Design functions
 export design_footing
@@ -717,7 +811,7 @@ export section_geometry
 export section_polygon, section_polygon_inner
 export section_thickness
 export section_flange_width, section_flange_thickness, section_web_thickness
-export has_rebar, section_rebar_positions, section_rebar_radius
+export has_rebar, section_rebar_positions, section_rebar_radius, section_rebar_bars, section_transverse
 
 # =============================================================================
 # Re-exports (at end to avoid world-age issues in Julia 1.12+)

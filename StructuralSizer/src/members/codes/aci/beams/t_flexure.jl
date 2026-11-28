@@ -105,28 +105,39 @@ returns that function's result exactly.
 
 # Clear distance
 §8.12.2(b) / §8.12.3(c) limit the overhang to one-half the clear distance to the
-next web. `d(s)` is the per-side tributary extent perpendicular to the beam, the
-same stand-in for that half-distance already used by
-[`effective_flange_width_from_tributary`](@ref) and by the steel §I3.1a path.
-A missing side (`nothing`) is a slab edge, not a zero-width bay.
+next web. `d(s)` is the per-side tributary extent perpendicular to the beam,
+measured from the beam centerline. `left_clear` / `right_clear`, when given, are
+that side's one-half clear distance to the next web, measured from the web
+faces; the overhang is capped by both. A missing side (`nothing`) is a slab
+edge, not a zero-width bay.
+
+`one_side` overrides the §8.12.3 selection. By default a side with no profile
+makes the beam one-sided. Pass `true` to apply the §8.12.3 limits to both
+present sides, e.g. a joist whose slab stops at a free edge.
 """
 function flange_width_at_station(bw::Length, hf::Length, ln::Length, s::Real;
                                  left::Union{SideExtentProfile, Nothing} = nothing,
-                                 right::Union{SideExtentProfile, Nothing} = nothing)
-    one_side = isnothing(left) || isnothing(right)
-    overhang(p) = _aci_side_overhang(p, s, hf, ln, one_side)
-    return bw + overhang(left) + overhang(right)
+                                 right::Union{SideExtentProfile, Nothing} = nothing,
+                                 left_clear::Union{Length, Nothing} = nothing,
+                                 right_clear::Union{Length, Nothing} = nothing,
+                                 one_side::Union{Bool, Nothing} = nothing)
+    one = something(one_side, isnothing(left) || isnothing(right))
+    return bw + _aci_side_overhang(left, s, hf, ln, one, left_clear) +
+                _aci_side_overhang(right, s, hf, ln, one, right_clear)
 end
 
 """ACI 318-11 §8.12.2 / §8.12.3 overhang on one side (corpus: aci-318-11, PDF p. 119)."""
 function _aci_side_overhang(p::Union{SideExtentProfile, Nothing}, s::Real,
-                            hf::Length, ln::Length, one_side::Bool)
+                            hf::Length, ln::Length, one_side::Bool,
+                            clear::Union{Length, Nothing} = nothing)
     p === nothing && return zero(hf)
     d = _sample_extent(p, s) * u"m"
     # §8.12.3 when the slab exists on one side only; §8.12.2 otherwise.
     # `ln/8` is the per-side form of the §8.12.2 total cap `bf ≤ span/4`
     # (see `effective_flange_width`). `ln/12` is §8.12.3(a) verbatim.
     capped = one_side ? min(6 * hf, ln / 12, d) : min(8 * hf, ln / 8, d)
+    # §8.12.2(b) / §8.12.3(c): one-half the clear distance to the next web.
+    clear === nothing || (capped = min(capped, max(clear, zero(clear))))
     return capped
 end
 
@@ -143,13 +154,20 @@ demand/capacity peak. Where `bf(s)` is constant the ratio peaks at maximum
 sagging moment and `bf` is that constant width, matching
 [`effective_flange_width`](@ref). Hogging stations are skipped: the flange is in
 tension there and §8.12 does not add it. If the demand never sags, the width at
-midspan is returned.
+midspan is returned. `left_clear`, `right_clear` and `one_side` pass through to
+[`flange_width_at_station`](@ref).
 """
 function governing_flange_width(bw::Length, hf::Length, ln::Length, demand_of_s;
                                 left::Union{SideExtentProfile, Nothing} = nothing,
                                 right::Union{SideExtentProfile, Nothing} = nothing,
+                                left_clear::Union{Length, Nothing} = nothing,
+                                right_clear::Union{Length, Nothing} = nothing,
+                                one_side::Union{Bool, Nothing} = nothing,
                                 extra_breakpoints::AbstractVector{Float64} = Float64[])
-    bf_of = s -> flange_width_at_station(bw, hf, ln, s; left = left, right = right)
+    bf_of = s -> flange_width_at_station(bw, hf, ln, s; left = left, right = right,
+                                         left_clear = left_clear,
+                                         right_clear = right_clear,
+                                         one_side = one_side)
     (left === nothing && right === nothing) && return bf_of(0.5)
 
     score = function(s)
@@ -171,6 +189,40 @@ end
 # ==============================================================================
 # T-Beam Flexural Design
 # ==============================================================================
+
+"""
+    tbeam_as_required(Mu, bw, d, bf, hf, fc, fy) -> Area
+
+Tension steel required by analysis, before §10.5.1.
+
+The flange case is [`required_reinforcement`](@ref) on `bf`. The web case adds
+the overhang force to the Whitney steel for the moment the web still carries,
+with φ = 0.90, the same split as [`design_tbeam_flexure`](@ref). Returns `0`
+when `Mu` does not call for tension steel, and `Inf` when the section cannot
+develop `Mu`.
+"""
+function tbeam_as_required(Mu::Moment, bw::Length, d::Length, bf::Length, hf::Length,
+                           fc::Pressure, fy::Pressure)
+    Mu <= zero(Mu) && return 0.0u"inch^2"
+    As_trial = required_reinforcement(Mu, bf, d, fc, fy; require_tension_controlled = false)
+    isinf(ustrip(u"inch^2", As_trial)) && return Inf * u"inch^2"
+    stress_block_depth(As_trial, fc, fy, bf) <= hf && return As_trial
+
+    fc_psi = ustrip(u"psi", fc)
+    fy_psi = ustrip(u"psi", fy)
+    bf_in = ustrip(u"inch", bf)
+    bw_in = ustrip(u"inch", bw)
+    hf_in = ustrip(u"inch", hf)
+    d_in = ustrip(u"inch", d)
+    Cf_lb = 0.85 * fc_psi * (bf_in - bw_in) * hf_in
+    Mw_lbin = ustrip(u"lbf*inch", Mu) / 0.90 - Cf_lb * (d_in - hf_in / 2)
+    Rn_w = Mw_lbin / (bw_in * d_in^2)
+    β = beta1(fc)
+    term = 2 * Rn_w / (β * fc_psi)
+    term < 1.0 || return Inf * u"inch^2"
+    ρ_w = (β * fc_psi / fy_psi) * (1 - sqrt(1 - term))
+    return (ρ_w * bw_in * d_in + Cf_lb / fy_psi) * u"inch^2"
+end
 
 """
     design_tbeam_flexure(Mu, bw, d, bf, hf, fc, fy; ...) -> NamedTuple
@@ -208,8 +260,6 @@ function design_tbeam_flexure(Mu::Moment, bw::Length, d::Length,
                                cover = 1.5u"inch",
                                d_stirrup = 0.375u"inch",
                                d_agg = 0.75u"inch")
-
-    φ_assumed = 0.90
 
     # Try as rectangular beam with full flange width
     As_trial = required_reinforcement(Mu, bf, d, fc, fy; require_tension_controlled = false)
@@ -254,28 +304,13 @@ function design_tbeam_flexure(Mu::Moment, bw::Length, d::Length,
         bf_in  = ustrip(u"inch", bf)
         bw_in  = ustrip(u"inch", bw)
         hf_in  = ustrip(u"inch", hf)
-        d_in   = ustrip(u"inch", d)
 
         # Flange overhang compression
         Cf_lb = 0.85 * fc_psi * (bf_in - bw_in) * hf_in
-        Mf_lbin = Cf_lb * (d_in - hf_in / 2)
 
-        # Moment to be carried by web
-        Mu_lbin = ustrip(u"lbf*inch", Mu)
-        Mw_lbin = Mu_lbin / φ_assumed - Mf_lbin
-
-        # Required web reinforcement from Whitney on bw × d
-        Rn_w = Mw_lbin / (bw_in * d_in^2)
-        β = beta1(fc)
-        term = 2 * Rn_w / (β * fc_psi)
-        term < 1.0 || error("T-beam web inadequate: increase h or bw")
-        ρ_w = (β * fc_psi / fy_psi) * (1 - sqrt(1 - term))
-        Asw_in = ρ_w * bw_in * d_in
-
-        # Flange overhang reinforcement
-        Asf_in = Cf_lb / fy_psi
-
-        As_required = (Asw_in + Asf_in) * u"inch^2"
+        As_required = tbeam_as_required(Mu, bw, d, bf, hf, fc, fy)
+        isinf(ustrip(u"inch^2", As_required)) &&
+            error("T-beam web inadequate: increase h or bw")
         As_design = max(As_required, As_min)
 
         # Recompute stress block for design As

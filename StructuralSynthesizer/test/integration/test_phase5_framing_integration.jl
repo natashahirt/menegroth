@@ -88,9 +88,16 @@ const SS = StructuralSynthesizer
         # After prepare!, should have auto-generated members
         @test length(struc.beams) > 0
         
-        # Level-1 joists must be auto-generated from framing_opts (the core of the
+        # Framing level 1 must be auto-generated from framing_opts (the core of the
         # integration fix: framing_opts → prepare! → populate_levels!).
-        joists = filter(b -> b.level == 1, struc.beams)
+        # `Beam.level` is the support rank, not this generation index.
+        joists = Beam[]
+        for slab in struc.slabs
+            for fl in slab.framing_levels
+                fl.level == 1 || continue
+                append!(joists, (struc.beams[i] for i in SS.level_member_indices(struc, fl)))
+            end
+        end
         @test !isempty(joists)
         @test all(b -> b.role == :joist, joists)
         

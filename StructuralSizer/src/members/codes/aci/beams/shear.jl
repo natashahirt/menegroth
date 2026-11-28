@@ -263,6 +263,8 @@ Complete beam shear design per ACI 318.
 - `stirrup_bar`: Bar number for stirrups (default #3)
 - `Nu`: Factored axial compression (positive). Increases Vc per ACI 318-11 §11.2.1.2.
 - `Ag`: Gross cross-section area (bw × h). Required when Nu is provided.
+- `joist`: A `JoistConstruction`. When §8.13.2 and §8.13.3 are met, `Vc` is
+  10 percent above Chapter 11 (ACI 318-11 §8.13.8). Otherwise `Vc` is unchanged.
 
 # Returns
 Named tuple:
@@ -284,11 +286,15 @@ Named tuple:
 function design_beam_shear(Vu::Force, bw::Length, d::Length,
                            fc::Pressure, fyt::Pressure;
                            λ::Real=1.0, stirrup_bar::Int=3,
-                           Nu=nothing, Ag=nothing)
+                           Nu=nothing, Ag=nothing, joist=nothing,
+                           omit_concrete::Bool=false)
     φ = 0.75
 
-    # Concrete capacity (with optional axial compression modifier)
-    Vc = Vc_beam(bw, d, fc; λ=λ, Nu=Nu, Ag=Ag)
+    # Concrete capacity. The joist factor is 1.10 only when ACI 318-11
+    # §8.13.2 and §8.13.3 are met (§8.13.8, PDF page 121); otherwise 1.
+    # §18.6.5.2 sets Vc = 0 when its two conditions both occur.
+    Vc = omit_concrete ? 0.0u"lbf" :
+         _joist_vc_factor(joist) * Vc_beam(bw, d, fc; λ=λ, Nu=Nu, Ag=Ag)
     φVc = φ * Vc
 
     # Required steel shear

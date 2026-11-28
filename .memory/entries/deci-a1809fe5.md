@@ -8,12 +8,12 @@ title: 'Core foundation seam: rigid mat restrains the wall base; reactions go to
 node_label: core on the mat
 tags: ''
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-9c9eabd9
 created_at: '2026-10-23T14:22:59.210319+00:00'
-updated_at: '2026-10-23T14:22:59.210319+00:00'
+updated_at: '2026-11-05T11:43:52.796277+00:00'
 has_child_rationale: User confirmed the core is founded on the building mat, not a
   new wall-foundation phase
 ---

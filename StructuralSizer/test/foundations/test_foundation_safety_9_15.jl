@@ -48,10 +48,10 @@ const SS = StructuralSizer
         @test pch.utilization != pch_old.utilization
     end
 
-    @testset "P0: default :c2 keeps governing Mux=80 not leftover Muy=10" begin
-        # Production oracle: punching_check(..., position=:edge) with no
-        # free_edge_parallel must use transfer moment 80 kip·ft, not 10.
-        # Default / inferred :c2 previously selected any nonzero Muy.
+    @testset "P0: default :c2 superposes Mux=80 and Muy=10" begin
+        # punching_check(..., position=:edge) adds both moments (engineering
+        # judgment, see test_corner_punching.jl for the hand calc), so it
+        # exceeds either moment alone.
         c1 = 12.0u"inch"
         c2 = 24.0u"inch"
         d  = 6.0u"inch"
@@ -69,7 +69,9 @@ const SS = StructuralSizer
         pch = punching_check(Vu, Mux, Muy, d, fc, c1, c2; position = :edge)
         pch_gov = punching_check(Vu, Mux, zero(Muy), d, fc, c1, c2; position = :edge)
         pch_left = punching_check(Vu, zero(Mux), Muy, d, fc, c1, c2; position = :edge)
-        @test pch.utilization ≈ pch_gov.utilization rtol=1e-12
+        # The worse assignment puts 80 on the symmetry axis and 10 on the
+        # edge-parallel axis, where the Vu·e centroid shift cancels it.
+        @test pch.utilization >= pch_gov.utilization - 1e-12
         @test pch.utilization > pch_left.utilization
         @test pch.geom.b0 ≈ pch_gov.geom.b0 rtol=1e-12
 
@@ -79,9 +81,9 @@ const SS = StructuralSizer
         @test ustrip(u"psi", r_slab.vu) ≈ ustrip(u"psi", pch.vu) rtol=1e-9
     end
 
-    @testset "P1: :c1 keeps geometry swap and governing |Muy|=130" begin
+    @testset "P1: :c1 keeps geometry swap and both moments" begin
         # Production :c1 previously returned M_edge = Mux and dropped Muy.
-        # After any c1↔c2 swap, M_edge is still max(|Mux|, |Muy|).
+        # After the c1↔c2 swap both moments still contribute.
         c1 = 12.0u"inch"
         c2 = 24.0u"inch"
         d  = 6.0u"inch"
@@ -106,7 +108,7 @@ const SS = StructuralSizer
 
         pch_gov = punching_check(Vu, Muy, zero(Mux), d, fc, c2, c1; position = :edge)
         pch_drop = punching_check(Vu, Mux, zero(Muy), d, fc, c2, c1; position = :edge)
-        @test pch.utilization ≈ pch_gov.utilization rtol=1e-12
+        @test pch.utilization > pch_gov.utilization
         @test pch.utilization > pch_drop.utilization
     end
 
@@ -259,7 +261,8 @@ const SS = StructuralSizer
         d2 = FoundationDemand(2; Pu=-200.0u"kN", Ps=-200.0u"kN",
                               c1=18.0u"inch", c2=18.0u"inch")
         soil = Soil(50.0u"ksf", 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa")
-        opts = StripParams(min_depth=12.0u"inch")
+        # The takeoff below counts the named bar. Development may step it down.
+        opts = StripParams(min_depth=12.0u"inch", check_development=false)
         result = design_footing(StripFooting(), [d1, d2], [0.0u"ft", 20.0u"ft"], soil; opts)
         @test hasproperty(result, :As_tensile)
         # Tension tie is tension-controlled: ϕ = 0.90 (ACI 318-11 §9.3.2.1,
@@ -365,12 +368,15 @@ const SS = StructuralSizer
         @test (x_gap - xc0 - face_x) <  d_ft - 0.01
     end
 
-    @testset "P1: transfer γf orients edge c1/c2 before b1/b2/bb" begin
-        # South-edge, boundary_edge_dirs≈(1,0) → inferred :c1. Named c1=24 in,
-        # c2=12 in, d=6.5 in, h=8 in, nonzero Mux. Unoriented γf≈0.55;
-        # oriented (ACI c1=12) γf≈0.68 — ~19% low Mu_transfer without the swap.
-        # ACI 318-11 §13.5.3.2 Eq. (13-1) / R11.11.7.2 (corpus: aci-318-11,
-        # pages 250, 209–211).
+    @testset "P1: transfer bands keep each moment on its named axis" begin
+        # South edge, boundary_edge_dirs≈(1,0) → inferred :c1. Named c1=24 in
+        # runs along the edge, c2=12 in is perpendicular to it. Mux spans
+        # along c1, so it is the along-edge moment: one side of its band is
+        # the free edge. The default :c2 treats c1 as already perpendicular
+        # to the edge, so the same Mux takes the full band.
+        # ACI 318-11 §13.5.3.2 (corpus: aci-318-11, page 250); the full band
+        # is the StructurePoint exterior column, c + 3h
+        # (corpus: sp-de-two-way-flat-plate-aci318-14, page 18).
         Mux = 80.0kip * u"ft"
         Muy = 0.0kip * u"ft"
         c1 = 24.0u"inch"
@@ -383,20 +389,23 @@ const SS = StructuralSizer
                boundary_edge_dirs = [(1.0, 0.0)], θ = 0.0)
         @test SS._infer_free_edge_parallel(col) === :c1
 
-        gov_old = SS.governing_transfer_reinforcement(
+        gov_perp = SS.governing_transfer_reinforcement(
             Mux, Muy, c1, c2, h, d, fc, fy; position = :edge)
-        @test gov_old.γf ≈ SS.gamma_f(c1 + d / 2, c2 + d) rtol=1e-12
-        @test gov_old.γf ≈ 0.55 atol=0.02
+        @test gov_perp.γf ≈ SS.gamma_f(c1 + d / 2, c2 + d) rtol=1e-12
+        @test gov_perp.bb ≈ c2 + 3h rtol=1e-12
 
-        gov = SS.governing_transfer_reinforcement(
+        gov_along = SS.governing_transfer_reinforcement(
             Mux, Muy, c1, c2, h, d, fc, fy; position = :edge,
             free_edge_parallel = SS._infer_free_edge_parallel(col))
-        @test gov.γf ≈ SS.gamma_f(c2 + d / 2, c1 + d) rtol=1e-12
-        @test gov.γf ≈ 0.68 atol=0.02
-        @test gov.γf > gov_old.γf
-        @test ustrip(u"inch^2", gov.As) > ustrip(u"inch^2", gov_old.As)
-        @test gov.bb ≈ c1 + 1.5h rtol=1e-12
-        @test gov_old.bb ≈ c2 + 1.5h rtol=1e-12
+        @test gov_along.γf ≈ SS.gamma_f(c1 + d, c2 + d / 2) rtol=1e-12
+        @test gov_along.bb ≈ c2 + 1.5h rtol=1e-12
+
+        # The other moment at that column spans perpendicular to the edge.
+        gov_other = SS.governing_transfer_reinforcement(
+            Muy, Mux, c1, c2, h, d, fc, fy; position = :edge,
+            free_edge_parallel = :c1)
+        @test gov_other.γf ≈ SS.gamma_f(c2 + d / 2, c1 + d) rtol=1e-12
+        @test gov_other.bb ≈ c1 + 3h rtol=1e-12
 
         # Interior is not swapped even if :c1 is passed.
         gov_int = SS.governing_transfer_reinforcement(
@@ -639,7 +648,8 @@ const SS = StructuralSizer
         c2 = 24.0u"inch"
         Pu = 80.0kip
         soil = Soil(20.0u"ksf", 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa")
-        opts = StripParams(min_depth=12.0u"inch")
+        # §15.6.3 lengthens a flush end. Hold the plan there to check bearing.
+        opts = StripParams(min_depth=12.0u"inch", check_development=false)
         fc = opts.material.concrete.fc′
         fy = opts.material.rebar.Fy
         ϕb = opts.ϕ_bearing
@@ -868,7 +878,8 @@ const SS = StructuralSizer
         c2 = uconvert(u"inch", uconvert(u"m", 24.0u"inch"))
         Pu = 80.0kip
         soil = Soil(20.0u"ksf", 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa")
-        opts = StripParams(min_depth=12.0u"inch")
+        # §15.6.3 lengthens a flush end. Hold the plan there to check bearing.
+        opts = StripParams(min_depth=12.0u"inch", check_development=false)
         positions = [uconvert(u"m", 0.0u"ft"), uconvert(u"m", 20.0u"ft")]
         d1 = FoundationDemand(1; Pu=Pu, Ps=Pu, c1=c1, c2=c2)
         d2 = FoundationDemand(2; Pu=Pu, Ps=Pu, c1=c1, c2=c2)
@@ -888,7 +899,9 @@ const SS = StructuralSizer
         # qa = 2 ksf so designed B exceeds D=24 in and all four faces project
         # (otherwise a flush across-face masks the L-ceil along clip).
         soil_wide = Soil(2.0u"ksf", 18.0u"kN/m^3", 30.0, 0.0u"kPa", 25.0u"MPa")
-        opts = StripParams(min_depth=12.0u"inch")
+        # These designs park a column 1 ft from the end so A2 is clipped.
+        # Development would lengthen that end.
+        opts = StripParams(min_depth=12.0u"inch", check_development=false)
         fc = opts.material.concrete.fc′
         fy = opts.material.rebar.Fy
         ϕb = opts.ϕ_bearing

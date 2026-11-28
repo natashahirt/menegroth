@@ -138,7 +138,7 @@ end
     compute_geometry_hash(input::APIInput) -> String
 
 Compute a deterministic SHA-256 hash of the geometry portion of the input
-(`units`, `vertices`, `edges`, `supports`, `faces`). Params are excluded so
+(`units`, `vertices`, `edges`, `supports`, `faces`, `openings`). Params are excluded so
 that parameter-only changes produce the same hash.
 
 `stories_z` is deliberately **not** included: `json_to_skeleton` calls
@@ -179,6 +179,17 @@ function compute_geometry_hash(input::APIInput)
     for cat in sort(collect(keys(input.faces)))
         SHA.update!(ctx, Vector{UInt8}(cat))
         for poly in input.faces[cat]
+            for coord in poly
+                SHA.update!(ctx, reinterpret(UInt8, Float64.(coord)))
+            end
+        end
+    end
+
+    # Openings (tagged so an empty list hashes like a payload without the key)
+    if !isempty(input.openings)
+        SHA.update!(ctx, Vector{UInt8}("openings"))
+        for poly in input.openings
+            SHA.update!(ctx, reinterpret(UInt8, [Int64(length(poly))]))
             for coord in poly
                 SHA.update!(ctx, reinterpret(UInt8, Float64.(coord)))
             end
@@ -239,6 +250,38 @@ function record_design_history!(entry::DesignHistoryEntry)
             popfirst!(DESIGN_HISTORY)
         end
     end
+end
+
+"""
+    publish_design_success!(cache, output, design, params_snapshot, history_entry)
+
+Atomically publish every observable artifact of a successful design. Readers
+can therefore see either the previous completed version or the new completed
+version, never a mixture of result, design, params, diagnose cache, version,
+and history from different runs.
+"""
+function publish_design_success!(
+    cache::DesignCache,
+    output::APIOutput,
+    design::BuildingDesign,
+    params_snapshot::Dict{String, Any},
+    history_entry::DesignHistoryEntry,
+)
+    lock(cache.lock) do
+        lock(DESIGN_HISTORY_LOCK) do
+            cache.last_result = output
+            cache.last_design = design
+            cache.last_api_params_json = params_snapshot
+            cache.last_diagnose = nothing
+            cache.diagnose_design_id = UInt64(0)
+            cache.design_version += 1
+            push!(DESIGN_HISTORY, history_entry)
+            while length(DESIGN_HISTORY) > DESIGN_HISTORY_MAX
+                popfirst!(DESIGN_HISTORY)
+            end
+        end
+    end
+    return cache.design_version
 end
 
 """

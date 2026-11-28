@@ -7,7 +7,7 @@ title: 'Commit: ASCE 7-22 diaphragm idealizations and FEM rigid-link mode'
 node_label: diaphragms committed
 tags: asce-7-22,phase-6,diaphragm,commit
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: StructuralSynthesizer/src/analyze/diaphragm.jl@4de643d, StructuralSynthesizer/src/analyze/_analyze.jl@4de643d,
   StructuralSynthesizer/src/analyze/asap/utils.jl@4de643d, StructuralSynthesizer/src/design_types.jl@4de643d,
@@ -17,7 +17,7 @@ files: StructuralSynthesizer/src/analyze/diaphragm.jl@4de643d, StructuralSynthes
   scripts/runners/run_phase8_diaphragm_smoke.jl@4de643d, scripts/runners/run_phase9_diaphragm_wiring_smoke.jl@4de643d
 session_id: sess-5e98e520
 created_at: '2026-10-25T13:32:33.191982+00:00'
-updated_at: '2026-10-25T13:32:33.191982+00:00'
+updated_at: '2026-11-04T19:27:35.911224+00:00'
 ---
 Commits Phase 6b. classify_diaphragm_idealization returns :rigid, :flexible, or :shell from caller inputs: seismic per ASCE 7-22 §12.3.1.1–§12.3.1.3, wind per §26.2. It fails closed on missing inputs. The two concrete-filled deck names share one permission (chec-f147f576).
 

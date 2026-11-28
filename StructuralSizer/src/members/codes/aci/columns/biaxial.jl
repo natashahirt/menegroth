@@ -114,46 +114,46 @@ end
 """
     pca_load_contour(Mux, Muy, φMnox, φMnoy; β=0.65) -> Float64
 
-Check biaxial capacity using PCA Load Contour Method.
-Per Portland Cement Association Notes on ACI 318.
+Check biaxial capacity with the PCA bilinear load contour.
 
-Formula: Mux/φMnox + β(Muy/φMnoy) ≤ 1.0  (for Mnx/Mny > b/h)
-      or β(Mux/φMnox) + Muy/φMnoy ≤ 1.0  (for Mnx/Mny < b/h)
+PCA Notes on ACI 318 approximate the constant-Pn contour by two straight
+lines that meet on the 45° line (EB712, Fig. 7-17, page 223). Eq. (15)
+(page 224) is the line on the side where the y-ratio is larger:
 
-# Arguments  
-- `Mux`: Factored moment about x-axis (kip-ft)
-- `Muy`: Factored moment about y-axis (kip-ft)
-- `φMnox`: Factored uniaxial x-moment capacity (Muy=0) at given Pu (kip-ft)
-- `φMnoy`: Factored uniaxial y-moment capacity (Mux=0) at given Pu (kip-ft)
-- `β`: Biaxial factor (default 0.65)
+    (Mnx / Mnox) · (1 − β) / β + Mny / Mnoy = 1
+
+The other line is the same expression with the axes swapped. `β` is read
+from Figs. 7-15 and 7-16 and passed in. Its limits are 0.5 and 1.0
+(page 222): 0.5 is the straight line between the uniaxial strengths, and
+1.0 leaves each axis at its own uniaxial strength.
+
+# Arguments
+- `Mux`, `Muy`: factored moments (kip-ft)
+- `φMnox`, `φMnoy`: factored uniaxial moment strengths at the same Pu (kip-ft)
+- `β`: contour parameter from Figs. 7-15 and 7-16 (default 0.65)
 
 # Returns
-- Utilization ratio (≤ 1.0 is adequate)
-
-# Note
-This implementation uses a caller-provided `β` (default 0.65). If axial-load-
-dependent behavior is needed, compute `β` externally and pass it in.
+Utilization ratio. A value of 1.0 is the contour.
 """
 function pca_load_contour(
     Mux::Real, Muy::Real,
     φMnox::Real, φMnoy::Real;
     β::Real = 0.65
 )
+    (0.5 ≤ β ≤ 1.0) || throw(ArgumentError(
+        "PCA load-contour β is between 0.5 and 1.0 (EB712, page 222); got $β"))
     if φMnox ≤ 0 || φMnoy ≤ 0
         return Inf
     end
-    
-    Mux = abs(Mux)
-    Muy = abs(Muy)
-    
-    ratio_x = Mux / φMnox
-    ratio_y = Muy / φMnoy
-    
-    # Use whichever controls
-    util1 = ratio_x + β * ratio_y
-    util2 = β * ratio_x + ratio_y
-    
-    return max(util1, util2)
+
+    ratio_x = abs(Mux) / φMnox
+    ratio_y = abs(Muy) / φMnoy
+    # Eq. (15) multiplies the smaller relative moment by (1−β)/β.
+    slope = (1 - β) / β
+    if ratio_y > ratio_x
+        return slope * ratio_x + ratio_y
+    end
+    return ratio_x + slope * ratio_y
 end
 
 # ==============================================================================
@@ -166,7 +166,8 @@ end
         diagram_y::PMInteractionDiagram,
         Pu::Real, Mux::Real, Muy::Real;
         method::Symbol = :contour,
-        α::Real = 1.5
+        α::Real = 1.5,
+        β::Real = 0.65
     ) -> NamedTuple
 
 Check biaxial bending capacity using P-M interaction diagrams for both axes.
@@ -177,8 +178,10 @@ Check biaxial bending capacity using P-M interaction diagrams for both axes.
 - `Pu`: Factored axial load (kip), positive = compression
 - `Mux`: Factored moment about x-axis (kip-ft)
 - `Muy`: Factored moment about y-axis (kip-ft)
-- `method`: `:contour` (Bresler Load Contour) or `:reciprocal` (Bresler Reciprocal)
-- `α`: Load contour exponent (default 1.5, used only for :contour)
+- `method`: `:contour` (Bresler load contour), `:reciprocal` (Bresler
+  reciprocal load), or `:pca` (PCA bilinear contour)
+- `α`: Load contour exponent (default 1.5, used only for `:contour`)
+- `β`: PCA contour parameter (default 0.65, used only for `:pca`)
 
 # Returns
 NamedTuple with:
@@ -196,15 +199,28 @@ function check_biaxial_capacity(
     diagram_y::PMInteractionDiagram,
     Pu::Real, Mux::Real, Muy::Real;
     method::Symbol = :contour,
-    α::Real = 1.5
+    α::Real = 1.5,
+    β::Real = 0.65
 )
     # Get capacities at the given axial load from both diagrams
     φMnx = capacity_at_axial(diagram_x, Pu)
     φMny = capacity_at_axial(diagram_y, Pu)
+
+    φPn_cap = min(_axial_design_cap(diagram_x), _axial_design_cap(diagram_y))
+    if Pu > φPn_cap
+        return (adequate = false, utilization = Pu / φPn_cap,
+                φMnx_at_Pu = φMnx, φMny_at_Pu = φMny, method = method)
+    end
     
     if method == :contour
         # Bresler Load Contour Method
         util = bresler_load_contour(Mux, Muy, φMnx, φMny; α=α)
+        adequate = util ≤ 1.0
+    elseif method == :pca
+        # PCA bilinear contour, Eqs. (15) and (18) (corpus: pca-eb712,
+        # pages 224–226). β = 0.65 is the manual procedure's initial choice
+        # (page 226) unless the caller read Figs. 7-15 and 7-16.
+        util = pca_load_contour(Mux, Muy, φMnx, φMny; β = β)
         adequate = util ≤ 1.0
     elseif method == :reciprocal
         # Bresler Reciprocal Load Method
@@ -224,7 +240,7 @@ function check_biaxial_capacity(
         util = check_bresler_reciprocal(Pu, φPnx, φPny, φP0)
         adequate = util ≤ 1.0
     else
-        error("Unknown biaxial method: $method. Use :contour or :reciprocal")
+        error("Unknown biaxial method: $method. Use :contour, :reciprocal, or :pca")
     end
     
     return (
@@ -272,6 +288,12 @@ function check_biaxial_simple(
     
     # Get capacity at the given axial load
     φMn = capacity_at_axial(diagram, Pu)
+
+    φPn_cap = _axial_design_cap(diagram)
+    if Pu > φPn_cap
+        return (adequate = false, utilization = Pu / φPn_cap,
+                φMn_at_Pu = φMn, method = :contour_symmetric)
+    end
     
     # Bresler Load Contour
     util = bresler_load_contour(Mux, Muy, φMn, φMn; α=α)
@@ -289,7 +311,8 @@ end
         section::RCColumnSection, mat,
         Pu::Real, Mux::Real, Muy::Real;
         method::Symbol = :contour,
-        α::Real = 1.5
+        α::Real = 1.5,
+        β::Real = 0.65
     ) -> NamedTuple
 
 Full biaxial check for RECTANGULAR columns with separate x/y capacities.
@@ -303,8 +326,9 @@ in each direction. Required for non-square columns where b ≠ h.
 - `Pu`: Factored axial load (kip), positive = compression
 - `Mux`: Factored moment about x-axis (kip-ft) - bends about h
 - `Muy`: Factored moment about y-axis (kip-ft) - bends about b
-- `method`: `:contour` (Bresler Load Contour) or `:reciprocal`
-- `α`: Load contour exponent (default 1.5)
+- `method`: `:contour` (Bresler load contour), `:reciprocal`, or `:pca`
+- `α`: Load contour exponent (default 1.5, used only for `:contour`)
+- `β`: PCA contour parameter (default 0.65, used only for `:pca`)
 
 # Returns
 NamedTuple with:
@@ -323,13 +347,15 @@ function check_biaxial_rectangular(
     mat,
     Pu::Real, Mux::Real, Muy::Real;
     method::Symbol = :contour,
-    α::Real = 1.5
+    α::Real = 1.5,
+    β::Real = 0.65
 )
     # Generate diagrams for both axes
     diagrams = generate_PM_diagrams_biaxial(section, mat; n_intermediate=15)
     
     # Use the full check with separate diagrams
-    return check_biaxial_capacity(diagrams.x, diagrams.y, Pu, Mux, Muy; method=method, α=α)
+    return check_biaxial_capacity(diagrams.x, diagrams.y, Pu, Mux, Muy;
+                                  method=method, α=α, β=β)
 end
 
 """
@@ -338,6 +364,7 @@ end
         Pu::Real, Mux::Real, Muy::Real;
         method::Symbol = :contour,
         α::Real = 1.5,
+        β::Real = 0.65,
         square_tolerance::Real = 0.01
     ) -> NamedTuple
 
@@ -348,16 +375,22 @@ Automatic biaxial check that detects square vs rectangular sections.
 - `mat`: Material properties
 - `Pu`: Factored axial load (kip)
 - `Mux, Muy`: Factored moments (kip-ft)
-- `method`: `:contour` or `:reciprocal`
-- `α`: Load contour exponent (default 1.5)
+- `method`: `:contour`, `:reciprocal`, or `:pca`. The symmetric shortcut
+  runs only for `:contour`.
+- `α`: Load contour exponent (default 1.5, used only for `:contour`)
+- `β`: PCA contour parameter (default 0.65, used only for `:pca`)
 - `square_tolerance`: Tolerance for b/h ratio to consider square (default 0.01)
 
 # Returns
 NamedTuple with biaxial check results
 
 # Notes
-- If b ≈ h (within tolerance): uses symmetric check (faster)
-- If b ≠ h: uses full rectangular check with separate diagrams
+- If b ≈ h (within tolerance) and the bar layout is 90°-symmetric: uses the
+  symmetric check (faster)
+- Otherwise: uses full rectangular check with separate diagrams. This
+  includes square sections whose `:perimeter` layout is asymmetric
+  (n_bars = 6, 10, 14, …), which are weaker about the y axis.
+- `is_square` in the result reports geometry only, not which path ran.
 """
 function check_biaxial_auto(
     section::RCColumnSection, 
@@ -365,6 +398,7 @@ function check_biaxial_auto(
     Pu::Real, Mux::Real, Muy::Real;
     method::Symbol = :contour,
     α::Real = 1.5,
+    β::Real = 0.65,
     square_tolerance::Real = 0.01
 )
     # Check if section is approximately square
@@ -374,8 +408,8 @@ function check_biaxial_auto(
     
     is_square = abs(aspect_ratio - 1.0) ≤ square_tolerance
     
-    if is_square
-        # Use symmetric check (faster)
+    if is_square && _bars_symmetric_90(section) && method == :contour
+        # Use symmetric check (faster). Other methods need the shared checker.
         result = check_biaxial_simple(section, mat, Pu, Mux, Muy; α=α)
         return (
             adequate = result.adequate,
@@ -387,14 +421,33 @@ function check_biaxial_auto(
         )
     else
         # Use full rectangular check
-        result = check_biaxial_rectangular(section, mat, Pu, Mux, Muy; method=method, α=α)
+        result = check_biaxial_rectangular(section, mat, Pu, Mux, Muy;
+                                           method=method, α=α, β=β)
         return (
             adequate = result.adequate,
             utilization = result.utilization,
             φMnx_at_Pu = result.φMnx_at_Pu,
             φMny_at_Pu = result.φMny_at_Pu,
             method = result.method,
-            is_square = false
+            is_square = is_square
         )
+    end
+end
+
+"""
+    _bars_symmetric_90(section::RCColumnSection; tol_in=0.01) -> Bool
+
+True if rotating the bar layout 90° about the section centroid maps every bar
+onto a bar of equal area (positions within `tol_in` inches). Only then are the
+x- and y-axis P-M diagrams of a square section identical.
+"""
+function _bars_symmetric_90(section::RCColumnSection; tol_in::Real = 0.01)
+    xc = to_inches(section.b) / 2
+    yc = to_inches(section.h) / 2
+    pts = [(to_inches(bar.x), to_inches(bar.y), to_sqinches(bar.As)) for bar in section.bars]
+    return all(pts) do (x, y, As)
+        xr, yr = xc - (y - yc), yc + (x - xc)
+        any(q -> abs(q[1] - xr) ≤ tol_in && abs(q[2] - yr) ≤ tol_in &&
+                 isapprox(q[3], As; rtol=1e-6), pts)
     end
 end

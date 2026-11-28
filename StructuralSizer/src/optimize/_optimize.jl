@@ -23,3 +23,12 @@ include("core/_core.jl")
 
 # Solvers (use abstract interface only)
 include("solvers/_solvers.jl")
+
+# Continuous-section scaling laws + catalog projection (pure: I/A/Z number tables)
+include("section_relaxation.jl")
+
+# Drift optimality-criteria resizer (pure: participation vectors → new sizes)
+include("drift_optimality.jl")
+
+# Drift governor (catalog-aware outer loop over an Asap model)
+include("drift_governor.jl")

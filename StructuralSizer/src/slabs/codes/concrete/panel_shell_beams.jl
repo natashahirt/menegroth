@@ -11,30 +11,58 @@ A frame beam drawn on the shell.
 
 `xy` is an open polyline in plan, in metres. `eccentricity` is
 `(e_f1_start, e_f1_end, e_f2, e_f3)` in metres: the rigid offset from the
-shell node to the frame centroid. Zeros put the centroid on the shell.
-At the default roll, local y is up, so a web below the slab is a negative
-`e_f2`.
+shell node to the frame centroid. Positive slot 3 is global up. Zeros put
+the centroid on the shell, and a web below the slab is a negative slot 3.
+The piece's local frame is applied when the element is built.
+
+`release` is the whole beam's Asap end release, start and end taken along
+`xy`: `:fixedfixed`, `:freefixed`, `:fixedfree`, `:freefree`, or `:joist`.
+Only the first and last pieces are released (see
+[`frame_elements_on_shell`](@ref)).
 """
 struct ShellFrameBeam
     xy::Vector{NTuple{2, Float64}}
     section::Asap.Section
     eccentricity::NTuple{4, Float64}
     id::Symbol
+    release::Symbol
 end
+
+const _SHELL_BEAM_RELEASES = (:fixedfixed, :freefixed, :fixedfree, :freefree, :joist)
 
 function ShellFrameBeam(xy, section::Asap.Section;
                         eccentricity::NTuple{4, Float64} = (0.0, 0.0, 0.0, 0.0),
-                        id::Symbol = :beam)
-    return ShellFrameBeam(collect(NTuple{2, Float64}, xy), section, eccentricity, id)
+                        id::Symbol = :beam, release::Symbol = :fixedfixed)
+    release in _SHELL_BEAM_RELEASES || throw(ArgumentError(
+        "unknown beam release :$release; use one of $(_SHELL_BEAM_RELEASES)"))
+    return ShellFrameBeam(collect(NTuple{2, Float64}, xy), section, eccentricity, id, release)
+end
+
+"""
+Release of piece `i` of `n` on a beam whose whole-member release is `release`.
+Interior pieces are continuous. A beam that is one piece takes the release
+as is.
+
+A released end of a multi-piece beam frees every rotation at that end
+(`:freefixed` / `:fixedfree`), as the frame model's outer element does. A
+`:joist` beam keeps torsion only when it is one piece; with more pieces the
+next piece and the slab restrain the twist.
+"""
+function _piece_release(release::Symbol, i::Int, n::Int)
+    n == 1 && return release
+    start_free = release in (:freefixed, :freefree, :joist)
+    end_free = release in (:fixedfree, :freefree, :joist)
+    i == 1 && start_free && return :freefixed
+    i == n && end_free && return :fixedfree
+    return :fixedfixed
 end
 
 """
 Offset of a web whose top is flush with the slab soffit.
 
 The shell node is on the slab mid-plane. The web centroid sits
-`h_slab/2 + h_web/2` below that. A frame element is created at roll `π/2`,
-which puts local y upward, so the offset is the `e_f2` component and it is
-negative.
+`h_slab/2 + h_web/2` below that. Slot 3 is that distance, negative because
+positive means global up. The element local frame is applied later.
 """
 function web_below_slab_eccentricity(h_slab::Length, h_web::Length)
     e = -ustrip(u"m", h_slab / 2 + h_web / 2)
@@ -46,7 +74,8 @@ Offset of a section whose top is flush with the slab soffit.
 
 `soffit_to_centroid` is half the depth of a rectangle and half the stem of a
 T-beam. The shell node is on the slab mid-plane, so the frame centroid is
-that distance plus half the slab thickness below the node.
+that distance plus half the slab thickness below the node. Slot 3 is
+negative: positive means global up.
 """
 function web_below_slab_eccentricity(h_slab::Length, section::AbstractSection)
     e = -ustrip(u"m", h_slab / 2 + soffit_to_centroid(section))
@@ -195,6 +224,16 @@ One frame element between each consecutive shell node on a beam line.
 `section_at(beam, station)` supplies the section at a station, in metres from
 the start of the beam line. `nothing` uses `beam.section` for every piece.
 The station passed in is the midpoint of that piece.
+
+`beam.release` frees the rotations of the first and last pieces only. Asap
+releases the local stiffness before the rigid offset, so the hinge is at the
+centroid end of the piece and the offset still carries axial force to the
+shell node.
+
+`beam.eccentricity` is the physical offset, positive slot 3 meaning global
+up. Each piece stores that offset in its own local frame at roll `π/2`, the
+roll the element is built with. A beam running the other way in plan has
+local y pointing down, so the same physical offset changes sign.
 """
 function frame_elements_on_shell(nodes, beams; tol::Float64 = 1e-4, section_at = nothing)
     frames = Asap.Element[]
@@ -202,9 +241,8 @@ function frame_elements_on_shell(nodes, beams; tol::Float64 = 1e-4, section_at =
         ordered = _nodes_on_polyline(nodes, beam.xy; tol = tol)
         length(ordered) < 2 && throw(ArgumentError(
             "beam $(beam.id) does not meet two shell nodes"))
-        e = beam.eccentricity
-        ecc = (e[1] * u"m", e[2] * u"m", e[3] * u"m", e[4] * u"m")
-        for i in 1:(length(ordered) - 1)
+        n = length(ordered) - 1
+        for i in 1:n
             sec = beam.section
             if section_at !== nothing
                 x1 = ustrip(u"m", ordered[i].position[1])
@@ -215,7 +253,12 @@ function frame_elements_on_shell(nodes, beams; tol::Float64 = 1e-4, section_at =
                 s2 = _station_on_polyline(x2, y2, beam.xy)[2]
                 sec = section_at(beam, 0.5 * (s1 + s2))
             end
+            # The constructor stores roll π/2. Sign the physical offset for
+            # that frame; a −X piece has local y pointing down.
+            ecc = Asap.orient_up_eccentricity(
+                beam.eccentricity, ordered[i], ordered[i + 1]; roll = π / 2)
             push!(frames, Asap.Element(ordered[i], ordered[i + 1], sec, beam.id;
+                                       release = _piece_release(beam.release, i, n),
                                        eccentricity = ecc))
         end
     end
@@ -246,7 +289,8 @@ function panel_shell_with_beams(boundary, shell_section::Asap.ShellSection, beam
                         id = :panel)
     nodes = _shell_nodes(shells)
     # Match the sampled line, which is what the mesher constrained.
-    sampled = [ShellFrameBeam(line, b.section; eccentricity = b.eccentricity, id = b.id)
+    sampled = [ShellFrameBeam(line, b.section; eccentricity = b.eccentricity, id = b.id,
+                              release = b.release)
                for (line, b) in zip(lines, beams)]
     frames = frame_elements_on_shell(nodes, sampled)
     return (shells = shells, frames = frames, nodes = nodes)
@@ -280,7 +324,7 @@ end
 
 _story_quantize(p) = (round(p[1], digits = 6), round(p[2], digits = 6))
 
-function _point_on_segment(p, a, b; tol = 1e-5)
+function _point_lies_on_segment(p, a, b; tol = 1e-5)
     abx, aby = b[1] - a[1], b[2] - a[2]
     L2 = abx * abx + aby * aby
     if L2 <= tol * tol
@@ -304,7 +348,7 @@ function _split_panel_edges(poly, verts)
         L2 = abx * abx + aby * aby
         for p in verts
             (p == a || p == b) && continue
-            _point_on_segment(p, a, b) || continue
+            _point_lies_on_segment(p, a, b) || continue
             t = L2 <= 1e-24 ? 0.0 : ((p[1] - a[1]) * abx + (p[2] - a[2]) * aby) / L2
             push!(hits, (clamp(t, 0.0, 1.0), p))
         end
@@ -435,6 +479,43 @@ function _shell_on_section(el, sec::Asap.ShellSection)
                           ρ = sec.ρ, id = el.id)
 end
 
+"""
+`loop` with every point of `lines` that lies on one of its edges inserted as
+a vertex, in order along the edge.
+
+The mesher seeds its own points along each edge. A line point that lands on
+one is merged into it, and the seed can differ from the line in the last bit.
+Three points of one straight line are then not exactly collinear, and the
+triangulation keeps a zero-area triangle on them. As vertices, the line
+points are used as given.
+"""
+function _with_line_points_on_loop(loop, lines; tol::Float64 = 1e-6)
+    n = length(loop)
+    out = NTuple{2, Float64}[]
+    for i in 1:n
+        a = loop[i]
+        b = loop[mod1(i + 1, n)]
+        L = hypot(b[1] - a[1], b[2] - a[2])
+        push!(out, a)
+        L > tol || continue
+        on = Tuple{Float64, NTuple{2, Float64}}[]
+        for line in lines, p in line
+            _point_lies_on_segment(p, a, b; tol = tol) || continue
+            s = ((p[1] - a[1]) * (b[1] - a[1]) + (p[2] - a[2]) * (b[2] - a[2])) / L
+            (s > tol && s < L - tol) || continue
+            push!(on, (s, p))
+        end
+        sort!(on; by = first)
+        last_s = 0.0
+        for (s, p) in on
+            s - last_s > tol || continue
+            push!(out, p)
+            last_s = s
+        end
+    end
+    return out
+end
+
 """Outer loop, shared edges, and holes of a connected story plate."""
 function _story_plate(panels, beams)
     verts = NTuple{2, Float64}[]
@@ -499,13 +580,15 @@ that contains its centroid.
 `beams` are frame elements on those nodes, not shells. `section_at(beam,
 station)` replaces the section of the piece whose midpoint is `station`
 metres along the beam. The shell edges are free. The caller fixes the supports.
+`support_lines` are wall lines the mesh must follow. The caller restrains them.
 
 Every shell node is on one plane, z = 0. A panel's thickness is centered on
 that plane.
 """
 function story_shell(panels::AbstractVector{StoryShellPanel}, beams;
                      target_edge::Length = 0.5u"m",
-                     section_at = nothing)
+                     section_at = nothing,
+                     support_lines = NTuple{2, NTuple{2, Float64}}[])
     isempty(panels) && throw(ArgumentError("a story shell needs a panel"))
     outer, interior, holes = _story_plate(panels, beams)
     spacing = ustrip(u"m", target_edge)
@@ -516,11 +599,17 @@ function story_shell(panels::AbstractVector{StoryShellPanel}, beams;
         line = _sample_polyline([_story_quantize(p) for p in b.xy], spacing)
         push!(lines, line)
         push!(sampled_beams, ShellFrameBeam(line, b.section;
-                                            eccentricity = b.eccentricity, id = b.id))
+                                            eccentricity = b.eccentricity, id = b.id,
+                                            release = b.release))
     end
-    corners = Tuple(Asap.Node([p[1] * u"m", p[2] * u"m", 0.0u"m"], :free) for p in outer)
+    for seg in support_lines
+        push!(lines, _sample_polyline([_story_quantize(p) for p in seg], spacing))
+    end
+    mesh_outer = _with_line_points_on_loop(outer, lines)
+    mesh_holes = [_with_line_points_on_loop(h, lines) for h in holes]
+    corners = Tuple(Asap.Node([p[1] * u"m", p[2] * u"m", 0.0u"m"], :free) for p in mesh_outer)
     raw = Asap.Shell(corners, panels[1].section;
-                     holes = holes,
+                     holes = mesh_holes,
                      interior_constrained_lines = lines,
                      edge_support_type = :free,
                      target_edge_length = target_edge,

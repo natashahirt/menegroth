@@ -56,7 +56,7 @@ strip fractions)."""
 const SECTION3_METHODS = [
     (key=:rot, name="ACI Min",     method=SR.RuleOfThumb()),
     (key=:ddm, name="DDM (Full)",  method=SR.DDM(:full)),
-    (key=:fea, name="FEA (frame)", method=SR.FEA(; pattern_loading=false, design_approach=:frame)),
+    (key=:fea, name="FEA (frame)", method=SR.FEA(; pattern_loading=true, pattern_mode=:efm_amp, design_approach=:frame)),
 ]
 
 """Slab concretes — baseline NWC, higher-strength NWC, and sand-LWC. Same set
@@ -102,20 +102,25 @@ concrete are the only things that vary across runs; everything else is held
 fixed so the EC cascade is isolated to slab feedback.
 
 Column / foundation defaults (fixed across runs):
-* Columns — `NWC_6000`, `:high_capacity` MIP catalog, `:per_story`
-  uniform sizing (one column section per story — typical construction).
+* Columns — `NWC_6000` on `MaterialOptions.column` and on the column
+  options, so the slab concrete axis does not change the column.
+  `:all` catalog (8–72 in), `:per_story` uniform sizing.
 * Foundations — spread footings on medium sand, `NWC_4000`, `:all_spread`.
 """
 function _section3_params(method::SR.FlatPlateAnalysisMethod,
                           concrete_label::AbstractString;
                           max_col_in::Float64,
-                          deflection_limit::Symbol = :L_360)
+                          min_h = nothing,
+                          deflection_limit::Symbol = DEFAULT_DEFL_LIMIT)
     preset = _concrete_preset(concrete_label)
     floor = SR.FlatPlateOptions(
         method           = method,
         material         = preset.material,
         deflection_limit = deflection_limit,
         max_column_size  = max_col_in * u"inch",
+        # Columns from axial load and P-M; punching grows them up to the cap.
+        column_span_minimum = false,
+        min_h            = min_h,
         shear_studs      = :if_needed,
     )
     return DesignParameters(
@@ -126,11 +131,15 @@ function _section3_params(method::SR.FlatPlateAnalysisMethod,
             floor_SDL = SECTION3_SDL_PSF * psf,
             roof_SDL  = SECTION3_SDL_PSF * psf,
         ),
-        materials = MaterialOptions(concrete = preset.concrete, rebar = SR.Rebar_60),
+        materials = MaterialOptions(
+            concrete = preset.concrete,
+            rebar = SR.Rebar_60,
+            column = SR.RC_6000_60,
+        ),
         columns   = SR.ConcreteColumnOptions(
             material        = SR.NWC_6000,
-            catalog         = :high_capacity,
-            sizing_strategy = :catalog,
+            catalog         = :all,
+            sizing_strategy = :discrete,
         ),
         floor = floor,
         foundation_options = FoundationParameters(
@@ -153,6 +162,83 @@ end
 # Result extraction
 # ==============================================================================
 
+"""Roof is the highest story. The typical story is the intermediate floor below it."""
+function _typical_and_roof(by_story)
+    stories = sort!(collect(keys(by_story)))
+    isempty(stories) && return (typical = nothing, roof = nothing)
+    return (typical = _intermediate_story(by_story), roof = stories[end])
+end
+
+"""Concrete and rebar mass per floor area for one captured slab, kg/m²."""
+function _story_mui(design, slab_idx::Int)
+    struc = design.structure
+    sr = get(design.slabs, slab_idx, nothing)
+    (isnothing(sr) || isnothing(sr.sizer_result)) && return (NaN, NaN)
+    slab = struc.slabs[slab_idx]
+    area = sum((struc.cells[i].area for i in slab.cell_indices); init = 0.0u"m^2")
+    area_m2 = ustrip(u"m^2", area)
+    area_m2 ≤ 0.0 && return (NaN, NaN)
+    floor = design.params.floor
+    mat = floor isa SR.FlatSlabOptions ? floor.base.material.concrete : floor.material.concrete
+    vols = try
+        SS._compute_slab_volumes(sr.sizer_result, area, mat, floor)
+    catch
+        return (NaN, NaN)
+    end
+    mui = _extract_slab_mui(vols, area_m2)
+    return (mui.concrete_kg_per_m2, mui.rebar_kg_per_m2)
+end
+
+"""Mean thickness, deflection ratio, punching ratio, MUI, and column size for one story.
+
+Column fields are the sections whose top is that floor. `:per_story` sizing
+makes every column on the floor the same section, so `col_c1_in` and
+`col_c2_in` are that section. The per-position fields are still recorded.
+"""
+function _story_metrics(design, by_story, story_idx)
+    cap = _params_max_col_in(design.params)
+    inc = _params_col_increment_in(design.params)
+    cols = _story_column_sizes(design.structure.columns, story_idx;
+                               cap_in = cap, increment_in = inc)
+    nan = (
+        h_in = NaN, defl_ratio = NaN, punch_ratio = NaN,
+        concrete_kg_per_m2 = NaN, rebar_kg_per_m2 = NaN,
+        col_c1_in = cols.col_c1_in, col_c2_in = cols.col_c2_in,
+        col_at_cap = cols.col_at_cap,
+        col_c1_corner_in = cols.col_c1_corner_in,
+        col_c2_corner_in = cols.col_c2_corner_in,
+        col_c1_edge_in = cols.col_c1_edge_in,
+        col_c2_edge_in = cols.col_c2_edge_in,
+        col_c1_interior_in = cols.col_c1_interior_in,
+        col_c2_interior_in = cols.col_c2_interior_in,
+    )
+    (isnothing(story_idx) || !haskey(by_story, story_idx)) && return nan
+    hs = Float64[]; ds = Float64[]; ps = Float64[]; cs = Float64[]; rs = Float64[]
+    for i in by_story[story_idx]
+        sr = get(design.slabs, i, nothing)
+        isnothing(sr) && continue
+        push!(hs, ustrip(u"inch", sr.thickness))
+        push!(ds, sr.deflection_ratio)
+        push!(ps, sr.punching_max_ratio)
+        c_kg, r_kg = _story_mui(design, i)
+        push!(cs, c_kg)
+        push!(rs, r_kg)
+    end
+    avg(v) = isempty(v) ? NaN : mean(v)
+    return (
+        h_in = avg(hs), defl_ratio = avg(ds), punch_ratio = avg(ps),
+        concrete_kg_per_m2 = avg(cs), rebar_kg_per_m2 = avg(rs),
+        col_c1_in = cols.col_c1_in, col_c2_in = cols.col_c2_in,
+        col_at_cap = cols.col_at_cap,
+        col_c1_corner_in = cols.col_c1_corner_in,
+        col_c2_corner_in = cols.col_c2_corner_in,
+        col_c1_edge_in = cols.col_c1_edge_in,
+        col_c2_edge_in = cols.col_c2_edge_in,
+        col_c1_interior_in = cols.col_c1_interior_in,
+        col_c2_interior_in = cols.col_c2_interior_in,
+    )
+end
+
 """
     _building_row(design, span_ft, method_name, concrete_label, n_stories, elapsed)
 
@@ -164,7 +250,7 @@ the BuildingDesign holds them by value).
 """
 function _building_row(design, span_ft::Float64, method_name::String,
                        concrete_label::AbstractString, n_stories::Int,
-                       elapsed::Float64)
+                       elapsed::Float64; min_h_rule::AbstractString = "table_minimum")
     summary = design.summary
     struc   = design.structure
 
@@ -176,6 +262,10 @@ function _building_row(design, span_ft::Float64, method_name::String,
     else
         ustrip(u"inch", mean(s.thickness for s in values(design.slabs)))
     end
+    by_story = _slab_story_map(struc)
+    picked = _typical_and_roof(by_story)
+    typ = _story_metrics(design, by_story, picked.typical)
+    roof = _story_metrics(design, by_story, picked.roof)
 
     col_dims_in = Float64[]
     for c in values(design.columns)
@@ -209,11 +299,31 @@ function _building_row(design, span_ft::Float64, method_name::String,
     return (
         span_ft         = span_ft,
         n_stories       = n_stories,
+        min_h_rule      = String(min_h_rule),
         concrete        = String(concrete_label),
         method          = method_name,
         floor_area_m2   = floor_area_m2,
-        # Sizing fingerprints
+        # Sizing fingerprints. `slab_h_in` is the all-story mean, roof included.
         slab_h_in       = slab_h_in,
+        slab_h_mean_in  = slab_h_in,
+        typ_story       = isnothing(picked.typical) ? -1 : picked.typical,
+        typ_h_in        = typ.h_in,
+        typ_defl_ratio  = typ.defl_ratio,
+        typ_punch_ratio = typ.punch_ratio,
+        typ_concrete_kg_per_m2 = typ.concrete_kg_per_m2,
+        typ_rebar_kg_per_m2    = typ.rebar_kg_per_m2,
+        typ_col_c1_in   = typ.col_c1_in,
+        typ_col_c2_in   = typ.col_c2_in,
+        typ_col_at_cap  = typ.col_at_cap,
+        typ_col_c1_corner_in = typ.col_c1_corner_in,
+        typ_col_c2_corner_in = typ.col_c2_corner_in,
+        typ_col_c1_edge_in   = typ.col_c1_edge_in,
+        typ_col_c2_edge_in   = typ.col_c2_edge_in,
+        typ_col_c1_interior_in = typ.col_c1_interior_in,
+        typ_col_c2_interior_in = typ.col_c2_interior_in,
+        max_col_in      = _params_max_col_in(design.params),
+        defl_limit      = first(_defl_label(_params_defl_limit(design.params))),
+        roof_h_in       = roof.h_in,
         col_min_in      = col_min_in,
         col_max_in      = col_max_in,
         col_avg_in      = col_avg_in,
@@ -246,14 +356,37 @@ end
 failure rows can coexist in the same DataFrame."""
 function _blank_building_row(span_ft::Float64, method_name::String,
                              concrete_label::AbstractString, n_stories::Int,
-                             elapsed::Float64, reason::String)
+                             elapsed::Float64, reason::String;
+                             min_h_rule::AbstractString = "table_minimum",
+                             max_col_in::Float64 = NaN,
+                             deflection_limit::Symbol = DEFAULT_DEFL_LIMIT)
     return (
         span_ft         = span_ft,
         n_stories       = n_stories,
+        min_h_rule      = String(min_h_rule),
         concrete        = String(concrete_label),
         method          = method_name,
         floor_area_m2   = NaN,
         slab_h_in       = NaN,
+        slab_h_mean_in  = NaN,
+        typ_story       = -1,
+        typ_h_in        = NaN,
+        typ_defl_ratio  = NaN,
+        typ_punch_ratio = NaN,
+        typ_concrete_kg_per_m2 = NaN,
+        typ_rebar_kg_per_m2    = NaN,
+        typ_col_c1_in   = NaN,
+        typ_col_c2_in   = NaN,
+        typ_col_at_cap  = false,
+        typ_col_c1_corner_in = NaN,
+        typ_col_c2_corner_in = NaN,
+        typ_col_c1_edge_in   = NaN,
+        typ_col_c2_edge_in   = NaN,
+        typ_col_c1_interior_in = NaN,
+        typ_col_c2_interior_in = NaN,
+        max_col_in      = max_col_in,
+        defl_limit      = first(_defl_label(deflection_limit)),
+        roof_h_in       = NaN,
         col_min_in      = NaN,
         col_max_in      = NaN,
         col_avg_in      = NaN,
@@ -313,11 +446,19 @@ function sweep_building(;
     methods                  = SECTION3_METHODS,
     concretes::Vector{String}= SECTION3_CONCRETES,
     stories::Vector{Int}     = SECTION3_STORIES,
+    min_h_variants           = [("table_minimum", nothing),
+                                ("computed_deflection", COMPUTED_DEFLECTION_SEED)],
     save::Bool               = true,
+    max_col_in::Union{Nothing, Float64} = nothing,
+    col_ratio::Float64       = 1.1,
+    column_cap::Symbol       = :span15,
+    deflection_limit::Symbol = DEFAULT_DEFL_LIMIT,
+    results_dir::AbstractString = SECTION3_RESULTS_DIR,
+    run_name::Union{Nothing, AbstractString} = nothing,
 )
     foreach(_concrete_preset, concretes)  # validate up-front
 
-    n_total = length(spans) * length(methods) * length(concretes) * length(stories)
+    n_total = length(spans) * length(methods) * length(concretes) * length(stories) * length(min_h_variants)
 
     print_header("Section 3 — Whole-Building EC Cascade")
     println("  Spans:      $(spans) ft  (bay = span × span)")
@@ -327,48 +468,87 @@ function sweep_building(;
     println("  Geometry:   $(SECTION3_X_BAYS)×$(SECTION3_Y_BAYS) bays, " *
             "$(SECTION3_STORY_HT_FT) ft story, LL = $(SECTION3_LL_PSF) psf, " *
             "SDL = $(SECTION3_SDL_PSF) psf")
-    println("  Columns:    NWC_6000 high-capacity catalog, :per_story uniform")
+    println("  Columns:    NWC_6000 full catalog (8–72 in), :per_story uniform")
     println("  Foundations: spread on medium sand, NWC_4000")
     println("  Total runs: $n_total")
     println()
 
-    rows = NamedTuple[]
-    fail = NamedTuple[]
-    p    = Progress(n_total; desc = "Section 3: ")
+    rows    = NamedTuple[]
+    fail    = NamedTuple[]
+    details = _detail_sink()
+    p       = Progress(n_total; desc = "Section 3: ")
 
     for span in spans, n_stories in stories
-        max_col = _adaptive_max_col(span)
-        for concrete_label in concretes, mcfg in methods
+        max_col = _resolve_max_col(span; max_col_in, col_ratio, column_cap)
+        for concrete_label in concretes, (mh_label, mh_val) in min_h_variants, mcfg in methods
+            if mcfg.method isa SR.RuleOfThumb && !isnothing(mh_val)
+                next!(p)
+                continue
+            end
             t0 = time()
             try
                 struc  = BuildingStructure(_section3_skeleton(span, n_stories))
                 params = _section3_params(mcfg.method, concrete_label;
-                                          max_col_in = max_col)
+                                          max_col_in = max_col, min_h = mh_val,
+                                          deflection_limit)
                 design = with_logger(NullLogger()) do
-                    design_building(struc, params)
+                    # Keep the designed state on struc for the detail rows
+                    design_building(struc, params; restore = false)
                 end
                 elapsed = time() - t0
-                push!(rows, _building_row(design, span, mcfg.name,
-                                          concrete_label, n_stories, elapsed))
+                run_id  = _new_run_id()
+                summary = try
+                    det = _collect_details(struc, design, run_id; cap_in = max_col)
+                    append!(details.columns, det.columns)
+                    append!(details.slabs, det.slabs)
+                    _summary_fields(det, design)
+                catch e
+                    @warn "Detail collection failed" run_id exception = (e, catch_backtrace())
+                    _blank_summary_fields()
+                end
+                # design_building's own phase timings (s): prepare, pipeline, capture, ...
+                phases = (; (Symbol("t_$(k)_s") => Float64(get(design.phase_timings, k, NaN))
+                             for k in ("prepare", "pipeline", "capture", "analysis_model"))...)
+                push!(rows, merge(_building_row(design, span, mcfg.name,
+                                                concrete_label, n_stories, elapsed;
+                                                min_h_rule = mh_label),
+                                  (run_id = run_id,), phases, summary))
             catch e
                 elapsed = time() - t0
                 reason  = sprint(showerror, e)
                 @warn "Section 3 run failed" span n_stories method=mcfg.name concrete=concrete_label err=reason
                 push!(fail, _blank_building_row(span, mcfg.name,
                                                 concrete_label, n_stories,
-                                                elapsed, reason))
+                                                elapsed, reason; min_h_rule = mh_label,
+                                                max_col_in = max_col,
+                                                deflection_limit))
             end
             next!(p)
         end
     end
 
     df      = isempty(rows) ? DataFrame() : DataFrame(rows)
-    df_fail = isempty(fail) ? DataFrame() : DataFrame(fail)
+    df_fail = _rows_df(fail)
 
     outfile = nothing
+    if save && !isnothing(run_name)
+        # Cluster array task: fixed names, written even when every run failed
+        ensure_dir(String(results_dir))
+        outfile = joinpath(results_dir, "$(run_name).csv")
+        CSV.write(outfile, df)
+        _write_details(outfile, details)
+        isempty(df_fail) || CSV.write(joinpath(results_dir, "$(run_name)_failures.csv"), df_fail)
+        write_run_meta(outfile; note = "sweep_building spans=$(spans) stories=$(stories) concretes=$(concretes) methods=$([m.name for m in methods]) regimes=$([v[1] for v in min_h_variants]) defl=$(deflection_limit) cap=$(column_cap)")
+        print_footer(nrow(df), nrow(df_fail), outfile)
+        return df
+    end
     if save && !isempty(df)
         outfile = output_filename("section3_building_sweep", SECTION3_RESULTS_DIR)
         CSV.write(outfile, df)
+        for path in _write_details(outfile, details)
+            println("  Details:     $path")
+        end
+        write_run_meta(outfile; note = "sweep_building spans=$(spans) stories=$(stories) concretes=$(concretes) methods=$([m.name for m in methods]) regimes=$([v[1] for v in min_h_variants])")
     end
     if save && !isempty(df_fail)
         ffile = output_filename("section3_building_sweep_failures", SECTION3_RESULTS_DIR)
@@ -388,7 +568,7 @@ function sweep_building_quick(; save::Bool = true)
         spans     = [20.0, 28.0],
         methods   = [
             (key=:rot, name="ACI Min",     method=SR.RuleOfThumb()),
-            (key=:fea, name="FEA (frame)", method=SR.FEA(; pattern_loading=false, design_approach=:frame)),
+            (key=:fea, name="FEA (frame)", method=SR.FEA(; pattern_loading=true, pattern_mode=:efm_amp, design_approach=:frame)),
         ],
         concretes = ["NWC_4000"],
         stories   = [3],
@@ -420,8 +600,21 @@ function cascade_table(df::DataFrame; baseline_method::String = "ACI Min")
     isempty(work) && return DataFrame()
 
     out = NamedTuple[]
-    for sub in groupby(work, [:span_ft, :n_stories, :concrete])
+    group_keys = [:span_ft, :n_stories, :concrete]
+    hasproperty(work, :min_h_rule) && push!(group_keys, :min_h_rule)
+    for sub in groupby(work, group_keys)
         base_rows = filter(r -> r.method == baseline_method, sub)
+        if isempty(base_rows) && hasproperty(work, :min_h_rule)
+            # Computed-deflection runs have no RuleOfThumb row. Compare them
+            # with the Table 9.5(c) baseline of the same building.
+            base_rows = filter(work) do r
+                r.method == baseline_method &&
+                    r.span_ft == sub.span_ft[1] &&
+                    r.n_stories == sub.n_stories[1] &&
+                    r.concrete == sub.concrete[1] &&
+                    r.min_h_rule == "table_minimum"
+            end
+        end
         isempty(base_rows) && continue
         base = base_rows[1, :]
         for row in eachrow(sub)
@@ -429,6 +622,7 @@ function cascade_table(df::DataFrame; baseline_method::String = "ACI Min")
             push!(out, (
                 span_ft        = row.span_ft,
                 n_stories      = row.n_stories,
+                min_h_rule     = hasproperty(row, :min_h_rule) ? row.min_h_rule : "table_minimum",
                 concrete       = row.concrete,
                 method         = row.method,
                 slab_h_in      = row.slab_h_in,

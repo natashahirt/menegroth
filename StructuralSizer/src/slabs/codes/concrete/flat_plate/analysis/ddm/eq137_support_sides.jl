@@ -423,6 +423,16 @@ function _eq137_side_width(struc, partway, vi::Int, frame, dir, perp, end_m::Flo
             width[σ] = run / 2
         end
     end
+    # §13.6.2.4 (page 253): along an edge, ℓ2 runs from the edge to the panel
+    # centerline. With no slab drawn past the column line on a building-edge
+    # side, the edge is the slab edge, out by the strip to the column face.
+    if zv !== nothing
+        for σ in (1, -1)
+            ((σ == 1 && overhang_up) || (σ == -1 && overhang_dn)) || continue
+            width[σ] <= _EQ137_COINCIDE_M || continue
+            width[σ] = slab_edge_width_at(struc, zv, (frame,), (σ * perp[1], σ * perp[2]))
+        end
+    end
     l2 = width[1] + width[-1]
     cells = Int[]
     areas = Float64[]
@@ -1237,15 +1247,21 @@ function _eq137_side_lines(struc, slab, side, sw_trial::Pressure, γ;
     return wD, wL
 end
 
-"""Trial self-weight implied by the design panel `qD` (`qD = sdl + sw`)."""
+"""
+Trial self-weight implied by the design panel `qD`.
+
+`qD` is the largest cell SDL plus self-weight (`_flat_plate_uniform_pressures`),
+so the same largest SDL is removed here.
+"""
 function _eq137_sw_trial(struc, slab, qD::Pressure)::Pressure
     if isnothing(struc) || isnothing(slab) || !hasproperty(slab, :cell_indices) ||
        isempty(slab.cell_indices) || !hasproperty(struc, :cells)
         return zero(uconvert(psf, qD))
     end
-    ref = struc.cells[first(slab.cell_indices)]
-    hasproperty(ref, :sdl) || return zero(uconvert(psf, qD))
-    return uconvert(psf, qD) - uconvert(psf, ref.sdl)
+    all(i -> hasproperty(struc.cells[i], :sdl), slab.cell_indices) ||
+        return zero(uconvert(psf, qD))
+    sdl_max = maximum(uconvert(psf, struc.cells[i].sdl) for i in slab.cell_indices)
+    return uconvert(psf, qD) - sdl_max
 end
 
 """ACI 318-11 §13.6.3.6 transfer, 0.3 M0 (corpus: aci-318-11, page 255)."""

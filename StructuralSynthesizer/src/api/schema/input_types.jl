@@ -63,6 +63,9 @@ Base.@kwdef mutable struct APIMaterials
     concrete::String = "NWC_4000"           # Slab/floor concrete (default 4 ksi)
     column_concrete::String = "NWC_6000"   # Column concrete (default 6 ksi)
     rebar::String = "Rebar_60"
+    # Bar coating for every rebar in the project: uncoated, galvanized, epoxy,
+    # or zinc_epoxy. Sets ψe in ACI 318-19 development and lap lengths.
+    rebar_coating::String = "uncoated"
     steel::String = "A992"
     # Optional named timber preset for framing_levels material "timber". No
     # NDS-grounded presets ship yet (see TIMBER_MAP in deserialize.jl), so this
@@ -89,6 +92,7 @@ Base.@kwdef mutable struct APIStripParams
     bar_size_trans::Union{Int, Nothing} = nothing
     width_increment_in::Union{Float64, Nothing} = nothing
     max_depth_ratio::Union{Float64, Nothing} = nothing
+    analysis_method::Union{String, Nothing} = nothing  # "rigid" | "winkler"
     merge_gap_factor::Union{Float64, Nothing} = nothing
     eccentricity_limit::Union{Float64, Nothing} = nothing
 end
@@ -121,6 +125,34 @@ Base.@kwdef mutable struct APIMatParams
     analysis_method::Union{String, Nothing} = nothing  # "rigid" | "shukla" | "winkler"
 end
 
+"""
+Optional global-stability (sliding/overturning/uplift) knobs from JSON.
+
+Presence of this block turns the ASCE 7-22 global-stability checks ON for
+every shallow-footing type (spread/strip/mat); omitting it reproduces the
+pre-stability behaviour exactly. Each field is optional and falls back to the
+`StructuralSizer.StabilityParams` default (a flagged engineering-judgment
+value — see that struct's docstring). The soil friction angle `φ`, cohesion
+`c`, and unit weight `γ` come from the named `foundation_soil` preset.
+
+- `delta_ratio`: `δ = delta_ratio·φ` base friction (Bowles Table 4-5,
+  `0.5 ≤ ratio ≤ 1`). Default 0.5.
+- `ca_ratio`: `cₐ = ca_ratio·c` base adhesion (Bowles Table 4-5 Note 3,
+  `0.6 ≤ ratio ≤ 1`). Default 0.6.
+- `include_passive`: include the passive-pressure resistance term. Default true.
+- `concrete_unit_weight_pcf`: footing concrete unit weight for uplift
+  resistance, pounds per cubic foot. Default 150 pcf (≈ 23.6 kN/m³).
+- `dead_counteracting_factor`: factor on the stabilizing self-weight,
+  matching ASCE 7-22 comb. 7a `0.6D`. Default 0.6.
+"""
+Base.@kwdef mutable struct APIStabilityParams
+    delta_ratio::Union{Float64, Nothing} = nothing
+    ca_ratio::Union{Float64, Nothing} = nothing
+    include_passive::Union{Bool, Nothing} = nothing
+    concrete_unit_weight_pcf::Union{Float64, Nothing} = nothing
+    dead_counteracting_factor::Union{Float64, Nothing} = nothing
+end
+
 """Optional foundation options from JSON (strategy + per-type overrides)."""
 Base.@kwdef mutable struct APIFoundationOptions
     strategy::String = "auto"
@@ -128,6 +160,7 @@ Base.@kwdef mutable struct APIFoundationOptions
     spread_params::Union{APISpreadParams, Nothing} = nothing
     strip_params::Union{APIStripParams, Nothing} = nothing
     mat_params::Union{APIMatParams, Nothing} = nothing
+    stability::Union{APIStabilityParams, Nothing} = nothing
 end
 
 """
@@ -154,9 +187,27 @@ girders (index 2, 3, …).
 - `end_fixity`: optional 2-element per-end release override, e.g.
   `["pinned", "pinned"]`. Accepted values: `"default"`, `"pinned"`, `"fixed"`,
   `"free"`. `"default"` defers to the `(role, material, lateral_role)` dispatch.
-- `catalog_override`: optional per-level steel section catalog name — one of
-  `"all_W"`, `"preferred_W"`, `"all_HSS"`, `"all_HSSRound"`. Restricts the group's
-  sizing catalog (steel members only).
+- `analysis`: optional panel-load owner, `"tributary"` or `"grillage"`.
+  Omitted means `"tributary"`, unless `n_xi`/`n_eta` or `module_spacing_in` is
+  set, which is a grillage. Any other value is an error.
+- `n_xi`, `n_eta`: optional rib-bay counts for a grillage, on framing level 1
+  only. Both are required together, each at least 1. They replace `spacing_in`:
+  a level that sends both is an error, and so is `"tributary"` together with
+  bay counts. The ribs are laid on a four-sided panel; a boundary that is not
+  a quadrilateral errors when the grid is built, before member sizing.
+- `module_spacing_in`: optional `[s1, s2]` rib spacings, in inches, of a module
+  grid on framing level 1. The grid covers any slab outline, including holes,
+  and the boundary cuts the edge modules. It replaces `n_xi`/`n_eta` and
+  `spacing_in`; sending either with it is an error.
+- `module_angle_deg`: optional direction of the first rib family, degrees from
+  the plan x axis. Goes with `module_spacing_in`; omitted means 0.
+- `solid_head`: optional fraction of the panel, from each corner, cast solid
+  around the columns. Level 1 grillage with `n_xi`/`n_eta` only, in `[0, 1/2)`.
+  It is snapped up to a whole rib module. Omitted means no solid head.
+
+A level's sizing options (`beam_options`) are set on the Julia `framing_opts`
+NamedTuple, not on this wire struct. A restricted catalog is
+`beam_options.custom_catalog`.
 """
 Base.@kwdef mutable struct APIFramingLevel
     material::String = "steel"
@@ -165,7 +216,12 @@ Base.@kwdef mutable struct APIFramingLevel
     axis::Union{Vector{Float64}, Nothing} = nothing
     count::Union{Int, Nothing} = nothing
     end_fixity::Union{Vector{String}, Nothing} = nothing
-    catalog_override::Union{String, Nothing} = nothing
+    analysis::Union{String, Nothing} = nothing
+    n_xi::Union{Int, Nothing} = nothing
+    n_eta::Union{Int, Nothing} = nothing
+    module_spacing_in::Union{Vector{Float64}, Nothing} = nothing
+    module_angle_deg::Union{Float64, Nothing} = nothing
+    solid_head::Union{Float64, Nothing} = nothing
 end
 
 """Design parameters block from JSON."""
@@ -212,7 +268,7 @@ Base.@kwdef mutable struct APIParams
     # slab outward (index 1 = joists). Empty (default) is a strict no-op.
     framing_levels::Vector{APIFramingLevel} = APIFramingLevel[]
     uniform_column_sizing::String = "off"  # off | per_story | building. Force uniform column sizes.
-    geometry_is_centerline::Bool = false
+    geometry_is_centerline::Bool = true
     visualization_target_edge_m::Union{Float64, Nothing} = nothing  # Viz shell mesh target edge (m). Default: FEA or adaptive.
     skip_visualization::Bool = false  # Skip shell mesh + viz serialization for faster response.
     visualization_detail::String = "full"  # "minimal" | "full". minimal = no deflected slab meshes.
@@ -226,6 +282,8 @@ Base.@kwdef mutable struct APIInput
     supports::Vector{Int} = Int[]
     stories_z::Vector{Float64} = Float64[]
     faces::APIFaceGroups = APIFaceGroups()
+    # Unframed slab openings: polylines [[x, y, z], ...]; z picks the story.
+    openings::Vector{Vector{Vector{Float64}}} = Vector{Vector{Float64}}[]
     params::APIParams = APIParams()
 end
 
@@ -241,6 +299,7 @@ StructTypes.StructType(::Type{APIMaterials}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APISpreadParams}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIStripParams}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIMatParams}) = StructTypes.Mutable()
+StructTypes.StructType(::Type{APIStabilityParams}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIFoundationOptions}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIBeamCatalogBounds}) = StructTypes.Mutable()
 StructTypes.StructType(::Type{APIPixelFrameOptions}) = StructTypes.Mutable()

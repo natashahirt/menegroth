@@ -37,12 +37,11 @@ function _solid_slab_thickness(result)
             "A shaped slab has no single solid thickness for a composite beam. " *
             "Volume per area is not a thickness."))
     end
-    # Concrete above the deck: the `t_slab` of `DeckSlabOnBeam`.
-    result isa StructuralSizer.CompositeDeckResult && return uconvert(u"m", result.fill_depth)
-    hasproperty(result, :thickness) || throw(ArgumentError(
+    # For a deck this is the concrete above the ribs: the `t_slab` of `DeckSlabOnBeam`.
+    t = StructuralSizer.flange_thickness(result)
+    t === nothing && throw(ArgumentError(
         "Slab result $(typeof(result)) has no solid thickness for a composite beam."))
-    t = result.thickness
-    return t isa Unitful.Quantity ? uconvert(u"m", t) : t * u"m"
+    return _as_length(t)
 end
 
 """
@@ -139,12 +138,7 @@ end
 
 _as_length(L) = L isa Unitful.Quantity ? uconvert(u"m", L) : L * u"m"
 
-"""
-Uniform line load of tributary loads, or `nothing` when the width varies.
-
-A varying width is not the layout of the construction line load, so the
-pre-cure moment must not be scaled from it.
-"""
+"""Uniform line load of tributary loads, or `nothing` when the width varies."""
 function _uniform_tributary_line_load(loads)
     isempty(loads) && return nothing
     w = 0.0
@@ -161,7 +155,12 @@ function _uniform_tributary_line_load(loads)
     return w
 end
 
-"""Dead-load displacement vector, or `nothing` when the model has no dead case."""
+"""Dead-load displacement vector, or `nothing` when the model has no dead case.
+
+Solved on the stored steel sections ([`_with_bare_steel`](@ref)), the same
+stiffness the unshored stage uses. A model with no composite children is
+already steel.
+"""
 function _dead_load_displacement(struc::BuildingStructure)
     loads = Asap.AbstractLoad[]
     for v in values(struc.cell_dead_loads)
@@ -170,7 +169,9 @@ function _dead_load_displacement(struc::BuildingStructure)
     isempty(loads) && return nothing
     model = struc.asap_model
     isempty(model.frame_elements) && return nothing
-    return Asap.solve(model, [loads])[1]
+    return _with_bare_steel(struc) do m
+        Asap.solve(m, [loads])[1]
+    end
 end
 
 function _dead_loads_by_element(struc::BuildingStructure)
@@ -185,37 +186,233 @@ function _dead_loads_by_element(struc::BuildingStructure)
 end
 
 """
-    beam_pre_cure_shape(struc, beam, u_dead, by_element) -> PreCureShape or nothing
-
-Extrema of absolute strong-axis moment and shear on `beam` from the dead-load
-displacement `u_dead`, plus the uniform line load that produced them.
-
-Returns `nothing` when any segment is unloaded or the line load changes along
-the beam. The construction check then keeps the simple-span statics.
+Frame elements that carry `beam`. Composite children, when this edge has been
+split; otherwise the element on the skeleton edge.
 """
-function beam_pre_cure_shape(struc::BuildingStructure, beam::Beam, u_dead, by_element)
-    w_beam = nothing
-    M = 0.0
-    V = 0.0
-    n = 0
+function _beam_frame_elements(struc::BuildingStructure, beam::Beam)
+    mesh = _composite_mesh(struc)
+    children = mesh === nothing ? nothing : get(mesh, :children, nothing)
+    model = struc.asap_model
+    els = eltype(model.frame_elements)[]
     for si in segment_indices(beam)
-        seg = struc.segments[si]
-        el = struc.asap_model.frame_elements[seg.edge_idx]
+        edge = struc.segments[si].edge_idx
+        if children !== nothing && haskey(children, edge)
+            for i in children[edge]
+                push!(els, model.frame_elements[i])
+            end
+        else
+            push!(els, model.frame_elements[edge])
+        end
+    end
+    return els
+end
+
+_widths_match(a, b) = length(a) == length(b) &&
+    all(isapprox(x, y; rtol=1e-5, atol=1e-8) for (x, y) in zip(a, b))
+
+"""
+`(p, varying)` when every load on `els` is a tributary load at one pressure.
+`varying` is true when the width is not one constant along the beam.
+`nothing` when a load is not a tributary load, or two loads on one element
+have different widths.
+"""
+function _beam_pressure_layout(els, by_element)
+    isempty(els) && return nothing
+    p = nothing
+    varying = false
+    for el in els
         loads = get(by_element, el.elementID, Asap.AbstractLoad[])
-        w_el = _uniform_tributary_line_load(loads)
-        w_el === nothing && return nothing
-        if w_beam === nothing
-            w_beam = w_el
-        elseif !isapprox(w_beam, w_el; rtol=1e-5, atol=1e-6)
+        isempty(loads) && return nothing
+        pe = 0.0
+        widths = nothing
+        for load in loads
+            load isa Asap.TributaryLoad || return nothing
+            if widths === nothing
+                widths = load._widths_m
+            elseif !_widths_match(widths, load._widths_m)
+                return nothing
+            end
+            w0 = widths[1]
+            for wi in widths
+                isapprox(wi, w0; rtol=1e-5, atol=1e-8) || (varying = true)
+            end
+            pe += load._pressure_Pa
+        end
+        pe > 0 || return nothing
+        if p === nothing
+            p = pe
+        elseif !isapprox(p, pe; rtol=1e-5, atol=1e-6)
             return nothing
         end
-        f = _element_forces_from_u(el, u_dead, loads; resolution=40)
+    end
+    return (p = p, varying = varying)
+end
+
+function _force_extrema(els, u, by_element)
+    M = 0.0
+    V = 0.0
+    for el in els
+        loads = get(by_element, el.elementID, Asap.AbstractLoad[])
+        f = _element_forces_from_u(el, u, loads; resolution=40)
         M = max(M, mapreduce(abs, max, f.My))
         V = max(V, mapreduce(abs, max, f.Vy))
-        n += 1
     end
-    n == 0 && return nothing
-    return (M_ref = M * u"N*m", V_ref = V * u"N", w_ref = w_beam * u"N/m")
+    return M, V
+end
+
+"""
+Dead-load and unit-line-load peaks on the bare steel, or `nothing` when
+there is no dead load.
+
+The line load is 1 N/m downward on every element the dead load touches.
+Peaks are read inside [`_with_bare_steel`](@ref), while that section's `K`
+is still on the element. A displacement taken out and pushed through the
+composite stiffness is a different moment.
+"""
+function _pre_cure_peaks(struc::BuildingStructure, els, by_element)
+    dead = Asap.AbstractLoad[]
+    for loads in values(struc.cell_dead_loads)
+        append!(dead, loads)
+    end
+    isempty(dead) && return nothing
+    seen = IdDict{Any, Nothing}()
+    line = Asap.AbstractLoad[]
+    by_line = Dict{Int, Vector{Asap.AbstractLoad}}()
+    for load in dead
+        hasproperty(load, :element) || continue
+        el = load.element
+        haskey(seen, el) && continue
+        seen[el] = nothing
+        ll = Asap.LineLoad(el, [0.0u"N/m", 0.0u"N/m", -1.0u"N/m"])
+        push!(line, ll)
+        push!(get!(() -> Asap.AbstractLoad[], by_line, el.elementID), ll)
+    end
+    return _with_bare_steel(struc) do model
+        us = Asap.solve(model, [dead, line])
+        M, V = _force_extrema(els, us[1], by_element)
+        Ml, Vl = _force_extrema(els, us[2], by_line)
+        return (M = M, V = V, Ml = Ml, Vl = Vl)
+    end
+end
+
+"""`true` when none of `els` carries a dead load of its own."""
+function _beam_unloaded(els, by_element)
+    for el in els
+        isempty(get(by_element, el.elementID, Asap.AbstractLoad[])) || return false
+    end
+    return true
+end
+
+"""
+The one dead pressure on the model, or `nothing`.
+
+A second pressure, or a dead load that is not a tributary load, has no single
+scale for a reaction delivered through the frame.
+"""
+function _unique_dead_pressure(struc::BuildingStructure)
+    p = nothing
+    any_load = false
+    for loads in values(struc.cell_dead_loads)
+        for load in loads
+            any_load = true
+            load isa Asap.TributaryLoad || return nothing
+            pe = load._pressure_Pa
+            pe > 0 || return nothing
+            if p === nothing
+                p = pe
+            elseif !isapprox(p, pe; rtol = 1e-5, atol = 1e-6)
+                return nothing
+            end
+        end
+    end
+    return any_load ? p : nothing
+end
+
+"""Unit line load on `els` only. Peaks are read on the bare steel."""
+function _line_peaks_on(struc::BuildingStructure, els)
+    line = Asap.AbstractLoad[]
+    by_line = Dict{Int, Vector{Asap.AbstractLoad}}()
+    for el in els
+        ll = Asap.LineLoad(el, [0.0u"N/m", 0.0u"N/m", -1.0u"N/m"])
+        push!(line, ll)
+        push!(get!(() -> Asap.AbstractLoad[], by_line, el.elementID), ll)
+    end
+    return _with_bare_steel(struc) do model
+        u = Asap.solve(model, [line])[1]
+        Ml, Vl = _force_extrema(els, u, by_line)
+        return (Ml = Ml, Vl = Vl)
+    end
+end
+
+"""
+Pre-cure shape of a beam that carries joist reactions and no load of its own.
+
+ENGINEERING JUDGMENT: the reactions of one tributary pressure are linear in
+that pressure, so the delivered moment scales the way a varying-width
+tributary does. The steel weight is a line load on this beam, not on the
+joists. A beam the dead case does not reach stays on the simple span.
+`1 N·m` is numerical noise, not a strength cutoff.
+"""
+function _reaction_pre_cure_shape(struc::BuildingStructure, els, u_dead, by_element)
+    _beam_unloaded(els, by_element) || return nothing
+    p = _unique_dead_pressure(struc)
+    p === nothing && return nothing
+    M, V = _with_bare_steel(struc) do _
+        _force_extrema(els, u_dead, by_element)
+    end
+    M > 1.0 || return nothing
+    peaks = _line_peaks_on(struc, els)
+    return (M_area = M * u"N*m", V_area = V * u"N", p_ref = p * u"Pa",
+            M_line = peaks.Ml * u"N*m", V_line = peaks.Vl * u"N")
+end
+
+"""
+    beam_pre_cure_shape(struc, beam, u_dead, by_element)
+
+Extrema of absolute strong-axis moment and shear on `beam` from the dead-load
+displacement, and what produced them.
+
+A constant tributary width returns `(M_ref, V_ref, w_ref)` from `u_dead`.
+`u_dead` has to be the bare-steel dead-load solve ([`_dead_load_displacement`](@ref)).
+Its forces are read with the steel section back on the element, same as the
+unshored stage: `K` of the section now on the model is not the section that
+produced `u_dead`. A varying width at one pressure returns
+`(M_area, V_area, p_ref, M_line, V_line)`, solved here on the bare steel.
+
+A beam with no load of its own can still carry the reactions of joists that
+do. When every dead load in the model is one tributary pressure, that
+delivered moment is returned in the same split form: the area part scales
+with pressure, and `M_line` is a unit line load on this beam alone. Two
+pressures, a dead load that is not a tributary load, or a beam the dead case
+does not reach, return `nothing`. The construction check then keeps the
+simple-span statics.
+"""
+function beam_pre_cure_shape(struc::BuildingStructure, beam::Beam, u_dead, by_element)
+    els = _beam_frame_elements(struc, beam)
+    layout = _beam_pressure_layout(els, by_element)
+    if layout === nothing
+        return _reaction_pre_cure_shape(struc, els, u_dead, by_element)
+    end
+    if !layout.varying
+        w_beam = nothing
+        for el in els
+            w_el = _uniform_tributary_line_load(get(by_element, el.elementID, Asap.AbstractLoad[]))
+            w_el === nothing && return nothing
+            if w_beam === nothing
+                w_beam = w_el
+            elseif !isapprox(w_beam, w_el; rtol=1e-5, atol=1e-6)
+                return nothing
+            end
+        end
+        M, V = _with_bare_steel(struc) do _
+            _force_extrema(els, u_dead, by_element)
+        end
+        return (M_ref = M * u"N*m", V_ref = V * u"N", w_ref = w_beam * u"N/m")
+    end
+    peaks = _pre_cure_peaks(struc, els, by_element)
+    peaks === nothing && return nothing
+    return (M_area = peaks.M * u"N*m", V_area = peaks.V * u"N", p_ref = layout.p * u"Pa",
+            M_line = peaks.Ml * u"N*m", V_line = peaks.Vl * u"N")
 end
 
 """
@@ -292,8 +489,9 @@ function composite_group_payload(
         "composite_deck_orientation must be :from_slab, :perpendicular, or :parallel, " *
         "got :$deck_orientation."))
     L = _as_length(L_beam)
-    # One dead-load solve for the group. A beam whose dead load is not a
-    # uniform line load keeps `pre_cure = nothing` and the simple-span check.
+    # One dead-load solve for the group, on the bare steel. A beam whose dead
+    # load is not one tributary pressure keeps `pre_cure = nothing` and the
+    # simple-span check. A varying width keeps the solved shape.
     u_dead = _dead_load_displacement(struc)
     by_element = u_dead === nothing ? nothing : _dead_loads_by_element(struc)
     supports_lookup = beam_support_lookup(struc)
@@ -361,7 +559,7 @@ end
         t_slab=nothing, anchor=nothing) -> Vector
 
 One payload per steel beam group. A group with no slab on any of its beams,
-and no `t_slab`, gets `false`: the sizer designs it as bare steel. `L_totals[i]` may be the sum of the beams
+and no `t_slab`, gets `false`: the sizer designs it as bare steel. `L_totals[i]` is the longest beam
 in the group; each beam is still checked at its own span. `t_slab`, when
 given, overrides every beam. Otherwise each beam uses the solid thickness of
 the slab it bears on. `concrete` is the fallback when that slab's volume map

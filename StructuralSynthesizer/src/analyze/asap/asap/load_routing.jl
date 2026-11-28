@@ -32,6 +32,11 @@ Create TributaryLoads for a single cell from its tributary polygons.
 When `split_dead_live=true`, returns `(dead_loads, live_loads)` with separate
 pressures for pattern loading. When `false` (default), returns combined loads
 with enveloped pressure, as a single vector.
+
+The slab past the centerline on the cell's free edges ([`slab_edge_strips`](@ref))
+is loaded with the same pressures, as a uniform `:slab_edge_strip` load on the
+edge member. `edge_strips` is [`slab_edge_strips_by_cell`](@ref); pass it when
+looping over many cells, since computing it walks the whole floor.
 """
 function _create_cell_tributary_loads!(
     loads::Vector{Asap.AbstractLoad},
@@ -42,7 +47,8 @@ function _create_cell_tributary_loads!(
     cell_idx::Int,
     params::DesignParameters=DesignParameters();
     split_dead_live::Bool=false,
-    combo::LoadCombination=governing_combo(params)
+    combo::LoadCombination=governing_combo(params),
+    edge_strips=nothing,
 )
     dead_loads = Asap.TributaryLoad[]
     live_loads = Asap.TributaryLoad[]
@@ -73,9 +79,7 @@ function _create_cell_tributary_loads!(
     for trib in tribs
         # Skip empty tributaries
         trib.area < 1e-12 && continue
-        length(trib.s) < 2 && continue
         
-        # Extract width profile from tributary polygon
         positions, widths_m = _extract_width_profile(trib)
         length(positions) < 2 && continue
         
@@ -110,44 +114,132 @@ function _create_cell_tributary_loads!(
             push!(dead_loads, tload)
         end
     end
-    
+
+    strips = edge_strips === nothing ? slab_edge_strips_by_cell(struc) : edge_strips
+    cell_strips = get(strips, cell_idx, NamedTuple[])
+    if split_dead_live
+        _append_edge_strip_loads!(loads, dead_loads, elements, cell_strips, dead_pressure)
+        _append_edge_strip_loads!(loads, live_loads, elements, cell_strips, live_pressure)
+    else
+        _append_edge_strip_loads!(loads, dead_loads, elements, cell_strips, combined_pressure)
+    end
+
     return split_dead_live ? (dead_loads, live_loads) : dead_loads
 end
 
 """
-Extract a sorted width profile from a TributaryPolygon.
+    _append_edge_strip_loads!(loads, record, elements, strips, pressure)
 
-The polygon vertices trace the boundary, but TributaryLoad needs positions
-sorted along the beam with corresponding widths.
-
-Returns (positions, widths) where positions are in [0,1] sorted order.
+One uniform `:slab_edge_strip` load per strip on its edge member, at
+`pressure`, pushed to both `loads` and `record`.
 """
-function _extract_width_profile(trib::TributaryPolygon)
-    isempty(trib.s) && return (Float64[], Float64[])
-    
-    # Collect (s, |d|) pairs and sort by s
-    pairs = [(trib.s[i], abs(trib.d[i])) for i in eachindex(trib.s)]
-    sort!(pairs, by=first)
-    
-    # Remove duplicates (keep max width at each position)
-    merged = Tuple{Float64, Float64}[]
-    for (s, w) in pairs
-        if isempty(merged) || abs(s - merged[end][1]) > 1e-9
-            push!(merged, (s, w))
+function _append_edge_strip_loads!(loads, record, elements, strips, pressure)
+    for strip in strips
+        w = slab_edge_line_width(strip)
+        (w > 1e-9 && 1 <= strip.edge <= length(elements)) || continue
+        ld = Asap.TributaryLoad(elements[strip.edge], [0.0, 1.0], [w * u"m", w * u"m"],
+                                pressure, (0.0, 0.0, -1.0), :slab_edge_strip)
+        push!(loads, ld)
+        push!(record, ld)
+    end
+    return loads
+end
+
+"""
+    _append_unrouted_edge_strip_loads!(loads, frame_elements, struc, strips, skip, params; use_patterns, combo)
+
+Edge strips for cells whose pressure did not go through
+[`_create_cell_tributary_loads!`](@ref): shell-area routing and joist-framed
+slabs. `skip` are the cells that did. Each load is recorded under its own cell
+so `sync_asap!` refreshes its pressure. Shell-area routing has no pattern
+split, so its strips carry the enveloped pressure like the rest of that slab.
+"""
+function _append_unrouted_edge_strip_loads!(loads, frame_elements, struc::BuildingStructure,
+                                            strips, skip, params::DesignParameters;
+                                            use_patterns::Bool, combo::LoadCombination)
+    for (ci, cell_strips) in strips
+        ci in skip && continue
+        cell = struc.cells[ci]
+        cell.floor_type == :grade && continue
+        if use_patterns
+            dead_p = uconvert(u"Pa", combo.D * (cell.sdl + cell.self_weight))
+            live_p = uconvert(u"Pa", combo.L * cell.live_load)
+            dead = get!(() -> Asap.TributaryLoad[], struc.cell_dead_loads, ci)
+            live = get!(() -> Asap.TributaryLoad[], struc.cell_live_loads, ci)
+            all_loads = get!(() -> Asap.TributaryLoad[], struc.cell_tributary_loads, ci)
+            n0 = length(loads)
+            _append_edge_strip_loads!(loads, dead, frame_elements, cell_strips, dead_p)
+            _append_edge_strip_loads!(loads, live, frame_elements, cell_strips, live_p)
+            append!(all_loads, @view loads[(n0 + 1):end])
         else
-            # Same position - keep max width
-            merged[end] = (merged[end][1], max(merged[end][2], w))
+            p = uconvert(u"Pa", envelope_pressure(params.load_combinations,
+                                                  cell.sdl + cell.self_weight, cell.live_load))
+            _append_edge_strip_loads!(loads, get!(() -> Asap.TributaryLoad[],
+                                                  struc.cell_tributary_loads, ci),
+                                      frame_elements, cell_strips, p)
         end
     end
-    
-    # Extract separate vectors
-    positions = [p[1] for p in merged]
-    widths = [p[2] for p in merged]
-    
-    # Ensure positions are clamped to [0, 1]
-    positions = clamp.(positions, 0.0, 1.0)
-    
-    return (positions, widths)
+    return loads
+end
+
+"""
+    _sync_slab_edge_strip_widths!(struc)
+
+Reset the width of every `:slab_edge_strip` load from the current slab edge.
+
+Columns that grew since `to_asap!` widen the strip. A load is matched to its
+strip by the midpoint of its element, so a subdivided edge member keeps its
+share. A load whose edge no longer has a strip goes to zero width.
+"""
+function _sync_slab_edge_strip_widths!(struc::BuildingStructure)
+    model = struc.asap_model
+    isnothing(model) && return
+    strips = nothing
+    for ld in model.loads
+        (ld isa Asap.TributaryLoad && ld.id === :slab_edge_strip) || continue
+        strips === nothing && (strips = slab_edge_strips(struc))
+        _set_tributary_width!(ld, _strip_width_at_element(strips, ld.element))
+    end
+    for dict in (struc.cell_tributary_loads, struc.cell_dead_loads, struc.cell_live_loads),
+        lds in values(dict), ld in lds
+        ld.id === :slab_edge_strip || continue
+        strips === nothing && (strips = slab_edge_strips(struc))
+        _set_tributary_width!(ld, _strip_width_at_element(strips, ld.element))
+    end
+    return
+end
+
+"""Line-load width (m) of the strip whose edge holds the midpoint of `el`."""
+function _strip_width_at_element(strips, el)
+    p1, p2 = el.nodeStart.position, el.nodeEnd.position
+    mid = ((ustrip(u"m", p1[1]) + ustrip(u"m", p2[1])) / 2,
+           (ustrip(u"m", p1[2]) + ustrip(u"m", p2[2])) / 2)
+    z = (ustrip(u"m", p1[3]) + ustrip(u"m", p2[3])) / 2
+    for s in strips
+        abs(s.z - z) <= 0.01 || continue
+        StructuralSizer._segment_station(mid, s.a, s.b) === nothing && continue
+        return slab_edge_line_width(s)
+    end
+    return 0.0
+end
+
+"""Set a uniform width on every breakpoint of `ld`."""
+function _set_tributary_width!(ld::Asap.TributaryLoad, w::Float64)
+    fill!(ld.widths, w * u"m")
+    fill!(ld._widths_m, w)
+    return ld
+end
+
+"""
+    _extract_width_profile(trib) -> (positions, widths_m)
+
+The tributary's load profile from the partition: positions on `[0, 1]` along
+the edge in face order, widths in meters, `∫ w ds × edge length = trib.area`.
+A repeated position is a step.
+"""
+function _extract_width_profile(trib::TributaryPolygon)
+    trib.area > 0 || return (Float64[], Float64[])
+    return (copy(trib.profile_s), copy(trib.profile_w))
 end
 
 # =============================================================================
@@ -222,6 +314,9 @@ end
 function vault_thrust_line_loads(struc::BuildingStructure, slab::Slab, 
                                   eff::StructuralSizer.LateralThrust,
                                   params::DesignParameters=DesignParameters())::Vector{EdgeLineLoadSpec}
+    # An opening in this vault is not in the thrust. Say so; the check comes later.
+    warned = findfirst(s -> s === slab, struc.slabs)
+    warned === nothing || warn_vault_openings!(struc, warned)
     # Factored thrust using governing (primary) load combination from params
     combo = governing_combo(params)
     thrust_factored = eff.dead * combo.D + eff.live * combo.L
@@ -294,22 +389,88 @@ function _build_edge_release_map(struc::BuildingStructure, params::DesignParamet
             edge_release[seg.edge_idx] = rel
         end
     end
+    # A pin-ended member in Asap keeps axial stiffness only (`k_freefree`).
+    # That shear connection is the one at a column or a wall, which can carry
+    # the end reaction. A skeleton end that meets neither is continuous, so
+    # the beam can carry shear to the girder. This stays in force when the
+    # beam's support rank is above 0. Filler joists generated by a
+    # FramingLevel stay pinned: they deliver their reactions to this frame.
+    held = _vertically_held_vertices(struc)
+    generated = _generated_framing_beams(struc)
+    skel = struc.skeleton
+    n_edges = length(skel.edge_indices)
+    for (bi, beam) in enumerate(struc.beams)
+        bi in generated && continue
+        for si in segment_indices(beam)
+            1 <= si <= n_seg || continue
+            e = struc.segments[si].edge_idx
+            (1 <= e <= n_edges) || continue
+            rel = get(edge_release, e, :fixedfixed)
+            v1, v2 = skel.edge_indices[e]
+            v1 in held || (rel = _release_with_fixed_end(rel, :start))
+            v2 in held || (rel = _release_with_fixed_end(rel, :end))
+            edge_release[e] = rel
+        end
+    end
     return edge_release
+end
+
+"""Vertices a column, a wall, or a support holds up."""
+function _vertically_held_vertices(struc::BuildingStructure)
+    skel = struc.skeleton
+    held = Set{Int}(get(skel.groups_vertices, :support, Int[]))
+    n_edges = length(skel.edge_indices)
+    n_seg = length(struc.segments)
+    for members in (struc.columns, struc.walls)
+        for member in members
+            for si in segment_indices(member)
+                1 <= si <= n_seg || continue
+                e = struc.segments[si].edge_idx
+                1 <= e <= n_edges || continue
+                v1, v2 = skel.edge_indices[e]
+                push!(held, v1, v2)
+            end
+        end
+    end
+    return held
+end
+
+"""
+`rel` with the named end fixed.
+
+`:start` is edge vertex 1 and `:end` is edge vertex 2, the order
+`Asap.Element` is built in. `:joist` is the pinned-pinned kernel; a fixed
+end uses the bending release.
+"""
+function _release_with_fixed_end(rel::Symbol, which::Symbol)
+    if which === :start
+        (rel === :freefree || rel === :joist) && return :fixedfree
+        rel === :freefixed && return :fixedfixed
+        return rel
+    elseif which === :end
+        (rel === :freefree || rel === :joist) && return :freefixed
+        rel === :fixedfree && return :fixedfixed
+        return rel
+    else
+        error("_release_with_fixed_end: which must be :start or :end, got :$which")
+    end
 end
 
 # =============================================================================
 # Phase 7 — joist-on-girder seat eccentricity (Element.eccentricity)
 # =============================================================================
-# The seat-offset tuple itself is NOT derived here: it comes verbatim from
+# The seat-offset tuple itself is not derived here: it comes from
 # `StructuralSizer.default_seat_eccentricity(role, material, host_depth,
 # member_depth)` (Phase 3 dispatch). For a steel joist that resolves to
-# `(0, 0, (host_depth + member_depth)/2, 0)` — the top-of-girder seat modeled as
-# a rigid transverse centroid offset (see StructuralSizer/src/materials/steel.jl
+# `(0, 0, (host_depth + member_depth)/2, 0)` — the physical top-of-girder
+# seat, positive local y = global up (see StructuralSizer/src/materials/steel.jl
 # :joist ENGINEERING JUDGMENT marker; StructuralSizer/src/members/defaults.jl,
 # and the transform in external/Asap/src/Elements/K.jl §eccentricity_transformation!).
-# All other (role, material) combinations return zeros. Depths come from the
-# already-sized member sections; when a section is not yet assigned the depth is
-# 0, so the eccentricity is naturally zero on the pre-sizing pass.
+# `to_asap!` and `sync_asap!` pass that tuple through `Asap.orient_up_eccentricity`
+# so slot 3 matches the member's roll. All other (role, material) combinations
+# return zeros. Depths come from the already-sized member sections; when a
+# section is not yet assigned the depth is 0, so the eccentricity is zero on
+# the pre-sizing pass.
 
 """Structural material recorded on a `Beam` (Phase 5 stamps the framing-level
 material as a zero-volume `MaterialVolumes` entry; sizing records the sized
@@ -389,11 +550,13 @@ end
 """
     _build_edge_eccentricity_map(struc, params) -> Dict{Int, NTuple{4, Float64}}
 
-Skeleton edge → Asap `Element.eccentricity` (metres) for auto-generated joists
-whose `(role, material)` seat offset is non-zero. The offset is taken verbatim
-from `StructuralSizer.default_seat_eccentricity` (Phase 3); this function only
-supplies the current host/member depths and tags the joist's edges. Edges absent
-from the map default to zero eccentricity at the construction site.
+Skeleton edge → physical seat offset (metres) for auto-generated joists whose
+`(role, material)` seat offset is non-zero. Positive local y means global up.
+The offset comes from `StructuralSizer.default_seat_eccentricity` (Phase 3);
+this function supplies the current host/member depths and tags the joist's
+edges. Element construction signs slot 3 with `Asap.orient_up_eccentricity`
+using that edge's chord and roll. Edges absent from the map default to zero
+eccentricity at the construction site.
 """
 function _build_edge_eccentricity_map(struc::BuildingStructure, params::DesignParameters)
     edge_ecc = Dict{Int, NTuple{4, Float64}}()
@@ -520,10 +683,7 @@ function _slab_area_load_geometry(struc::BuildingStructure, slab::Slab,
     framing_edges = Int[]
     joist_edges = Int[]
     for fl in slab.framing_levels
-        fl.group_id === nothing && continue
-        grp = get(struc.member_groups, fl.group_id, nothing)
-        grp === nothing && continue
-        for mi in grp.member_indices
+        for mi in level_member_indices(struc, fl)
             (mi >= 1 && mi <= length(struc.beams)) || continue
             beam = struc.beams[mi]
             for si in segment_indices(beam)
@@ -558,10 +718,7 @@ historical per-cell tributary loads byte-for-byte.
 """
 function _slab_has_joist_framing(struc::BuildingStructure, slab::Slab)
     for fl in slab.framing_levels
-        fl.group_id === nothing && continue
-        grp = get(struc.member_groups, fl.group_id, nothing)
-        grp === nothing && continue
-        for mi in grp.member_indices
+        for mi in level_member_indices(struc, fl)
             (mi >= 1 && mi <= length(struc.beams)) || continue
             struc.beams[mi].role === :joist && return true
         end
@@ -825,10 +982,7 @@ function _framed_slab_strip_geometry(struc::BuildingStructure, slab::Slab,
     # Level-1 joist beams for this slab.
     joist_beams = Int[]
     for fl in slab.framing_levels
-        fl.group_id === nothing && continue
-        grp = get(struc.member_groups, fl.group_id, nothing)
-        grp === nothing && continue
-        for mi in grp.member_indices
+        for mi in level_member_indices(struc, fl)
             (1 <= mi <= length(struc.beams)) || continue
             struc.beams[mi].role === :joist && push!(joist_beams, mi)
         end
@@ -1090,6 +1244,411 @@ function _emit_strip_loads!(loads::Vector{Asap.AbstractLoad},
     return dest
 end
 
+"""Drop vertices that lie on the segment between their two neighbors."""
+function _drop_collinear_vertices(poly::Vector{NTuple{2, Float64}}; tol::Float64 = 1e-8)
+    n = length(poly)
+    n < 4 && return poly
+    keep = NTuple{2, Float64}[]
+    for i in 1:n
+        a = poly[mod1(i - 1, n)]
+        b = poly[i]
+        c = poly[mod1(i + 1, n)]
+        abx, aby = b[1] - a[1], b[2] - a[2]
+        bcx, bcy = c[1] - b[1], c[2] - b[2]
+        lab = hypot(abx, aby)
+        lbc = hypot(bcx, bcy)
+        (lab > tol && lbc > tol && abs(abx * bcy - aby * bcx) <= tol * lab * lbc) && continue
+        push!(keep, b)
+    end
+    return length(keep) >= 3 ? keep : poly
+end
+
+"""Plan area (m²) a tributary load covers: element length times ∫ w dt on [0, 1]."""
+function _tributary_area_m2(ld::Asap.TributaryLoad)
+    p1 = ld.element.nodeStart.position
+    p2 = ld.element.nodeEnd.position
+    L = hypot(ustrip(u"m", p2[1] - p1[1]), ustrip(u"m", p2[2] - p1[2]),
+              ustrip(u"m", p2[3] - p1[3]))
+    pos = ld.positions
+    w = ld._widths_m
+    area = 0.0
+    for i in 1:(length(pos) - 1)
+        area += 0.5 * (w[i] + w[i + 1]) * (pos[i + 1] - pos[i]) * L
+    end
+    return area
+end
+
+"""Unit across-joist direction of `el`, or `nothing` when the joist has no plan length."""
+function _across_joist_axis(el::Asap.Element)
+    p1 = el.nodeStart.position
+    p2 = el.nodeEnd.position
+    tx = ustrip(u"m", p2[1] - p1[1])
+    ty = ustrip(u"m", p2[2] - p1[2])
+    len = hypot(tx, ty)
+    len <= 1e-9 && return nothing
+    return [-ty / len, tx / len]
+end
+
+"""Signed area of `poly`. Positive when the loop is counter-clockwise."""
+function _signed_area(poly::Vector{NTuple{2, Float64}})
+    a = 0.0
+    n = length(poly)
+    for i in 1:n
+        x1, y1 = poly[i]
+        x2, y2 = poly[mod1(i + 1, n)]
+        a += x1 * y2 - x2 * y1
+    end
+    return 0.5 * a
+end
+
+_ccw_poly(poly) = _signed_area(poly) < 0 ? reverse(poly) : poly
+
+"""`loop` clipped to the counter-clockwise polygon `poly`, or empty."""
+function _clip_loop_to_polygon(loop::Vector{NTuple{2, Float64}},
+                               poly::Vector{NTuple{2, Float64}})
+    out = loop
+    ring = _ccw_poly(poly)
+    n = length(ring)
+    for i in 1:n
+        a = ring[i]
+        b = ring[mod1(i + 1, n)]
+        ex = b[1] - a[1]
+        ey = b[2] - a[2]
+        out = Asap.clip_halfplane(out, a, (-ey, ex))
+        length(out) < 3 && return NTuple{2, Float64}[]
+    end
+    abs(_signed_area(out)) < 1e-8 && return NTuple{2, Float64}[]
+    return out
+end
+
+"""
+Bands of `poly` divided on the opening edges parallel to `axis`.
+
+Those edges are the ones the joists run into. A cut parallel to the load
+direction takes no one-way area, and each band is short enough that a joist
+which stops at the opening spans the band.
+"""
+function _bands_beside_openings(poly::Vector{NTuple{2, Float64}},
+                                loops::Vector{Vector{NTuple{2, Float64}}},
+                                axis::Vector{Float64})
+    alen = hypot(axis[1], axis[2])
+    alen < 1e-12 && return [poly]
+    u = (axis[1] / alen, axis[2] / alen)
+    xs = [p[1] for p in poly]
+    ys = [p[2] for p in poly]
+    span = hypot(maximum(xs) - minimum(xs), maximum(ys) - minimum(ys)) + 1.0
+    pieces = [poly]
+    for loop in loops
+        n = length(loop)
+        for i in 1:n
+            a = loop[i]
+            b = loop[mod1(i + 1, n)]
+            d = (b[1] - a[1], b[2] - a[2])
+            L = hypot(d[1], d[2])
+            L <= 1e-6 && continue
+            ud = (d[1] / L, d[2] / L)
+            abs(ud[1] * u[1] + ud[2] * u[2]) > 0.95 || continue
+            p1 = (a[1] - ud[1] * span, a[2] - ud[2] * span)
+            p2 = (b[1] + ud[1] * span, b[2] + ud[2] * span)
+            nxt = Vector{NTuple{2, Float64}}[]
+            for s in pieces
+                append!(nxt, Asap._split_polygon_by_line(s, p1, p2))
+            end
+            pieces = nxt
+        end
+    end
+    return [p for p in pieces if _polygon_area_m2(p) > 1e-8]
+end
+
+_beam_xy(el::Asap.FrameElement) = (
+    (ustrip(u"m", el.nodeStart.position[1]), ustrip(u"m", el.nodeStart.position[2])),
+    (ustrip(u"m", el.nodeEnd.position[1]), ustrip(u"m", el.nodeEnd.position[2])))
+
+"""
+Beams lying along the segment `a→b`, each with the stretch `(lo, hi)` of
+`a→b` it covers, as fractions from 0 at `a` to 1 at `b`.
+
+A bay side carries one element between each pair of landings, so a strip's
+side can run over several of them. Each gets the part of the strip it lies under.
+"""
+function _beams_along_segment(beams::Vector{<:Asap.FrameElement},
+                              a::NTuple{2, Float64}, b::NTuple{2, Float64};
+                              tol::Float64 = 1e-4)
+    out = Tuple{eltype(beams), Float64, Float64}[]
+    d = (b[1] - a[1], b[2] - a[2])
+    L2 = d[1] * d[1] + d[2] * d[2]
+    L2 <= tol * tol && return out
+    L = sqrt(L2)
+    t_of(pt) = ((pt[1] - a[1]) * d[1] + (pt[2] - a[2]) * d[2]) / L2
+    off(pt) = abs((pt[1] - a[1]) * d[2] - (pt[2] - a[2]) * d[1]) / L
+    for beam in beams
+        p, q = _beam_xy(beam)
+        (off(p) <= tol && off(q) <= tol) || continue
+        lo = max(0.0, min(t_of(p), t_of(q)))
+        hi = min(1.0, max(t_of(p), t_of(q)))
+        (hi - lo) * L > tol || continue
+        push!(out, (beam, lo, hi))
+    end
+    return out
+end
+
+"""
+Piecewise-linear `depths` at `positions`, cut to `[lo, hi]`. Outside the
+profile there is no depth, so the cut also stops where the profile stops.
+Returns empty vectors when nothing is left.
+"""
+function _clip_depth_profile(positions::Vector{Float64}, depths::Vector{Float64},
+                             lo::Float64, hi::Float64)
+    order = sortperm(positions)
+    s = positions[order]
+    w = depths[order]
+    lo = max(lo, s[1])
+    hi = min(hi, s[end])
+    hi > lo || return Float64[], Float64[]
+    at(t) = begin
+        t <= s[1] && return w[1]
+        t >= s[end] && return w[end]
+        k = searchsortedlast(s, t)
+        ds = s[k + 1] - s[k]
+        ds <= 1e-15 ? w[k + 1] : w[k] + (w[k + 1] - w[k]) * (t - s[k]) / ds
+    end
+    ps = Float64[lo]
+    ws = Float64[at(lo)]
+    for (sk, wk) in zip(s, w)
+        lo < sk < hi || continue
+        push!(ps, sk)
+        push!(ws, wk)
+    end
+    push!(ps, hi)
+    push!(ws, at(hi))
+    return ps, ws
+end
+
+"""
+Tributary of one edge, written onto the beam that contains it.
+
+`positions` run from 0 to 1 along `a→b`. On the beam they run along the
+beam, so a joist that crosses several bands keeps each band's share on its
+own stretch.
+"""
+function _tributary_on_beam(beam::Asap.FrameElement, a::NTuple{2, Float64},
+                            b::NTuple{2, Float64}, positions::Vector{Float64},
+                            depths::Vector{Float64})
+    length(positions) < 2 && return nothing
+    p, q = _beam_xy(beam)
+    d = (q[1] - p[1], q[2] - p[2])
+    L2 = d[1] * d[1] + d[2] * d[2]
+    L2 <= 1e-12 && return nothing
+    s_of(pt) = ((pt[1] - p[1]) * d[1] + (pt[2] - p[2]) * d[2]) / L2
+    s0, s1 = s_of(a), s_of(b)
+    mapped = Float64[clamp(s0 + t * (s1 - s0), 0.0, 1.0) for t in positions]
+    dep = depths
+    if mapped[end] < mapped[1]
+        reverse!(mapped)
+        dep = reverse(depths)
+    end
+    issorted(mapped) || return nothing
+    mapped[end] - mapped[1] <= 1e-9 && return nothing
+    maximum(dep) <= 1e-9 && return nothing
+    widths = [w * u"m" for w in dep]
+    return Asap.TributaryLoad(beam, mapped, widths, 1.0u"Pa", (0.0, 0.0, -1.0))
+end
+
+"""
+One-way joist loads of `poly` with `openings` cut out.
+
+The bay is divided where joists meet an opening, then each band is cut
+along its joists. An opening edge is not a support: the strip from that
+edge goes to the joist at its other end. A strip side that runs over several
+members loads each one over its own stretch.
+"""
+function _joist_strip_loads(poly::Vector{NTuple{2, Float64}},
+                                      openings::Vector{Vector{NTuple{2, Float64}}},
+                                      beams::Vector{<:Asap.FrameElement},
+                                      interiors::Vector{<:Asap.FrameElement},
+                                      axis::Vector{Float64})
+    loads = Asap.TributaryLoad[]
+    bands = _bands_beside_openings(poly, openings, axis)
+    for band in bands
+        holes = Vector{NTuple{2, Float64}}[]
+        for op in openings
+            clipped = _clip_loop_to_polygon(op, band)
+            isempty(clipped) || push!(holes, clipped)
+        end
+        subs = Asap._split_polygon_by_beams(band, interiors)
+        for sub in subs
+            local_holes = Vector{NTuple{2, Float64}}[]
+            for h in holes
+                clipped = _clip_loop_to_polygon(h, sub)
+                isempty(clipped) || push!(local_holes, clipped)
+            end
+            pts = [Meshes.Point(p[1] * u"m", p[2] * u"m") for p in sub]
+            tribs = Asap.get_tributary_polygons(pts; axis = axis,
+                holes = isempty(local_holes) ? nothing : local_holes)
+            length(tribs) == length(sub) || return nothing
+            n = length(sub)
+            for i in 1:n
+                a = sub[i]
+                b = sub[mod1(i + 1, n)]
+                positions, depths = Asap._extract_depth_profile(tribs[i])
+                isempty(positions) && continue
+                for (beam, lo, hi) in _beams_along_segment(beams, a, b)
+                    ps, ws = _clip_depth_profile(positions, max.(depths, 0.0), lo, hi)
+                    ld = _tributary_on_beam(beam, a, b, ps, ws)
+                    ld === nothing || push!(loads, ld)
+                end
+            end
+        end
+    end
+    return loads
+end
+
+"""
+    _cell_split_joist_loads(struc, cell, frame_elements) -> Union{Nothing, Vector{TributaryLoad}}
+
+One-way tributaries of `cell` after it is cut along its joists, at 1 Pa.
+An opening is cut out first, and the joists and the edges the strips reach
+share what remains. `nothing` when the split does not reproduce that area,
+so the caller can leave the cell on the boundary skeleton instead of dropping load.
+"""
+function _cell_split_joist_loads(struc::BuildingStructure, cell::Cell,
+                                 frame_elements::Vector{<:Asap.Element})
+    skel = struc.skeleton
+    vis = skel.face_vertex_indices[cell.face_idx]
+    length(vis) >= 3 || return nothing
+    # Landings sit on the face edges. Leaving them in the loop makes a joist
+    # run from vertex to vertex, and the cut then sees the corner twice and
+    # does not split. Drop those collinear points so the joist crosses two edges.
+    poly = _drop_collinear_vertices(NTuple{2, Float64}[_vertex_xy_m(skel, v) for v in vis])
+    openings = [skel.openings[k].loop for k in face_openings(skel, cell.face_idx)]
+    gross = _polygon_area_m2(poly)
+    cut = sum(_overlap_area(poly, op) for op in openings; init = 0.0)
+    cell_area = gross - cut
+    cell_area > 0 || return nothing
+    z_cell = _vertex_z_m(skel, first(vis))
+
+    interiors = Asap.FrameElement[]
+    boundary = Asap.FrameElement[]
+    for beam in struc.beams
+        for si in segment_indices(beam)
+            e = struc.segments[si].edge_idx
+            (1 <= e <= length(frame_elements)) || continue
+            el = frame_elements[e]
+            el isa Asap.FrameElement || continue
+            z_el = (ustrip(u"m", el.nodeStart.position[3]) +
+                    ustrip(u"m", el.nodeEnd.position[3])) / 2
+            abs(z_el - z_cell) <= 0.01 || continue
+            a = (ustrip(u"m", el.nodeStart.position[1]), ustrip(u"m", el.nodeStart.position[2]))
+            b = (ustrip(u"m", el.nodeEnd.position[1]), ustrip(u"m", el.nodeEnd.position[2]))
+            mx, my = (a[1] + b[1]) / 2, (a[2] + b[2]) / 2
+            in_opening = any(op -> _point_in_polygon_xy(mx, my, op) &&
+                !_point_on_polygon_boundary(mx, my, op; tol = 1e-6), openings)
+            in_opening && continue
+            if _point_on_polygon_boundary(mx, my, poly; tol = 1e-6)
+                push!(boundary, el)
+            elseif beam.role === :joist && _point_in_polygon_xy(mx, my, poly)
+                push!(interiors, el)
+            end
+        end
+    end
+    isempty(interiors) && return nothing
+    axis = nothing
+    for el in interiors
+        axis = _across_joist_axis(el)
+        axis === nothing || break
+    end
+    axis === nothing && return nothing
+
+    beams = vcat(boundary, interiors)
+    tls = try
+        _joist_strip_loads(poly, openings, beams, interiors, axis)
+    catch err
+        @warn "joist bay could not be split along its joists" exception = (err, catch_backtrace())
+        return nothing
+    end
+    tls === nothing && return nothing
+    loaded = sum(_tributary_area_m2, tls; init = 0.0)
+    abs(loaded / cell_area - 1.0) <= 1e-3 || return nothing
+    interior_ids = Set(objectid(el) for el in interiors)
+    joist_area = 0.0
+    for ld in tls
+        objectid(ld.element) in interior_ids || continue
+        joist_area += _tributary_area_m2(ld)
+    end
+    joist_area > 1e-6 * cell_area || return nothing
+    return tls
+end
+
+"""
+    _try_polygon_joist_loads!(loads, frame_elements, struc, slab; use_patterns, combo) -> Bool
+
+Load one single-level joist slab by cutting each cell along its joists.
+Records each cell's loads and returns `true` only when every cell conserves
+its area onto those members. An opening is cut out of the cell first, and the
+joists carry the slab that remains. A second framing level, or a split that
+misses area, returns `false` and warns: the joists are not given the slab.
+"""
+function _try_polygon_joist_loads!(loads::Vector{Asap.AbstractLoad},
+                                   frame_elements::Vector{<:Asap.Element},
+                                   struc::BuildingStructure, slab::Slab,
+                                   params::DesignParameters;
+                                   use_patterns::Bool, combo::LoadCombination)
+    length(slab.framing_levels) == 1 || return false
+    for ci in slab.cell_indices
+        if !isempty(face_openings(struc.skeleton, struc.cells[ci].face_idx))
+            @warn "an unframed opening lies in a joist bay; the joists stop at its edge" cell = ci maxlog = 4
+        end
+    end
+    per_cell = Dict{Int, Vector{Asap.TributaryLoad}}()
+    for ci in slab.cell_indices
+        tls = _cell_split_joist_loads(struc, struc.cells[ci], frame_elements)
+        if tls === nothing
+            @warn "joists in this bay carry no slab load; the panel stays on its boundary" cell = ci
+            return false
+        end
+        per_cell[ci] = tls
+    end
+    for ci in slab.cell_indices
+        _store_split_joist_loads!(loads, struc, ci, per_cell[ci], struc.cells[ci],
+                                  params; use_patterns, combo)
+    end
+    return true
+end
+
+function _store_split_joist_loads!(loads, struc, ci, unit_loads, cell,
+                                   params::DesignParameters;
+                                   use_patterns::Bool, combo::LoadCombination)
+    if use_patterns
+        dead_p = uconvert(u"Pa", combo.D * (cell.sdl + cell.self_weight))
+        live_p = uconvert(u"Pa", combo.L * cell.live_load)
+        dead = Asap.TributaryLoad[]
+        live = Asap.TributaryLoad[]
+        for ld in unit_loads
+            d = _tributary_at(ld, dead_p)
+            l = _tributary_at(ld, live_p)
+            push!(loads, d, l)
+            push!(dead, d)
+            push!(live, l)
+        end
+        struc.cell_dead_loads[ci] = dead
+        struc.cell_live_loads[ci] = live
+        struc.cell_tributary_loads[ci] = vcat(dead, live)
+    else
+        combined_p = uconvert(u"Pa", envelope_pressure(params.load_combinations,
+                            cell.sdl + cell.self_weight, cell.live_load))
+        combined = Asap.TributaryLoad[]
+        for ld in unit_loads
+            t = _tributary_at(ld, combined_p)
+            push!(loads, t)
+            push!(combined, t)
+        end
+        struc.cell_dead_loads[ci] = Asap.TributaryLoad[]
+        struc.cell_live_loads[ci] = Asap.TributaryLoad[]
+        struc.cell_tributary_loads[ci] = combined
+    end
+    return loads
+end
+
 """
     _create_framed_slab_loads!(loads, frame_elements, struc, params;
                                use_patterns, combo) -> Set{Int}
@@ -1102,9 +1661,11 @@ supporting girders' demand envelope from the concentrated joist reactions
 caller skips those in the per-cell tributary loop so a framed slab's pressure is
 applied exactly ONCE (no double counting). A slab whose geometry does not resolve
 to a valid, load-conserving one-way strip layout (no joists, multi-level grid,
-degenerate, or a strip layout that fails the runtime conservation check) is left
-for the per-cell path (its cells are NOT added to the returned set) — that path
-conserves load on any polygon, so nothing is dropped.
+degenerate, or a strip layout that fails the runtime conservation check) is
+split along its joists ([`_try_polygon_joist_loads!`](@ref)). A split that does
+not conserve the cell area leaves the cells for the per-cell path (they are NOT
+added to the returned set). That path loads the face edges and a warning says
+the joists carry no slab load.
 
 The emitted objects are raw `Asap.TributaryLoad`s (not an `Asap.AreaLoad`): a raw
 `TributaryLoad` carries a `.element`, so `Asap.get_elemental_loads` — and hence
@@ -1159,6 +1720,41 @@ function _create_framed_slab_loads!(loads::Vector{Asap.AbstractLoad},
     combos = params.load_combinations
     dir = (0.0, 0.0, -1.0)
     for slab in struc.slabs
+        grill = _grillage_level(slab)
+        if grill !== nothing
+            isempty(slab.cell_indices) && throw(ArgumentError(
+                "a grillage slab has no cells"))
+            c0 = first(slab.cell_indices)
+            cell0 = struc.cells[c0]
+            if use_patterns
+                dead_p = uconvert(u"Pa", combo.D * (cell0.sdl + cell0.self_weight))
+                live_p = uconvert(u"Pa", combo.L * cell0.live_load)
+                dead_loads = Asap.TributaryLoad[]
+                live_loads = Asap.TributaryLoad[]
+                _emit_grillage_loads!(loads, dead_loads, frame_elements, struc, slab, grill, dead_p)
+                _emit_grillage_loads!(loads, live_loads, frame_elements, struc, slab, grill, live_p)
+                struc.cell_dead_loads[c0] = dead_loads
+                struc.cell_live_loads[c0] = live_loads
+                struc.cell_tributary_loads[c0] = vcat(dead_loads, live_loads)
+            else
+                combined_p = uconvert(u"Pa", envelope_pressure(combos,
+                                cell0.sdl + cell0.self_weight, cell0.live_load))
+                combined_loads = Asap.TributaryLoad[]
+                _emit_grillage_loads!(loads, combined_loads, frame_elements, struc,
+                                      slab, grill, combined_p)
+                struc.cell_dead_loads[c0] = Asap.TributaryLoad[]
+                struc.cell_live_loads[c0] = Asap.TributaryLoad[]
+                struc.cell_tributary_loads[c0] = combined_loads
+            end
+            for ci in slab.cell_indices
+                push!(handled, ci)
+                ci == c0 && continue
+                struc.cell_dead_loads[ci] = Asap.TributaryLoad[]
+                struc.cell_live_loads[ci] = Asap.TributaryLoad[]
+                struc.cell_tributary_loads[ci] = Asap.TributaryLoad[]
+            end
+            continue
+        end
         _slab_has_joist_framing(struc, slab) || continue
         isempty(slab.cell_indices) && continue
         c0 = first(slab.cell_indices)
@@ -1166,11 +1762,20 @@ function _create_framed_slab_loads!(loads::Vector{Asap.AbstractLoad},
         cell0.floor_type == :grade && continue
 
         # One-way strip geometry. Pass `frame_elements` so the member-length gate
-        # measures lengths on the SAME basis the emitter integrates over. `nothing`
-        # ⇒ leave this slab to the per-cell path (slab NOT marked handled) so no
-        # load is dropped.
+        # measures lengths on the SAME basis the emitter integrates over. A
+        # rectangle aligned with the joists takes that path. Every other
+        # single-level joist bay is split along its joists so the joists still
+        # receive the slab. Only a split that does not conserve the cell area
+        # leaves the slab on the boundary skeleton.
         strips = _framed_slab_strip_geometry(struc, slab, frame_elements)
-        strips === nothing && continue
+        if strips === nothing
+            _try_polygon_joist_loads!(loads, frame_elements, struc, slab, params;
+                                      use_patterns, combo) || continue
+            for ci in slab.cell_indices
+                push!(handled, ci)
+            end
+            continue
+        end
 
         # C3 DEFENSE-IN-DEPTH — uniform-pressure guard for multi-cell slabs. The
         # strip path below applies cell0's pressure (sdl / self_weight / live_load)

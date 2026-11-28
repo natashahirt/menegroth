@@ -34,6 +34,8 @@ include(joinpath(@__DIR__, "..", "init.jl"))
 using Printf
 using Logging: NullLogger, with_logger
 
+include(joinpath(@__DIR__, "run_details.jl"))
+
 const SR = StructuralSizer
 const SS = StructuralSynthesizer
 
@@ -43,24 +45,81 @@ const SS = StructuralSynthesizer
 # Method definitions
 # ==============================================================================
 
-# NOTE: pattern_loading=false for EFM and FEA to enable fair comparison with DDM's
-# fixed coefficients. Pattern loading can reduce EFM moments significantly,
-# which causes EFM to converge to thinner slabs (lower self-weight → lower M0).
-const ALL_METHODS = [
+# Pattern loading (ACI 318-11 §13.7.6, corpus: aci-318-11, page 261) is on
+# for EFM and FEA. The envelope keeps the full-load moments and raises any
+# station the checkerboard or adjacent-span patterns govern, so moments
+# never fall below the uniform-load case. Patterns run only when L/D > 0.75
+# at the thickness being analyzed (ACI 318-11 §13.7.6). A 50 psf office
+# load stays under that ratio. A 150 psf load does too once the slab is
+# thick enough that self-weight dominates; the result column `pattern_loading`
+# records whether the envelope actually ran.
+# DDM has no switch: its coefficients already cover pattern loading.
+# Patterned spans use three-quarters of the factored live load
+# (ACI 318-11 §13.7.6.3, corpus: aci-318-11, page 261). The full-load
+# case is kept as a lower bound (§13.7.6.4).
+# FEA uses :efm_amp (1-D frame ratios applied to slab and column demands).
+# `FEA_PATTERN_RESOLVE` re-solves the shell and is a validation subset only.
+#
+# `CORE_METHODS` is the canonical comparison. `SENSITIVITY_METHODS` are
+# solver and stiffness variants, not part of the default sweep.
+const CORE_METHODS = [
     (key=:rot,    name="ACI Min",     method=SR.RuleOfThumb()),
-    (key=:mddm,   name="MDDM",       method=SR.DDM(:simplified)),
     (key=:ddm,    name="DDM (Full)",  method=SR.DDM(:full)),
-    (key=:efm_hc, name="EFM (HC)",    method=SR.EFM(solver=:hardy_cross, pattern_loading=false)),
-    (key=:efm,    name="EFM (ASAP)",  method=SR.EFM(solver=:asap, pattern_loading=false)),
-    (key=:efm_kc, name="EFM (Kc)",    method=SR.EFM(solver=:asap, column_stiffness=:Kc, pattern_loading=false)),
-    (key=:fea,    name="FEA (frame)", method=SR.FEA(; pattern_loading=false, design_approach=:frame)),
-    (key=:fea_d,  name="FEA (strip)", method=SR.FEA(; pattern_loading=false, design_approach=:strip)),
+    (key=:efm,    name="EFM (ASAP)",  method=SR.EFM(solver=:asap, pattern_loading=true)),
+    (key=:fea,    name="FEA (frame)", method=SR.FEA(; pattern_loading=true, pattern_mode=:efm_amp, design_approach=:frame)),
+    (key=:fea_d,  name="FEA (strip)", method=SR.FEA(; pattern_loading=true, pattern_mode=:efm_amp, design_approach=:strip)),
     # `:area` requires `moment_transform=:wood_armer` to envelope twisting
     # moments per element (StructuralSizer/.../helpers.jl §_check_fea_approach_applicability).
-    (key=:fea_a,  name="FEA (area)",  method=SR.FEA(; pattern_loading=false,
+    (key=:fea_a,  name="FEA (area)",  method=SR.FEA(; pattern_loading=true, pattern_mode=:efm_amp,
                                                       design_approach=:area,
                                                       moment_transform=:wood_armer)),
 ]
+
+const SENSITIVITY_METHODS = [
+    (key=:mddm,   name="MDDM",        method=SR.DDM(:simplified)),
+    (key=:efm_hc, name="EFM (HC)",    method=SR.EFM(solver=:hardy_cross, pattern_loading=true)),
+    (key=:efm_kc, name="EFM (Kc)",    method=SR.EFM(solver=:asap, column_stiffness=:Kc, pattern_loading=true)),
+]
+
+const ALL_METHODS = vcat(CORE_METHODS, SENSITIVITY_METHODS)
+
+# Numerical seed for the computed-deflection search. Not an ACI minimum.
+# At the default cover (0.75 in) and bar diameter (0.5 in), h = 2 in gives
+# d = 0.75 in. ACI 318-11 §9.5.3.4 (corpus: aci-318-11, page 135) permits
+# thickness below Table 9.5(c) when computed deflections satisfy Table 9.5(b).
+const COMPUTED_DEFLECTION_SEED = 2.0u"inch"
+
+# ENGINEERING JUDGMENT: practical floor at the §9.5.3.2 absolute values
+# (5 in without drop panels, 4 in with them; corpus: aci-318-11, page 134).
+# This is a sensitivity. The computed-deflection regime is allowed to
+# search below it.
+const PRACTICAL_FLOOR_PLATE = 5.0u"inch"
+const PRACTICAL_FLOOR_SLAB  = 4.0u"inch"
+
+# ACI 318-11 Table 9.5(b) (corpus: aci-318-11, page 133). Label and
+# construction category for each deflection limit, recorded on every row.
+# The study default is L/240: deflection after attachment of nonstructural
+# elements (long-term sustained plus immediate live load). L/360 checks
+# immediate live load only and did not govern any design.
+const DEFL_LIMITS = Dict(
+    :L_240 => ("L/240", "ACI 318-11 Table 9.5(b): floors supporting or attached to nonstructural elements not likely to be damaged by large deflections; deflection after attachment"),
+    :L_360 => ("L/360", "ACI 318-11 Table 9.5(b): floors not supporting or attached to nonstructural elements likely to be damaged by large deflections; immediate live-load deflection"),
+    :L_480 => ("L/480", "ACI 318-11 Table 9.5(b): floors supporting or attached to nonstructural elements likely to be damaged by large deflections; deflection after attachment"),
+)
+const DEFAULT_DEFL_LIMIT = :L_240
+
+"""Row label and Table 9.5(b) category for a deflection limit symbol."""
+function _defl_label(limit::Symbol)
+    haskey(DEFL_LIMITS, limit) ||
+        error("deflection_limit must be one of $(collect(keys(DEFL_LIMITS))), got $(limit)")
+    return DEFL_LIMITS[limit]
+end
+
+"""FEA frame with shell re-solves per pattern. Not part of `ALL_METHODS`."""
+const FEA_PATTERN_RESOLVE = (
+    key=:fea_res, name="FEA (frame, resolve)",
+    method=SR.FEA(; pattern_loading=true, pattern_mode=:fea_resolve, design_approach=:frame),
+)
 
 # ==============================================================================
 # Concrete preset axis (Section 1 sensitivity)
@@ -105,14 +164,14 @@ end
 # Note: cracked_columns only affects :asap stubs (Hardy Cross always uses gross Ig).
 const ALL_EFM = [
     # ── Hardy Cross ──────────────────────────────────────────────────────────
-    (key=:hc_kec,         name="HC  Kec",          method=SR.EFM(solver=:hardy_cross, column_stiffness=:Kec, pattern_loading=false)),
-    (key=:hc_kc,          name="HC  Kc",           method=SR.EFM(solver=:hardy_cross, column_stiffness=:Kc,  pattern_loading=false)),
+    (key=:hc_kec,         name="HC  Kec",          method=SR.EFM(solver=:hardy_cross, column_stiffness=:Kec, pattern_loading=true)),
+    (key=:hc_kc,          name="HC  Kc",           method=SR.EFM(solver=:hardy_cross, column_stiffness=:Kc,  pattern_loading=true)),
     # ── ASAP (gross Ig) ─────────────────────────────────────────────────────
-    (key=:asap_kec,       name="ASAP Kec",         method=SR.EFM(solver=:asap, column_stiffness=:Kec, pattern_loading=false)),
-    (key=:asap_kc,        name="ASAP Kc",          method=SR.EFM(solver=:asap, column_stiffness=:Kc,  pattern_loading=false)),
+    (key=:asap_kec,       name="ASAP Kec",         method=SR.EFM(solver=:asap, column_stiffness=:Kec, pattern_loading=true)),
+    (key=:asap_kc,        name="ASAP Kc",          method=SR.EFM(solver=:asap, column_stiffness=:Kc,  pattern_loading=true)),
     # ── ASAP (cracked 0.70 Ig) ──────────────────────────────────────────────
-    (key=:asap_kec_crack, name="ASAP Kec cracked",  method=SR.EFM(solver=:asap, column_stiffness=:Kec, cracked_columns=true, pattern_loading=false)),
-    (key=:asap_kc_crack,  name="ASAP Kc  cracked",  method=SR.EFM(solver=:asap, column_stiffness=:Kc,  cracked_columns=true, pattern_loading=false)),
+    (key=:asap_kec_crack, name="ASAP Kec cracked",  method=SR.EFM(solver=:asap, column_stiffness=:Kec, cracked_columns=true, pattern_loading=true)),
+    (key=:asap_kc_crack,  name="ASAP Kc  cracked",  method=SR.EFM(solver=:asap, column_stiffness=:Kc,  cracked_columns=true, pattern_loading=true)),
 ]
 
 # ==============================================================================
@@ -123,9 +182,144 @@ const ALL_EFM = [
 _adaptive_story_ht(span_ft::Float64) = max(12.0, round(span_ft / 3.0))
 
 """Max column constraint scaled to span — limits slab-loop column growth.
-`ratio` is the span-to-column multiplier (default 1.1 → 36″–60″ range)."""
+
+`ratio` is the span-to-column multiplier. The default 1.1 is then clamped
+to 36–60 in, so a 20 ft bay still allows a 36 in column. That floor is
+large for the span: a 20 ft bay more often lands near 16–24 in. Punching
+demand goes into the column until this cap, and only then into slab
+thickness, so the clamp is part of the thickness result.
+
+This is the E5 sensitivity cap (`column_cap=:adaptive`). The main runs
+use `span15_max_col`. `col_ratio` on the sweeps still passes through this
+clamp.
+"""
 _adaptive_max_col(span_ft::Float64; ratio::Float64 = 1.1) =
     clamp(round(span_ft * ratio), 36.0, 60.0)
+
+"""Column cap for the main runs, in inches: span/15.
+
+0.8 × span in ft gives inches (span/15), clamped to 16–36 in. A 20 ft bay
+is 16 in. It stands in for the practical column size, beyond which a
+designer adds studs or drop panels rather than a larger column. A fixed
+24 in cap is the sweeps' `max_col_in=24` argument. The generous
+`_adaptive_max_col` is the E5 sensitivity case.
+"""
+span15_max_col(span_ft::Float64) = clamp(round(span_ft * 0.8), 16.0, 36.0)
+
+"""Resolve the column cap for one span.
+
+An explicit `max_col_in` wins, including a fixed 24 in. The default
+`column_cap=:span15` uses `span15_max_col`. `column_cap=:adaptive` is the
+E5 case, and `col_ratio` still passes through its 36 in floor.
+"""
+function _resolve_max_col(span_ft::Float64;
+                          max_col_in::Union{Nothing, Real} = nothing,
+                          col_ratio::Real = 1.1,
+                          column_cap::Symbol = :span15,
+                          uncap::Bool = false)
+    !isnothing(max_col_in) && return Float64(max_col_in)
+    uncap && return _uncapped_max_col(span_ft)
+    column_cap === :span15 && return span15_max_col(span_ft)
+    column_cap === :adaptive ||
+        error("column_cap must be :span15 or :adaptive, got $(column_cap)")
+    return _adaptive_max_col(span_ft; ratio = Float64(col_ratio))
+end
+
+"""Inches stored on a column side. `nothing` and a non-positive side are missing."""
+function _dim_in(x)
+    isnothing(x) && return NaN
+    v = ustrip(u"inch", x)
+    return v > 0 ? v : NaN
+end
+
+"""
+    _story_column_sizes(columns, story; cap_in, increment_in) -> NamedTuple
+
+Column section on one floor.
+
+`story` is `Column.story`: the skeleton key of the floor at the top of the
+column, which is the slab that column supports. Roof and ground columns
+are left out.
+
+`col_c1_in` and `col_c2_in` are the largest side on that floor. The
+per-position fields are the largest side in `:corner`, `:edge`, and
+`:interior`, so an enlarged edge column is not hidden inside one min/max.
+`col_at_cap` is true when any column's larger side is within one size
+increment of `cap_in`. The section could not take another increment
+without passing the cap.
+"""
+function _story_column_sizes(columns, story; cap_in::Real = NaN, increment_in::Real = 0.5)
+    blank = (
+        col_c1_in = NaN, col_c2_in = NaN, col_at_cap = false,
+        col_min_c1_in = NaN,
+        col_c1_corner_in = NaN, col_c2_corner_in = NaN,
+        col_c1_edge_in = NaN, col_c2_edge_in = NaN,
+        col_c1_interior_in = NaN, col_c2_interior_in = NaN,
+    )
+    isnothing(story) && return blank
+    c1s = Float64[]
+    c2s = Float64[]
+    by_pos = Dict{Symbol, Vector{Tuple{Float64, Float64}}}()
+    at_cap = false
+    for col in columns
+        col.story == story || continue
+        c1 = _dim_in(col.c1)
+        c2 = _dim_in(col.c2)
+        isfinite(c1) && push!(c1s, c1)
+        isfinite(c2) && push!(c2s, c2)
+        push!(get!(by_pos, col.position, Tuple{Float64, Float64}[]), (c1, c2))
+        finite_sides = filter(isfinite, (c1, c2))
+        side = isempty(finite_sides) ? NaN : maximum(finite_sides)
+        if isfinite(cap_in) && isfinite(side) && side >= cap_in - increment_in - 1e-9
+            at_cap = true
+        end
+    end
+    pos_max(pos, idx) = begin
+        pairs = get(by_pos, pos, Tuple{Float64, Float64}[])
+        vals = [p[idx] for p in pairs if isfinite(p[idx])]
+        isempty(vals) ? NaN : maximum(vals)
+    end
+    return (
+        col_c1_in = isempty(c1s) ? NaN : maximum(c1s),
+        col_c2_in = isempty(c2s) ? NaN : maximum(c2s),
+        col_at_cap = at_cap,
+        col_min_c1_in = isempty(c1s) ? NaN : minimum(c1s),
+        col_c1_corner_in = pos_max(:corner, 1),
+        col_c2_corner_in = pos_max(:corner, 2),
+        col_c1_edge_in = pos_max(:edge, 1),
+        col_c2_edge_in = pos_max(:edge, 2),
+        col_c1_interior_in = pos_max(:interior, 1),
+        col_c2_interior_in = pos_max(:interior, 2),
+    )
+end
+
+"""Cap recorded on a sweep row, in inches, from the floor options actually used."""
+function _params_max_col_in(params)
+    floor = params.floor
+    fp = floor isa SR.FlatSlabOptions ? floor.base : floor
+    return ustrip(u"inch", fp.max_column_size)
+end
+
+"""Column size increment, in inches. One step short of the cap still counts as capped."""
+function _params_col_increment_in(params)
+    cols = params.columns
+    hasproperty(cols, :size_increment) || return 0.5
+    return ustrip(u"inch", cols.size_increment)
+end
+
+"""Punching strategy recorded on a sweep row, from the floor options actually used."""
+function _params_punching_strategy(params)
+    floor = params.floor
+    fp = floor isa SR.FlatSlabOptions ? floor.base : floor
+    return fp.punching_strategy
+end
+
+"""Deflection limit recorded on a sweep row, from the floor options actually used."""
+function _params_defl_limit(params)
+    floor = params.floor
+    fp = floor isa SR.FlatSlabOptions ? floor.base : floor
+    return fp.deflection_limit
+end
 
 """
     _uncapped_max_col(span_ft) -> Float64
@@ -168,10 +362,11 @@ function _make_params(;
     live_psf::Float64   = 50.0,
     max_col_in::Float64 = 36.0,
     shear_studs::Symbol = :if_needed,
+    punching_thickening::Bool = true,
     min_h               = nothing,
     max_iterations::Int = 150,
-    deflection_limit::Symbol = :L_360,
-    column_strategy::Symbol = :catalog,
+    deflection_limit::Symbol = DEFAULT_DEFL_LIMIT,
+    column_strategy::Symbol = :discrete,
     concrete_label::AbstractString = "NWC_4000",
 )
     preset = _concrete_preset(concrete_label)
@@ -180,6 +375,9 @@ function _make_params(;
         material         = preset.material,
         shear_studs      = shear_studs,
         max_column_size  = max_col_in * u"inch",
+        # Columns from axial load and P-M; punching grows them up to the cap.
+        column_span_minimum = false,
+        punching_thickening = punching_thickening,
         min_h            = min_h,
         deflection_limit = deflection_limit,
     )
@@ -192,10 +390,16 @@ function _make_params(;
             floor_SDL = sdl_psf * psf,
             roof_SDL  = sdl_psf * psf,
         ),
-        materials = MaterialOptions(concrete = preset.concrete, rebar = SR.Rebar_60),
+        materials = MaterialOptions(
+            concrete = preset.concrete,
+            rebar = SR.Rebar_60,
+            column = SR.RC_6000_60,
+        ),
         columns   = SR.ConcreteColumnOptions(
             material        = SR.NWC_6000,
-            catalog         = :high_capacity,
+            # :all spans 8–72 in. :high_capacity starts at 18 in, which sits
+            # above the span/15 cap at short spans and would override it.
+            catalog         = :all,
             sizing_strategy = column_strategy,
         ),
         floor     = floor,
@@ -221,7 +425,8 @@ shear studs, min_h, etc.) are inherited from `base_params` automatically.
 """
 function _with_method_and_ll(base_params::DesignParameters,
                              method::SR.FlatPlateAnalysisMethod,
-                             live_psf::Float64)
+                             live_psf::Float64;
+                             min_h = :inherit)
     # Swap method on the floor options
     bp_floor = base_params.floor
     fp_base = bp_floor isa SR.FlatSlabOptions ? bp_floor.base : bp_floor
@@ -239,9 +444,12 @@ function _with_method_and_ll(base_params::DesignParameters,
         deflection_limit = fp_base.deflection_limit,
         shear_studs      = fp_base.shear_studs,
         max_column_size  = fp_base.max_column_size,
+        column_span_minimum = fp_base.column_span_minimum,
+        punching_thickening = fp_base.punching_thickening,
+        moment_transfer_increase = fp_base.moment_transfer_increase,
         stud_material    = fp_base.stud_material,
         stud_diameter    = fp_base.stud_diameter,
-        min_h            = fp_base.min_h,
+        min_h            = min_h === :inherit ? fp_base.min_h : min_h,
         objective        = fp_base.objective,
         col_I_factor     = fp_base.col_I_factor,
     )
@@ -282,6 +490,97 @@ function _build_skeleton(lx_ft::Float64, ly_ft::Float64,
     total_y = ly_ft * n_bays * u"ft"
     ht      = story_ht_ft * u"ft"
     gen_medium_office(total_x, total_y, ht, n_bays, n_bays, n_stories)
+end
+
+"""Map each slab index to the story that owns most of its cells."""
+function _slab_story_map(struc)
+    face_to_story = Dict{Int, Int}()
+    for (story_idx, story) in struc.skeleton.stories
+        for face_idx in story.faces
+            face_to_story[face_idx] = story_idx
+        end
+    end
+    by_story = Dict{Int, Vector{Int}}()
+    for (slab_idx, slab) in enumerate(struc.slabs)
+        counts = Dict{Int, Int}()
+        for ci in slab.cell_indices
+            sid = get(face_to_story, struc.cells[ci].face_idx, nothing)
+            isnothing(sid) && continue
+            counts[sid] = get(counts, sid, 0) + 1
+        end
+        isempty(counts) && continue
+        push!(get!(by_story, argmax(counts), Int[]), slab_idx)
+    end
+    return by_story
+end
+
+"""
+Median story below the roof. A 3-story building reports story 2.
+When two floors are equally central, the upper one is used.
+"""
+function _intermediate_story(by_story)
+    stories = sort!(collect(keys(by_story)))
+    isempty(stories) && return nothing
+    floors = length(stories) == 1 ? stories : stories[1:end-1]
+    return floors[cld(length(floors) + 1, 2)]
+end
+
+"""Slab reported by the study: the intermediate floor, or the only floor."""
+function _select_study_slab(struc)
+    by_story = _slab_story_map(struc)
+    story = _intermediate_story(by_story)
+    if isnothing(story) || !haskey(by_story, story) || isempty(by_story[story])
+        return (slab = struc.slabs[1], slab_index = 1, story = 1, story_role = "only")
+    end
+    idx = first(by_story[story])
+    role = length(by_story) == 1 ? "only" : "intermediate"
+    return (slab = struc.slabs[idx], slab_index = idx, story = story, story_role = role)
+end
+
+"""First slab whose design did not converge, or `nothing`."""
+function _first_failed_slab(struc)
+    for slab in struc.slabs
+        dd = slab.design_details
+        if !isnothing(dd) && hasproperty(dd, :converged) && !dd.converged
+            return dd
+        end
+    end
+    return nothing
+end
+
+"""Method knobs recorded on every result row."""
+function _option_fields(method=nothing; deflection_limit::Symbol = DEFAULT_DEFL_LIMIT)
+    defl_label, defl_cat = _defl_label(deflection_limit)
+    return (
+        pattern_mode = method isa SR.FEA ? string(method.pattern_mode) : "",
+        pattern_requested = (method isa SR.EFM || method isa SR.FEA) ? method.pattern_loading : false,
+        design_approach = method isa SR.FEA ? string(method.design_approach) : "",
+        averaging_width_factor = (method isa SR.FEA && method.averaging_width_factor !== nothing) ?
+            method.averaging_width_factor : NaN,
+        fea_moment_transform = method isa SR.FEA ? string(method.moment_transform) : "",
+        fea_field_smoothing = method isa SR.FEA ? string(method.field_smoothing) : "",
+        fea_torsion_discount = method isa SR.FEA ? method.concrete_torsion_discount : missing,
+        fea_patch_stiffness = method isa SR.FEA ? method.patch_stiffness_factor : NaN,
+        fea_target_edge_m = (method isa SR.FEA && !isnothing(method.target_edge)) ?
+            ustrip(u"m", method.target_edge) : NaN,
+        efm_solver = method isa SR.EFM ? string(method.solver) : "",
+        column_stiffness = method isa SR.EFM ? string(method.column_stiffness) : "",
+        shear_demand_source = "analytical",
+        defl_limit = defl_label,
+        defl_category = defl_cat,
+    )
+end
+
+function _shear_fields(dd)
+    empty = (Vu_kip = NaN, Vu_fea_kip = NaN, Vu_fea_ratio = NaN)
+    (isnothing(dd) || !hasproperty(dd, :one_way_shear) || isnothing(dd.one_way_shear)) && return empty
+    shear = dd.one_way_shear
+    Vu_fea = hasproperty(shear, :Vu_fea) ? shear.Vu_fea : nothing
+    return (
+        Vu_kip = ustrip(kip, shear.Vu),
+        Vu_fea_kip = isnothing(Vu_fea) ? NaN : ustrip(kip, Vu_fea),
+        Vu_fea_ratio = hasproperty(shear, :fea_ratio) ? shear.fea_ratio : NaN,
+    )
 end
 
 """Override every cell's live load and re-sync the Asap model."""
@@ -352,6 +651,48 @@ function _extract_slab_mui(volumes, floor_area_m2::Float64)
 end
 
 """
+    _defl_report(dc, dd) -> NamedTuple
+
+Deflection columns beyond the governing check.
+
+`defl_source` is `"fea_direct"` when the thickness was accepted on the FEA
+nodal displacement, and `"crossing_beam"` for DDM, EFM, and ACI Min.
+`defl_ratio_cb` / `defl_in_cb` are the crossing-beam values. For non-FEA
+methods they equal the governing check. `governing_check` is the last
+check that forced a thickness increase, `"table_minimum"` when the
+Table 9.5(c) start thickness passed, or `"search_floor"` when a
+caller-supplied floor passed on the first pass.
+"""
+function _defl_report(dc, dd)
+    governing = "table_minimum"
+    if !isnothing(dd) && hasproperty(dd, :governing_check)
+        g = string(dd.governing_check)
+        isempty(g) || (governing = g)
+    end
+    is_fea = !isnothing(dd) && hasproperty(dd, :method_used) && dd.method_used isa SR.FEA
+    cb_ratio = dc.ratio
+    cb_in = ustrip(u"inch", dc.Δ_check)
+    if is_fea
+        cb = hasproperty(dd, :deflection_check_crossing_beam) ?
+             dd.deflection_check_crossing_beam : nothing
+        if isnothing(cb)
+            cb_ratio = NaN
+            cb_in = NaN
+        else
+            lim = ustrip(u"inch", cb.Δ_limit)
+            cb_in = ustrip(u"inch", cb.Δ_check)
+            cb_ratio = lim == 0.0 ? NaN : cb_in / lim
+        end
+    end
+    return (
+        defl_source    = is_fea ? "fea_direct" : "crossing_beam",
+        defl_ratio_cb  = cb_ratio,
+        defl_in_cb     = cb_in,
+        governing_check = governing,
+    )
+end
+
+"""
     _extract_results(struc; kw...) -> NamedTuple or nothing
 
 Extract a flat result row from the current (post-pipeline) state of `struc`.
@@ -367,8 +708,13 @@ function _extract_results(struc;
                           floor_type::Symbol,
                           method_name::String,
                           elapsed::Float64,
-                          concrete_label::AbstractString = "NWC_4000")
-    slab = struc.slabs[1]
+                          concrete_label::AbstractString = "NWC_4000",
+                          method = nothing,
+                          max_col_in::Float64 = NaN,
+                          col_increment_in::Float64 = 0.5,
+                          deflection_limit::Symbol = DEFAULT_DEFL_LIMIT)
+    picked = _select_study_slab(struc)
+    slab = picked.slab
     r = slab.result
     isnothing(r) && return nothing
     dd = slab.design_details   # rich NamedTuple from size_flat_plate!
@@ -424,11 +770,23 @@ function _extract_results(struc;
         end
     end
 
-    # ── Columns (post-reconciliation — pipeline Stage 2) ─────────────
-    cols_in = [ustrip(u"inch", c.c1) for c in struc.columns]
+    # ── Columns on the reported floor (pipeline Stage 2) ────────────
+    # `col.story` is the floor at the top of the column. Roof and ground
+    # sections are a different story and are not mixed into this row.
+    col_sizes = _story_column_sizes(struc.columns, picked.story;
+                                    cap_in = max_col_in, increment_in = col_increment_in)
+    cols_in = Float64[]
+    for col in struc.columns
+        col.story == picked.story || continue
+        c1 = _dim_in(col.c1)
+        isfinite(c1) && push!(cols_in, c1)
+    end
+    if isempty(cols_in)
+        cols_in = [_dim_in(c.c1) for c in struc.columns if isfinite(_dim_in(c.c1))]
+    end
 
     # ── ACI minimum thickness ────────────────────────────────────────
-    col_avg_ft = sum(cols_in) / length(cols_in) / 12.0
+    col_avg_ft = isempty(cols_in) ? 0.0 : sum(cols_in) / length(cols_in) / 12.0
     ln_ft = max(lx_ft, ly_ft) - col_avg_ft
     ft_tag = floor_type === :flat_slab ? SR.FlatSlab() : SR.FlatPlate()
     h_min = SR.min_thickness(ft_tag, ln_ft * u"ft")
@@ -466,11 +824,16 @@ function _extract_results(struc;
         ""
     end
 
+    defl = _defl_report(r.deflection_check, dd)
+    shear = _shear_fields(dd)
+
     return merge((
         floor_type        = string(floor_type),
         concrete          = String(concrete_label),
         lx_ft             = lx_ft,
         ly_ft             = ly_ft,
+        story             = picked.story,
+        story_role        = picked.story_role,
         story_ht_ft       = ht_ft,
         live_psf          = live_psf,
         method            = method_name,
@@ -492,8 +855,25 @@ function _extract_results(struc;
         defl_ok           = r.deflection_check.ok,
         defl_in           = ustrip(u"inch", r.deflection_check.Δ_check),
         defl_limit_in     = ustrip(u"inch", r.deflection_check.Δ_limit),
-        col_min_in        = minimum(cols_in),
-        col_max_in        = maximum(cols_in),
+        defl_source       = defl.defl_source,
+        defl_ratio_cb     = defl.defl_ratio_cb,
+        defl_in_cb        = defl.defl_in_cb,
+        governing_check   = defl.governing_check,
+        Vu_kip            = shear.Vu_kip,
+        Vu_fea_kip        = shear.Vu_fea_kip,
+        Vu_fea_ratio      = shear.Vu_fea_ratio,
+        max_col_in        = max_col_in,
+        col_min_in        = col_sizes.col_min_c1_in,
+        col_max_in        = col_sizes.col_c1_in,
+        col_c1_in         = col_sizes.col_c1_in,
+        col_c2_in         = col_sizes.col_c2_in,
+        col_at_cap        = col_sizes.col_at_cap,
+        col_c1_corner_in  = col_sizes.col_c1_corner_in,
+        col_c2_corner_in  = col_sizes.col_c2_corner_in,
+        col_c1_edge_in    = col_sizes.col_c1_edge_in,
+        col_c2_edge_in    = col_sizes.col_c2_edge_in,
+        col_c1_interior_in = col_sizes.col_c1_interior_in,
+        col_c2_interior_in = col_sizes.col_c2_interior_in,
         col_rho_max       = col_rho_max,
         As_cs_in2         = ustrip(u"inch^2", As_cs),
         As_ms_in2         = ustrip(u"inch^2", As_ms),
@@ -520,7 +900,7 @@ function _extract_results(struc;
         concrete_t_eq_m       = mui.concrete_t_eq_m,
         rebar_vol_per_m2      = mui.rebar_vol_per_m2,
         failures          = _failures,
-    ), fdn)
+    ), fdn, _option_fields(method; deflection_limit))
 end
 
 """Extract foundation summary from sized foundations."""
@@ -580,16 +960,24 @@ function _blank_failure_row(;
     failure_reason::String = "",
     failing_check::String  = "",
     concrete_label::AbstractString = "NWC_4000",
+    method = nothing,
+    story::Int = -1,
+    story_role::String = "",
+    max_col_in::Float64 = NaN,
+    deflection_limit::Symbol = DEFAULT_DEFL_LIMIT,
+    h_in::Float64 = NaN,
 )
-    return (
+    return merge((
         floor_type        = string(floor_type),
         concrete          = String(concrete_label),
         lx_ft             = lx_ft,
         ly_ft             = ly_ft,
+        story             = story,
+        story_role        = story_role,
         story_ht_ft       = story_ht_ft,
         live_psf          = live_psf,
         method            = method_name,
-        h_in              = NaN,
+        h_in              = h_in,
         h_min_in          = NaN,
         h_over_h_min      = NaN,
         sw_psf            = NaN,
@@ -607,8 +995,25 @@ function _blank_failure_row(;
         defl_ok           = false,
         defl_in           = NaN,
         defl_limit_in     = NaN,
+        defl_source       = "",
+        defl_ratio_cb     = NaN,
+        defl_in_cb        = NaN,
+        governing_check   = failing_check,
+        Vu_kip            = NaN,
+        Vu_fea_kip        = NaN,
+        Vu_fea_ratio      = NaN,
+        max_col_in        = max_col_in,
         col_min_in        = NaN,
         col_max_in        = NaN,
+        col_c1_in         = NaN,
+        col_c2_in         = NaN,
+        col_at_cap        = false,
+        col_c1_corner_in  = NaN,
+        col_c2_corner_in  = NaN,
+        col_c1_edge_in    = NaN,
+        col_c2_edge_in    = NaN,
+        col_c1_interior_in = NaN,
+        col_c2_interior_in = NaN,
         col_rho_max       = NaN,
         As_cs_in2         = NaN,
         As_ms_in2         = NaN,
@@ -646,7 +1051,7 @@ function _blank_failure_row(;
         converged         = false,
         failure_reason    = failure_reason,
         failing_check     = failing_check,
-    )
+    ), _option_fields(method; deflection_limit))
 end
 
 """
@@ -664,7 +1069,11 @@ function _extract_rot_failure(struc, dd;
                               floor_type::Symbol,
                               method_name::String,
                               elapsed::Float64,
-                              concrete_label::AbstractString = "NWC_4000")
+                              concrete_label::AbstractString = "NWC_4000",
+                              method = nothing,
+                              max_col_in::Float64 = NaN,
+                              col_increment_in::Float64 = 0.5,
+                              deflection_limit::Symbol = DEFAULT_DEFL_LIMIT)
     zs = struc.skeleton.stories_z
     ht_ft = length(zs) >= 2 ? ustrip(u"ft", zs[2] - zs[1]) : NaN
 
@@ -701,11 +1110,11 @@ function _extract_rot_failure(struc, dd;
         As_total_in2 = As_cs_in2 + As_ms_in2
     end
 
-    # Column data — from columns sized within the single pass (best-effort)
-    cols_in = [ustrip(u"inch", c.c1) for c in struc.columns
-               if !isnothing(c.c1) && c.c1 > 0u"inch"]
-    col_min_in = isempty(cols_in) ? NaN : minimum(cols_in)
-    col_max_in = isempty(cols_in) ? NaN : maximum(cols_in)
+    # Reported floor only. A failed table-minimum run may still have sized
+    # the columns of that story inside the slab pass.
+    picked = _select_study_slab(struc)
+    col_sizes = _story_column_sizes(struc.columns, picked.story;
+                                    cap_in = max_col_in, increment_in = col_increment_in)
     col_rho_max = 0.0
     if hasproperty(dd, :column_results) && !isnothing(dd.column_results)
         ρg_vals = [v.ρg for v in values(dd.column_results)]
@@ -713,12 +1122,23 @@ function _extract_rot_failure(struc, dd;
     end
 
     _failures = hasproperty(dd, :failures) ? join(dd.failures, ", ") : ""
+    rot_defl = isnothing(sr) ? nothing : _defl_report(sr.deflection_check, dd)
+    shear = _shear_fields(dd)
+    governing = if hasproperty(dd, :governing_check) && !isempty(string(dd.governing_check))
+        string(dd.governing_check)
+    elseif isempty(_failures)
+        "table_minimum"
+    else
+        _failures
+    end
 
-    return (
+    return merge((
         floor_type        = string(floor_type),
         concrete          = String(concrete_label),
         lx_ft             = lx_ft,
         ly_ft             = ly_ft,
+        story             = picked.story,
+        story_role        = picked.story_role,
         story_ht_ft       = ht_ft,
         live_psf          = live_psf,
         method            = method_name,
@@ -740,8 +1160,25 @@ function _extract_rot_failure(struc, dd;
         defl_ok           = defl_ok,
         defl_in           = defl_in,
         defl_limit_in     = defl_limit_in,
-        col_min_in        = col_min_in,
-        col_max_in        = col_max_in,
+        defl_source       = isnothing(rot_defl) ? "" : rot_defl.defl_source,
+        defl_ratio_cb     = isnothing(rot_defl) ? NaN : rot_defl.defl_ratio_cb,
+        defl_in_cb        = isnothing(rot_defl) ? NaN : rot_defl.defl_in_cb,
+        governing_check   = governing,
+        Vu_kip            = shear.Vu_kip,
+        Vu_fea_kip        = shear.Vu_fea_kip,
+        Vu_fea_ratio      = shear.Vu_fea_ratio,
+        max_col_in        = max_col_in,
+        col_min_in        = col_sizes.col_min_c1_in,
+        col_max_in        = col_sizes.col_c1_in,
+        col_c1_in         = col_sizes.col_c1_in,
+        col_c2_in         = col_sizes.col_c2_in,
+        col_at_cap        = col_sizes.col_at_cap,
+        col_c1_corner_in  = col_sizes.col_c1_corner_in,
+        col_c2_corner_in  = col_sizes.col_c2_corner_in,
+        col_c1_edge_in    = col_sizes.col_c1_edge_in,
+        col_c2_edge_in    = col_sizes.col_c2_edge_in,
+        col_c1_interior_in = col_sizes.col_c1_interior_in,
+        col_c2_interior_in = col_sizes.col_c2_interior_in,
         col_rho_max       = col_rho_max,
         As_cs_in2         = As_cs_in2,
         As_ms_in2         = As_ms_in2,
@@ -781,7 +1218,7 @@ function _extract_rot_failure(struc, dd;
         converged         = false,
         failure_reason    = _failures,
         failing_check     = dd.failing_check,
-    )
+    ), _option_fields(method; deflection_limit))
 end
 
 # ==============================================================================
@@ -811,7 +1248,7 @@ contain ACI code references like "§13.6.1.2: Panel aspect ratio l₂/l₁ = 2.5
 function _check_applicability_detailed(struc, method)
     method isa SR.FEA && return (true, "")
     method isa SR.RuleOfThumb && return (true, "")
-    slab = struc.slabs[1]
+    slab = _select_study_slab(struc).slab
     columns = SR.find_supporting_columns(struc, Set(slab.cell_indices))
     chk = if method isa SR.DDM
         SR.check_ddm_applicability(struc, slab, columns; throw_on_failure = false)
@@ -840,14 +1277,47 @@ avoiding silent fallbacks and duplicate FEA runs.
 
 All sizing stages — slab, column reconciliation, foundations — are handled
 by `build_pipeline`.  Returns a result NamedTuple, or `nothing` on failure.
+
+Every returned row carries a `run_id` and building / reported-floor summary
+fields. With `details = _detail_sink()`, the run's per-column and per-slab
+rows are appended to it under the same `run_id` (see `run_details.jl`).
 """
 function _run_method(struc, base_params::DesignParameters, method_cfg;
-                     lx_ft::Float64, ly_ft::Float64,
+                     details = nothing,
                      live_psf::Float64,
-                     floor_type::Symbol = :flat_plate,
-                     concrete_label::AbstractString = "NWC_4000")
+                     min_h = :inherit,
+                     kw...)
+    timings = Dict{Int, Float64}()
+    row = _run_method_core(struc, base_params, method_cfg; live_psf, min_h, timings, kw...)
+    isnothing(row) && return nothing
+    run_id = _new_run_id()
+    params = _with_method_and_ll(base_params, method_cfg.method, live_psf; min_h)
+    t0 = time()
+    summary = _attach_details!(details, struc, params, run_id;
+                               cap_in = _params_max_col_in(base_params),
+                               increment_in = _params_col_increment_in(base_params))
+    # Wall time per pipeline stage (seconds; stage 1 slabs, 2 column
+    # reconciliation, 3+ foundations), and for capture + detail collection.
+    later = [t for (i, t) in timings if i >= 3]
+    times = (t_slabs_s       = get(timings, 1, NaN),
+             t_columns_s     = get(timings, 2, NaN),
+             t_foundations_s = isempty(later) ? NaN : sum(later),
+             t_details_s     = time() - t0)
+    return merge(row, (run_id = run_id,), times, summary)
+end
+
+function _run_method_core(struc, base_params::DesignParameters, method_cfg;
+                          lx_ft::Float64, ly_ft::Float64,
+                          live_psf::Float64,
+                          floor_type::Symbol = :flat_plate,
+                          concrete_label::AbstractString = "NWC_4000",
+                          min_h = :inherit,
+                          timings::Union{Nothing, Dict{Int, Float64}} = nothing)
     restore!(struc)
     _set_live_load!(struc, live_psf)
+    cap_in = _params_max_col_in(base_params)
+    cap_inc = _params_col_increment_in(base_params)
+    defl_limit = _params_defl_limit(base_params)
 
     # Check high aspect ratio (Ly/Lx > 2.0 is outside DDM limits and generally
     # impractical for flat plate design)
@@ -855,9 +1325,10 @@ function _run_method(struc, base_params::DesignParameters, method_cfg;
     if aspect > 2.0
         return _blank_failure_row(;
             floor_type, lx_ft, ly_ft, live_psf, concrete_label,
-            method_name = method_cfg.name, elapsed = 0.0,
+            method_name = method_cfg.name, method = method_cfg.method, elapsed = 0.0,
             failure_reason = "high_aspect_ratio",
-            failing_check = "Aspect ratio $(round(aspect; digits=2)) > 2.0")
+            failing_check = "Aspect ratio $(round(aspect; digits=2)) > 2.0",
+            max_col_in = cap_in, deflection_limit = defl_limit)
     end
 
     # Pre-check applicability (DDM/EFM only; FEA always passes)
@@ -865,13 +1336,15 @@ function _run_method(struc, base_params::DesignParameters, method_cfg;
     if !applicable
         return _blank_failure_row(;
             floor_type, lx_ft, ly_ft, live_psf, concrete_label,
-            method_name = method_cfg.name, elapsed = 0.0,
+            method_name = method_cfg.name, method = method_cfg.method, elapsed = 0.0,
             failure_reason = "ddm_ineligible",
-            failing_check = reason)
+            failing_check = reason,
+            max_col_in = cap_in, deflection_limit = defl_limit)
     end
 
     # Derive run params from base — swap method + live load, keep everything else
-    method_params = _with_method_and_ll(base_params, method_cfg.method, live_psf)
+    method_params = _with_method_and_ll(base_params, method_cfg.method, live_psf;
+                                        min_h = min_h)
 
     is_rot = method_cfg.method isa SR.RuleOfThumb
 
@@ -882,14 +1355,16 @@ function _run_method(struc, base_params::DesignParameters, method_cfg;
         with_logger(NullLogger()) do
             stages = build_pipeline(method_params)
             for (i, stage) in enumerate(stages)
+                t_stage = time()
                 stage.fn(struc)
                 stage.needs_sync && sync_asap!(struc; params = method_params)
+                isnothing(timings) || (timings[i] = time() - t_stage)
 
                 # After slab sizing (stage 1), check for non-convergence.
                 # If the slab failed, skip columns & foundations entirely.
                 if i == 1
-                    dd_early = struc.slabs[1].design_details
-                    if !isnothing(dd_early) && hasproperty(dd_early, :converged) && !dd_early.converged
+                    dd_early = _first_failed_slab(struc)
+                    if !isnothing(dd_early)
                         break
                     end
                 end
@@ -902,14 +1377,15 @@ function _run_method(struc, base_params::DesignParameters, method_cfg;
         @warn "$(method_cfg.name) exception ($(round(elapsed; digits=1))s)" lx=lx_ft ly=ly_ft live=live_psf concrete=concrete_label err=failing_check
         return _blank_failure_row(;
             floor_type, lx_ft, ly_ft, live_psf, concrete_label,
-            method_name = method_cfg.name, elapsed,
-            failure_reason, failing_check)
+            method_name = method_cfg.name, method = method_cfg.method, elapsed,
+            failure_reason, failing_check,
+            max_col_in = cap_in, deflection_limit = defl_limit)
     end
     elapsed = time() - t0
 
     # Check for non-convergence (structured failure from pipeline)
-    slab = struc.slabs[1]
-    dd = slab.design_details
+    dd = _first_failed_slab(struc)
+    isnothing(dd) && (dd = _select_study_slab(struc).slab.design_details)
 
     if !isnothing(dd) && hasproperty(dd, :converged) && !dd.converged
         # For RuleOfThumb: extract what we can from design_details (slab-level
@@ -918,19 +1394,30 @@ function _run_method(struc, base_params::DesignParameters, method_cfg;
         if is_rot
             return _extract_rot_failure(struc, dd;
                 lx_ft, ly_ft, live_psf, floor_type, concrete_label,
-                method_name = method_cfg.name, elapsed)
+                method_name = method_cfg.name, method = method_cfg.method, elapsed,
+                max_col_in = cap_in, col_increment_in = cap_inc,
+                deflection_limit = defl_limit)
         else
+            selected = _select_study_slab(struc)
             return _blank_failure_row(;
                 floor_type, lx_ft, ly_ft, live_psf, concrete_label,
-                method_name = method_cfg.name, elapsed,
-                failure_reason = "non_convergence",
-                failing_check = dd.failing_check)
+                method_name = method_cfg.name, method = method_cfg.method, elapsed,
+                failure_reason = hasproperty(dd, :failure_reason) ? string(dd.failure_reason) : "non_convergence",
+                failing_check = dd.failing_check,
+                # Thickness when the design stopped (for a punching-lever failure,
+                # the thickness at which the allowed levers ran out)
+                h_in = hasproperty(dd, :h_final) && !isnothing(dd.h_final) ?
+                    Float64(ustrip(u"inch", dd.h_final)) : NaN,
+                story = selected.story, story_role = selected.story_role,
+                max_col_in = cap_in, deflection_limit = defl_limit)
         end
     end
 
     row = _extract_results(struc;
         lx_ft, ly_ft, live_psf, floor_type, concrete_label,
-        method_name = method_cfg.name, elapsed)
+        method_name = method_cfg.name, method = method_cfg.method, elapsed,
+        max_col_in = cap_in, col_increment_in = cap_inc,
+        deflection_limit = defl_limit)
     isnothing(row) && return nothing
     return merge(row, (converged = true, failure_reason = "", failing_check = ""))
 end
@@ -940,32 +1427,55 @@ end
 # ==============================================================================
 
 """
-    sweep(; spans, live_loads, concretes, n_bays, sdl, save, floor_type)
+    sweep(; spans, live_loads, concretes, n_bays, sdl, save, floor_type, min_h_variants)
 
-Run all concrete × span × method × live-load combinations.
+Run all concrete × span × thickness-floor × method × live-load combinations.
 
 For each (concrete, span) pair the structure is prepared once via
-`prepare!`; all (LL, method) combinations reuse it via snapshot/restore +
-`build_pipeline`. Different concretes require fresh `prepare!` because the
-slab self-weight, ECC, and Ec all change.
+`prepare!`; all (thickness floor, LL, method) combinations reuse it via
+snapshot/restore + `build_pipeline`. Different concretes require fresh
+`prepare!` because the slab self-weight, ECC, and Ec all change.
 
-`concretes` is a vector of label strings into `CONCRETE_PRESETS`. The
-default sweep covers three NWC strengths plus one sand-LWC at 4 ksi.
+`min_h_variants` defaults to two regimes:
+* `("table_minimum", nothing)` — ACI 318-11 Table 9.5(c)
+* `("computed_deflection", 2 in)` — search seed, not a code minimum.
+  ACI 318-11 §9.5.3.4 (corpus: aci-318-11, page 135) permits a thinner
+  slab when computed deflections satisfy Table 9.5(b).
+
+`RuleOfThumb` runs only in `table_minimum`. It is the table baseline,
+not an iterative design at the search seed. Each row records `min_h_rule`.
+`n_stories` defaults to 3 and the reported slab is the intermediate floor.
 """
 function sweep(;
     spans::Vector{Float64}     = [16.0, 20.0, 24.0, 28.0, 32.0, 36.0, 40.0, 44.0, 48.0, 52.0],
-    live_loads::Vector{Float64} = [50.0, 150.0, 250.0],
+    live_loads::Vector{Float64} = [50.0, 100.0, 150.0, 250.0],
     concretes::Vector{String}  = DEFAULT_CONCRETES,
+    methods                    = CORE_METHODS,
     n_bays::Int                = 3,
+    n_stories::Int             = 3,
     sdl::Float64               = 20.0,
     save::Bool                 = true,
     floor_type::Symbol         = :flat_plate,
+    min_h_variants             = nothing,
+    max_col_in::Union{Nothing, Float64} = nothing,
+    col_ratio::Float64         = 1.1,
+    column_cap::Symbol         = :span15,
 )
     foreach(_concrete_preset, concretes)  # validate up-front
 
+    if isnothing(min_h_variants)
+        min_h_variants = [
+            ("table_minimum", nothing),
+            ("computed_deflection", COMPUTED_DEFLECTION_SEED),
+        ]
+    end
+    isempty(min_h_variants) && error("sweep: min_h_variants is empty")
+    isempty(methods) && error("sweep: methods is empty")
+
     ft_label  = floor_type === :flat_slab ? "Flat Slab" : "Flat Plate"
-    n_methods = length(ALL_METHODS)
-    n_total   = length(concretes) * length(spans) * length(live_loads) * n_methods
+    n_methods = length(methods)
+    n_floors  = length(min_h_variants)
+    n_total   = length(concretes) * length(spans) * n_floors * length(live_loads) * n_methods
 
     print_header("$(ft_label) Method Comparison — Full Pipeline")
     println("  Floor type:  $(ft_label)")
@@ -973,6 +1483,7 @@ function sweep(;
     println("  Spans:       $(spans) ft")
     println("  Story hts:   $([_adaptive_story_ht(s) for s in spans]) ft")
     println("  Live loads:  $(live_loads) psf")
+    println("  Thickness:   $([v[1] for v in min_h_variants])")
     println("  Methods:     $n_methods")
     println("  Pipeline:    slab → columns → spread foundations")
     println("  Geometries:  $(length(concretes) * length(spans))  (concrete × span; prepared once each)")
@@ -981,20 +1492,21 @@ function sweep(;
 
     rows      = NamedTuple[]
     fail_rows = NamedTuple[]
+    details   = _detail_sink()
     n_fail    = 0
     p         = Progress(n_total; desc = "Sweep ($(ft_label)): ")
 
-    n_runs = length(live_loads) * n_methods
+    n_runs = n_floors * length(live_loads) * n_methods
     for concrete_label in concretes, span in spans
         ht      = _adaptive_story_ht(span)
-        max_col = _adaptive_max_col(span)
+        max_col = _resolve_max_col(span; max_col_in, col_ratio, column_cap)
 
         local struc, base_params
         try
             base_params = _make_params(; floor_type, sdl_psf = sdl,
                                           max_col_in = max_col,
                                           concrete_label = concrete_label)
-            skel   = _build_skeleton(span, span, ht, n_bays)
+            skel   = _build_skeleton(span, span, ht, n_bays; n_stories)
             struc  = BuildingStructure(skel)
             prepare!(struc, base_params)
         catch e
@@ -1004,30 +1516,43 @@ function sweep(;
             continue
         end
 
-        for ll in live_loads, mcfg in ALL_METHODS
+        for (mh_label, mh_val) in min_h_variants, ll in live_loads, mcfg in methods
+            if mcfg.method isa SR.RuleOfThumb && !isnothing(mh_val)
+                next!(p)
+                continue
+            end
             row = _run_method(struc, base_params, mcfg;
                               lx_ft = span, ly_ft = span, live_psf = ll,
                               floor_type = floor_type,
-                              concrete_label = concrete_label)
+                              concrete_label = concrete_label,
+                              min_h = mh_val,
+                              details = details)
             if isnothing(row)
                 n_fail += 1
-            elseif hasproperty(row, :converged) && !row.converged
-                n_fail += 1
-                push!(fail_rows, row)
             else
-                push!(rows, row)
+                row = merge(row, (min_h_rule = String(mh_label),))
+                if hasproperty(row, :converged) && !row.converged
+                    n_fail += 1
+                    push!(fail_rows, row)
+                else
+                    push!(rows, row)
+                end
             end
             next!(p)
         end
     end
 
     df = DataFrame(rows)
-    df_fail = isempty(fail_rows) ? DataFrame() : DataFrame(fail_rows)
+    df_fail = _rows_df(fail_rows)
     outfile = nothing
     if save && !isempty(df)
         tag = floor_type === :flat_slab ? "flat_slab_methods" : "flat_plate_methods"
         outfile = output_filename(tag, FP_RESULTS_DIR)
         CSV.write(outfile, df)
+        for path in _write_details(outfile, details)
+            println("  Details:     $path")
+        end
+        write_run_meta(outfile; note = "sweep spans=$(spans) ll=$(live_loads) concretes=$(concretes) methods=$([m.name for m in methods]) n_stories=$(n_stories) regimes=$([v[1] for v in min_h_variants])")
     end
     if save && !isempty(df_fail)
         tag_fail = floor_type === :flat_slab ? "flat_slab_failures" : "flat_plate_failures"
@@ -1218,6 +1743,7 @@ function sweep_ecc(df::DataFrame;
         df_csv = "slab_ec_samples" in names(df_out) ?
                  select(df_out, Not(:slab_ec_samples)) : df_out
         CSV.write(outfile, df_csv)
+        write_run_meta(outfile; note = "sweep_ecc n_samples=$n_samples rows=$(nrow(df_csv))")
         println("  ECC sweep:   $outfile  ($(nrow(df_csv)) rows, n_samples=$n_samples)")
     end
     return df_out
@@ -1236,6 +1762,38 @@ function dual_sweep(; kw...)
     return vcat(df_fp, df_fs)
 end
 
+"""Smallest column cap used by the single-lever punching variants, in inches."""
+const PUNCHING_MIN_COL_IN = 14.0
+
+"""
+Punching-resolution variants: which levers the slab loop may use for
+punching. `cap` is `:sweep` (the sweep's own cap), `:unbounded` (half the
+bay, which punching growth never reaches in practice), or `:min`
+(`PUNCHING_MIN_COL_IN`, so punching cannot grow the column). `thicken = false`
+makes the design fail punching when its levers run out, instead of thickening
+the slab, so a single lever is tested on its own. Axial growth is never capped,
+and the slab still thickens for deflection, flexure and one-way shear.
+"""
+const PUNCHING_VARIANTS = Dict(
+    :all_levers     => (shear_studs = :if_needed, cap = :sweep,    thicken = true),   # columns → studs → thickness
+    :columns_only   => (shear_studs = :never,     cap = :unbounded, thicken = false), # columns only
+    :studs_only     => (shear_studs = :always,    cap = :min,      thicken = false),  # studs, else fail
+    :studs_then_thickness => (shear_studs = :always, cap = :min,   thicken = true),   # studs → thickness
+    :thickness_only => (shear_studs = :never,     cap = :min,      thicken = true),   # thickness
+    :no_studs       => (shear_studs = :never,     cap = :sweep,    thicken = true),   # columns → thickness (E5)
+)
+
+"""Column cap (in) for a punching variant at one span."""
+function _variant_cap(variant::Symbol, sweep_cap::Float64, span_ft::Float64)
+    haskey(PUNCHING_VARIANTS, variant) ||
+        error("punching variant must be one of $(collect(keys(PUNCHING_VARIANTS))), got $(variant)")
+    cap = PUNCHING_VARIANTS[variant].cap
+    cap === :sweep    && return sweep_cap
+    # Half the bay in inches (span_ft × 12 / 2); past that it is no longer a column
+    cap === :unbounded && return 6.0 * span_ft
+    return PUNCHING_MIN_COL_IN
+end
+
 """
     dual_heatmap_sweep(; spans_x, spans_y, live_loads, min_h_variants, ...)
 
@@ -1244,24 +1802,40 @@ Sweep Lx × Ly × LL × method for both flat plate and flat slab.
 Each (Lx, Ly) skeleton is built once; a fresh structure is prepared for
 every (floor_type, min_h) combination.  Each run uses `build_pipeline`
 for the full slab → column → foundation pipeline.
+
+`punching_variants` (keys of `PUNCHING_VARIANTS`) repeats the grid with
+different punching levers. Saving writes the main CSV plus
+`<name>_columns.csv` and `<name>_slabs.csv`, joined on `run_id`.
+
+With `run_name`, files go to `results_dir` as `<run_name>.csv`,
+`<run_name>_columns.csv`, `<run_name>_slabs.csv` and `<run_name>_failures.csv`
+(no timestamp, no per-floor-type split), as a cluster array task needs.
 """
 
 function dual_heatmap_sweep(;
     spans_x::Vector{Float64}    = [16.0, 20.0, 24.0, 28.0, 32.0, 36.0, 40.0, 44.0, 48.0, 52.0],
     spans_y::Vector{Float64}    = [16.0, 20.0, 24.0, 28.0, 32.0, 36.0, 40.0, 44.0, 48.0, 52.0],
-    live_loads::Vector{Float64} = [50.0, 150.0, 250.0],
+    live_loads::Vector{Float64} = [50.0, 100.0, 150.0, 250.0],
     concretes::Vector{String}   = ["NWC_4000"],
+    methods                     = CORE_METHODS,
     n_bays::Int                 = 3,
+    n_stories::Int              = 3,
+    half_grid::Bool             = false,
     sdl::Float64                = 20.0,
     save::Bool                  = true,
     min_h                       = nothing,
     min_h_variants::Vector{<:Tuple{String, Any}} = Tuple{String,Any}[],
     max_col_in::Union{Nothing, Float64} = nothing,
     col_ratio::Float64                  = 1.1,
+    column_cap::Symbol                  = :span15,
     uncap_columns::Bool                 = false,
-    deflection_limit::Symbol            = :L_360,
-    column_strategies::Vector{Symbol}   = [:catalog],
+    deflection_limit::Symbol            = DEFAULT_DEFL_LIMIT,
+    column_strategies::Vector{Symbol}   = [:discrete],
+    punching_variants::Vector{Symbol}   = [:all_levers],
+    results_dir::AbstractString         = FP_RESULTS_DIR,
+    run_name::Union{Nothing, AbstractString} = nothing,
 )
+    foreach(v -> _variant_cap(v, 0.0, 0.0), punching_variants)  # validate up-front
     foreach(_concrete_preset, concretes)  # validate up-front
     if isempty(min_h_variants)
         label = isnothing(min_h) ? "ACI" : "override"
@@ -1275,12 +1849,15 @@ function dual_heatmap_sweep(;
     end
 
     floor_types = [:flat_plate, :flat_slab]
-    n_methods   = length(ALL_METHODS)
-    n_geom      = length(spans_x) * length(spans_y)
+    isempty(methods) && error("dual_heatmap_sweep: methods is empty")
+    n_methods   = length(methods)
+    geom_pairs  = [(lx, ly) for lx in spans_x for ly in spans_y if !half_grid || ly <= lx]
+    n_geom      = length(geom_pairs)
     n_strats    = length(column_strategies)
     n_runs_per  = length(live_loads) * n_methods
     n_concretes = length(concretes)
-    n_variants  = length(min_h_variants) * length(floor_types) * n_strats * n_concretes
+    n_variants  = length(min_h_variants) * length(floor_types) * n_strats * n_concretes *
+                  length(punching_variants)
     n_total     = n_geom * n_runs_per * n_variants
 
     print_header("Dual Heatmap — Full Pipeline")
@@ -1291,6 +1868,7 @@ function dual_heatmap_sweep(;
     println("  Live loads:   $(live_loads) psf")
     println("  Methods:      $n_methods")
     println("  Col strategy: $(column_strategies)")
+    println("  Punching:     $(punching_variants)")
     println("  Pipeline:     slab → columns → spread foundations")
     println("  Geometries:   $n_geom  (skeleton shared per variant)")
     println("  Total runs:   $n_total")
@@ -1298,33 +1876,31 @@ function dual_heatmap_sweep(;
 
     rows      = NamedTuple[]
     fail_rows = NamedTuple[]
+    details   = _detail_sink()
     n_fail    = 0
     p         = Progress(n_total; desc="Dual heatmap: ")
 
-    for lx in spans_x, ly in spans_y
+    for (lx, ly) in geom_pairs
         ht      = _adaptive_story_ht(max(lx, ly))
-        max_col = if !isnothing(max_col_in)
-            max_col_in
-        elseif uncap_columns
-            _uncapped_max_col(max(lx, ly))
-        else
-            _adaptive_max_col(max(lx, ly); ratio = col_ratio)
-        end
+        max_col = _resolve_max_col(max(lx, ly); max_col_in, col_ratio, column_cap,
+                                   uncap = uncap_columns)
 
         local skel
         try
-            skel = _build_skeleton(lx, ly, ht, n_bays)
+            skel = _build_skeleton(lx, ly, ht, n_bays; n_stories)
         catch e
             @warn "Skeleton build failed — skipping" lx ly exception=e
-            for (mh_label, _) in min_h_variants, ft in floor_types, cs in column_strategies, conc in concretes, ll in live_loads, mcfg in ALL_METHODS
+            for (mh_label, _) in min_h_variants, ft in floor_types, cs in column_strategies, conc in concretes, pv in punching_variants, ll in live_loads, mcfg in methods
                 row = _blank_failure_row(;
                     floor_type=ft, lx_ft=lx, ly_ft=ly, live_psf=ll,
                     concrete_label = conc,
                     method_name=mcfg.name, elapsed=0.0,
                     failure_reason="skeleton_build_failed",
                     failing_check=string(e),
-                    story_ht_ft=ht)
-                push!(fail_rows, merge(row, (min_h_rule = mh_label, column_strategy = string(cs))))
+                    story_ht_ft=ht,
+                    max_col_in=max_col)
+                push!(fail_rows, merge(row, (min_h_rule = mh_label, column_strategy = string(cs),
+                                             punching_variant = string(pv))))
             end
             n_skip = n_runs_per * n_variants
             n_fail += n_skip
@@ -1333,11 +1909,14 @@ function dual_heatmap_sweep(;
         end
 
         for (mh_label, mh_val) in min_h_variants
-            for ft in floor_types, cs in column_strategies, conc in concretes
+            for ft in floor_types, cs in column_strategies, conc in concretes, pv in punching_variants
                 local struc, base_params
                 try
                     base_params = _make_params(; floor_type = ft, sdl_psf = sdl,
-                                                  max_col_in = max_col, min_h = mh_val,
+                                                  max_col_in = _variant_cap(pv, max_col, max(lx, ly)),
+                                                  shear_studs = PUNCHING_VARIANTS[pv].shear_studs,
+                                                  punching_thickening = PUNCHING_VARIANTS[pv].thicken,
+                                                  min_h = mh_val,
                                                   deflection_limit = deflection_limit,
                                                   column_strategy = cs,
                                                   concrete_label = conc)
@@ -1352,19 +1931,27 @@ function dual_heatmap_sweep(;
                     continue
                 end
 
-                for ll in live_loads, mcfg in ALL_METHODS
+                for ll in live_loads, mcfg in methods
+                    if mcfg.method isa SR.RuleOfThumb && !isnothing(mh_val)
+                        next!(p)
+                        continue
+                    end
                     row = _run_method(struc, base_params, mcfg;
                                       lx_ft = lx, ly_ft = ly, live_psf = ll,
                                       floor_type = ft,
-                                      concrete_label = conc)
+                                      concrete_label = conc,
+                                      details = details)
+                    tags = (min_h_rule = mh_label, column_strategy = string(cs),
+                            punching_variant = string(pv),
+                            punching_strategy = string(_params_punching_strategy(base_params)),
+                            punching_thickening = PUNCHING_VARIANTS[pv].thicken)
                     if isnothing(row)
                         n_fail += 1
                     elseif hasproperty(row, :converged) && !row.converged
                         n_fail += 1
-                        push!(fail_rows, merge(row, (min_h_rule = mh_label, column_strategy = string(cs))))
+                        push!(fail_rows, merge(row, tags))
                     else
-                        row = merge(row, (min_h_rule = mh_label, column_strategy = string(cs)))
-                        push!(rows, row)
+                        push!(rows, merge(row, tags))
                     end
                     next!(p)
                 end
@@ -1372,10 +1959,18 @@ function dual_heatmap_sweep(;
         end
     end
 
-    df = DataFrame(rows)
-    df_fail = isempty(fail_rows) ? DataFrame() : DataFrame(fail_rows)
-    
-    if save
+    df = isempty(rows) ? DataFrame() : DataFrame(rows)
+    df_fail = _rows_df(fail_rows)
+
+    if save && !isnothing(run_name)
+        ensure_dir(String(results_dir))
+        outfile = joinpath(results_dir, "$(run_name).csv")
+        CSV.write(outfile, df)
+        _write_details(outfile, details)
+        isempty(df_fail) || CSV.write(joinpath(results_dir, "$(run_name)_failures.csv"), df_fail)
+        write_run_meta(outfile; note = "dual_heatmap spans_x=$(spans_x) spans_y=$(spans_y) ll=$(live_loads) concretes=$(concretes) methods=$([m.name for m in methods]) n_stories=$(n_stories) n_bays=$(n_bays) regimes=$([v[1] for v in min_h_variants]) punching=$(punching_variants) defl=$(deflection_limit) cap=$(column_cap)")
+        print_footer(nrow(df), n_fail, outfile)
+    elseif save
         outfile = nothing
         if !isempty(df)
             for (mh_label, _) in min_h_variants
@@ -1387,6 +1982,10 @@ function dual_heatmap_sweep(;
             end
             outfile = output_filename("dual_heatmap", FP_RESULTS_DIR)
             CSV.write(outfile, df)
+            for path in _write_details(outfile, details)
+                println("  Details:     $path")
+            end
+            write_run_meta(outfile; note = "dual_heatmap spans_x=$(spans_x) spans_y=$(spans_y) ll=$(live_loads) concretes=$(concretes) methods=$([m.name for m in methods]) n_stories=$(n_stories) n_bays=$(n_bays) half_grid=$(half_grid) regimes=$([v[1] for v in min_h_variants]) punching=$(punching_variants)")
         end
 
         if !isempty(df_fail)
@@ -1412,7 +2011,7 @@ end
 function compare(; span = 20.0, ll = 50.0, n_bays = 3, sdl = 20.0,
                    concrete::AbstractString = "NWC_4000")
     ht      = _adaptive_story_ht(span)
-    max_col = _adaptive_max_col(span)
+    max_col = _resolve_max_col(span)
     base_params = _make_params(; sdl_psf = sdl, live_psf = ll, max_col_in = max_col,
                                   concrete_label = concrete)
     skel    = _build_skeleton(span, span, ht, n_bays)
@@ -1496,7 +2095,7 @@ function stud_sweep(;
     for stud_mode in studs_list
         for span in spans
             ht      = _adaptive_story_ht(span)
-            max_col = _adaptive_max_col(span)
+            max_col = _resolve_max_col(span)
 
             local struc, base_params
             try
@@ -1572,8 +2171,8 @@ df = column_strategy_sweep(methods=ALL_METHODS)        # all slab methods
 function column_strategy_sweep(;
     spans::Vector{Float64}      = [16.0, 20.0, 24.0, 28.0, 32.0, 36.0, 40.0],
     live_loads::Vector{Float64}  = [50.0, 150.0],
-    methods                      = [(key=:fea, name="FEA", method=SR.FEA(; pattern_loading=false))],
-    strategies::Vector{Symbol}   = [:catalog, :nlp],
+    methods                      = [(key=:fea, name="FEA", method=SR.FEA(; pattern_loading=true, pattern_mode=:efm_amp, design_approach=:frame))],
+    strategies::Vector{Symbol}   = [:discrete, :nlp],
     floor_type::Symbol           = :flat_plate,
     n_bays::Int                  = 3,
     sdl::Float64                 = 20.0,
@@ -1595,13 +2194,14 @@ function column_strategy_sweep(;
 
     rows      = NamedTuple[]
     fail_rows = NamedTuple[]
+    details   = _detail_sink()
     n_fail    = 0
     p         = Progress(n_total; desc = "Col strategy: ")
 
     n_runs_per_strat = length(live_loads) * n_methods
     for span in spans
         ht      = _adaptive_story_ht(span)
-        max_col = _adaptive_max_col(span)
+        max_col = _resolve_max_col(span)
 
         for strat in strategies
             local struc, base_params
@@ -1638,7 +2238,7 @@ function column_strategy_sweep(;
     end
 
     df = DataFrame(rows)
-    df_fail = isempty(fail_rows) ? DataFrame() : DataFrame(fail_rows)
+    df_fail = _rows_df(fail_rows)
     outfile = nothing
     if save && !isempty(df)
         outfile = output_filename("col_strategy_$(floor_type)", FP_RESULTS_DIR)

@@ -73,16 +73,56 @@ end
 """
 Maximum design shear capacity for T-beam section geometry.
 Shear is resisted by the web only (bw × d), per ACI 318-11 §11.2.1.1.
+`vc_factor` scales `Vc` only (1.10 for qualifying joists, §8.13.8).
 """
-function _compute_φVn_max(section::RCTBeamSection, fc_psi::Float64, λ::Float64)
+function _compute_φVn_max(section::RCTBeamSection, fc_psi::Float64, λ::Float64;
+                          vc_factor::Float64 = 1.0, vs_factor::Float64 = 1.0)
     bw_in = ustrip(u"inch", section.bw)
     d_in  = ustrip(u"inch", section.d)
 
     sqrt_fc = sqrt(fc_psi)
-    Vc_lb     = 2 * λ * sqrt_fc * bw_in * d_in
-    Vs_max_lb = 8 * sqrt_fc * bw_in * d_in
+    # §8.13.8 raises Vc only. Vs,max stays the Chapter 11 limit.
+    Vc_lb     = vc_factor * 2 * λ * sqrt_fc * bw_in * d_in
+    # vs_factor is 0 when stirrups are not credited. §11.4.7.9 still defines Vs,max.
+    Vs_max_lb = vs_factor * 8 * sqrt_fc * bw_in * d_in
 
     return 0.75 * (Vc_lb + Vs_max_lb) / 1000.0  # kip
+end
+
+"""
+`Vc` factor for `section` under `checker`: 1.10 when the checker sizes joist
+ribs and the section meets ACI 318-11 §8.13.2 and §8.13.3 at the checker's
+spacing (§8.13.8, corpus: aci-318-11, PDF page 121), 1.0 otherwise.
+"""
+_checker_vc_factor(::ACIBeamChecker, ::AbstractSection) = 1.0
+function _checker_vc_factor(checker::ACIBeamChecker, section::RCTBeamSection)
+    checker.joist_spacing_in > 0 || return 1.0
+    checker.joist_spacing_in > ustrip(u"inch", section.bw) || return 1.0
+    joist = JoistConstruction(section, checker.joist_spacing_in * u"inch",
+                              checker.joist_direction)
+    return _joist_vc_factor(joist)
+end
+
+"""
+φVn (kip) of one T-beam at one signed axial force, including a joist Vc increase.
+
+ENGINEERING JUDGMENT: use the larger gross area (section_area =
+bf·hf + bw·(h−hf)) for the compression modifier so the boost is not
+overstated, and bw·h for the tension reduction (smaller Ag → larger
+|Nu/Ag| reduction). Each is the conservative choice for that sign.
+"""
+function _section_φVn(checker::ACIBeamChecker, cache::ACIBeamCapacityCache,
+                      j::Int, section::RCTBeamSection, Nu_kip::Float64)
+    Nu_kip == 0 && return cache.φVn_max[j]
+    fc_psi = cache.fc_ksi * 1000.0
+    bw_in = ustrip(u"inch", section.bw)
+    d_in = ustrip(u"inch", section.d)
+    h_in = ustrip(u"inch", section.h)
+    Ag_comp = ustrip(u"inch^2", section_area(section))
+    Ag_tens = bw_in * h_in
+    return _φVn_with_axial(bw_in, d_in, Ag_comp, Ag_tens, fc_psi, checker.λ, Nu_kip;
+                           vc_factor = _checker_vc_factor(checker, section),
+                           vs_factor = _checker_vs_factor(checker))
 end
 
 # ==============================================================================
@@ -133,7 +173,6 @@ function is_feasible(
 )::Bool
     Mu = to_kipft(demand.Mu)
     Mu_neg = to_kipft(demand.Mu_neg)
-    Vu = to_kip(demand.Vu)
 
     # 1. Depth check
     cache.depths[j] ≤ checker.max_depth || return false
@@ -147,37 +186,30 @@ function is_feasible(
     #    or ℓn/10; that detailing rule is not modeled in this capacity check.
     cache.φMn_neg[j] ≥ Mu_neg || return false
 
-    # 4. Shear adequacy with signed Nu.
-    #    ENGINEERING JUDGMENT: use the larger gross area (section_area =
-    #    bf·hf + bw·(h−hf)) for the compression modifier so the boost is not
-    #    overstated, and bw·h for the tension reduction (smaller Ag → larger
-    #    |Nu/Ag| reduction). Each is the conservative choice for that sign.
-    Nu_kip = _get_Nu_kip(demand)
-    if Nu_kip != 0
-        fc_psi_s = cache.fc_ksi * 1000.0
-        bw_in_s  = ustrip(u"inch", section.bw)
-        d_in_s   = ustrip(u"inch", section.d)
-        h_in_s   = ustrip(u"inch", section.h)
-        Ag_comp  = ustrip(u"inch^2", section_area(section))
-        Ag_tens  = bw_in_s * h_in_s
-        φVn_kip = _φVn_with_axial(bw_in_s, d_in_s, Ag_comp, Ag_tens, fc_psi_s, checker.λ, Nu_kip)
-        φVn_kip ≥ Vu || return false
-    else
-        cache.φVn_max[j] ≥ Vu || return false
+    # 4. Shear, one row per concurrent case. Ag for compression is the full
+    #    T-section; Ag for tension is bw·h. Each is the smaller Vc for that sign.
+    #    §8.13.8, when the rib qualifies, is inside `_section_φVn`.
+    for row in _demand_shear_rows(checker, demand)
+        _section_φVn(checker, cache, j, section, row.Nu_kip) >= row.Vu_kip || return false
     end
 
     # 4. Net tensile strain (ACI 318-11 §10.3.5) — εt ≥ 0.004 for beams
     cache.εt[j] ≥ 0.004 || return false
 
-    # 5. Minimum reinforcement (ACI 318-11 §10.5.1) — uses bw for T-beams
+    # 5. Minimum reinforcement. §10.5.1 uses bw. §10.5.3 waives it when the
+    #    steel is at least one-third over the analysis area. The piece is
+    #    prismatic, so the envelope moment is the largest area required.
     fc_psi = cache.fc_ksi * 1000.0
     fy_psi = cache.fy_ksi * 1000.0
     bw_in  = ustrip(u"inch", section.bw)
     d_in   = ustrip(u"inch", section.d)
     As_in  = ustrip(u"inch^2", section.As)
-    As_min = max(3.0 * sqrt(fc_psi) * bw_in * d_in / fy_psi,
-                 200.0 * bw_in * d_in / fy_psi)
-    As_in ≥ As_min || return false
+    As_min = _as_min_aci_1051(bw_in, d_in, fc_psi, fy_psi)
+    As_req = ustrip(u"inch^2", tbeam_as_required(
+        to_kipft(demand.Mu) * kip * u"ft", section.bw, section.d, section.bf, section.hf,
+        fc_psi * u"psi", fy_psi * u"psi"))
+    # §10.5.3 can waive As,min. Discrete sizing does not take that waiver.
+    _sizing_min_steel(checker, As_in, As_min, float(As_req)).passed || return false
 
     # 6. Deflection check (ACI §24.2) — only when service loads are provided
     if checker.w_dead_kplf > 0
@@ -190,29 +222,46 @@ function is_feasible(
             checker.w_dead_kplf * kip / u"ft",
             checker.w_live_kplf * kip / u"ft";
             support = checker.defl_support,
+            λ = checker.λ,
             ξ = checker.defl_ξ,
+            sustained_live_fraction = checker.defl_sustained_live,
         )
         defl_result.ok || return false
     end
 
-    # 7. Torsion section adequacy (§11.5.3.1) — when Tu > 0
-    Tu_val = _get_Tu_kipin(demand)
-    if Tu_val > 0.0
+    # 7. Torsion, each concurrent row above the threshold (§11.5.3.1)
+    for row in _demand_shear_rows(checker, demand)
+        row.Tu_kipin > 0 || continue
         d_stir = ustrip(u"inch", rebar(section.stirrup_size).diameter)
         cov_in = ustrip(u"inch", section.cover)
-        c_ctr  = cov_in + d_stir / 2
-
         props = torsion_section_properties_tbeam(
-            section.bw, section.h, section.bf, section.hf, c_ctr * u"inch")
+            section.bw, section.h, section.bf, section.hf,
+            (cov_in + d_stir / 2) * u"inch")
         Tth = threshold_torsion(props.Acp, props.pcp, fc_psi; λ=checker.λ)
-        if Tu_val > Tth
-            torsion_section_adequate(Vu, Tu_val, bw_in, d_in,
+        if row.Tu_kipin > Tth
+            torsion_section_adequate(row.Vu_kip, row.Tu_kipin, bw_in, d_in,
                                      props.Aoh, props.ph, fc_psi;
                                      λ=checker.λ) || return false
         end
     end
 
+    # 8. Story-shell deflection (ACI 318-11 §9.5.2) — when the shell gave spans
+    _shell_deflection_ratio(checker, demand.member_idx, section) <= 1 || return false
+
     return true
+end
+
+"""Strength checks use the concrete. The rebar on a reinforced-concrete material is for the objective."""
+function is_feasible(
+    checker::ACIBeamChecker,
+    cache::ACIBeamCapacityCache,
+    j::Int,
+    section::RCTBeamSection,
+    material::ReinforcedConcreteMaterial,
+    demand::RCBeamDemand,
+    geometry::ConcreteMemberGeometry,
+)
+    is_feasible(checker, cache, j, section, material.concrete, demand, geometry)
 end
 
 # ==============================================================================
@@ -226,45 +275,55 @@ function objective_value(
     ::MinVolume,
     section::RCTBeamSection,
     material::Concrete,
-    length::Length,
+    length::Length;
+    rebar=nothing,
+    transverse=nothing,
 )
     Ag = section.bw * section.h
     uconvert(u"m^3", Ag * length)
 end
 
-"""Objective value: self-weight (web only) of the T-beam per unit length."""
+"""Self-weight of the T-beam web, in kilograms. Flange concrete stays with the slab. Longitudinal steel and stirrups are included when `rebar` is passed."""
 function objective_value(
     ::MinWeight,
     section::RCTBeamSection,
     material::Concrete,
-    length::Length,
+    length::Length;
+    rebar=nothing,
+    transverse=nothing,
 )
     Ag = section.bw * section.h
-    uconvert(u"kN", Ag * length * material.ρ * 1u"gn")
+    rebar === nothing && return uconvert(u"kg", Ag * length * material.ρ)
+    trans = transverse === nothing ? rebar : transverse
+    return _rc_objective(MinWeight(), Ag, section.As + section.As_prime, material, rebar, trans, length, section)
 end
 
-"""Objective value: cost proxy (web volume) for the T-beam per unit length."""
+"""Cost of the T-beam web: web volume (m³)."""
 function objective_value(
     ::MinCost,
     section::RCTBeamSection,
     material::Concrete,
-    length::Length,
+    length::Length;
+    rebar=nothing,
+    transverse=nothing,
 )
-    Ag = section.bw * section.h
-    uconvert(u"m^3", Ag * length)
+    return uconvert(u"m^3", section.bw * section.h * length)
 end
 
-"""Objective value: embodied carbon of the T-beam (web only) per unit length,
-returned as a typed `kgCO₂e` quantity (Asap `𝐗` dimension)."""
+"""Embodied carbon of the T-beam web, a typed `kgCO₂e` quantity."""
 function objective_value(
     ::MinCarbon,
     section::RCTBeamSection,
     material::Concrete,
-    length::Length,
+    length::Length;
+    rebar=nothing,
+    transverse=nothing,
 )
     Ag = section.bw * section.h
-    volume = uconvert(u"m^3", Ag * length)
-    return uconvert(u"kgCO2e", volume * material.ρ * material.ecc)
+    rebar === nothing && return uconvert(u"kgCO2e",
+        uconvert(u"m^3", Ag * length) * material.ρ * material.ecc)
+    trans = transverse === nothing ? rebar : transverse
+    return _rc_objective(MinCarbon(), Ag, section.As + section.As_prime, material, rebar, trans, length, section)
 end
 
 function diagnose_infeasibility(
@@ -281,8 +340,6 @@ function diagnose_infeasibility(
     sec = catalog[best_j]
     Mu = to_kipft(demand.Mu)
     Mu_neg = to_kipft(demand.Mu_neg)
-    Vu = to_kip(demand.Vu)
-    Nu_kip = _get_Nu_kip(demand)
     if cache.depths[best_j] > checker.max_depth
         return "Depth: h=$(cache.depths[best_j])m > max_depth=$(checker.max_depth)m"
     end
@@ -292,20 +349,26 @@ function diagnose_infeasibility(
     if cache.φMn_neg[best_j] < Mu_neg
         return "Neg. flexure: φMn_neg=$(round(cache.φMn_neg[best_j], digits=1)) < Mu_neg=$(round(Mu_neg, digits=1)) kip·ft"
     end
-    if Nu_kip != 0
-        fc_psi = cache.fc_ksi * 1000.0
-        bw_in = ustrip(u"inch", sec.bw)
-        d_in = ustrip(u"inch", sec.d)
-        Ag_comp = ustrip(u"inch^2", section_area(sec))
-        Ag_tens = bw_in * ustrip(u"inch", sec.h)
-        φVn_kip = _φVn_with_axial(bw_in, d_in, Ag_comp, Ag_tens, fc_psi, checker.λ, Nu_kip)
-        if φVn_kip < Vu
-            tag = Nu_kip < 0 ? "Nu<0" : "Nu>0"
-            return "Shear ($tag): φVn=$(round(φVn_kip, digits=1)) < Vu=$(round(Vu, digits=1)) kip"
-        end
-    elseif cache.φVn_max[best_j] < Vu
-        return "Shear: φVn_max=$(round(cache.φVn_max[best_j], digits=1)) < Vu=$(round(Vu, digits=1)) kip"
+    for row in _demand_shear_rows(checker, demand)
+        φVn_kip = _section_φVn(checker, cache, best_j, sec, row.Nu_kip)
+        φVn_kip >= row.Vu_kip && continue
+        tag = row.Nu_kip < 0 ? "Nu<0" : (row.Nu_kip > 0 ? "Nu>0" : "Nu=0")
+        return "Shear ($tag): φVn=$(round(φVn_kip, digits=1)) < Vu=$(round(row.Vu_kip, digits=1)) kip"
     end
+    fc_psi = cache.fc_ksi * 1000.0
+    fy_psi = cache.fy_ksi * 1000.0
+    bw_in = ustrip(u"inch", sec.bw)
+    d_in = ustrip(u"inch", sec.d)
+    As_in = ustrip(u"inch^2", sec.As)
+    As_min = _as_min_aci_1051(bw_in, d_in, fc_psi, fy_psi)
+    As_req = ustrip(u"inch^2", tbeam_as_required(
+        Mu * kip * u"ft", sec.bw, sec.d, sec.bf, sec.hf, fc_psi * u"psi", fy_psi * u"psi"))
+    if _sizing_requires_as_min(checker, As_in, As_min, float(As_req))
+        return "As_min: sizing requires As >= $(round(As_min, digits=2)) in²; " *
+               "this section has $(round(As_in, digits=2)) in²"
+    end
+    msg = _shell_deflection_message(checker, demand.member_idx, sec)
+    msg === nothing || return msg
     return "All checks passed for best T-beam section — possible threading/cache inconsistency"
 end
 
@@ -321,7 +384,6 @@ function explain_feasibility(
     checks = CheckResult[]
     Mu = to_kipft(demand.Mu)
     Mu_neg = to_kipft(demand.Mu_neg)
-    Vu = to_kip(demand.Vu)
 
     d_section = cache.depths[j]
     d_limit = checker.max_depth
@@ -337,23 +399,61 @@ function explain_feasibility(
           φMn_neg > 0 ? Mu_neg / φMn_neg : (Mu_neg > 0 ? Inf : 0.0),
           Mu_neg, φMn_neg, "ACI 318-11 10.2"))
 
-    Nu_kip = _get_Nu_kip(demand)
-    if Nu_kip != 0
-        fc_psi_s = cache.fc_ksi * 1000.0
-        bw_in = ustrip(u"inch", section.bw)
-        d_in = ustrip(u"inch", section.d)
-        Ag_comp = ustrip(u"inch^2", section_area(section))
-        Ag_tens = bw_in * ustrip(u"inch", section.h)
-        φVn_kip = _φVn_with_axial(bw_in, d_in, Ag_comp, Ag_tens, fc_psi_s, checker.λ, Nu_kip)
-    else
-        φVn_kip = cache.φVn_max[j]
+    gov = nothing
+    for row in _demand_shear_rows(checker, demand)
+        φVn_row = _section_φVn(checker, cache, j, section, row.Nu_kip)
+        ratio = φVn_row > 0 ? row.Vu_kip / φVn_row : (row.Vu_kip > 0 ? Inf : 0.0)
+        if gov === nothing || ratio > gov.ratio
+            gov = (; row, φVn=φVn_row, ratio)
+        end
     end
-    shear_clause = Nu_kip < 0 ? "ACI 318-11 11.2.2.3" : (Nu_kip > 0 ? "ACI 318-11 11.2.1.2" : "ACI 318-11 11.2.1.1")
-    push!(checks, CheckResult("shear", φVn_kip >= Vu,
-          φVn_kip > 0 ? Vu / φVn_kip : (Vu > 0 ? Inf : 0.0), Vu, φVn_kip, shear_clause))
+    shear_clause = gov.row.Nu_kip < 0 ? "ACI 318-11 11.2.2.3" :
+                   (gov.row.Nu_kip > 0 ? "ACI 318-11 11.2.1.2" : "ACI 318-11 11.2.1.1")
+    push!(checks, CheckResult("shear", gov.φVn >= gov.row.Vu_kip,
+          gov.ratio, gov.row.Vu_kip, gov.φVn, shear_clause))
+
+    # Same two checks as `is_feasible`. Bar rounding can pass flexure and
+    # still land below εt = 0.004.
+    εt = cache.εt[j]
+    push!(checks, CheckResult("net_tensile_strain", εt >= 0.004,
+          0.004 / max(εt, 1e-10), 0.004, εt, "ACI 318-11 10.3.5"))
+
+    fc_psi = cache.fc_ksi * 1000.0
+    fy_psi = cache.fy_ksi * 1000.0
+    bw_in = ustrip(u"inch", section.bw)
+    d_in = ustrip(u"inch", section.d)
+    As_in = ustrip(u"inch^2", section.As)
+    As_min = _as_min_aci_1051(bw_in, d_in, fc_psi, fy_psi)
+    As_req = ustrip(u"inch^2", tbeam_as_required(
+        Mu * kip * u"ft", section.bw, section.d, section.bf, section.hf,
+        fc_psi * u"psi", fy_psi * u"psi"))
+    steel = _sizing_min_steel(checker, As_in, As_min, float(As_req))
+    push!(checks, CheckResult("min_reinforcement", steel.passed,
+          steel.ratio, As_min, As_in, steel.clause))
+
+    _push_shell_deflection_check!(checks, checker, demand.member_idx, section)
 
     all_pass = all(c -> c.passed, checks)
     gov_idx = argmax([c.ratio for c in checks])
     gov = checks[gov_idx]
     FeasibilityExplanation(all_pass, checks, gov.name, gov.ratio)
+end
+
+"""
+Strength/serviceability checks use the concrete; the rebar on a
+`ReinforcedConcreteMaterial` only enters the objective. Mirrors the
+`is_feasible` RC overload so `optimize_discrete`, which passes the
+rebar-carrying sizing material, gets the full per-check explanation instead of
+the generic `explain_feasibility` fallback ("aggregate", one check).
+"""
+function explain_feasibility(
+    checker::ACIBeamChecker,
+    cache::ACIBeamCapacityCache,
+    j::Int,
+    section::RCTBeamSection,
+    material::ReinforcedConcreteMaterial,
+    demand::RCBeamDemand,
+    geometry::ConcreteMemberGeometry,
+)::FeasibilityExplanation
+    explain_feasibility(checker, cache, j, section, material.concrete, demand, geometry)
 end

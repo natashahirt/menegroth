@@ -5,7 +5,7 @@
 using Asap
 using Unitful
 
-const G_ACCEL = 9.80665u"m/s^2"
+const G_ACCEL = Asap.GRAVITY
 
 function wood_selfweight_pressure()
     # ρ t g, downward.

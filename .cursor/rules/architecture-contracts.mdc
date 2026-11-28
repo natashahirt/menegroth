@@ -1,0 +1,43 @@
+---
+description: Julia architecture, ownership, and normalized public-contract conventions
+globs: "**/*.jl"
+alwaysApply: false
+---
+
+# Architecture and Contract Conventions
+
+Follow `docs/src/reference/architecture_contracts.md`.
+
+## Ownership
+
+- Preserve dependency direction: Asap → StructuralSizer → StructuralSynthesizer → leaf consumers.
+- Give each lifecycle phase and mutable state one authoritative owner.
+- Resolve effective run options once; publish only finalized, stable results.
+- Put types and interfaces in the package that owns their behavior.
+- Finite-element behavior belongs in Asap: nodes, elements, meshing, assembly, solving, and degenerate-element repair. StructuralSizer and StructuralSynthesizer call that code. Do not reimplement a node merge, a mesh repair, or an element invariant above Asap. Slab-edge geometry (which column face sets a band width) stays with the slab.
+
+## Public contracts
+
+- Validate every strategy, solver, objective, method, and enum-like `Symbol`.
+- Unknown or unsupported values must fail loudly; never fall through to a default.
+- Do not substitute a different objective or algorithm than the caller requested.
+- Normalize backend statuses/results at the adapter boundary.
+- Separate termination, feasibility, and installability.
+- Required child failure cannot become aggregate success.
+- Use `nothing` only for documented optional values, not as a generic skipped/failed result.
+- Convert units once at a documented solver/catalog boundary.
+
+## State and organization
+
+- Mutations must invalidate all dependent caches, hashes, factorizations, and snapshots.
+- Content hashes are authoritative; revisions are prefilters only.
+- Prefer composition/traits over abstract types with one implementation.
+- Consolidate repeated control flow, validation, and result adaptation.
+- Keep distinct code provisions, signs, axes, boundary conditions, and analysis methods separate.
+
+## Tests
+
+- Add fail-loud tests for unsupported values and regression tests for fixed defects.
+- Test advertised strategy/objective combinations and aggregate/child status agreement.
+- Prove fresh/incremental parity and that published results survive later mutation.
+- Follow `code-accuracy.mdc`, `corpus.mdc`, and `testing.mdc` for engineering calculations.

@@ -7,12 +7,12 @@ title: D6 — Steel shape-catalog expansion (channels, angles, WT, built-up/plat
 node_label: 'D6: Steel shapes'
 tags: todo,steel,sections,channels,angles,wt,plate-girder,aisc,phase-d
 status: active
-open_threads: 0
+open_threads: 1
 success: 'null'
 files: ''
 session_id: sess-92359b08
 created_at: '2026-07-15T02:27:04.261265+00:00'
-updated_at: '2026-07-15T02:27:04.261265+00:00'
+updated_at: '2026-11-06T11:13:08.920602+00:00'
 has_child_rationale: Only W and HSS today; trusses, bracing, and lintels need the
   other AISC shapes
 ---

@@ -59,7 +59,7 @@ using Asap  # units
         @test fl.end_fixity === (:default, :default)  # default
         @test fl.torsion_released === nothing         # default
         @test fl.group_id === nothing                 # default
-        @test fl.catalog_override === nothing         # default
+        @test fl.beam_options === nothing             # default: building-wide options
         @test fl.supports == Int[]                    # default
         @test fl.pattern isa IsoparametricPattern
         @test fl.material === NWC_4000

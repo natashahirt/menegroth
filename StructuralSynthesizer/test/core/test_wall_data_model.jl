@@ -19,6 +19,8 @@
 #   - A faced floor 5 cm below the wall does not own it. The wall edge at
 #     z = 0 keeps story elevation 0 m and base.L = 4 m. The 0.1 m
 #     edge_story window is not used.
+#   - A column on the wall centerline, and the beam on the wall's top line,
+#     move to :absent. The wall edge itself stays a Wall.
 #   - That edge is not also a Beam. An edge index listed in both :walls
 #     and :beams throws ArgumentError. The beam is not dropped.
 #   - wall_thickness is required when :walls edges exist. It is not invented.
@@ -155,9 +157,32 @@ function _office(; n_stories::Int)
     return gen_medium_office(10.0u"m", 6.0u"m", 4.0u"m", 1, 1, n_stories)
 end
 
+"""
+Grade beams on story 0, one bay of 10 m by 6 m.
+
+`gen_medium_office` leaves story 0 as support nodes with no beam grid, and
+the wall checks need a plan edge there. The four edges are added in `:beams`
+so a test can claim one as a wall. `find_faces!` has already run.
+"""
+function _grade_beams!(skel)
+    z0 = skel.stories[0].elevation
+    corners = [Meshes.Point(x, y, z0) for (x, y) in
+               ((0.0u"m", 0.0u"m"), (10.0u"m", 0.0u"m"),
+                (10.0u"m", 6.0u"m"), (0.0u"m", 6.0u"m"))]
+    vids = [add_vertex!(skel, p) for p in corners]
+    for i in 1:4
+        add_element!(skel, vids[i], vids[mod1(i + 1, 4)]; group=:beams, level_idx=0)
+    end
+    # find_faces! has already run, so the grade face is added here.
+    StructuralSynthesizer.add_face!(skel, Meshes.Ngon(skel.vertices[vids]...);
+                                    group=:grade, level_idx=0, v_indices=vids)
+    return skel
+end
+
 """Longest horizontal beam on `story`, claimed as the single :walls edge."""
 function _office_with_wall_on(story::Int; n_stories::Int)
     skel = _office(; n_stories=n_stories)
+    story == 0 && _grade_beams!(skel)
     edges = _horizontal_beams(skel, story)
     @assert !isempty(edges) "fixture: no horizontal beam on story $story"
     eidx = edges[argmax(_plan_length.(Ref(skel), edges))]
@@ -192,6 +217,30 @@ end
         # Thickness is the value we passed, not a stand-in default.
         @test w.thickness ≈ thk
         @test any(struc.segments[si].edge_idx == eidx for si in w.base.segment_indices)
+
+        # The wall runs from z = 0 to z = 4. The two columns on its plan line
+        # overlap it, and the beam on its top line carries the slab edge the
+        # wall carries. Both move to :absent. The wall edge stays a Wall.
+        absent = Set(get(struc.skeleton.groups_edges, :absent, Int[]))
+        vc = struc.skeleton.geometry.vertex_coords
+        v1, v2 = struc.skeleton.edge_indices[eidx]
+        on_line(p) = StructuralSynthesizer._plan_point_segment_distance(
+            (p[1], p[2]), (vc[v1, 1], vc[v1, 2]), (vc[v2, 1], vc[v2, 2])) <= 1e-3
+        n_parked_columns = 0
+        for e in absent
+            a, b = struc.skeleton.edge_indices[e]
+            abs(vc[a, 3] - vc[b, 3]) > 1.0 || continue
+            on_line((vc[a, 1], vc[a, 2])) && (n_parked_columns += 1)
+        end
+        @test n_parked_columns == 2
+        top = [e for e in absent if begin
+            a, b = struc.skeleton.edge_indices[e]
+            abs(vc[a, 3] - vc[b, 3]) <= 1e-6 &&
+                abs(vc[a, 3] - ustrip(u"m", h)) <= 1e-6 &&
+                on_line((vc[a, 1], vc[a, 2]))
+        end]
+        @test length(top) == 1
+        @test eidx ∉ absent
     end
 
     # ── (B) That same edge is not also a Beam.
@@ -231,6 +280,7 @@ end
     # the roof wall and its wall_above stays nothing.
     @testset "D: wall_above links only upward" begin
         skel = _office(; n_stories=2)
+        _grade_beams!(skel)
         e0s = _horizontal_beams(skel, 0)
         e1s = _horizontal_beams(skel, 1)
         keys1 = Dict(_plan_key(skel, e) => e for e in e1s)
@@ -272,6 +322,7 @@ end
     # [0, 10] × [0, 6] floor, and shares no edge with the slab faces.
     @testset "E: wall center outside story faces throws" begin
         skel = _office(; n_stories=1)
+        _grade_beams!(skel)
         z0 = skel.stories[0].elevation
         p1 = Meshes.Point(0.0u"m", -25.0u"m", z0)
         p2 = Meshes.Point(6.0u"m", -25.0u"m", z0)
@@ -302,6 +353,7 @@ end
     # story of 1.
     @testset "G: to_wall_line story is wall.story + 1" begin
         skel = _office(; n_stories=2)
+        _grade_beams!(skel)
         e0s = _horizontal_beams(skel, 0)
         e1s = _horizontal_beams(skel, 1)
         keys1 = Dict(_plan_key(skel, e) => e for e in e1s)
@@ -372,6 +424,7 @@ end
     # list with no error. The throw names the edge index and both groups.
     @testset "I: edge in both :walls and :beams throws" begin
         skel = _office(; n_stories=1)
+        _grade_beams!(skel)
         edges = _horizontal_beams(skel, 0)
         @test !isempty(edges)
         eidx = edges[argmax(_plan_length.(Ref(skel), edges))]

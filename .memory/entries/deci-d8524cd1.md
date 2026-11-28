@@ -8,7 +8,7 @@ title: 'Composite steel beams on the story shell: per-combination strength field
 node_label: composite on story shell
 tags: story-shell,composite,AISC-I3,I8.2c,I_LB,stiffness
 status: active
-open_threads: 0
+open_threads: 2
 success: 'null'
 files: StructuralSizer/src/members/codes/aisc/composite/per_station.jl@b3090e3, StructuralSizer/src/members/codes/aisc/checker/composite_feasibility.jl@b3090e3,
   StructuralSizer/src/members/codes/aisc/checker/explanations.jl@b3090e3, StructuralSizer/src/slabs/codes/concrete/panel_shell_beams.jl@b3090e3,
@@ -19,7 +19,7 @@ files: StructuralSizer/src/members/codes/aisc/composite/per_station.jl@b3090e3, 
   StructuralSynthesizer/test/analyze/test_story_shell_beams.jl@b3090e3
 session_id: sess-86fd7170
 created_at: '2026-11-03T23:47:10.234954+00:00'
-updated_at: '2026-11-03T23:47:10.234954+00:00'
+updated_at: '2026-11-04T23:27:53.043976+00:00'
 ---
 Composite steel beams now run through size_beams_with_story_shell!.
 

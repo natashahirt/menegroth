@@ -44,6 +44,7 @@ via `snapshot!(struc, key)`.  Restored via `restore!(struc, key)`.
 - Beam sections
 - Cell self-weights and live loads
 - Slab results, design details, volumes, and drop panels
+- Stage diagnostics, row F section floors, and the demand rows stored with them
 """
 struct DesignSnapshot{T, P}
     # ── Members ──
@@ -56,4 +57,8 @@ struct DesignSnapshot{T, P}
     cell_live_loads::Vector{P}
     # ── Slabs ──
     slab_snapshots::Vector{SlabSnapshot}
+    # ── Stage outcomes ──
+    stage_diagnostics::Dict{Symbol, String}
+    frame_section_floors::Dict{UInt64, Any}
+    frame_floor_demands::Dict{UInt64, Vector{Tuple{String, Any}}}
 end

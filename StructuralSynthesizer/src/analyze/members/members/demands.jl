@@ -3,6 +3,46 @@
 # =============================================================================
 
 """
+    ColumnCaseRow
+
+One column's demands in one pattern case, all from that case [N, N·m].
+`Pu_c` is the largest compression along the member, `Mux`/`Muy` the largest
+moments, and `M1`/`M2` the signed end moments (ACI 318-19 convention).
+"""
+struct ColumnCaseRow
+    Pu_c::Float64
+    Mux::Float64
+    Muy::Float64
+    M1x::Float64
+    M2x::Float64
+    M1y::Float64
+    M2y::Float64
+end
+
+"""
+    BeamShearCase
+
+One beam's shear and flexure in one pattern case, all from that case [N, N·m].
+
+`Vu` is the largest |Vy| (strong-axis shear). `Nu` is the axial at that
+same station, compression-positive, so a gravity case is not credited with
+another case's compression. `Tu` is torsion; station diagrams carry none,
+so gravity rows are 0. `Mu_pos` and `Mu_neg` are that case's sagging and
+hogging peaks, so a moment that is not the shear governor is still a
+flexure case.
+"""
+struct BeamShearCase
+    Vu::Float64
+    Nu::Float64
+    Tu::Float64
+    Mu_pos::Float64
+    Mu_neg::Float64
+end
+
+"""Shear row with no flexure. Callers that have a moment pass the five-field form."""
+BeamShearCase(Vu, Nu, Tu) = BeamShearCase(Float64(Vu), Float64(Nu), Float64(Tu), 0.0, 0.0)
+
+"""
     build_member_groups!(struc::BuildingStructure; member_type::Symbol=:beams)
 
 Populate `struc.member_groups` from the specified member collection.
@@ -16,15 +56,6 @@ Note: member_indices in MemberGroup refer to indices within the specific member 
 (e.g., struc.beams[idx] for beams).
 """
 function build_member_groups!(struc::BuildingStructure; member_type::Symbol=:beams)
-    # Preserve per-group catalog overrides (Phase 6) across the rebuild.
-    # build_member_groups! is re-run on every sizing pass (via
-    # member_group_demands), so a catalog_override set by materialize_level!
-    # (Phase 5) — keyed on the stable group_id — must survive the
-    # empty!/recreate cycle rather than being reset to `nothing`.
-    prev_overrides = Dict{UInt64, Any}()
-    for (gid, mg) in struc.member_groups
-        mg.catalog_override === nothing || (prev_overrides[gid] = mg.catalog_override)
-    end
     empty!(struc.member_groups)
     
     members = if member_type == :beams
@@ -45,7 +76,7 @@ function build_member_groups!(struc::BuildingStructure; member_type::Symbol=:bea
         set_group_id!(m, gid)
 
         mg = get!(struc.member_groups, gid) do
-            MemberGroup(gid; catalog_override = get(prev_overrides, gid, nothing))
+            MemberGroup(gid)
         end
         push!(mg.member_indices, m_idx)
     end
@@ -53,68 +84,491 @@ function build_member_groups!(struc::BuildingStructure; member_type::Symbol=:bea
     return struc.member_groups
 end
 
-"""
-    _service_load_deflections(struc, params) -> (δ_LL, δ_total)
+"""Stations per element for service deflection; odd so midspan is sampled."""
+const _SERVICE_DEFLECTION_STATIONS = 41
 
-Perform a service-load multi-RHS solve using the already-factorized stiffness
-matrix. Returns two `Dict{Int, Float64}` (elementID → max deflection in meters):
-  - `δ_LL`:    live-load-only deflection (for L/360 check)
-  - `δ_total`: dead + live deflection (for L/240 check)
+"""Copy of a slab tributary load at an unfactored pressure (same geometry, element, id)."""
+_tributary_at(ld::Asap.TributaryLoad, p) =
+    Asap.TributaryLoad(ld.element, copy(ld.positions), copy(ld.widths), p, ld.direction, ld.id)
 
-Load factors from `governing_combo(params)` are divided out to yield unfactored
-(service) displacements. Only cell tributary loads (cell_dead_loads / cell_live_loads)
-are included; secondary effects (vault thrust, self-weight) are omitted from the
-split — this is a conservative simplification since vault thrust adds to total
-deflection, making the factored-solve δ from `model.u` more conservative.
+"""Copy of a slab `AreaLoad` at an unfactored pressure (same shells and distribution)."""
+_area_load_at(ld::Asap.AreaLoad, p) =
+    Asap.AreaLoad(ld.shells, p; distribute_to = ld.distribute_to,
+                  interior_beams = ld.interior_beams, axis = ld.axis,
+                  direction = ld.direction, id = ld.id)
+
 """
-function _service_load_deflections(
-    struc::BuildingStructure,
-    params::DesignParameters;
-    resolution::Int = 20,
-)
+    _service_dead_live_loads(struc) -> (dead, live, sdl)
+
+Unfactored dead, live, and superimposed-dead gravity load sets for the service
+deflection solve,
+built from the loads on `struc.asap_model` whatever `pattern_loading` is.
+
+Slab pressure keeps the routing of the factored model and only the pressure
+changes: dead is `sdl + self_weight`, live is `live_load`, each at factor 1.
+- Per-cell, joist-strip, grillage, and slab edge-strip tributary loads are
+  copied from the cell records: `cell_dead_loads` / `cell_live_loads` when the
+  model was built split (pattern loading), else `cell_tributary_loads`, which
+  then holds one copy at the enveloped pressure. Records under a framed slab's
+  first cell carry that cell's pressure, as in the factored build.
+- Shell-area slab `AreaLoad`s are copied one per eligible slab, in the order of
+  `_sync_shell_area_pressures!`.
+
+Dead also holds the unfactored member self-weight (`GravityLoad` at `g`),
+fire-protection coating, drop-panel weight, curtain-wall cladding, and wall
+self-weight: the same set
+as `_unfactored_DL_loads` (foundations). `sdl` is only `cell.sdl` on the same
+tributary routing, with self-weight left out. Vault thrust is split into its
+dead and live parts and is not part of `sdl`. A `:p_delta` notional lateral
+force is not gravity and is left out.
+Any other load on the model throws, so a load cannot drop out of the check.
+
+ASCE 7-16 Commentary CC.2.1 (corpus: asce-7-16, PDF p. 856) states the
+historical floor limit "1/360 of the span for floors subjected to full nominal
+live load": nominal, so no load factor is applied.
+"""
+function _service_dead_live_loads(struc::BuildingStructure)
     model = struc.asap_model
-    combo = governing_combo(params)
-    factor_D = combo.D
-    factor_L = combo.L
+    isnothing(model) && throw(ArgumentError(
+        "service deflection: the building has no Asap model. Run to_asap! first."))
+    dead = Asap.AbstractLoad[]
+    live = Asap.AbstractLoad[]
+    sdl = Asap.AbstractLoad[]
 
-    dead_loads = Asap.AbstractLoad[]
-    live_loads = Asap.AbstractLoad[]
-    for loads in values(struc.cell_dead_loads)
-        append!(dead_loads, loads)
-    end
-    for loads in values(struc.cell_live_loads)
-        append!(live_loads, loads)
-    end
-
-    if isempty(dead_loads) && isempty(live_loads)
-        empty_d = Dict{Int, Float64}()
-        return (empty_d, copy(empty_d))
-    end
-
-    # Unshored composite already solved dead on steel and live on the composite
-    # inertia. Superimpose those displacements. Do not recover both from one K.
-    staged = _unshored_stage!(struc; resolution = resolution)
-    if staged !== nothing
-        u_D = copy(staged.u_D)
-        u_L = copy(staged.u_L)
-    else
-        cases = Vector{Asap.AbstractLoad}[dead_loads, live_loads]
-        u_vecs = Asap.solve(model, cases)
-        u_D = u_vecs[1]
-        u_L = u_vecs[2]
+    has_records = false
+    for (ci, cell) in enumerate(struc.cells)
+        cell.floor_type == :grade && continue
+        d_rec = get(struc.cell_dead_loads, ci, Asap.TributaryLoad[])
+        l_rec = get(struc.cell_live_loads, ci, Asap.TributaryLoad[])
+        all_rec = get(struc.cell_tributary_loads, ci, Asap.TributaryLoad[])
+        p_D = uconvert(u"Pa", cell.sdl + cell.self_weight)
+        p_L = uconvert(u"Pa", cell.live_load)
+        if !isempty(d_rec) || !isempty(l_rec)
+            foreach(ld -> push!(dead, _tributary_at(ld, p_D)), d_rec)
+            foreach(ld -> push!(live, _tributary_at(ld, p_L)), l_rec)
+        else
+            for ld in all_rec
+                push!(dead, _tributary_at(ld, p_D))
+                push!(live, _tributary_at(ld, p_L))
+            end
+        end
+        has_records |= !(isempty(d_rec) && isempty(l_rec) && isempty(all_rec))
     end
 
-    # Unfactor to service-level displacements
-    if factor_D != 0; u_D ./= factor_D; end
-    if factor_L != 0; u_L ./= factor_L; end
+    slab_area_loads = Asap.AreaLoad[]
+    n_thrust = 0
+    for ld in model.loads
+        if ld isa Asap.TributaryLoad
+            has_records || throw(ArgumentError(
+                "service deflection: the model has slab TributaryLoads but no cell " *
+                "load records, so their dead and live parts cannot be separated"))
+        elseif ld isa Asap.GravityLoad
+            push!(dead, unfactored_gravity_load(ld))
+        elseif ld isa Asap.AreaLoad
+            ld.id === :wall_self_weight || push!(slab_area_loads, ld)
+        elseif ld isa Asap.LineLoad && (ld.id === FIRE_COATING_LOAD_ID || ld.id === :cladding)
+            continue
+        elseif ld isa Asap.LineLoad && ld.id === :vault_thrust
+            n_thrust += 1
+        elseif ld isa Asap.NodeForce && (ld.id === DROP_PANEL_LOAD_ID || ld.id === :p_delta)
+            continue
+        else
+            throw(ArgumentError(
+                "service deflection: no unfactored dead/live split is known for a " *
+                "$(nameof(typeof(ld))) with id :$(ld.id) on the model"))
+        end
+    end
 
-    u_total = u_D .+ u_L
+    if !isempty(slab_area_loads)
+        eligible = [slab for slab in struc.slabs
+                    if !isempty(slab.cell_indices) &&
+                       struc.cells[first(slab.cell_indices)].floor_type != :grade]
+        length(eligible) == length(slab_area_loads) || throw(ArgumentError(
+            "service deflection: $(length(slab_area_loads)) slab AreaLoads for " *
+            "$(length(eligible)) loaded slabs; cannot match pressures to slabs"))
+        for (slab, al) in zip(eligible, slab_area_loads)
+            cell0 = struc.cells[first(slab.cell_indices)]
+            push!(dead, _area_load_at(al, uconvert(u"Pa", cell0.sdl + cell0.self_weight)))
+            push!(live, _area_load_at(al, uconvert(u"Pa", cell0.live_load)))
+        end
+    end
 
-    δ_LL    = Asap.element_max_deflections(model, u_L; resolution=resolution)
-    δ_total = Asap.element_max_deflections(model, u_total; resolution=resolution)
+    if n_thrust > 0
+        for (bucket, combo) in ((dead, LoadCombination(name = :service_dead, D = 1.0, L = 0.0)),
+                                (live, LoadCombination(name = :service_live, D = 0.0, L = 1.0)))
+            p = DesignParameters(load_combinations = [combo])
+            specs = EdgeLineLoadSpec[]
+            for slab in struc.slabs
+                append!(specs, slab_edge_line_loads(struc, slab, p))
+            end
+            length(specs) == n_thrust || throw(ArgumentError(
+                "service deflection: $(length(specs)) vault-thrust specs for $(n_thrust) " *
+                "vault-thrust loads on the model"))
+            for spec in specs
+                push_asap_loads!(bucket, model.frame_elements[spec.edge_idx], spec)
+            end
+        end
+    end
 
-    return (δ_LL, δ_total)
+    for (ci, cell) in enumerate(struc.cells)
+        cell.floor_type == :grade && continue
+        p_S = uconvert(u"Pa", cell.sdl)
+        d_rec = get(struc.cell_dead_loads, ci, Asap.TributaryLoad[])
+        l_rec = get(struc.cell_live_loads, ci, Asap.TributaryLoad[])
+        all_rec = get(struc.cell_tributary_loads, ci, Asap.TributaryLoad[])
+        recs = !isempty(d_rec) || !isempty(l_rec) ? d_rec : all_rec
+        foreach(ld -> push!(sdl, _tributary_at(ld, p_S)), recs)
+    end
+    if !isempty(slab_area_loads)
+        eligible = [slab for slab in struc.slabs
+                    if !isempty(slab.cell_indices) &&
+                       struc.cells[first(slab.cell_indices)].floor_type != :grade]
+        if length(eligible) == length(slab_area_loads)
+            for (slab, al) in zip(eligible, slab_area_loads)
+                cell0 = struc.cells[first(slab.cell_indices)]
+                push!(sdl, _area_load_at(al, uconvert(u"Pa", cell0.sdl)))
+            end
+        end
+    end
+
+    append!(dead, unfactored_fire_coating_loads(model))
+    append!(dead, unfactored_drop_panel_loads(struc))
+    append!(dead, unfactored_cladding_loads(struc, model.frame_elements))
+    _append_service_wall_weight!(dead, model)
+    return dead, live, sdl
 end
+
+"""
+    _service_load_deflections(struc, idxs) -> (δ_LL, δ_total)
+
+Chord offset (m) of each frame element in `idxs`, measured from the straight
+line through the supports of its span:
+  - `δ_LL`:    live load (L/360)
+  - `δ_total`: superimposed dead plus live (L/240)
+
+Supports and the span length are [`assign_framing_levels!`](@ref): a column,
+a wall, a `:support` vertex, or a beam line of a lower level. A cantilever is
+the tip movement relative to its support.
+"""
+function _service_load_deflections(struc::BuildingStructure, idxs;
+                                   resolution::Int = _SERVICE_DEFLECTION_STATIONS)
+    el_ll, el_tot, _ = _relative_service_deflection(struc, idxs; resolution = resolution)
+    return el_ll, el_tot
+end
+
+"""Station (m) of point `p` along the polyline `xy` with cumulative length `cum`."""
+function _project_station(p::NTuple{3, Float64}, xy, cum)
+    best_s = 0.0
+    best_d = Inf
+    for k in 1:(length(xy) - 1)
+        a, b = xy[k], xy[k + 1]
+        d = b .- a
+        L2 = d[1]^2 + d[2]^2 + d[3]^2
+        L2 < 1e-18 && continue
+        t = clamp(((p[1] - a[1]) * d[1] + (p[2] - a[2]) * d[2] + (p[3] - a[3]) * d[3]) / L2,
+                   0.0, 1.0)
+        q = a .+ t .* d
+        dist = (p[1] - q[1])^2 + (p[2] - q[2])^2 + (p[3] - q[3])^2
+        if dist < best_d
+            best_d = dist
+            best_s = cum[k] + t * (cum[k + 1] - cum[k])
+        end
+    end
+    return best_s
+end
+
+"""`(station, uz)` of one element's deflection profile, `uz` positive upward."""
+function _element_station_samples(el, profile, xy, cum)
+    n = length(profile)
+    n == 0 && return Tuple{Float64, Float64}[]
+    function xyz(node)
+        p = node.position
+        (ustrip(u"m", p[1]), ustrip(u"m", p[2]), ustrip(u"m", p[3]))
+    end
+    s1 = _project_station(xyz(el.nodeStart), xy, cum)
+    s2 = _project_station(xyz(el.nodeEnd), xy, cum)
+    n == 1 && return [(s1, profile[1])]
+    return Tuple{Float64, Float64}[(s1 + (s2 - s1) * (i - 1) / (n - 1), profile[i])
+                                   for i in 1:n]
+end
+
+_interp_station(samples, s) = begin
+    isempty(samples) && return 0.0
+    s <= samples[1][1] && return samples[1][2]
+    s >= samples[end][1] && return samples[end][2]
+    i = searchsortedlast(first.(samples), s)
+    i == length(samples) && return samples[end][2]
+    (s0, u0), (s1, u1) = samples[i], samples[i + 1]
+    return s1 == s0 ? u1 : u0 + (u1 - u0) * (s - s0) / (s1 - s0)
+end
+
+"""
+Spans of a line: `(s0, s1, kind)`.
+
+`kind` is `:chord` between two supports, `:tip0` when the free end is `s0`,
+or `:tip1` when the free end is `s1`. No support: one chord over the line.
+"""
+function _deflection_spans(supports, total)
+    merged = Float64[]
+    for s in sort(supports)
+        (isempty(merged) || s - merged[end] > 1e-4) && push!(merged, s)
+    end
+    spans = Tuple{Float64, Float64, Symbol}[]
+    if isempty(merged)
+        total > 1e-8 && push!(spans, (0.0, total, :chord))
+        return spans
+    end
+    merged[1] > 1e-4 && push!(spans, (0.0, merged[1], :tip0))
+    for k in 1:(length(merged) - 1)
+        merged[k + 1] - merged[k] > 1e-4 &&
+            push!(spans, (merged[k], merged[k + 1], :chord))
+    end
+    total - merged[end] > 1e-4 && push!(spans, (merged[end], total, :tip1))
+    return spans
+end
+
+"""Downward sag (m) of one element's profile relative to the chord through its ends."""
+function _profile_sag(profile::Vector{Float64})
+    n = length(profile)
+    n < 2 && return 0.0
+    u0, u1 = profile[1], profile[end]
+    δ = 0.0
+    for i in 1:n
+        t = (i - 1) / (n - 1)
+        δ = max(δ, -(profile[i] - (u0 + t * (u1 - u0))))
+    end
+    return δ
+end
+
+"""Largest downward offset (m) of `sel` from the span, and the length the limit uses."""
+function _span_offset(kind, s0, s1, sel, line_samples)
+    L = s1 - s0
+    (L <= 1e-8 || isempty(sel)) && return (0.0, L)
+    if kind === :chord
+        # IBC 2021 Table 1604.3 footnote i (corpus: ibc-2021, PDF p. 418):
+        # l is the length of the member between supports.
+        u0 = _interp_station(line_samples, s0)
+        u1 = _interp_station(line_samples, s1)
+        δ = 0.0
+        for (s, uz) in sel
+            t = (s - s0) / L
+            δ = max(δ, -(uz - (u0 + t * (u1 - u0))))
+        end
+        return (δ, L)
+    end
+    # IBC 2021 Table 1604.3 footnote i (corpus: ibc-2021, PDF p. 418):
+    # for a cantilever, l is twice the length of the cantilever.
+    u_sup = _interp_station(line_samples, kind === :tip0 ? s1 : s0)
+    δ = 0.0
+    for (_, uz) in sel
+        δ = max(δ, -(uz - u_sup))
+    end
+    return (δ, 2 * L)
+end
+
+"""
+Live and superimposed-dead-plus-live deflection, relative to each span's supports.
+
+Returns per-element chord offsets (m) and, per beam index, the governing
+`(δ / l)` of live and of superimposed dead plus live. `l` is the span between
+supports, or twice the cantilever length.
+
+# ENGINEERING JUDGMENT
+AISC 360-16 Commentary L2 (corpus: aisc-360-16, PDF p. 535) allows D in the
+total-load check to be the dead load applied after nonstructural elements are
+attached. That share is taken as the whole `cell.sdl`, self-weight excluded.
+Post-attachment load is solved on the section the model holds now, including a
+composite section where one is installed.
+"""
+function _relative_service_deflection(struc::BuildingStructure, idxs;
+                                     resolution::Int = _SERVICE_DEFLECTION_STATIONS)
+    el_ll = Dict{Int, Float64}()
+    el_tot = Dict{Int, Float64}()
+    ratios = fill((0.0, 0.0), length(struc.beams))
+    model = struc.asap_model
+    (model === nothing || isempty(model.frame_elements)) && return el_ll, el_tot, ratios
+    assign_framing_levels!(struc)
+    _, live, sdl = _service_dead_live_loads(struc)
+    wanted = Set{Int}(idxs)
+    edge_elements = Dict{Int, Vector{Int}}()
+    n_el = length(model.frame_elements)
+    for (bi, beam) in enumerate(struc.beams)
+        for si in segment_indices(beam)
+            e = struc.segments[si].edge_idx
+            kids = [i for i in _frame_element_indices(struc, e) if 1 <= i <= n_el]
+            edge_elements[e] = kids
+            union!(wanted, kids)
+        end
+    end
+    isempty(wanted) && return el_ll, el_tot, ratios
+    uL, uS = Asap.solve(model, Vector{Asap.AbstractLoad}[live, sdl], struc.asap_rigid_links)
+    byL = Asap.frame_loads_by_element(model, live)
+    byS = Asap.frame_loads_by_element(model, sdl)
+    profL = Dict{Int, Vector{Float64}}()
+    profT = Dict{Int, Vector{Float64}}()
+    for i in wanted
+        el = model.frame_elements[i]
+        pL = Asap.element_deflection_profile(el, uL, get(byL, i, Asap.AbstractLoad[]);
+                                            resolution = resolution)
+        pS = Asap.element_deflection_profile(el, uS, get(byS, i, Asap.AbstractLoad[]);
+                                            resolution = resolution)
+        profL[i] = pL
+        profT[i] = pL .+ pS
+    end
+
+    lines = _constant_level_lines(struc, _frame_lines(struc))
+    skel = struc.skeleton
+    fixed = beam_support_lookup(struc).fixed
+    at = Dict{Int, Vector{Int}}()
+    level_of = Vector{Int}(undef, length(lines))
+    for (i, ln) in enumerate(lines)
+        level_of[i] = struc.beams[ln.beams[1]].level
+        for v in ln.verts
+            push!(get!(at, v, Int[]), i)
+        end
+    end
+    beam_line = Dict{Int, Int}()
+    for (i, ln) in enumerate(lines)
+        for bi in ln.beams
+            beam_line[bi] = i
+        end
+    end
+
+    function samples_of(ids, prof, xy, cum)
+        out = Tuple{Float64, Float64}[]
+        for i in ids
+            haskey(prof, i) || continue
+            append!(out, _element_station_samples(model.frame_elements[i], prof[i], xy, cum))
+        end
+        sort!(out; by = first)
+        return out
+    end
+
+    seen_el = Set{Int}()
+    for (li, ln) in enumerate(lines)
+        cum, xy = _line_stations(skel, ln.verts)
+        total = cum[end]
+        total > 1e-8 || continue
+        sup = _line_support_stations(ln, li, lines, at, fixed, cum, level_of)
+        spans = _deflection_spans(sup, total)
+        station = Dict(v => cum[k] for (k, v) in enumerate(ln.verts))
+        line_ids = Int[]
+        for bi in ln.beams
+            for si in segment_indices(struc.beams[bi])
+                append!(line_ids, get(edge_elements, struc.segments[si].edge_idx, Int[]))
+            end
+        end
+        lineL = samples_of(line_ids, profL, xy, cum)
+        lineT = samples_of(line_ids, profT, xy, cum)
+        for bi in ln.beams
+            ids = Int[]
+            s_lo, s_hi = Inf, -Inf
+            chain = _beam_vertex_chain(struc, struc.beams[bi])
+            if chain !== nothing
+                for v in chain
+                    haskey(station, v) || continue
+                    s_lo = min(s_lo, station[v])
+                    s_hi = max(s_hi, station[v])
+                end
+            end
+            for si in segment_indices(struc.beams[bi])
+                append!(ids, get(edge_elements, struc.segments[si].edge_idx, Int[]))
+            end
+            bL = samples_of(ids, profL, xy, cum)
+            bT = samples_of(ids, profT, xy, cum)
+            rL, rT = 0.0, 0.0
+            for (s0, s1, kind) in spans
+                on_beam = s_hi >= s0 - 1e-6 && s_lo <= s1 + 1e-6
+                on_beam || continue
+                selL = [(s, u) for (s, u) in bL if s0 - 1e-6 <= s <= s1 + 1e-6]
+                selT = [(s, u) for (s, u) in bT if s0 - 1e-6 <= s <= s1 + 1e-6]
+                δL, LL = _span_offset(kind, s0, s1, selL, lineL)
+                δT, LT = _span_offset(kind, s0, s1, selT, lineT)
+                LL > 1e-8 && (rL = max(rL, δL / LL))
+                LT > 1e-8 && (rT = max(rT, δT / LT))
+                for i in ids
+                    i in seen_el && continue
+                    eL = [(s, u) for (s, u) in samples_of([i], profL, xy, cum)
+                          if s0 - 1e-6 <= s <= s1 + 1e-6]
+                    eT = [(s, u) for (s, u) in samples_of([i], profT, xy, cum)
+                          if s0 - 1e-6 <= s <= s1 + 1e-6]
+                    el_ll[i] = max(get(el_ll, i, 0.0), _span_offset(kind, s0, s1, eL, lineL)[1])
+                    el_tot[i] = max(get(el_tot, i, 0.0), _span_offset(kind, s0, s1, eT, lineT)[1])
+                end
+            end
+            ratios[bi] = (rL, rT)
+            union!(seen_el, ids)
+        end
+    end
+    # A beam the line walk did not place still reports the sag of its own
+    # elements. A loaded beam with no measured element is a bug: a zero would
+    # skip the check. A measured zero is a piece bent only in hogging, such
+    # as a short rib at a solid-head face.
+    for (bi, beam) in enumerate(struc.beams)
+        rL, rT = ratios[bi]
+        (rL > 0 || rT > 0) && continue
+        measured = false
+        loaded = false
+        for si in segment_indices(beam)
+            e = struc.segments[si].edge_idx
+            for i in get(edge_elements, e, Int[])
+                if !isempty(byL[i]) || !isempty(byS[i])
+                    loaded = true
+                end
+                haskey(profL, i) || continue
+                Lm = _element_length_m(model.frame_elements[i])
+                Lm > 1e-8 || continue
+                measured = true
+                rL = max(rL, _profile_sag(profL[i]) / Lm)
+                rT = max(rT, _profile_sag(profT[i]) / Lm)
+            end
+        end
+        if loaded && !measured
+            throw(ArgumentError(
+                "beam $bi ($(beam.role), level $(beam.level)) carries service load " *
+                "but none of its elements has a deflection profile"))
+        end
+        ratios[bi] = (rL, rT)
+    end
+    keep_ll = Dict(i => el_ll[i] for i in idxs if haskey(el_ll, i))
+    keep_tot = Dict(i => el_tot[i] for i in idxs if haskey(el_tot, i))
+    return keep_ll, keep_tot, ratios
+end
+
+"""
+    _require_service_deflections(demands, group_ids, limit_set::Bool)
+
+Throw when a deflection limit applies and a beam group has no service
+deflection. `MemberDemand` reads `δ = 0` as "skip the check". Once member
+self-weight is on the model every beam deflects under dead + live, so
+`δ_max_total == 0` means the deflection was never computed.
+"""
+function _require_service_deflections(demands, group_ids, limit_set::Bool)
+    limit_set || return nothing
+    for (k, d) in enumerate(demands)
+        d.δ_max_total > 0 && continue
+        throw(ArgumentError(
+            "beam group $(group_ids[k]) has a deflection limit but no service " *
+            "deflection (δ_total = 0); the deflection check would be skipped"))
+    end
+    return nothing
+end
+
+"""
+    _member_span_bounds(struc, m, seg_lengths) -> Vector{Float64}
+
+Distances (m) from the start of member `m` to its span ends: `0`, each interior
+support, and the member length. For a beam the interior supports are
+[`beam_interior_supports`](@ref) (columns, walls, `:support` vertices, and
+beams that pass through). Other members are one span.
+"""
+function _member_span_bounds(struc::BuildingStructure, m, seg_lengths; lookup = nothing)
+    L = sum(seg_lengths; init = 0.0)
+    fr = (m isa Beam && lookup !== nothing) ?
+        beam_interior_supports(struc, m; lookup = lookup) : Float64[]
+    return [0.0; fr .* L; L]
+end
+
 
 """
     _fem_to_aci_endmoments(M_start, M_end) -> (M1, M2)
@@ -123,16 +577,19 @@ Convert a pair of signed FEM internal end moments to ACI 318-19 / AISC 360-16
 end-moment convention `(M1, M2)` with `|M2| ≥ |M1|`.
 
 # FEM convention
-For a column under purely end moments, the *internal* moment field is
-linear and antisymmetric in single curvature (`M_start`, `M_end` opposite
-signs) and even-symmetric in double curvature (same signs).
+The inputs are values of Asap's internal moment diagram at the two ends
+(`My[i] = Vy·x − M_start`, `external/Asap/src/Analysis/force_displacement.jl`).
+With no load between the ends that diagram is linear. Same signs at both
+ends mean no inflection point: **single** curvature. Opposite signs mean an
+inflection point: **double** curvature. `segment_end_moment_ratio` (wall
+piers) uses the same reading.
 
 # ACI 318-19 / AISC 360-16 convention
 `M1/M2 > 0` ⇔ **double** curvature (best case, low Cm),
 `M1/M2 < 0` ⇔ **single** curvature (worst case, high Cm).
 
-So same-sign FEM end moments map to a **positive** `M1/M2` ratio, and
-opposite-sign FEM end moments map to a **negative** ratio.
+So same-sign FEM end moments map to a **negative** `M1/M2` ratio, and
+opposite-sign FEM end moments map to a **positive** ratio.
 
 `M2` is always returned positive (defines the reference direction);
 `M1` carries the relative sign.
@@ -151,8 +608,9 @@ function _fem_to_aci_endmoments(M_start::Real, M_end::Real)
         return (0.0, 0.0)
     end
 
-    same_sign = sign(M2_signed) == sign(M1_signed) || iszero(M1_signed)
-    M1 = same_sign ? abs(M1_signed) : -abs(M1_signed)
+    iszero(M1_signed) && return (0.0, M2)
+    same_sign = sign(M2_signed) == sign(M1_signed)
+    M1 = same_sign ? -abs(M1_signed) : abs(M1_signed)
     return (M1, M2)
 end
 
@@ -181,6 +639,78 @@ function _asap_signed_My_envelopes(el, My)
         hog = max(hog, -M * s)
     end
     return sag, hog
+end
+
+"""
+    _strong_weak_peaks(My, Vy, Mz, Vz) -> (Mu, Vu, Mu_weak, Vu_weak)
+    _strong_weak_peaks(f::AbstractVector) -> (Mu, Vu)
+
+Peak strong- and weak-axis forces on one Asap frame element.
+
+Asap pairs `My` with `Vy` (transverse load along local y) and `Mz` with `Vz`
+(load along local z); see `accumulate_force!`. A beam's default roll is
+`Ψ = π/2`, so local y is vertical and gravity is the `My`/`Vy` pair — the
+strong axis, same pairing as [`_asap_signed_My_envelopes`](@ref). `Mz`/`Vz`
+is the weak axis. Reading `Vz` as the design shear drops gravity shear.
+
+The 12-vector method reads `element.forces` (local end forces, no member
+load). Slots 2 and 8 are `Vy`; slots 6 and 12 are the end moments Asap
+integrates into `My`.
+"""
+function _strong_weak_peaks(My, Vy, Mz, Vz)
+    mu = isempty(My) ? 0.0 : mapreduce(abs, max, My)
+    vu = isempty(Vy) ? 0.0 : mapreduce(abs, max, Vy)
+    mu_w = isempty(Mz) ? 0.0 : mapreduce(abs, max, Mz)
+    vu_w = isempty(Vz) ? 0.0 : mapreduce(abs, max, Vz)
+    return (Mu = mu, Vu = vu, Mu_weak = mu_w, Vu_weak = vu_w)
+end
+
+"""Largest |Vy| and the axial at that station. `Nu` is compression-positive."""
+function _concurrent_strong_shear(P, Vy)
+    isempty(Vy) && return 0.0, 0.0
+    i_at = first(eachindex(Vy))
+    vu = abs(Float64(Vy[i_at]))
+    for i in eachindex(Vy)
+        a = abs(Float64(Vy[i]))
+        a > vu || continue
+        vu = a
+        i_at = i
+    end
+    # Asap axial is tension-positive. RC shear Nu is compression-positive.
+    Nu = checkbounds(Bool, P, i_at) ? -Float64(P[i_at]) : 0.0
+    return vu, Nu
+end
+
+"""
+Drop shear rows another row covers: no more `Vu`, no less compression `Nu`,
+and the same `Tu`. Vc rises with compression in ACI 318-11 Eq. (11-4) and
+Eq. (11-8), so a covered row never governs a shear constraint.
+"""
+function _prune_covered_shear(rows::Vector{BeamShearCase})
+    kept = BeamShearCase[]
+    for (i, r) in enumerate(rows)
+        # A higher sagging or hogging moment is its own flexure case. Shear
+        # coverage does not drop it.
+        covered = any(enumerate(rows)) do (j, o)
+            j != i && o.Tu == r.Tu && o.Vu >= r.Vu && o.Nu <= r.Nu &&
+                o.Mu_pos >= r.Mu_pos && o.Mu_neg >= r.Mu_neg &&
+                (o.Vu > r.Vu || o.Nu < r.Nu || o.Mu_pos > r.Mu_pos ||
+                 o.Mu_neg > r.Mu_neg || j < i)
+        end
+        covered || push!(kept, r)
+    end
+    return kept
+end
+
+function _strong_weak_peaks(f::AbstractVector{<:Real})
+    n = length(f)
+    mu = 0.0
+    vu = 0.0
+    n >= 2 && (vu = max(vu, abs(f[2])))
+    n >= 8 && (vu = max(vu, abs(f[8])))
+    n >= 6 && (mu = max(mu, abs(f[6])))
+    n >= 12 && (mu = max(mu, abs(f[12])))
+    return (Mu = mu, Vu = vu)
 end
 
 """
@@ -254,10 +784,83 @@ function _pattern_demand_cases(struc::BuildingStructure, params::DesignParameter
     (use && struc.asap_model.processed) || return nothing
     cases = _generate_pattern_cases(struc)
     length(cases) <= 1 && return nothing
-    u_cases = Asap.solve(struc.asap_model, cases)
+    u_cases = Asap.solve(struc.asap_model, cases, struc.asap_rigid_links)
     n_el = length(struc.asap_model.frame_elements)
     n_el == 0 && return nothing
     return [(u, Asap.get_elemental_loads(loads, n_el)) for (u, loads) in zip(u_cases, cases)]
+end
+
+"""
+    column_force_envelopes(struc, params; resolution=200) -> Dict{Int, NamedTuple}
+
+Per-column strength envelope from the frame, keyed by column index, with
+the same force sources as [`member_group_demands`](@ref) for a column
+group: the full-load solve plus the pattern cases of
+[`_pattern_demand_cases`](@ref) (ACI 318-11 §13.7.6.3–13.7.6.4, corpus:
+aci-318-11, page 261), sampled along each segment.
+
+Entries (N, N·m): `Pu` the largest compression (tension counts as zero),
+`Pu_t` the largest tension, `My`/`Mz` the peak moments about the element's
+local y and z axes, and signed `(M1y, M2y)`/`(M1z, M2z)` end moments in the
+ACI 318-19 convention, each pair from the one case with the largest `|M2|`
+on that axis. Local y and z are not tied to the section's strong and weak
+axes here; callers check both assignments.
+"""
+function column_force_envelopes(struc::BuildingStructure, params::DesignParameters;
+                                resolution::Int = 200)
+    out = Dict{Int, NamedTuple}()
+    model = struc.asap_model
+    (model === nothing || isempty(model.frame_elements)) && return out
+    element_loads = Asap.get_elemental_loads(model)
+    cases = _pattern_demand_cases(struc, params)
+    for (ci, col) in enumerate(struc.columns)
+        Pu = Pu_t = My = Mz = 0.0
+        segs = segment_indices(col)
+        n_case = cases === nothing ? 1 : 1 + length(cases)
+        My_s = zeros(n_case); My_e = zeros(n_case)
+        Mz_s = zeros(n_case); Mz_e = zeros(n_case)
+        saw = false
+        for (sp, seg_idx) in enumerate(segs)
+            edge_idx = struc.segments[seg_idx].edge_idx
+            edge_idx < 1 && continue
+            els = _frame_element_indices(struc, edge_idx)
+            for (cp, el_idx) in enumerate(els)
+                el = model.frame_elements[el_idx]
+                loads = element_loads[el.elementID]
+                full = Asap.ElementForceAndDisplacement(el, loads; resolution).forces
+                sets = cases === nothing ? (full,) : (full, (begin
+                    u, case_map = c
+                    ld = el.elementID <= length(case_map) ? case_map[el.elementID] :
+                         Asap.AbstractLoad[]
+                    _element_forces_from_u(el, u, ld; resolution)
+                end for c in cases)...)
+                saw = true
+                for (k, f) in enumerate(sets)
+                    Pu = max(Pu, -minimum(f.P))
+                    Pu_t = max(Pu_t, maximum(f.P))
+                    My = max(My, maximum(abs, f.My))
+                    Mz = max(Mz, maximum(abs, f.Mz))
+                    if sp == 1 && cp == 1
+                        My_s[k] = f.My[1]; Mz_s[k] = f.Mz[1]
+                    end
+                    if sp == length(segs) && cp == length(els)
+                        My_e[k] = f.My[end]; Mz_e[k] = f.Mz[end]
+                    end
+                end
+            end
+        end
+        saw || continue
+        M1y = M2y = M1z = M2z = 0.0
+        for k in 1:n_case
+            a1, a2 = _fem_to_aci_endmoments(My_s[k], My_e[k])
+            a2 > M2y && ((M1y, M2y) = (a1, a2))
+            b1, b2 = _fem_to_aci_endmoments(Mz_s[k], Mz_e[k])
+            b2 > M2z && ((M1z, M2z) = (b1, b2))
+        end
+        out[ci] = (Pu = max(Pu, 0.0), Pu_t = max(Pu_t, 0.0), My = My, Mz = Mz,
+                   M1y = M1y, M2y = M2y, M1z = M1z, M2z = M2z)
+    end
+    return out
 end
 
 """
@@ -270,7 +873,8 @@ Conventions:
 - gravity bending (strong axis) demand uses `My`
 - weak-axis bending demand uses `Mz`
 - shear demand uses `Vy`/`Vz` (mapped to weak/strong)
-- deflection uses max local Z displacement from `ElementDisplacements.ulocal`
+- beam deflection is the chord offset from the span's supports
+  ([`_relative_service_deflection`](@ref))
 
 For columns (`member_edge_group == :columns`), signed end moments are
 extracted at the start of the first segment and the end of the last
@@ -280,22 +884,38 @@ segment of each member, then converted to ACI 318-19 / AISC 360-16
 This lets the slenderness path compute `Cm = 0.6 − 0.4·(M1/M2)`
 instead of falling back on the conservative `M1 = 0` stand-in.
 
-When `params` is provided and cell dead/live loads are available, a service-load
-multi-RHS solve separates LL-only and total (DL+LL) deflections. Otherwise
-the factored-solve deflection is used for both (conservative).
+Beam groups always get service deflections from unfactored live and
+superimposed dead ([`_relative_service_deflection`](@ref)), whatever
+`params.pattern_loading` is: `δ_max_LL` from live alone and `δ_max_total`
+from superimposed dead plus live. Column and strut
+groups carry no deflection demand (their checkers have no deflection limit).
+`service_deflection = false` skips the service solve and leaves both at 0 (no
+check); pass it only when no deflection limit applies.
 
 Pattern cases (ACI 318-11 §13.7.6.3–13.7.6.4, corpus: aci-318-11, page 261)
 envelope STRENGTH from per-case station forces (signed M+/M− and shears).
-Deflection stays on the full-load solve (`model.u`). The per-DOF abs envelope
-on `el.forces` is not used as a sizing source.
+The per-DOF abs envelope on `el.forces` is not used as a sizing source.
 
-For multi-segment members (shattered edges), the `δ_max` in the returned demand
-is pre-scaled so that `δ_max / L_total == δ_original / L_defl`, where `L_defl`
-is the longest individual sub-segment (the actual deflection span between supports).
+`L_totals[g]` is the length of the longest member in group `g` (the sum of
+that member's segments), not the sum over the group's members.
+
+The checker compares `δ_max / L_total` against the limit. Each beam is cut into
+spans at its supports ([`_member_span_bounds`](@ref)); `δ/L` is taken per span
+with that span's length, and the group's governing ratio `r` is returned as
+`δ_max = r · L_total`. A node where a beam only carries another beam is not a
+support, so the span is not shortened there.
 
 `shell_demands` maps a beam index to its [`ShellBeamDemand`](@ref). Each beam
 group's sagging moment, hogging moment, and strong-axis shear become the larger
 of the frame-model value and the shell value. The shell never lowers a demand.
+Deflection here is the frame model's alone. Story-shell deflection is a
+separate per-span check and never enters these demands.
+
+`case_rows`, when given for columns, is filled with one vector per returned
+group: a [`ColumnCaseRow`](@ref) for each member and pattern case, with that
+case's axial force and moments together. The group demand pairs the largest
+axial force of any case with the largest moment of any case, which does not
+bound a reinforced concrete section below its balanced point.
 
 Returns `(group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs)`.
 """
@@ -303,8 +923,16 @@ function member_group_demands(struc::BuildingStructure;
     member_edge_group::Union{Symbol, AbstractVector{Symbol}, Tuple{Vararg{Symbol}}}=:beams,
     resolution::Int=200,
     params::DesignParameters=DesignParameters(),
-    shell_demands::Union{Nothing, AbstractDict{Int, ShellBeamDemand}}=nothing)
+    shell_demands::Union{Nothing, AbstractDict{Int, ShellBeamDemand}}=nothing,
+    case_rows::Union{Nothing, Vector{Vector{ColumnCaseRow}}}=nothing,
+    beam_shear_cases::Union{Nothing, Vector{Vector{BeamShearCase}}}=nothing,
+    service_deflection::Bool=true)
     isempty(struc.asap_model.frame_elements) && throw(ArgumentError("ASAP model is empty. Call `to_asap!(struc)` before sizing."))
+    stale = Asap.stale_frame_elements(struc.asap_model)
+    isempty(stale) || throw(ArgumentError(
+        "member demands: $(length(stale)) frame elements (first $(first(stale))) carry " *
+        "stiffness from an earlier section. Rebuild the model after installing " *
+        "sections (`update_analysis!(struc, :stiffness)`) before reading its forces."))
 
     skel = struc.skeleton
     groups = member_edge_group isa Symbol ? (member_edge_group,) : member_edge_group
@@ -356,9 +984,18 @@ function member_group_demands(struc::BuildingStructure;
         length(pattern_cases)
     end
 
-    # Whether to extract signed end moments for ACI 318-19 slenderness Cm.
-    # Only meaningful for columns; beams/struts use the conservative M1=0 default.
+    # Signed end moments are the column curvature for Eq. A-8-4. Beams and
+    # struts carry load between their supports, so they use §8.2.1(b)
+    # (Cm = 1.0) instead of that ratio. AISC 360-16 App. 8 §8.2.1
+    # (corpus: aisc-360-16, PDF page 306).
     extract_end_moments = member_type === :columns
+    case_rows === nothing || extract_end_moments || throw(ArgumentError(
+        "case_rows are per-case column demands; member_edge_group must be :columns"))
+    beam_shear_cases === nothing || member_type === :beams || throw(ArgumentError(
+        "beam_shear_cases are per-case beam shears; member_edge_group must be beams"))
+    par_rows = case_rows === nothing ? nothing : [ColumnCaseRow[] for _ in 1:n_groups]
+    par_shear = beam_shear_cases === nothing ? nothing :
+        [BeamShearCase[] for _ in 1:n_groups]
 
     # Preallocated per-group parallel storage
     par_has  = Vector{Bool}(undef, n_groups)
@@ -370,14 +1007,12 @@ function member_group_demands(struc::BuildingStructure;
     par_Muy  = Vector{Float64}(undef, n_groups)
     par_Vus  = Vector{Float64}(undef, n_groups)
     par_Vuw  = Vector{Float64}(undef, n_groups)
-    par_δ    = Vector{Float64}(undef, n_groups)
     par_Ir   = Vector{Float64}(undef, n_groups)
     par_L    = Vector{Float64}(undef, n_groups)
     par_Lb   = Vector{Float64}(undef, n_groups)
     par_Cb   = Vector{Float64}(undef, n_groups)
     par_Kx   = Vector{Float64}(undef, n_groups)
     par_Ky   = Vector{Float64}(undef, n_groups)
-    par_Ldefl = Vector{Float64}(undef, n_groups)  # deflection span (longest sub-segment)
     # Signed (M1, M2) per group, ACI 318-19 sign convention. Selected from the
     # member with the largest |M2| in each axis. Defaulted to (0,0) when no
     # column member is present (e.g., beam/strut groups).
@@ -396,10 +1031,9 @@ function member_group_demands(struc::BuildingStructure;
         Mux = 0.0; Mux_pos = 0.0; Mux_neg = 0.0; Muy = 0.0
         Vu_strong = 0.0; Vu_weak = 0.0
         L_total = 0.0; Lb_gov = 0.0; Cb_gov = Inf
-        L_defl = 0.0  # longest individual segment (deflection span)
         Kx_gov = 0.0; Ky_gov = 0.0
         has_any = false
-        δ_max = 0.0; I_ref = 0.0
+        I_ref = 0.0
 
         # End-moment selection (column groups only). M1 and M2 come from the
         # same pattern case — the case with the largest |M2| on that axis —
@@ -412,6 +1046,7 @@ function member_group_demands(struc::BuildingStructure;
             m = member_array[m_idx]
             Kx_gov = max(Kx_gov, m.base.Kx)
             Ky_gov = max(Ky_gov, m.base.Ky)
+            L_member = 0.0
 
             seg_list = segment_indices(m)
             n_segs = length(seg_list)
@@ -422,6 +1057,16 @@ function member_group_demands(struc::BuildingStructure;
             case_My_s = zeros(Float64, n_pat); case_My_e = zeros(Float64, n_pat)
             case_Mz_s = zeros(Float64, n_pat); case_Mz_e = zeros(Float64, n_pat)
             saw_first_seg = false; saw_last_seg = false
+            # Per-case compression and moment peaks for `case_rows`.
+            case_Pc = zeros(Float64, n_pat)
+            case_Mx = zeros(Float64, n_pat); case_My = zeros(Float64, n_pat)
+            # Per-case shear for `beam_shear_cases`. An unshored composite
+            # diagram is one more case past n_pat. -1 marks a case not seen.
+            n_shear = n_pat + (staged === nothing ? 0 : 1)
+            case_Vu = fill(-1.0, n_shear)
+            case_Nu = zeros(Float64, n_shear)
+            case_Mu_pos = zeros(Float64, n_shear)
+            case_Mu_neg = zeros(Float64, n_shear)
 
             for (seg_pos, seg_idx) in enumerate(seg_list)
                 seg = struc.segments[seg_idx]
@@ -431,9 +1076,8 @@ function member_group_demands(struc::BuildingStructure;
                 has_any = true
                 len_val = to_meters(seg.L)
                 lb_val  = to_meters(seg.Lb)
-                L_total += len_val
+                L_member += len_val
                 Lb_gov = max(Lb_gov, lb_val)
-                L_defl = max(L_defl, len_val)  # track longest sub-segment
                 Cb_gov = min(Cb_gov, seg.Cb)
 
                 frame_idxs = _frame_element_indices(struc, edge_idx)
@@ -441,10 +1085,7 @@ function member_group_demands(struc::BuildingStructure;
                 el = struc.asap_model.frame_elements[el_idx]
                 el_loads = element_loads[el.elementID]
 
-                # Displacements from the full-load solve (`model.u` / node.displacement).
-                # Pattern cases envelope STRENGTH only; deflection stays full-load.
                 fd = Asap.ElementForceAndDisplacement(el, el_loads; resolution=resolution)
-                edisp = fd.displacements
 
                 force_sets = if split_patterns !== nothing
                     ntuple(i -> begin
@@ -470,17 +1111,30 @@ function member_group_demands(struc::BuildingStructure;
                     if min_P < 0; Pu_comp = max(Pu_comp, abs(min_P)); end
                     if max_P > 0; Pu_tens = max(Pu_tens, max_P); end
 
-                    Mux = max(Mux, mapreduce(abs, max, f.My))
+                    peaks = _strong_weak_peaks(f.My, f.Vy, f.Mz, f.Vz)
+                    Mux = max(Mux, peaks.Mu)
                     sag, hog = _asap_signed_My_envelopes(el, f.My)
                     if member_type === :beams
                         Mux_pos = max(Mux_pos, sag)
                         Mux_neg = max(Mux_neg, hog)
+                        case_Mu_pos[ci] = max(case_Mu_pos[ci], sag)
+                        case_Mu_neg[ci] = max(case_Mu_neg[ci], hog)
                     end
-                    Vu_strong = max(Vu_strong, mapreduce(abs, max, f.Vz))
-                    Muy = max(Muy, mapreduce(abs, max, f.Mz))
-                    Vu_weak = max(Vu_weak, mapreduce(abs, max, f.Vy))
+                    Vu_strong = max(Vu_strong, peaks.Vu)
+                    if par_shear !== nothing && member_type === :beams
+                        vu_i, Nu_i = _concurrent_strong_shear(f.P, f.Vy)
+                        if vu_i > case_Vu[ci]
+                            case_Vu[ci] = vu_i
+                            case_Nu[ci] = Nu_i
+                        end
+                    end
+                    Muy = max(Muy, peaks.Mu_weak)
+                    Vu_weak = max(Vu_weak, peaks.Vu_weak)
 
                     if extract_end_moments && ci <= n_pat
+                        case_Pc[ci] = max(case_Pc[ci], -min_P)
+                        case_Mx[ci] = max(case_Mx[ci], peaks.Mu)
+                        case_My[ci] = max(case_My[ci], peaks.Mu_weak)
                         if seg_pos == 1 && child_pos == 1
                             case_My_s[ci] = Float64(f.My[1])
                             case_Mz_s[ci] = Float64(f.Mz[1])
@@ -494,13 +1148,13 @@ function member_group_demands(struc::BuildingStructure;
                     end
                 end
 
-                δ_local = mapreduce(j -> abs(edisp.ulocal[3, j]), max, 1:size(edisp.ulocal, 2))
-                δ_max = max(δ_max, δ_local)
-
                 I_current = ustrip(u"m^4", el.section.Ix)
                 I_ref = max(I_ref, I_current)
                 end
             end
+            # Every member in the group gets the same section, so the group is
+            # checked at its longest member (AISC 360-16 §E2 Lc = K·L; F2.2 Lb).
+            L_total = max(L_total, L_member)
 
             if extract_end_moments && saw_first_seg && saw_last_seg
                 for ci in 1:n_pat
@@ -512,6 +1166,22 @@ function member_group_demands(struc::BuildingStructure;
                     if M2y_m > best_M2y
                         best_M2y = M2y_m; best_M1y = M1y_m
                     end
+                    par_rows === nothing || push!(par_rows[g], ColumnCaseRow(
+                        case_Pc[ci], case_Mx[ci], case_My[ci], M1x_m, M2x_m, M1y_m, M2y_m))
+                end
+            elseif par_rows !== nothing && L_member > 0
+                # No end moments for Cm: the case peaks stand in for M2 with
+                # M1 = 0, as in the group envelope.
+                for ci in 1:n_pat
+                    push!(par_rows[g], ColumnCaseRow(case_Pc[ci], case_Mx[ci], case_My[ci],
+                                                     0.0, case_Mx[ci], 0.0, case_My[ci]))
+                end
+            end
+            if par_shear !== nothing && member_type === :beams
+                for ci in eachindex(case_Vu)
+                    case_Vu[ci] < 0 && continue
+                    push!(par_shear[g], BeamShearCase(case_Vu[ci], case_Nu[ci], 0.0,
+                                                      case_Mu_pos[ci], case_Mu_neg[ci]))
                 end
             end
         end
@@ -522,10 +1192,9 @@ function member_group_demands(struc::BuildingStructure;
         par_Mux_pos[g] = member_type === :beams ? Mux_pos : Mux
         par_Mux_neg[g] = member_type === :beams ? Mux_neg : Mux
         par_Vus[g]  = Vu_strong; par_Vuw[g] = Vu_weak
-        par_δ[g]    = δ_max;   par_Ir[g]   = I_ref
+        par_Ir[g]   = I_ref
         par_L[g]    = L_total; par_Lb[g]   = Lb_gov
         par_Cb[g]   = Cb_gov;  par_Kx[g]   = Kx_gov; par_Ky[g] = Ky_gov
-        par_Ldefl[g] = L_defl
         par_M1x[g] = best_M1x; par_M2x[g] = best_M2x
         par_M1y[g] = best_M1y; par_M2y[g] = best_M2y
     end
@@ -542,46 +1211,45 @@ function member_group_demands(struc::BuildingStructure;
                 par_Mux[g] = max(par_Mux[g], d.Mu_pos, d.Mu_neg)
                 par_Vus[g] = max(par_Vus[g], d.Vu)
             end
+            # Shell demands have no axial. A shear they raise above the frame
+            # cases is one row with Nu = 0, so it is not credited with frame
+            # compression.
+            if par_shear !== nothing
+                peak = isempty(par_shear[g]) ? 0.0 : maximum(c.Vu for c in par_shear[g])
+                par_Vus[g] > peak + 1.0 &&
+                    push!(par_shear[g], BeamShearCase(par_Vus[g], 0.0, 0.0,
+                                                      par_Mux_pos[g], par_Mux_neg[g]))
+            end
         end
     end
-
-    # ── Service-load deflection split (LL-only vs DL+LL) ──
-    # Solve for unfactored dead and live displacements separately,
-    # then extract per-element max deflections.
-    has_split = !isempty(struc.cell_dead_loads) || !isempty(struc.cell_live_loads)
-    local δ_LL_map::Dict{Int, Float64}
-    local δ_total_map::Dict{Int, Float64}
-    if has_split
-        δ_LL_map, δ_total_map = _service_load_deflections(struc, params)
-    else
-        δ_LL_map = Dict{Int, Float64}()
-        δ_total_map = Dict{Int, Float64}()
-    end
-
-    # Aggregate service deflections per group (max over all segments)
-    par_δ_LL    = Vector{Float64}(undef, n_groups)
-    par_δ_total = Vector{Float64}(undef, n_groups)
-    Threads.@threads for g in 1:n_groups
-        par_has[g] || (par_δ_LL[g] = 0.0; par_δ_total[g] = 0.0; continue)
-        gid = all_group_ids[g]
-        mg = struc.member_groups[gid]
-        δ_ll = 0.0; δ_tot = 0.0
-        for m_idx in mg.member_indices
-            m = member_array[m_idx]
-            for seg_idx in segment_indices(m)
-                seg = struc.segments[seg_idx]
-                edge_idx = seg.edge_idx
-                edge_idx in beam_edge_ids || continue
-                for el_idx in _frame_element_indices(struc, edge_idx)
-                    el = struc.asap_model.frame_elements[el_idx]
-                    eid = el.elementID
-                    δ_ll  = max(δ_ll,  get(δ_LL_map, eid, 0.0))
-                    δ_tot = max(δ_tot, get(δ_total_map, eid, 0.0))
+    # ── Service deflection (beams): live, and superimposed dead + live ──
+    # Each beam reports its own chord offset over the span between supports.
+    par_r_LL    = zeros(Float64, n_groups)
+    par_r_total = zeros(Float64, n_groups)
+    if member_type === :beams && service_deflection
+        el_idxs = Set{Int}()
+        for g in 1:n_groups
+            par_has[g] || continue
+            for m_idx in struc.member_groups[all_group_ids[g]].member_indices
+                for seg_idx in segment_indices(member_array[m_idx])
+                    edge_idx = struc.segments[seg_idx].edge_idx
+                    edge_idx in beam_edge_ids || continue
+                    union!(el_idxs, _frame_element_indices(struc, edge_idx))
                 end
             end
         end
-        par_δ_LL[g] = δ_ll
-        par_δ_total[g] = δ_tot
+        _, _, ratios = _relative_service_deflection(struc, el_idxs)
+        for g in 1:n_groups
+            par_has[g] || continue
+            r_ll = 0.0
+            r_tot = 0.0
+            for m_idx in struc.member_groups[all_group_ids[g]].member_indices
+                r_ll = max(r_ll, ratios[m_idx][1])
+                r_tot = max(r_tot, ratios[m_idx][2])
+            end
+            par_r_LL[g] = r_ll
+            par_r_total[g] = r_tot
+        end
     end
 
     # Sequential filter & renumber indices
@@ -592,24 +1260,30 @@ function member_group_demands(struc::BuildingStructure;
     Cb_govs   = Float64[]
     Kx_govs   = Float64[]
     Ky_govs   = Float64[]
-    Ldefl_govs = Float64[]
 
+    case_rows === nothing || empty!(case_rows)
+    beam_shear_cases === nothing || empty!(beam_shear_cases)
     for g in 1:n_groups
         par_has[g] || continue
         push!(group_ids, all_group_ids[g])
         g_idx = length(group_ids)
+        case_rows === nothing || push!(case_rows, par_rows[g])
+        beam_shear_cases === nothing ||
+            push!(beam_shear_cases, _prune_covered_shear(par_shear[g]))
 
-        L_t = par_L[g]
-        L_d = par_Ldefl[g]
-        scale = (L_d > 0 && L_d < L_t) ? L_t / L_d : 1.0
+        # The checker divides by L_total; this returns the governing span ratio.
+        # A computed chord offset of zero is a beam that does not sag between
+        # its supports. `MemberDemand` reads 0 as "skip", so a computed zero is
+        # stored as a negligible sag and the check passes.
+        δ_ll_adj    = par_r_LL[g] * par_L[g]
+        δ_total_adj = par_r_total[g] * par_L[g]
+        if service_deflection && δ_total_adj == 0
+            δ_total_adj = 1e-12
+        end
 
-        δ_ll_adj    = has_split ? par_δ_LL[g] * scale    : par_δ[g] * scale
-        δ_total_adj = has_split ? par_δ_total[g] * scale  : 0.0
-
-        # For column groups, par_M*x/par_M*y carry signed (M1, M2) per ACI
-        # 318-19 from FEA. For other member types we leave M1/M2 unset so
-        # the `MemberDemand` constructor falls back to its conservative
-        # default (`M1 = 0`, `M2 = Mux/Muy` ⇒ Cm = 0.6).
+        # Column groups carry signed (M1, M2) from the frame analysis.
+        # Beams and struts are loaded between supports, so Cm = 1.0
+        # (AISC 360-16 App. 8 §8.2.1(b), corpus: aisc-360-16, PDF page 306).
         if extract_end_moments
             d = StructuralSizer.MemberDemand(g_idx;
                 Pu_c=par_Pu_c[g], Pu_t=par_Pu_t[g],
@@ -628,7 +1302,8 @@ function member_group_demands(struc::BuildingStructure;
                 Muy=par_Muy[g],
                 Vu_strong=par_Vus[g], Vu_weak=par_Vuw[g],
                 δ_max_LL=δ_ll_adj, δ_max_total=δ_total_adj,
-                I_ref=par_Ir[g])
+                I_ref=par_Ir[g],
+                transverse_load=true)
         end
 
         push!(demands, d)
@@ -639,7 +1314,54 @@ function member_group_demands(struc::BuildingStructure;
         push!(Ky_govs, par_Ky[g])
     end
 
+    # DEBUG (e0c0 chirality, ENV-gated, revert): per-call dump of the four hub
+    # girder groups' demands + installed sections, to pin the pass where the two
+    # mirror diagonals first diverge. Hub girders are found by geometry.
+    if member_type === :beams && get(ENV, "SS_TRACE_HUB_DEMANDS", "") == "1"
+        _trace_hub_demands(struc, all_group_ids, par_has, par_Mux_pos,
+                           par_Mux_neg, par_Vus)
+    end
+
     return group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs
+end
+
+const _HUB_DEMAND_CALL = Ref(0)
+
+"""DEBUG (e0c0 chirality, revert): dump hub-girder group demands + sections."""
+function _trace_hub_demands(struc, all_group_ids, par_has, par_Mux_pos,
+                            par_Mux_neg, par_Vus)
+    skel = struc.skeleton
+    hub = (12.0, 10.0)
+    far = ("NE" => (18.0, 15.0), "NW" => (6.0, 15.0),
+           "SE" => (18.0, 5.0), "SW" => (6.0, 5.0))
+    near(p, q) = hypot(p[1] - q[1], p[2] - q[2]) <= 1e-3
+    _HUB_DEMAND_CALL[] += 1
+    call = _HUB_DEMAND_CALL[]
+    for (lab, f) in far
+        bi = 0
+        for (i, b) in enumerate(struc.beams)
+            edges = [struc.segments[si].edge_idx for si in segment_indices(b)]
+            isempty(edges) && continue
+            vs = _ordered_chain_vertices(skel, edges)
+            (isempty(vs) || length(vs) < 2) && continue
+            p = _vertex_xy_m(skel, vs[1]); q = _vertex_xy_m(skel, vs[end])
+            if (near(p, hub) && near(q, f)) || (near(q, hub) && near(p, f))
+                bi = i; break
+            end
+        end
+        bi == 0 && continue
+        gi = findfirst(g -> par_has[g] &&
+            bi in struc.member_groups[all_group_ids[g]].member_indices,
+            eachindex(all_group_ids))
+        gi === nothing && continue
+        sec = _story_beam_section(struc, struc.beams[bi])
+        nm = sec === nothing ? "(none)" :
+             (hasproperty(sec, :name) ? string(sec.name) : string(sec))
+        # NB: @printf lives in the Printf stdlib, not Base; a plain println keeps
+        # this debug dump self-contained (no module-level import needed).
+        println("HUBDEMAND call=$call $lab  Mu+=$(round(par_Mux_pos[gi]; digits=3)) ",
+                "Mu-=$(round(par_Mux_neg[gi]; digits=3)) Vu=$(round(par_Vus[gi]; digits=3)) sec=$nm")
+    end
 end
 
 """
@@ -656,6 +1378,7 @@ for ASAP model updates.
 - `material`: Steel grade (default: A992_Steel)
 - `member_edge_group`: Which edge group to size — `:beams`, `:columns`, `:struts` (default: `:beams`)
 - `deflection_limit`: L/δ ratio, e.g. `1/360`. `nothing` = strength-only (default: `nothing`)
+- `params`: design parameters passed to [`member_group_demands`](@ref) (pattern cases)
 
 Side effects:
 - populates/overwrites `struc.member_groups[gid].section`
@@ -674,13 +1397,18 @@ function size_steel_members!(
     reanalyze::Bool=true,
     gravity_factor::Quantity=GRAVITY,
     deflection_limit::Union{Nothing, Real}=nothing,  # e.g., 1/360
+    params::DesignParameters=DesignParameters(),
     skel = struc.skeleton,
     edge_ids_in_group = Set(get(skel.groups_edges, member_edge_group, Int[])))
     
     _add_gravity_loads!(struc, edge_ids_in_group, gravity_factor)
     
     group_ids, demands, L_totals, Lb_govs, Cb_govs, Kx_govs, Ky_govs =
-        member_group_demands(struc; member_edge_group=member_edge_group, resolution=resolution)
+        member_group_demands(struc; member_edge_group=member_edge_group,
+                             resolution=resolution, params=params,
+                             service_deflection=deflection_limit !== nothing)
+    member_edge_group === :beams &&
+        _require_service_deflections(demands, group_ids, deflection_limit !== nothing)
 
     # Determine member array from edge group name (must match member_group_demands logic)
     member_array = if member_edge_group === :columns || (member_edge_group isa Union{AbstractVector{Symbol}, Tuple} && :columns in member_edge_group)
@@ -741,7 +1469,7 @@ function size_steel_members!(
             L_total = L_raw isa Unitful.Quantity ? L_raw : L_raw * u"m"
             set_section!(m, chosen)
             set_volumes!(m, MaterialVolumes(
-                _volume_key(material) => StructuralSizer.section_area(chosen) * L_total))
+                _volume_key(material) => StructuralSizer.self_weight_area(chosen) * L_total))
 
             # Update ASAP elements
             for seg_idx in segment_indices(m)
@@ -754,7 +1482,7 @@ function size_steel_members!(
 
     if reanalyze
         Asap.process!(struc.asap_model)
-        Asap.solve!(struc.asap_model)
+        _solve_struc_model!(struc)
     end
 
     defl_str = isnothing(deflection_limit) ? "none" : "L/$(Int(round(1/deflection_limit)))"

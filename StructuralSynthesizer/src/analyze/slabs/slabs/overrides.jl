@@ -129,9 +129,7 @@ function _scoped_override_floor_opts(ov::ScopedFloorOverride)
     punch = _resolve_scoped_punching_strategy(ov.punching_strategy)
 
     if ov.floor_type == :vault
-        return isnothing(ov.vault_lambda) ?
-            StructuralSizer.VaultOptions(lambda=10.0) :
-            StructuralSizer.VaultOptions(lambda=ov.vault_lambda)
+        return StructuralSizer.VaultOptions(lambda=something(ov.vault_lambda, DEFAULT_VAULT_LAMBDA))
     elseif ov.floor_type == :flat_plate
         return StructuralSizer.FlatPlateOptions(
             method=method, deflection_limit=defl, punching_strategy=punch)
@@ -141,6 +139,8 @@ function _scoped_override_floor_opts(ov::ScopedFloorOverride)
                 method=method, deflection_limit=defl, punching_strategy=punch))
     elseif ov.floor_type == :one_way
         return StructuralSizer.OneWayOptions()
+    elseif ov.floor_type == :two_way
+        return StructuralSizer.TwoWayOptions()
     end
     return nothing
 end

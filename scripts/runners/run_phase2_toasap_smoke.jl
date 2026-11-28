@@ -19,7 +19,7 @@ end
 
 to_asap!(struc; params=DesignParameters())
 
-releases = [SS._get_release_symbol(el) for el in struc.asap_model.elements if el isa Asap.Element]
+releases = [SS._get_release_symbol(el) for el in struc.asap_model.frame_elements if el isa Asap.Element]
 println("n_frame_elements = ", length(releases))
 uniq = unique(releases)
 println("unique releases   = ", uniq)

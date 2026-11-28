@@ -3,82 +3,15 @@
     _get_slab_boundary_vertices(struc, slab)
         -> (boundary_vis::Vector{Int}, interior_edge_vis::Vector{Tuple{Int,Int}})
 
-Ordered boundary vertex indices and interior cell-edge vertex pairs for a slab.
+Exterior boundary vertex indices and interior cell-edge vertex pairs.
 
-Single-cell slabs: boundary = face polygon, interior edges = empty.
-Multi-cell slabs: boundary edges (shared by exactly 1 cell) are chained into a
-CCW polygon; interior edges (shared by 2+ cells) are returned as vertex pairs.
-
-Correctly handles concave slab boundaries (L-shapes, T-shapes, etc.) — does NOT
-use a convex hull.  The architecture supports future multiply-connected domains
-(slab openings) via `DT.triangulate(...; boundary_nodes=...)`.
+The exterior is the largest closed loop of edges that belong to one slab
+cell. A missing bay is a hole ([`StructuralSizer.slab_void_loops`](@ref)),
+not part of this polygon. Concave plans stay concave: this is not a convex hull.
 """
 function _get_slab_boundary_vertices(struc::BuildingStructure, slab::Slab)
-    skel = struc.skeleton
-
-    if length(slab.cell_indices) == 1
-        cell = struc.cells[first(slab.cell_indices)]
-        boundary = collect(skel.face_vertex_indices[cell.face_idx])
-        return (boundary, Tuple{Int,Int}[])
-    end
-
-    # Count how many slab cells reference each skeleton edge
-    edge_count = Dict{Int, Int}()
-    for ci in slab.cell_indices
-        face_idx = struc.cells[ci].face_idx
-        for ei in skel.face_edge_indices[face_idx]
-            edge_count[ei] = get(edge_count, ei, 0) + 1
-        end
-    end
-
-    boundary_edge_vis = Tuple{Int,Int}[skel.edge_indices[ei] for (ei, c) in edge_count if c == 1]
-    interior_edge_vis = Tuple{Int,Int}[skel.edge_indices[ei] for (ei, c) in edge_count if c >= 2]
-
-    isempty(boundary_edge_vis) && error("Could not find slab boundary — all edges are shared.")
-
-    # Chain boundary edges into an ordered polygon
-    adj = Dict{Int, Vector{Int}}()
-    for (a, b) in boundary_edge_vis
-        push!(get!(adj, a, Int[]), b)
-        push!(get!(adj, b, Int[]), a)
-    end
-
-    start = boundary_edge_vis[1][1]
-    boundary = [start]
-    prev = 0
-    current = start
-    for _ in 1:length(boundary_edge_vis)
-        neighbors = adj[current]
-        next = first(n for n in neighbors if n != prev)
-        next == start && break
-        push!(boundary, next)
-        prev = current
-        current = next
-    end
-
-    # Ensure CCW orientation (Delaunay triangulator requirement)
-    _ensure_ccw_vis!(boundary, skel)
-
-    return (boundary, interior_edge_vis)
-end
-
-"""
-    _ensure_ccw_vis!(vis, skel)
-
-Reverse `vis` in-place if the polygon formed by the skeleton vertices is CW.
-Uses the signed-area (shoelace) sign test.
-"""
-function _ensure_ccw_vis!(vis::Vector{Int}, skel)
-    n = length(vis)
-    vc = skel.geometry.vertex_coords
-    signed_area = 0.0
-    for i in 1:n
-        j = mod1(i + 1, n)
-        signed_area += vc[vis[i], 1] * vc[vis[j], 2] -
-                       vc[vis[j], 1] * vc[vis[i], 2]
-    end
-    signed_area < 0 && reverse!(vis)
-    return vis
+    boundary, _, interior = StructuralSizer._get_slab_face_boundary(struc, slab)
+    return (boundary, interior)
 end
 
 """
@@ -107,9 +40,78 @@ function _get_interior_column_nodes(struc::BuildingStructure, slab::Slab,
     return Asap.Node[nodes[vi] for vi in interior_vert_indices]
 end
 
+"""
+    _slab_outline_nodes!(skel, nodes, vert_indices, overhang, face_nodes, spawned)
+        -> (corners, centers)
+
+Shell corners on the slab edge, outside the column centerlines.
+
+`nodes[vi]` is the column center, on the skeleton vertex. `overhang[vi]` is
+the displacement in metres from that vertex to the slab edge
+([`slab_vertex_overhang`](@ref)). The spawned corner is the edge. The column
+node is returned in `centers` so the shell embeds it. A vertex with no
+overhang keeps `nodes[vi]` as its corner. `face_nodes` reuses one edge node
+when several slabs share the vertex.
+"""
+function _slab_outline_nodes!(skel, nodes::Vector{Asap.Node}, vert_indices,
+                              overhang, face_nodes::Dict{Int, Asap.Node},
+                              spawned::Vector{Asap.Node})
+    vc = skel.geometry.vertex_coords
+    corners = Asap.Node[]
+    centers = Asap.Node[]
+    sizehint!(corners, length(vert_indices))
+    for vi in vert_indices
+        off = get(overhang, vi, (0.0, 0.0))
+        if hypot(off[1], off[2]) <= 1e-8
+            push!(corners, nodes[vi])
+            continue
+        end
+        nd = get!(face_nodes, vi) do
+            node = Asap.Node(
+                [(vc[vi, 1] + off[1]) * u"m", (vc[vi, 2] + off[2]) * u"m", vc[vi, 3] * u"m"],
+                [true, true, true, false, false, false],
+            )
+            push!(spawned, node)
+            node
+        end
+        push!(corners, nd)
+        # The column stays on the centerline. The shell covers it.
+        push!(centers, nodes[vi])
+    end
+    return corners, centers
+end
+
+"Append column centers that are not already in `interior`."
+function _embed_column_centers!(interior::Vector{Asap.Node}, centers::Vector{Asap.Node})
+    seen = Set{UInt64}(objectid(n) for n in interior)
+    for nd in centers
+        id = objectid(nd)
+        id in seen && continue
+        push!(seen, id)
+        push!(interior, nd)
+    end
+    return interior
+end
+
 # =============================================================================
 # Analysis Model Builder (Frame + Shell for Global Deflection)
 # =============================================================================
+
+"""
+`struc.walls` index of each shell in a model from [`build_analysis_model!`](@ref),
+in `model.shell_elements` order, 0 for a shell that is not a wall. Kept beside
+the model rather than on `BuildingDesign` so a saved design file keeps its
+layout. Weak keys: an entry goes when its model does.
+"""
+const _ANALYSIS_SHELL_WALLS = WeakKeyDict{Asap.Model, Vector{Int}}()
+
+"""
+    analysis_shell_walls(model) -> Vector{Int} or nothing
+
+The wall index of each shell in `model` (see `_ANALYSIS_SHELL_WALLS`), or
+`nothing` when `model` was not built by `build_analysis_model!`.
+"""
+analysis_shell_walls(model::Asap.Model) = get(_ANALYSIS_SHELL_WALLS, model, nothing)
 
 """
     build_analysis_model!(design; load_combination=service, mesh_density=2, frame_groups=:auto)
@@ -136,6 +138,11 @@ The original `struc.asap_model` (frame-only) is preserved for design calculation
   modulus multiplier. `nothing` (default) follows the floor `FEA` method
   (100). A number overrides that; `1` is an ordinary-slab patch. Ignored
   when the slab has no drop-panel patches.
+- `source`: `:auto` (default) returns [`story_shell_scene_model`](@ref) when
+  every slab was sized on a story shell, and [`grillage_scene_model`](@ref)
+  when every slab is a grillage. Otherwise it meshes the model below.
+  `:story_shell` requires the story shells. `:rebuild` always meshes. The
+  other arguments apply only to the meshed model.
 
 # Example
 ```julia
@@ -157,10 +164,10 @@ visualize(design, mode=:deflected)
 - Self-weight is included via shell density (ρ = concrete density)
 - SDL + LL applied as AreaLoad to shell surfaces
 - Frame TributaryLoads are NOT included (loads go through shells)
-- A `:walls` edge that this filter still copies (the edge is also in an
-  included group, or `frame_groups` lists `:walls`) gets the same zero frame
-  section as `to_asap!`. Which groups are included does not change.
+- A `:walls` or `:absent` edge that this filter still copies gets the same
+  zero frame section as `to_asap!`. Which groups are included does not change.
 """
+
 function build_analysis_model!(design::BuildingDesign;
                                load_combination::LoadCombination=service,
                                mesh_density::Int=2,
@@ -169,7 +176,18 @@ function build_analysis_model!(design::BuildingDesign;
                                refinement_edge_length=nothing,
                                refinement_radius=nothing,
                                refinement_targets=nothing,
-                               patch_stiffness_factor::Union{Real, Nothing}=nothing)
+                               patch_stiffness_factor::Union{Real, Nothing}=nothing,
+                               source::Symbol=:auto)
+    source in (:auto, :story_shell, :rebuild) || throw(ArgumentError(
+        "source must be :auto, :story_shell or :rebuild, got :$source"))
+    if source !== :rebuild
+        model = story_shell_scene_model(design)
+        model !== nothing && return model
+        source === :story_shell && error(
+            "a slab of this design has no saved story-shell solve")
+        model = grillage_scene_model(design)
+        model !== nothing && return model
+    end
     struc = design.structure
     skel = struc.skeleton
     
@@ -183,7 +201,14 @@ function build_analysis_model!(design::BuildingDesign;
         if floor_type == :flat_plate
             [:columns]  # Beamless slab
         else
-            [:columns, :beams]  # Slab-on-beam systems
+            # Joists are the rib grid. A solid-head cut leaves vertices that
+            # only those ribs touch; leaving the vertices free with no element
+            # makes the scene model singular.
+            groups = Symbol[:columns, :beams]
+            for g in (:joists, :secondary)
+                isempty(get(skel.groups_edges, g, Int[])) || push!(groups, g)
+            end
+            groups
         end
     else
         frame_groups isa Vector ? frame_groups : [frame_groups]
@@ -218,8 +243,7 @@ function build_analysis_model!(design::BuildingDesign;
     src_model = struc.asap_model
     frame_elements = Asap.FrameElement[]
     frame_edge_indices = Int[]
-    wall_ids = get(skel.groups_edges, :walls, Int[])
-    wall_edges = isempty(wall_ids) ? nothing : Set(wall_ids)
+    inert_edges = _inert_frame_edges(skel)
 
     # Resolve releases from the beam release fields (same source as to_asap!), not
     # by reading them back off the source Asap element, so the rebuild honors any
@@ -235,13 +259,13 @@ function build_analysis_model!(design::BuildingDesign;
         edge_idx in included_edges || continue
         
         # Get section from source model if available.
-        # Zero a copied :walls edge so its frame stiffness and mass stay out
-        # of this model. Non-wall edges keep the sized source section.
+        # Zero a copied :walls or :absent edge so its frame stiffness and mass
+        # stay out of this model. Other edges keep the sized source section.
         # Unified `Model` stores frames on `frame_elements`. `FrameModel` still
         # uses `elements`. Skeleton edge `i` is frame element `i` in both.
         src_frames = hasproperty(src_model, :frame_elements) ? src_model.frame_elements : src_model.elements
         src_el = src_frames[edge_idx]
-        section = if !isnothing(wall_edges) && edge_idx in wall_edges
+        section = if edge_idx in inert_edges
             _zero_wall_frame_section(src_el.section.E, src_el.section.G)
         else
             src_el.section
@@ -250,18 +274,35 @@ function build_analysis_model!(design::BuildingDesign;
         # Per-beam release (non-beam edges default to :fixedfixed)
         release_sym = get(edge_release, edge_idx, :fixedfixed)
         ecc = get(edge_eccentricity, edge_idx, (0.0, 0.0, 0.0, 0.0))
-        
-        el = Asap.Element(nodes[v1], nodes[v2], section; release=release_sym, eccentricity=ecc)
+
+        el = Asap.Element(nodes[v1], nodes[v2], section; release=release_sym)
+        el.Ψ = src_el.Ψ
+        # `ecc` is physical (positive local y = global up). Sign slot 3
+        # for the roll just copied from the source element.
+        el.eccentricity = Asap.orient_up_eccentricity(
+            ecc, el.nodeStart, el.nodeEnd; roll = el.Ψ)
         push!(frame_elements, el)
         push!(frame_edge_indices, edge_idx)
     end
     
-    # ─── 5. Create shell elements for slabs ───
+    # ─── 5a. Wall shells ───
+    # Same mesh and stiffness as to_asap!. Meshed before the slabs so a flat
+    # slab can embed the wall nodes at its elevation (see `_slab_wall_nodes`).
+    # Walls are vertical; the slab AreaLoad below does not touch them.
+    wall_shells, wall_nodes, shells_by_wall, _ = _mesh_wall_shells(struc, design.params, nodes, Asap.ShellElement[])
+    _apply_stated_cracked_wall_stiffness!(wall_shells, design.params)
+
+    # ─── 5b. Create shell elements for slabs ───
     # Mesh entire slab boundary as one continuous shell, not per-cell.
     # For vault slabs, use VaultShell to create curved parabolic mesh.
     shell_elements = Asap.ShellElement[]
     slab_shell_map = Dict{Int, Vector{Asap.ShellElement}}()
-    
+    # Slab-edge nodes. The column nodes in `nodes` stay on the centerlines,
+    # inboard of this outline.
+    face_nodes = Dict{Int, Asap.Node}()
+    spawned_face_nodes = Asap.Node[]
+    overhang = slab_vertex_overhang(struc)
+
     for (slab_idx, slab) in enumerate(struc.slabs)
         # Get slab properties
         t = thickness(slab)
@@ -295,8 +336,10 @@ function build_analysis_model!(design::BuildingDesign;
             rise = vault_result.rise
             span_axis = slab.spans.axis
             
-            corners = tuple([nodes[vi] for vi in boundary_vert_indices]...)
-            
+            outline, _ = _slab_outline_nodes!(
+                skel, nodes, boundary_vert_indices, overhang, face_nodes, spawned_face_nodes)
+            corners = tuple(outline...)
+
             column_refinement_nodes = _get_slab_column_nodes(struc, slab, nodes)
             effective_target_edge_length = _resolve_slab_target_edge_length(
                 struc, slab, mesh_controls.target_edge_length)
@@ -326,7 +369,14 @@ function build_analysis_model!(design::BuildingDesign;
             scale_factor = ceil(Int, sqrt(n_cells))
             effective_n = mesh_density * scale_factor
             
+            outline, column_centers = _slab_outline_nodes!(
+                skel, nodes, boundary_vert_indices, overhang, face_nodes, spawned_face_nodes)
             interior_nodes = _get_interior_column_nodes(struc, slab, boundary_vert_indices, nodes)
+            _embed_column_centers!(interior_nodes, column_centers)
+            slab_holes = vcat(StructuralSizer.slab_opening_loops(struc, slab),
+                              StructuralSizer.slab_void_loops(struc, slab))
+            append!(interior_nodes, _slab_wall_nodes(wall_nodes, interior_nodes, outline;
+                                                     holes=slab_holes))
             column_refinement_nodes = _get_slab_column_nodes(struc, slab, nodes)
             slab_columns = _get_slab_columns(struc, slab)
             use_shell_patches = slab.floor_type == :flat_slab && !isnothing(slab.drop_panel)
@@ -341,7 +391,8 @@ function build_analysis_model!(design::BuildingDesign;
                     struc, slab_columns, section;
                     drop_panel=slab.drop_panel,
                     patch_stiffness_factor=mesh_controls.patch_stiffness_factor,
-                    vertex_set=slab_vertex_set) :
+                    vertex_set=slab_vertex_set,
+                    span_axis=StructuralSizer._get_span_axis(slab)) :
                 Asap.ShellPatch[]
             effective_target_edge_length = _resolve_slab_target_edge_length(
                 struc, slab, mesh_controls.target_edge_length)
@@ -363,10 +414,11 @@ function build_analysis_model!(design::BuildingDesign;
                 @debug "  Refinement targets" n=length(ref_positions) positions=ref_positions[1:min(10, length(ref_positions))]
             end
             
-            corners = tuple([nodes[vi] for vi in boundary_vert_indices]...)
+            corners = tuple(outline...)
             warn_span_m = _slab_min_primary_span_m(struc, slab)
 
             slab_shells = Asap.Shell(corners, section; n=effective_n,
+                                     holes=slab_holes,
                                      id=Symbol("slab_$(slab_idx)"),
                                      interior_nodes=interior_nodes,
                                      interior_patches=interior_patches,
@@ -394,7 +446,8 @@ function build_analysis_model!(design::BuildingDesign;
                     struc, slab_columns, section;
                     drop_panel=slab.drop_panel,
                     patch_stiffness_factor=mesh_controls.patch_stiffness_factor,
-                    vertex_set=slab_vertex_set) :
+                    vertex_set=slab_vertex_set,
+                    span_axis=StructuralSizer._get_span_axis(slab)) :
                 Asap.ShellPatch[]
             effective_target_edge_length = _resolve_slab_target_edge_length(
                 struc, slab, mesh_controls.target_edge_length)
@@ -411,10 +464,14 @@ function build_analysis_model!(design::BuildingDesign;
             
             for face_idx in face_indices
                 vert_indices = skel.face_vertex_indices[face_idx]
-                corners = tuple([nodes[vi] for vi in vert_indices]...)
-                
+                outline, column_centers = _slab_outline_nodes!(
+                    skel, nodes, vert_indices, overhang, face_nodes, spawned_face_nodes)
+                corners = tuple(outline...)
+
                 face_shells = Asap.Shell(corners, section; n=mesh_density,
+                                         holes=StructuralSizer.slab_opening_loops(struc, slab; face_idx=face_idx),
                                          id=Symbol("slab_$(slab_idx)"),
+                                         interior_nodes=column_centers,
                                          edge_support_type=:free,
                                          interior_support_type=:free,
                                          interior_patches=interior_patches,
@@ -430,10 +487,15 @@ function build_analysis_model!(design::BuildingDesign;
         append!(shell_elements, slab_shells)
     end
     
+    append!(shell_elements, wall_shells)
+    # Face nodes are shell-only. They join the node list so their rotations
+    # free with the rest of the plate before the model is assembled.
+    append!(nodes, spawned_face_nodes)
+
     # ─── 6. Create loads ───
     loads = Asap.AbstractLoad[]
     
-    # Self-weight of shells (concrete weight)
+    # Self-weight of shells (slab and wall concrete weight, from each shell's ρ)
     if !isempty(shell_elements)
         push!(loads, Asap.SelfWeight(shell_elements))
     end
@@ -459,6 +521,7 @@ function build_analysis_model!(design::BuildingDesign;
     
     # ─── 7. Build and solve model ───
     _free_restrained_node_rotations!(nodes, frame_elements, shell_elements)
+    _fix_unused_nodes!(nodes, frame_elements, shell_elements)
     model = Asap.Model(nodes, frame_elements, shell_elements, loads)
     
     Asap.process!(model)
@@ -466,7 +529,13 @@ function build_analysis_model!(design::BuildingDesign;
     
     design.asap_model = model
     design.asap_model_frame_edge_indices = frame_edge_indices
-    
+    wall_of = Dict{UInt, Int}()
+    for (iw, shells) in enumerate(shells_by_wall), sh in shells
+        wall_of[objectid(sh)] = iw
+    end
+    _ANALYSIS_SHELL_WALLS[model] = [get(wall_of, objectid(sh), 0) for sh in model.shell_elements]
+    _ANALYSIS_SCENE_KIND[model] = :display_mesh
+
     @info "Built analysis model" frame_groups=resolved_groups n_frames=length(frame_elements) n_shells=length(shell_elements) n_loads=length(loads)
     
     return model
@@ -560,6 +629,52 @@ both above and below each column segment (vertex_idx is always the top).
 """
 function _get_slab_columns(struc::BuildingStructure, slab::Slab)
     return StructuralSizer.find_supporting_columns(struc, Set(slab.cell_indices))
+end
+
+"""
+    _slab_wall_nodes(wall_nodes, interior_nodes, corners; holes=...) -> Vector{Asap.Node}
+
+Wall-mesh nodes a flat slab should embed: at the slab elevation (1 mm), inside
+the slab or on its edge, and not already a corner or interior node. Nodes
+strictly inside a hole are the shaft, not the slab. Embedding the same `Node`
+objects is what lets the slab bear on the wall, including along a core opening
+where the wall is the slab boundary.
+"""
+function _slab_wall_nodes(wall_nodes::Vector{Asap.Node}, interior_nodes::Vector{Asap.Node},
+                          corners::Vector{Asap.Node};
+                          holes=Vector{Vector{NTuple{2,Float64}}}())
+    isempty(wall_nodes) && return Asap.Node[]
+    slab_z = ustrip(u"m", corners[1].position[3])
+    polygon = [(ustrip(u"m", n.position[1]), ustrip(u"m", n.position[2])) for n in corners]
+    taken = Set{UInt64}(objectid(n) for n in Iterators.flatten((interior_nodes, corners)))
+    out = Asap.Node[]
+    for nd in wall_nodes
+        objectid(nd) in taken && continue
+        abs(ustrip(u"m", nd.position[3]) - slab_z) <= 1e-3 || continue
+        pt = (ustrip(u"m", nd.position[1]), ustrip(u"m", nd.position[2]))
+        on_slab = _point_inside_polygon(pt, polygon) || _point_on_polygon_boundary(pt, polygon)
+        on_slab || continue
+        any(h -> _point_inside_polygon(pt, h) && !_point_on_polygon_boundary(pt, h), holes) && continue
+        push!(out, nd)
+        push!(taken, objectid(nd))
+    end
+    return out
+end
+
+"""True when `pt` is within `tol` metres of an edge of `polygon`."""
+function _point_on_polygon_boundary(pt::Tuple{Float64, Float64},
+                                    polygon::Vector{Tuple{Float64, Float64}}; tol::Float64=1e-3)
+    n = length(polygon)
+    for i in 1:n
+        a = polygon[i]
+        b = polygon[mod1(i + 1, n)]
+        ab = (b[1] - a[1], b[2] - a[2])
+        len2 = ab[1]^2 + ab[2]^2
+        len2 == 0 && continue
+        s = clamp(((pt[1] - a[1]) * ab[1] + (pt[2] - a[2]) * ab[2]) / len2, 0.0, 1.0)
+        hypot(pt[1] - (a[1] + s * ab[1]), pt[2] - (a[2] + s * ab[2])) <= tol && return true
+    end
+    return false
 end
 
 """

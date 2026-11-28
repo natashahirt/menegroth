@@ -193,7 +193,7 @@ is_steel_beam(sec)      = sec !== nothing && !is_concrete_beam(sec)
 #     / `_apply_column_results!`.
 #
 # Element resolution mirrors those same appliers:
-#   member → `segment_indices` → `segments[seg].edge_idx` → `asap_model.elements`.
+#   member → `segment_indices` → `segments[seg].edge_idx` → `asap_model.frame_elements`.
 function rep_member(struc, member_type::Symbol, section_pred)
     member_array = member_type === :columns ? struc.columns : struc.beams
     SS.build_member_groups!(struc; member_type = member_type)
@@ -204,8 +204,8 @@ function rep_member(struc, member_type::Symbol, section_pred)
             (sec !== nothing && section_pred(sec)) || continue
             for seg_idx in SS.segment_indices(m)
                 edge_idx = struc.segments[seg_idx].edge_idx
-                (1 <= edge_idx <= length(struc.asap_model.elements)) || continue
-                return (sec, struc.asap_model.elements[edge_idx])
+                (1 <= edge_idx <= length(struc.asap_model.frame_elements)) || continue
+                return (sec, struc.asap_model.frame_elements[edge_idx])
             end
         end
     end

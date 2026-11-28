@@ -135,10 +135,7 @@ function _collect_slab_joist_lines(struc::BuildingStructure, slab::Slab,
                                    nodes::Vector{Asap.Node})
     lines = _DiaphragmJoistLine[]
     for fl in slab.framing_levels
-        fl.group_id === nothing && continue
-        grp = get(struc.member_groups, fl.group_id, nothing)
-        grp === nothing && continue
-        for mi in grp.member_indices
+        for mi in level_member_indices(struc, fl)
             (mi >= 1 && mi <= length(struc.beams)) || continue
             beam = struc.beams[mi]
             beam.role === :joist || continue
@@ -237,10 +234,13 @@ function create_slab_diaphragm_shells(struc::BuildingStructure, slab::Slab, node
         face_lines = _DiaphragmJoistLine[jl for jl in joist_lines
                        if _point_in_polygon_xy(jl.midpoint[1], jl.midpoint[2], face_poly)]
 
+        # Openings and beam rings are voids. An empty list meshes the face as before.
+        holes = face_opening_loops(skel, face_idx)
         if isempty(face_lines)
             # Use Asap's Shell() for automatic triangulation (n=2 for coarse mesh)
             face_shells = Asap.Shell(corners, section; n=2, id=:diaphragm,
-                                     edge_support_type=:free, interior_support_type=:free)
+                                     edge_support_type=:free, interior_support_type=:free,
+                                     holes=holes)
         else
             # Joist lines present → constrained-Delaunay mesh that respects them.
             constrained = Vector{NTuple{2, Float64}}[jl.polyline for jl in face_lines]
@@ -269,6 +269,7 @@ function create_slab_diaphragm_shells(struc::BuildingStructure, slab::Slab, node
                                      interior_support_type=:free,
                                      interior_nodes=interior_nodes,
                                      interior_constrained_lines=constrained,
+                                     holes=holes,
                                      refinement_edge_length=h_near * u"m",
                                      refinement_targets=refine_targets)
         end

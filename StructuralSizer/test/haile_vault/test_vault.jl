@@ -224,6 +224,9 @@ const TEST_PARAMS = (
         @test ustrip(result1.arc_length) > ustrip(u"m", 6.0u"m")  # Arc > span
         @test result1.σ_max > 0
         @test result1.governing_case in [:symmetric, :asymmetric]
+        # Shell + rise is not a beam flange.
+        @test StructuralSizer.flange_thickness(result1) === nothing
+        @test total_depth(result1) == result1.thickness + result1.rise
         
         # Test with lambda (should give same result)
         result2 = _size_vault_slab(
@@ -286,8 +289,76 @@ const TEST_PARAMS = (
         @test haskey(NamedTuple(result.convergence_check), :iterations)
         
         # is_adequate accessor
-        expected_adequate = result.stress_check.ok && result.deflection_check.ok && result.convergence_check.converged
+        expected_adequate = result.stress_check.ok && result.kern_check.ok &&
+                            result.deflection_check.ok && result.convergence_check.converged
         @test is_adequate(result) == expected_adequate
+    end
+
+    @testset "Half-span thrust-line kern (unreinforced, middle third)" begin
+        # HAND CHECK — L = 6 m, f = 1 m, t = 50 mm, q_D = 5 kN/m, q_L = 2 kN/m.
+        # tanθ = 2f/L = 1/3, cosθ = 3/√10, sinθ = 1/√10.
+        # H = L²(2q_D + q_L)/(16f) = 27 kN; V = (2q_D + q_L)L/8 = 9 kN;
+        # N = H cosθ + V sinθ = 90/√10 kN; M = q_L L²/64 = 1.125 kN·m.
+        # e = M/N = 39.53 mm; limit = t cosθ/6 = 7.906 mm.
+        k = StructuralSizer.vault_kern_check(6.0u"m", 1.0u"m", 0.05u"m", 5.0u"kN/m", 2.0u"kN/m")
+        @test k.e ≈ 1.125 / (90 / sqrt(10)) * 1000 rtol = 1e-12
+        @test k.limit ≈ 50 * (3 / sqrt(10)) / 6 rtol = 1e-12
+        @test k.ratio ≈ k.e / k.limit
+        @test !k.ok
+
+        # Full-span load is funicular: no live load, no eccentricity.
+        k0 = StructuralSizer.vault_kern_check(6.0u"m", 1.0u"m", 0.05u"m", 5.0u"kN/m", 0.0u"kN/m")
+        @test k0.e == 0.0 && k0.ok
+
+        # A failing kern makes the vault inadequate. The check cannot be switched off.
+        r = _size_vault_slab(6.0u"m", 1.0u"kN/m^2", 2.0u"kN/m^2";
+                             options = VaultOptions(rise = 1.0u"m", thickness = 0.05u"m"))
+        @test !r.kern_check.ok
+        @test !is_adequate(r)
+        @test !hasfield(VaultOptions, :check_asymmetric)
+    end
+
+    @testset "Default limits (single source)" begin
+        mat = StructuralSizer.NWC_4000
+        @test StructuralSizer.vault_allowable_stress(mat) ≈ 0.45 * mat.fc′
+        @test StructuralSizer.vault_allowable_stress(mat, 3.0) == 3.0u"MPa"
+        @test StructuralSizer.vault_rise_loss_limit(6.0u"m") ≈ 6.0u"m" / 240
+        @test StructuralSizer.vault_rise_loss_limit(6.0u"m", 0.01u"m") == 0.01u"m"
+    end
+
+    @testset "Minimum-thickness search: bisection matches a full scan" begin
+        span, rise, trib = 6.0u"m", 1.0u"m", 1.0u"m"
+        z = 0.0u"m"
+        mat = StructuralSizer.NWC_4000
+        sdl, live, fin = 1.0u"kN/m^2", 2.0u"kN/m^2", 0.5u"kN/m^2"
+        σ_allow = 0.45 * mat.fc′
+        δ_lim = span / 240
+        t_min, t_max, t_step = 0.03u"m", 0.50u"m", 0.005u"m"
+
+        function passes(t)
+            c = StructuralSizer.vault_load_cases(span, rise, trib, t, z, z, mat.ρ, sdl, live, fin)
+            (c.σ_max <= σ_allow && c.kern.ok) || return false
+            eq = StructuralSizer.solve_equilibrium_rise(span, rise, sdl + live + c.self_weight + fin,
+                                                        t, trib, mat.E; deflection_limit = δ_lim)
+            return eq.converged && eq.deflection_ok
+        end
+        grid = [t * u"m" for t in ustrip(u"m", t_min):ustrip(u"m", t_step):ustrip(u"m", t_max)]
+        i_scan = findfirst(passes, grid)
+        @test i_scan !== nothing
+
+        t = StructuralSizer._find_min_thickness(span, rise, trib, z, z, mat.ρ, mat.E,
+                                                sdl, live, fin, σ_allow, δ_lim;
+                                                t_min, t_max, t_step)
+        @test t ≈ grid[i_scan]
+        @test passes(t)
+
+        # Bounds are honored: a window that stops below the scan answer
+        # returns its upper bound (with a warning), never a value outside it.
+        hi = grid[max(i_scan - 2, 1)]
+        t_cap = @test_logs (:warn,) match_mode = :any StructuralSizer._find_min_thickness(
+            span, rise, trib, z, z, mat.ρ, mat.E, sdl, live, fin, σ_allow, δ_lim;
+            t_min, t_max = hi, t_step)
+        @test t_cap == hi
     end
     
     @testset "Default allowable stress (0.45 fc')" begin
@@ -337,14 +408,24 @@ const TEST_PARAMS = (
                                 rib_depth=0.0u"m", rib_apex_rise=0.0u"m")
         )
         
-        # With ribs (should have higher self-weight)
-        result_with_rib = _size_vault_slab(
+        @test result_no_rib.kern_check isa NamedTuple
+
+        # Ribs add weight (Haile's geometry), but the no-tension check covers
+        # the plain shell only, so a ribbed vault is refused.
+        ribbed = get_vault_properties(6.0, 1.0, 0.05, 1.0, 0.10, 0.05)
+        plain = get_vault_properties(6.0, 1.0, 0.05, 1.0, 0.0, 0.0)
+        @test ribbed.total_vol > plain.total_vol
+        @test_throws ArgumentError _size_vault_slab(
             6.0u"m", 1.0u"kN/m^2", 1.5u"kN/m^2";
             options=VaultOptions(rise=1.0u"m", thickness=0.05u"m",
                                 rib_depth=0.10u"m", rib_apex_rise=0.05u"m")
         )
-        
-        @test result_with_rib.self_weight > result_no_rib.self_weight
+        # One rib dimension at zero is no rib.
+        @test _size_vault_slab(
+            6.0u"m", 1.0u"kN/m^2", 1.5u"kN/m^2";
+            options=VaultOptions(rise=1.0u"m", thickness=0.05u"m",
+                                rib_depth=0.10u"m", rib_apex_rise=0.0u"m")
+        ).self_weight ≈ result_no_rib.self_weight
     end
     
     # =========================================================================
@@ -366,7 +447,7 @@ const TEST_PARAMS = (
         )
         
         # Self-weight for shell only: thickness * density * g
-        g = 9.80665u"m/s^2"
+        g = GRAVITY
         sw_expected = thickness * density * g
         @test ustrip(u"kN/m^2", result.self_weight) ≈ ustrip(u"kN/m^2", sw_expected) rtol=0.01
         

@@ -6,12 +6,12 @@
 # floor types:
 #   - :mass_timber_joist  → LinearAxisPattern auto-derived from the joist result
 #   - :joist_roof_deck    → a MANUALLY attached FramingLevel (tests manual
-#                            respect + catalog_override propagation)
+#                            respect + beam_options on the level)
 #   - :two_way            → opts-schema LinearAxisPattern (perp to span axis)
 #   - :flat_plate         → no framing (derive returns nothing)
 #
 # Verifies: level counts per slab, joist Beam role/level/lateral_role/material,
-# the per-level MemberGroup + catalog_override propagation, host-member
+# the per-level MemberGroup, host-member
 # subdivision (multi-segment chains), and idempotence.
 #
 # Run:
@@ -188,13 +188,12 @@ end
     end
     n_host_beams = length(struc.beams)
 
-    # ── Manually attach a roof-deck level to test catalog_override + manual
-    # respect. A distinct sentinel object stands in for a section catalog.
-    owsj_catalog = (:owsj_only, ["22K6", "24K7"])
+    # ── Manually attach a roof-deck level to test beam_options + manual respect.
+    joist_opts = StructuralSizer.SteelBeamOptions(composite = false)
     manual_jrd = FramingLevel{Float64}(
         slab_idx = 0, level = 1,
         pattern = LinearAxisPattern{Float64}((0.0, 1.0), ustrip(u"m", 4.0u"ft"), nothing),
-        role = :joist, material = A992_Steel, catalog_override = owsj_catalog)
+        role = :joist, material = A992_Steel, beam_options = joist_opts)
     attach_framing_level!(struc, slab_jrd, manual_jrd)
 
     opts = (materials = (steel = A992_Steel, timber = SMOKE_TIMBER, concrete = NWC_4000),
@@ -238,7 +237,7 @@ end
         end
     end
 
-    @testset "(e) MemberGroup created + catalog_override propagated" begin
+    @testset "(e) MemberGroup created; beam_options stay on the level" begin
         # Every materialized level stamped a group_id and registered a group.
         for slab in (slab_mtj, slab_jrd, slab_2w)
             gid = slab.framing_levels[1].group_id
@@ -247,12 +246,11 @@ end
             grp = struc.member_groups[gid]
             @test !isempty(grp.member_indices)
         end
-        # The manually attached roof-deck level's catalog_override reaches the group.
-        jrd_grp = struc.member_groups[slab_jrd.framing_levels[1].group_id]
-        @test jrd_grp.catalog_override == owsj_catalog
-        # Auto-derived levels carry no catalog override.
-        @test struc.member_groups[slab_mtj.framing_levels[1].group_id].catalog_override === nothing
-        @test struc.member_groups[slab_2w.framing_levels[1].group_id].catalog_override === nothing
+        # The manually attached level keeps its sizing options. Auto-derived
+        # levels have none, so they use the building-wide options.
+        @test slab_jrd.framing_levels[1].beam_options === joist_opts
+        @test slab_mtj.framing_levels[1].beam_options === nothing
+        @test slab_2w.framing_levels[1].beam_options === nothing
     end
 
     @testset "(f) host members subdivided into multi-segment chains" begin

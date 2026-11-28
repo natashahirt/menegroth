@@ -22,6 +22,8 @@ Base.@kwdef mutable struct SiteConditions
     S1::Union{Float64, Nothing} = nothing
     site_class::Symbol = :D
     risk_category::Symbol = :II
+    # Set by the lateral stage. Nothing until that stage has run.
+    sdc::Union{Symbol, Nothing} = nothing
     
     # Snow / Rain
     ground_snow_load::Union{typeof(1.0u"kN/m^2"), Nothing} = nothing
@@ -170,13 +172,15 @@ different keys.
 
 Structural steel (and rebar used as the whole section) is `section_area · L`
 under that metal. Reinforced concrete is `(Ag − As) · L` of concrete plus
-`As · L` of rebar. `As` is `As_total` on a column section, or `As + As_prime`
-on a beam section. `rebar` supplies the rebar material when `mat` is a plain
-`Concrete` (beam and column options keep the grade on `rebar_material`).
+`As · L` of rebar, where `Ag` is [`StructuralSizer.self_weight_area`](@ref): a
+T-beam's flange is the slab and is taken off with the slab. `As` is `As_total`
+on a column section, or `As + As_prime` on a beam section. `rebar` supplies the
+rebar material when `mat` is a plain `Concrete` (beam and column options keep
+the grade on `rebar_material`).
 """
 function member_material_volumes(sec, L, mat; rebar=nothing)
     Lq = L isa Unitful.Quantity ? uconvert(u"m", L) : L * u"m"
-    Ag = uconvert(u"m^2", StructuralSizer.section_area(sec))
+    Ag = uconvert(u"m^2", StructuralSizer.self_weight_area(sec))
     if mat isa StructuralSizer.StructuralSteel || mat isa StructuralSizer.RebarSteel
         return MaterialVolumes(_volume_key(mat) => Ag * Lq)
     end
@@ -188,6 +192,19 @@ function member_material_volumes(sec, L, mat; rebar=nothing)
         vols[reb] = As * Lq
     end
     return vols
+end
+
+"""One support's share of one cell, in plan metres.
+
+`kind` is `:column` or `:wall`. `owner` is the index in `structure.columns`
+or `structure.walls`. `xy` is the boundary. A straight share is a polygon
+with a few corners. A parabolic share carries the sampled arc.
+"""
+struct SlabTributaryPolygon
+    cell_idx::Int
+    kind::Symbol
+    owner::Int
+    xy::Vector{NTuple{2, Float64}}
 end
 
 """
@@ -212,6 +229,9 @@ reassignment during sizing (e.g., CIPSlabResult → FlatPlatePanelResult).
   ([`FramingLevel`](@ref)); levels `1, 2, …` (level 0 is the primary skeleton).
   Empty by default; populated by `attach_framing_level!` (manual) or Phase 5's
   auto-generation.
+- `tributary_polygons`: The column and wall shares of this slab's cells, as
+  [`compute_column_tributaries!`](@ref) computed them. A parabolic edge is
+  already sampled into the loop.
 """
 mutable struct Slab{T}
     cell_indices::Vector{Int}
@@ -229,6 +249,7 @@ mutable struct Slab{T}
     # Framing hierarchy (Phase 4): generated levels above this slab. Empty until
     # attached manually (attach_framing_level!) or by Phase 5 auto-generation.
     framing_levels::Vector{FramingLevel{T}}
+    tributary_polygons::Vector{SlabTributaryPolygon}
 end
 
 """
@@ -246,7 +267,29 @@ function Slab(cell_indices::Vector{Int}, result::AbstractFloorResult, spans::Spa
     spans_T = SpanInfo{T}(T(spans.primary), T(spans.secondary), spans.axis, T(spans.isotropic))
     levels = isnothing(framing_levels) ? FramingLevel{T}[] : framing_levels
     Slab{T}(cell_indices, result, floor_type, spans_T, position, group_id, volumes,
-            drop_panel, design_details, levels)
+            drop_panel, design_details, levels, SlabTributaryPolygon[])
+end
+
+"""
+Positional `Slab` from before tributary polygons were stored on the slab.
+
+The column and wall shares stay empty until `compute_column_tributaries!`.
+"""
+function Slab{T}(
+    cell_indices::Vector{Int},
+    result::AbstractFloorResult,
+    floor_type::Symbol,
+    spans::SpanInfo{T},
+    position::Symbol,
+    group_id::Union{UInt64, Nothing},
+    volumes::MaterialVolumes,
+    drop_panel::Union{Nothing, StructuralSizer.DropPanelGeometry},
+    design_details::Union{Nothing, NamedTuple},
+    framing_levels::Vector{FramingLevel{T}},
+) where {T}
+    return Slab{T}(cell_indices, result, floor_type, spans, position, group_id,
+                   volumes, drop_panel, design_details, framing_levels,
+                   SlabTributaryPolygon[])
 end
 
 """Single-cell slab convenience: wraps the cell index in a vector."""

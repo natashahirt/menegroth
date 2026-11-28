@@ -157,11 +157,15 @@ section_geometry(::Type{<:RCTBeamSection}) = TShape()
 # Timber
 section_geometry(::Type{<:GlulamSection}) = SolidRect()
 
-# RC column rebar visualization
-has_rebar(sec::RCColumnSection) = !isempty(sec.bars)
+# RC column rebar visualization. Bars are stored from the bottom-left corner of
+# the bounding box (circular: centre at (D/2, D/2)), so shifting by half the
+# width/depth gives the same centroid-origin frame as `section_polygon`.
+const _RCColumnWithBars = Union{RCColumnSection, RCCircularSection}
+
+has_rebar(sec::_RCColumnWithBars) = !isempty(sec.bars)
 
 """Rebar positions in centroid-relative (y, z) coordinates (meters) for an RC column."""
-function section_rebar_positions(sec::RCColumnSection)
+function section_rebar_positions(sec::_RCColumnWithBars)
     b = ustrip(u"m", section_width(sec))
     h = ustrip(u"m", section_depth(sec))
     return [(ustrip(u"m", bar.x) - b/2, 
@@ -169,10 +173,154 @@ function section_rebar_positions(sec::RCColumnSection)
 end
 
 """Rebar radius (meters) for visualization, computed from the first bar's area."""
-function section_rebar_radius(sec::RCColumnSection)
+function section_rebar_radius(sec::_RCColumnWithBars)
     isempty(sec.bars) && return 0.0
     As = ustrip(u"m^2", sec.bars[1].As)
     return sqrt(As / π)
+end
+
+# A rectangular beam stores one tension layer at `d` and, when doubly reinforced,
+# one compression layer at `d_prime`. Both layers use the clear spacing
+# `validate` already checks: the outer bar center is one cover, one stirrup
+# diameter, and half a bar in from the face, and the rest are spaced evenly.
+const _RCBeamWithLayers = Union{RCBeamSection, RCTBeamSection}
+
+has_rebar(sec::_RCBeamWithLayers) = sec.n_bars > 0 || sec.n_bars_prime > 0
+
+"""One layer of equal bars. `z` is the centroid-frame height of the layer."""
+function _beam_bar_row(width::Float64, cover::Float64, stirrup::Float64,
+                       diameter::Float64, n::Int, z::Float64)
+    n > 0 || return NTuple{3, Float64}[]
+    outer = width / 2 - cover - stirrup - diameter / 2
+    n == 1 && return [(0.0, z, diameter)]
+    return [(y, z, diameter) for y in range(-outer, outer; length = n)]
+end
+
+"""Tension and compression bars of a rectangular beam, in the centroid frame."""
+function section_rebar_bars(sec::RCBeamSection)
+    width = ustrip(u"m", sec.b)
+    depth = ustrip(u"m", sec.h)
+    cover = ustrip(u"m", sec.cover)
+    stirrup = ustrip(u"m", rebar(sec.stirrup_size).diameter)
+    bars = NTuple{3, Float64}[]
+    if sec.n_bars > 0
+        diameter = ustrip(u"m", rebar(sec.bar_size).diameter)
+        z = -depth / 2 + cover + stirrup + diameter / 2
+        append!(bars, _beam_bar_row(width, cover, stirrup, diameter, sec.n_bars, z))
+    end
+    if sec.n_bars_prime > 0 && sec.bar_size_prime > 0
+        diameter = ustrip(u"m", rebar(sec.bar_size_prime).diameter)
+        z = depth / 2 - cover - stirrup - diameter / 2
+        append!(bars, _beam_bar_row(width, cover, stirrup, diameter, sec.n_bars_prime, z))
+    end
+    return bars
+end
+
+"""Tension and compression bars of a T-beam. The row sits in the web."""
+function section_rebar_bars(sec::RCTBeamSection)
+    width = ustrip(u"m", sec.bw)
+    cover = ustrip(u"m", sec.cover)
+    stirrup = ustrip(u"m", rebar(sec.stirrup_size).diameter)
+    z_top = ustrip(u"m", sec.h - gross_centroid_from_top(sec))
+    bars = NTuple{3, Float64}[]
+    if sec.n_bars > 0
+        diameter = ustrip(u"m", rebar(sec.bar_size).diameter)
+        append!(bars, _beam_bar_row(width, cover, stirrup, diameter, sec.n_bars,
+                                    z_top - ustrip(u"m", sec.d)))
+    end
+    if sec.n_bars_prime > 0 && sec.bar_size_prime > 0
+        diameter = ustrip(u"m", rebar(sec.bar_size_prime).diameter)
+        append!(bars, _beam_bar_row(width, cover, stirrup, diameter, sec.n_bars_prime,
+                                    z_top - ustrip(u"m", sec.d_prime)))
+    end
+    return bars
+end
+
+section_rebar_positions(sec::_RCBeamWithLayers) =
+    [(y, z) for (y, z, _) in section_rebar_bars(sec)]
+
+function section_rebar_radius(sec::_RCBeamWithLayers)
+    bars = section_rebar_bars(sec)
+    return isempty(bars) ? 0.0 : bars[1][3] / 2
+end
+
+"""
+    section_rebar_bars(sec) -> Vector{NTuple{3,Float64}}
+
+Each bar as `(y, z, diameter)` in the centroid frame of `section_polygon`, meters.
+"""
+function section_rebar_bars(sec::AbstractSection)
+    radius = section_rebar_radius(sec)
+    return [(y, z, 2 * radius) for (y, z) in section_rebar_positions(sec)]
+end
+
+"""
+    section_transverse(sec) -> NamedTuple or nothing
+
+The stirrup, tie, or spiral the section stores. `loop` is the bar centerline
+in the centroid frame. `radius` is a circle about the origin for a spiral.
+`nothing` when the section has no transverse bar.
+"""
+section_transverse(::AbstractSection) = nothing
+
+function _closed_loop(width::Float64, depth::Float64, cover::Float64, diameter::Float64)
+    inset = cover + diameter / 2
+    (2 * inset < width && 2 * inset < depth) || return nothing
+    hw, hd = width / 2, depth / 2
+    return NTuple{2, Float64}[
+        (-hw + inset, -hd + inset),
+        ( hw - inset, -hd + inset),
+        ( hw - inset,  hd - inset),
+        (-hw + inset,  hd - inset),
+    ]
+end
+
+function section_transverse(sec::RCBeamSection)
+    diameter = ustrip(u"m", rebar(sec.stirrup_size).diameter)
+    cover = ustrip(u"m", sec.cover)
+    loop = _closed_loop(ustrip(u"m", sec.b), ustrip(u"m", sec.h), cover, diameter)
+    isnothing(loop) && return nothing
+    return (kind = :stirrup, diameter = diameter, cover = cover,
+            bar_size = sec.stirrup_size, loop = loop, radius = nothing)
+end
+
+function section_transverse(sec::RCTBeamSection)
+    diameter = ustrip(u"m", rebar(sec.stirrup_size).diameter)
+    cover = ustrip(u"m", sec.cover)
+    inset = cover + diameter / 2
+    bw = ustrip(u"m", sec.bw)
+    z_bot = -ustrip(u"m", gross_centroid_from_top(sec))
+    z_top = ustrip(u"m", sec.h) + z_bot
+    y_l, y_r = -bw / 2 + inset, bw / 2 - inset
+    z_lo, z_hi = z_bot + inset, z_top - inset
+    (y_r > y_l && z_hi > z_lo) || return nothing
+    return (kind = :stirrup, diameter = diameter, cover = cover, bar_size = sec.stirrup_size,
+            loop = NTuple{2, Float64}[(y_l, z_lo), (y_r, z_lo), (y_r, z_hi), (y_l, z_hi)],
+            radius = nothing)
+end
+
+function section_transverse(sec::RCColumnSection)
+    diameter = ustrip(u"m", rebar(sec.tie_bar_size).diameter)
+    cover = ustrip(u"m", sec.cover)
+    loop = _closed_loop(ustrip(u"m", sec.b), ustrip(u"m", sec.h), cover, diameter)
+    isnothing(loop) && return nothing
+    kind = sec.tie_type == :spiral ? :spiral : :tie
+    return (kind = kind, diameter = diameter, cover = cover,
+            bar_size = sec.tie_bar_size, loop = loop, radius = nothing)
+end
+
+function section_transverse(sec::RCCircularSection)
+    cover = ustrip(u"m", sec.cover)
+    diameter_section = ustrip(u"m", sec.D)
+    bars = section_rebar_positions(sec)
+    isempty(bars) && return nothing
+    bar_radius = section_rebar_radius(sec)
+    # The constructor seats each bar on the outside of the spiral.
+    diameter = diameter_section / 2 - cover - hypot(bars[1]...) - bar_radius
+    diameter > 1e-4 || return nothing
+    kind = sec.tie_type == :tied ? :tie : :spiral
+    return (kind = kind, diameter = diameter, cover = cover, bar_size = nothing,
+            loop = nothing, radius = diameter_section / 2 - cover - diameter / 2)
 end
 
 # =============================================================================

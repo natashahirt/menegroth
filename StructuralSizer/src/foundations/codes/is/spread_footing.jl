@@ -247,7 +247,8 @@ function design_footing(::SpreadFooting,
         rebar_dia_m,    # Rebar diameter (m)
         V_concrete,     # Concrete volume (m³)
         V_steel,        # Steel volume (m³)
-        utilization
+        utilization,
+        FoundationUtilizations(; bearing = Float64(utilization)),
     )
 end
 

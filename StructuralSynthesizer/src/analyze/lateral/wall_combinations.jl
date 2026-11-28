@@ -7,9 +7,9 @@
 # N is compression-positive, in newtons, matching the wall P–M checkers.
 # V is in-plane shear along the pier, in newtons. M is the in-plane moment
 # about the horizontal normal through the cut centroid, in newton-metres.
-# Out-of-plane shear and moment are not in this resultant.
+# Vo and Mo are the out-of-plane pair. They are reported and not checked.
 
-"""In-plane axial force, shear, and moment of one pier for one case."""
+"""In-plane and out-of-plane resultants of one pier for one case."""
 struct WallAction
     "Compression-positive axial force [N]."
     N::Float64
@@ -17,6 +17,13 @@ struct WallAction
     V::Float64
     "In-plane moment about the horizontal normal through the cut centroid [N·m]."
     M::Float64
+    "Out-of-plane shear, along the horizontal normal [N]."
+    Vo::Float64
+    "Out-of-plane moment about the pier tangent [N·m]."
+    Mo::Float64
+    function WallAction(N, V, M, Vo=0.0, Mo=0.0)
+        new(Float64(N), Float64(V), Float64(M), Float64(Vo), Float64(Mo))
+    end
 end
 
 WallAction() = WallAction(0.0, 0.0, 0.0)
@@ -43,6 +50,12 @@ struct CombinedWallAction
     N::Float64
     V::Float64
     M::Float64
+    Vo::Float64
+    Mo::Float64
+    function CombinedWallAction(combination, alternative, N, V, M, Vo=0.0, Mo=0.0)
+        new(combination, alternative, Float64(N), Float64(V), Float64(M),
+            Float64(Vo), Float64(Mo))
+    end
 end
 
 """
@@ -56,14 +69,18 @@ the pier delivers, so `N = -Fz`.
 
 The in-plane tangent is `(x2 - x1, y2 - y1)`. The horizontal normal is that
 tangent turned 90° counterclockwise. `V` is the shear along the tangent.
-`M` is the moment about the normal.
+`M` is the moment about the normal. `Vo` is the shear along the normal.
+`Mo` is the moment about the tangent. Out-of-plane values are reported and
+are not a strength check.
 """
 function wall_action_from_global(wall::Wall, Fx, Fy, Fz, Mx, My, Mz)
     tx, ty, nx, ny = _pier_plan_axes(wall)
     return WallAction(
         -Float64(Fz),
         Float64(Fx) * tx + Float64(Fy) * ty,
-        Float64(Mx) * nx + Float64(My) * ny)
+        Float64(Mx) * nx + Float64(My) * ny,
+        Float64(Fx) * nx + Float64(Fy) * ny,
+        Float64(Mx) * tx + Float64(My) * ty)
 end
 
 """
@@ -93,7 +110,52 @@ function pier_wall_action(wall::Wall, pier::WallPierMesh, u::AbstractVector{<:Re
     return WallAction(
         -Float64(Fz),
         Float64(Fx) * tx + Float64(Fy) * ty,
-        Float64(Mx) * nx + Float64(My) * ny)
+        Float64(Mx) * nx + Float64(My) * ny,
+        Float64(Fx) * nx + Float64(Fy) * ny,
+        Float64(Mx) * tx + Float64(My) * ty)
+end
+
+# A factored tributary axial below this is not a dead/live split to scale.
+const _WALL_AXIAL_SCALE_FLOOR_N = 1.0
+
+"""
+    raise_wall_axial_to_shell(gravity, n_shell; combo=default_combo) -> PierGravityActions
+
+Raise dead and live axial so `combo`'s `D` and `L` terms match the story shell
+when that shell reaction is larger.
+
+`n_shell` is one factored vertical force, the same combination the story
+shell puts on the panels: [`total_factored_pressure`](@ref) is
+`factored_pressure(default_combo, dead, live)`, so the comparison is
+`combo.D * D.N + combo.L * L.N`. The roof companion is not in that pressure
+and is not scaled. Shear and moment stay on the tributary cut. The dead and
+live proportion stays the proportion already on the pier.
+
+# ENGINEERING JUDGMENT
+The shell reports one factored reaction. ACI 318 does not split it back into
+dead and live. Scaling both axials by the same ratio keeps the split the
+tributary analysis already made, and leaves a pier whose factored dead-plus-live
+axial is about zero untouched: there is no proportion to apply.
+"""
+function raise_wall_axial_to_shell(gravity::PierGravityActions, n_shell::Real;
+                                   combo::LoadCombination = default_combo)
+    n_trib = combo.D * gravity.D.N + combo.L * gravity.L.N
+    if !(isfinite(n_shell) && isfinite(n_trib) &&
+         n_trib > _WALL_AXIAL_SCALE_FLOOR_N && n_shell > n_trib)
+        return gravity
+    end
+    r = n_shell / n_trib
+    return PierGravityActions(gravity.roof,
+        WallAction(gravity.D.N * r, gravity.D.V, gravity.D.M, gravity.D.Vo, gravity.D.Mo),
+        WallAction(gravity.L.N * r, gravity.L.V, gravity.L.M, gravity.L.Vo, gravity.L.Mo),
+        gravity.companion)
+end
+
+"""The pier cut, with dead and live axial raised to a stored shell reaction."""
+function _gravity_raised_to_shell(struc, gravity::PierGravityActions, wall_index::Int)
+    n = _story_shell_wall_axial(struc, wall_index)
+    n === nothing && return gravity
+    return raise_wall_axial_to_shell(gravity, n)
 end
 
 """
@@ -124,12 +186,17 @@ end
 """
     assembly_wall_action(struc, assembly, u; kwargs...) -> WallAction
 
-The single pier of an assembly that is not joined. A joined assembly throws
-[`refuse_joined_wall_design`](@ref): an ordinary wall has no flange width here.
+The single pier of an assembly that is not joined. A joined assembly has no
+single action; read each leg with [`pier_wall_action`](@ref).
 """
 function assembly_wall_action(struc::BuildingStructure, assembly::WallAssembly,
                               u::AbstractVector{<:Real}; kwargs...)
-    refuse_joined_wall_design(assembly)
+    if assembly.joined
+        throw(ArgumentError(
+            "assembly_wall_action: assembly on story $(assembly.story) joins " *
+            "walls $(join(assembly.wall_indices, ", ")). There is no single " *
+            "action. Read each pier with pier_wall_action."))
+    end
     idx = only(assembly.wall_indices)
     pier = _pier_by_wall_index(struc.wall_mesh, idx)
     return pier_wall_action(struc.walls[idx], pier, u; kwargs...)
@@ -163,6 +230,53 @@ function combine_wall_action(combo::LoadCombination, gravity::PierGravityActions
                              rho::Union{Nothing, Real}=nothing,
                              SDS::Union{Nothing, Real}=nothing,
                              alternative::Symbol=:only)
+    terms = _combination_terms(combo, gravity; wind, qe, rho, SDS, alternative)
+    N = _factored_component(combo, terms.roof, gravity.D.N, terms.live.N,
+                            gravity.companion.N, terms.wind_a.N, terms.eh.N, terms.ev_N)
+    V = _factored_component(combo, terms.roof, gravity.D.V, terms.live.V,
+                            gravity.companion.V, terms.wind_a.V, terms.eh.V, 0.0)
+    M = _factored_component(combo, terms.roof, gravity.D.M, terms.live.M,
+                            gravity.companion.M, terms.wind_a.M, terms.eh.M, 0.0)
+    # Ev is an axial effect. Out-of-plane shear and moment follow V and M.
+    Vo = _factored_component(combo, terms.roof, gravity.D.Vo, terms.live.Vo,
+                             gravity.companion.Vo, terms.wind_a.Vo, terms.eh.Vo, 0.0)
+    Mo = _factored_component(combo, terms.roof, gravity.D.Mo, terms.live.Mo,
+                             gravity.companion.Mo, terms.wind_a.Mo, terms.eh.Mo, 0.0)
+    return CombinedWallAction(combo.name, alternative, N, V, M, Vo, Mo)
+end
+
+"""
+    factored_inplane_moment_parts(combo, gravity; wind, qe, rho, SDS, alternative=:only)
+        -> Vector{Float64}
+
+The two in-plane moments that add to this combination's moment, in N·m.
+
+The first is factored gravity: dead, live, and the roof companion. The second
+is wind or `Eh`. `Ev` is an axial effect and is not in either moment. The two
+values add to the `M` of [`combine_wall_action`](@ref) for the same arguments.
+
+# Citation
+ACI 318-19 R6.2.5.3 (corpus: aci-318-19, PDF page 72). The 1.4 limit is the
+secondary-to-primary moment ratio of the moment being magnified. These are
+the two moments the combination adds.
+"""
+function factored_inplane_moment_parts(combo::LoadCombination, gravity::PierGravityActions;
+                                       wind::Union{Nothing, WallAction}=nothing,
+                                       qe::Union{Nothing, WallAction}=nothing,
+                                       rho::Union{Nothing, Real}=nothing,
+                                       SDS::Union{Nothing, Real}=nothing,
+                                       alternative::Symbol=:only)
+    terms = _combination_terms(combo, gravity; wind, qe, rho, SDS, alternative)
+    gravity_M = _factored_component(combo, terms.roof, gravity.D.M, terms.live.M,
+                                    gravity.companion.M, 0.0, 0.0, 0.0)
+    lateral_M = _factored_component(combo, terms.roof, 0.0, 0.0, 0.0,
+                                    terms.wind_a.M, terms.eh.M, 0.0)
+    return [gravity_M, lateral_M]
+end
+
+"""Live, wind, and Eh actions for one combination, after the same gates as the sum."""
+function _combination_terms(combo::LoadCombination, gravity::PierGravityActions;
+                            wind, qe, rho, SDS, alternative::Symbol)
     alternative in (:only, :L, :W) || throw(ArgumentError(
         "combine_wall_action: alternative must be :only, :L, or :W, " *
         "got $(repr(alternative))."))
@@ -201,14 +315,9 @@ function combine_wall_action(combo::LoadCombination, gravity::PierGravityActions
     end
     live = use_live ? gravity.L : WallAction()
     wind_a = use_wind ? wind : WallAction()
-    eh = use_eh ? WallAction(ρ * qe.N, ρ * qe.V, ρ * qe.M) : WallAction()
-    N = _factored_component(combo, roof, gravity.D.N, live.N, gravity.companion.N,
-                            wind_a.N, eh.N, ev_N)
-    V = _factored_component(combo, roof, gravity.D.V, live.V, gravity.companion.V,
-                            wind_a.V, eh.V, 0.0)
-    M = _factored_component(combo, roof, gravity.D.M, live.M, gravity.companion.M,
-                            wind_a.M, eh.M, 0.0)
-    return CombinedWallAction(combo.name, alternative, N, V, M)
+    eh = use_eh ? WallAction(ρ * qe.N, ρ * qe.V, ρ * qe.M, ρ * qe.Vo, ρ * qe.Mo) :
+         WallAction()
+    return (; roof, live, wind_a, eh, ev_N)
 end
 
 """
@@ -243,25 +352,32 @@ end
 """
     wind_pier_actions(struc, analysis, pier) -> Vector{WallAction}
 
-Re-solve each stored Chapter 27 case and read this pier. The story analysis
-keeps master displacements only. The forces re-solved here are the `Fx`,
-`Fy`, and `Mz` already on the case. `model.u` is not replaced.
+Read this pier on each stored Chapter 27 case. The story analysis keeps the
+solved displacement of every case, and this read uses that displacement.
+A hand-built analysis with no stored displacement is solved once here.
+The forces are the `Fx`, `Fy`, and `Mz` already on the case. `model.u` is
+not replaced.
 """
 function wind_pier_actions(struc::BuildingStructure, analysis::WindStoryAnalysis,
                            pier::WallPierMesh)
     cases = Vector{Vector{Asap.AbstractLoad}}(undef, length(analysis.cases))
     for (j, case) in enumerate(analysis.cases)
-        cases[j] = _wind_loads(analysis.levels, case.Fx_kN, case.Fy_kN, case.Mz_kN_m)
+        cases[j] = _wind_loads(struc, analysis.levels, case.Fx_kN, case.Fy_kN,
+                               case.Mz_kN_m, analysis.centroids)
     end
-    return _story_case_pier_actions(struc, cases, pier)
+    stored = _stored_story_displacements(struc.asap_model, analysis.displacements,
+                                         length(analysis.cases))
+    return _story_case_pier_actions(struc, cases, pier; displacements=stored)
 end
 
 """
     seismic_strength_pier_actions(struc, analysis, pier) -> (indices, actions)
 
-Re-solve each `:strength` ELF case and read this pier. `:drift` cases are
-omitted. `indices[k]` is the case in `analysis.cases` that produced
-`actions[k]`. The action is `QE`, before `ρ`. `model.u` is not replaced.
+Read this pier on each `:strength` ELF effect. `:drift` cases are omitted.
+`indices[k]` is the case in `analysis.cases` that produced `actions[k]`.
+The action is `QE`, before `ρ`. A stored displacement is reused. An effect
+that sums cases uses the same sum of those displacements. `model.u` is not
+replaced.
 """
 function seismic_strength_pier_actions(struc::BuildingStructure,
                                        analysis::ElfStoryAnalysis,
@@ -280,8 +396,9 @@ function seismic_strength_pier_actions(struc::BuildingStructure,
                                        analysis::ElfStoryAnalysis,
                                        pier::WallPierMesh,
                                        effects::AbstractVector{SeismicEffectCase})
-    cases = [seismic_effect_loads(analysis, e) for e in effects]
-    return _story_case_pier_actions(struc, cases, pier)
+    cases = [seismic_effect_loads(struc, analysis, e) for e in effects]
+    stored = seismic_effect_displacements(analysis, effects)
+    return _story_case_pier_actions(struc, cases, pier; displacements=stored)
 end
 
 # ------------------------------------------------------------------------------
@@ -307,7 +424,6 @@ edge off `(x1, y1)–(x2, y2)` without changing which end is the start. The
 architectural tangent breaks a tie so shear keeps its sign.
 """
 function _meshed_plan_axes(wall, pier::WallPierMesh)
-    tx, ty, nx, ny = _pier_plan_axes(wall)
     z = _pier_bottom(pier)
     pts = Tuple{Float64, Float64}[]
     for sh in pier.shells, nd in sh.nodes
@@ -317,6 +433,12 @@ function _meshed_plan_axes(wall, pier::WallPierMesh)
         any(p -> hypot(p[1] - xy[1], p[2] - xy[2]) <= 1e-9, pts) && continue
         push!(pts, xy)
     end
+    return _oriented_plan_axes(wall, pts)
+end
+
+"Tangent through `pts`, oriented with `(x2 - x1, y2 - y1)`."
+function _oriented_plan_axes(wall, pts)
+    tx, ty, nx, ny = _pier_plan_axes(wall)
     length(pts) < 2 && return tx, ty, nx, ny
     best = -1.0
     a = pts[1]
@@ -372,12 +494,28 @@ function _require_rho(rho)
     return ρ
 end
 
-function _story_case_pier_actions(struc, cases, pier::WallPierMesh)
+"""
+Stored displacements that line up with `ncases` and the model.
+
+`nothing` when the analysis was built without a solve, so the caller solves.
+"""
+function _stored_story_displacements(model, stored, ncases::Int)
+    model === nothing && return nothing
+    length(stored) == ncases || return nothing
+    n = model.nDOFs
+    all(v -> length(v) == n, stored) || return nothing
+    return stored
+end
+
+function _story_case_pier_actions(struc, cases, pier::WallPierMesh; displacements=nothing)
     isempty(cases) && return WallAction[]
     model = struc.asap_model
     isnothing(model) && throw(ArgumentError(
         "wall action: the building has no Asap model. Run to_asap! first."))
-    u = Asap.solve(model, cases, struc.asap_rigid_links)
+    u = displacements === nothing ?
+        Asap.solve(model, cases, lateral_solve_links(struc)) : displacements
+    length(u) == length(cases) || throw(ArgumentError(
+        "wall action: $(length(u)) stored displacements and $(length(cases)) cases."))
     wall = struc.walls[pier.wall_index]
     return [pier_wall_action(wall, pier, u[i];
                              loads=cases[i], fixed_end_from_loads=true)

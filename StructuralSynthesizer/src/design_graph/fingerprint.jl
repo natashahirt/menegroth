@@ -165,6 +165,16 @@ function _field_fingerprint(struc, field::Symbol)
                    for f in struc.foundations]
     elseif field === :asap_model
         return _asap_fingerprint(struc.asap_model)
+    elseif field === :walls
+        # The ordinary-wall stage's thickness. Not `repr(struc.walls)`: that
+        # mixes checks, mesh, and openings into the hash foundations read.
+        return Any[w.thickness for w in struc.walls]
+    elseif field === :frame_section_floors
+        return Any[(gid, repr(s)) for (gid, s) in sort!(collect(struc.frame_section_floors);
+                                                        by = first)]
+    elseif field === :frame_floor_demands
+        return Any[(gid, repr(rows)) for (gid, rows) in sort!(collect(struc.frame_floor_demands);
+                                                              by = first)]
     else
         # Unknown field: fall back to a repr of the whole field. Safe (complete)
         # but coarse; declared writes should use the named fields above.
@@ -178,11 +188,11 @@ end
 # sections + forces ⇒ identical downstream analysis. Deliberately excludes the
 # recomputable factorization cache and topology (fixed after `prepare!`).
 function _asap_fingerprint(model)
-    (isnothing(model) || isempty(model.elements)) && return Any[]
+    (isnothing(model) || isempty(model.frame_elements)) && return Any[]
     # Keep raw element/global vectors (may be plain Float64 or dimensionful) and
     # let the recursive content hasher serialize each element; forcing Float64
     # would throw on unit-ful entries.
-    els = Any[(collect(el.forces), repr(el.section)) for el in model.elements]
+    els = Any[(collect(el.forces), repr(el.section)) for el in model.frame_elements]
     return Any[els, collect(model.u), collect(model.reactions)]
 end
 

@@ -54,6 +54,8 @@ function with_fea_source(method::FEA, source::Symbol)
                patch_stiffness_factor = method.patch_stiffness_factor,
                averaging_width_factor = method.averaging_width_factor,
                deflection_Ie_method = method.deflection_Ie_method,
+               fixed_mesh = method.fixed_mesh,
+               fixed_mesh_cap = method.fixed_mesh_cap,
                source)
 end
 

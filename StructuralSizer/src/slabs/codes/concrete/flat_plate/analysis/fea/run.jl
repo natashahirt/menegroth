@@ -131,6 +131,19 @@ function run_moment_analysis(
         cache = FEAModelCache()
     end
     cache.averaging_width_factor = method.averaging_width_factor
+
+    # Fixed-mesh fenced-zone cap (audit #1 / direction 7.8). The cap is the
+    # design `max_column_size`; the slab-level FEA method does not carry it, so
+    # callers that enable `fixed_mesh` should set `fixed_mesh_cap`. Fall back to
+    # 36 in (the `standard_rc_columns` catalog maximum) with a one-time warning.
+    fixed_mesh_cap = if method.fixed_mesh && method.fixed_mesh_cap === nothing
+        @warn "FEA fixed_mesh=true without fixed_mesh_cap; sizing the fenced zone \
+               for a 36 in cap" maxlog=1
+        uconvert(u"m", 36.0u"inch")
+    else
+        method.fixed_mesh_cap
+    end
+
     _build_or_update_fea!(
         cache, struc, slab, supporting_columns, h, Ecs, ν_concrete, qu, Lc;
         Ecc=Ecc, target_edge=method.target_edge, verbose=verbose, drop_panel=drop_panel,
@@ -141,6 +154,8 @@ function run_moment_analysis(
         edge_beam_l2   = l2,
         edge_beam_c1_avg = c1_avg,
         q_drop = isnothing(drop_panel) ? 0.0u"Pa" : drop_panel_dead_pressure(drop_panel, γ_concrete),
+        fixed_mesh = method.fixed_mesh,
+        fixed_mesh_cap = fixed_mesh_cap,
     )
     model = cache.model
 

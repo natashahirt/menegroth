@@ -52,6 +52,8 @@ function build_slab_shell_patches(
     patch_stiffness_factor::Float64 = 100.0,
     vertex_set::Union{Nothing, Set{Int}} = nothing,
     span_axis::NTuple{2, Float64} = (1.0, 0.0),
+    fixed_mesh::Bool = false,
+    fixed_mesh_cap::Union{Nothing, Length} = nothing,
 )
     skel = struc.skeleton
     h_m = section.thickness
@@ -63,12 +65,31 @@ function build_slab_shell_patches(
     )
     patches = Asap.ShellPatch[]
 
+    # Fixed mesh: every column patch is the cap square, oriented with the
+    # column. The mesh then covers the whole growth range; `_update_and_resolve!`
+    # carves the current footprint out of the cap zone by re-tagging triangles.
+    cap_m = fixed_mesh && fixed_mesh_cap !== nothing ? ustrip(u"m", fixed_mesh_cap) : nothing
+
     for col in columns
         vi = col.vertex_idx
         isnothing(vertex_set) || vi in vertex_set || continue
         xy = _column_xy_m(skel, col)
         cshape = col_shape(col)
-        if cshape == :circular
+        if fixed_mesh && cap_m !== nothing
+            # Cap-sized oriented square patch (shape/size leave the mesh here).
+            c1_m = cap_m
+            c2_m = cap_m
+            θ = col_orientation(col)
+            cosθ = cos(θ); sinθ = sin(θ)
+            hx = c1_m / 2; hy = c2_m / 2
+            corners_local = ((-hx, -hy), (hx, -hy), (hx, hy), (-hx, hy))
+            verts = Tuple{Float64, Float64}[
+                (xy[1] + cosθ*lx - sinθ*ly, xy[2] + sinθ*lx + cosθ*ly)
+                for (lx, ly) in corners_local
+            ]
+            push!(patches, Asap.ShellPatch(verts, (xy[1], xy[2]),
+                                           patch_section, :col_patch))
+        elseif cshape == :circular
             D_m = ustrip(u"m", col.c1)
             eq_side = D_m * sqrt(π / 4)
             push!(patches, Asap.ShellPatch(xy[1], xy[2], eq_side, eq_side,
@@ -115,6 +136,112 @@ function build_slab_shell_patches(
     end
 
     return patches
+end
+
+# =============================================================================
+# Fixed-mesh patch re-tagging (audit #1 / direction 7.8)
+# =============================================================================
+
+"""
+    _in_oriented_rect(px, py, cx, cy, θ, c1_m, c2_m; tol=1e-9) -> Bool
+
+True when the plan point `(px, py)` lies in the rectangle centred at `(cx, cy)`,
+rotated by `θ`, with full widths `c1_m` (local x) and `c2_m` (local y). The
+rotation matches [`build_slab_shell_patches`](@ref): global = R(θ)·local, so the
+inverse maps the point into the column's local axes.
+"""
+function _in_oriented_rect(px, py, cx, cy, θ, c1_m, c2_m; tol = 1e-9)
+    dx = px - cx; dy = py - cy
+    cosθ = cos(θ); sinθ = sin(θ)
+    lx =  cosθ * dx + sinθ * dy
+    ly = -sinθ * dx + cosθ * dy
+    return abs(lx) <= c1_m / 2 + tol && abs(ly) <= c2_m / 2 + tol
+end
+
+"""
+    _point_in_current_col(px, py, col, struc) -> Bool
+
+True when `(px, py)` is inside column `col`'s *current* footprint — the oriented
+rectangle `c1×c2`, or the equal-area square for a circular column (the fenced
+zone is re-tagged with square cells, see the module note).
+"""
+function _point_in_current_col(px, py, col, struc)
+    xy = _column_xy_m(struc.skeleton, col)
+    θ = col_orientation(col)
+    if col_shape(col) === :circular
+        s = ustrip(u"m", col.c1) * sqrt(π / 4)
+        return _in_oriented_rect(px, py, xy[1], xy[2], θ, s, s)
+    end
+    return _in_oriented_rect(px, py, xy[1], xy[2], θ,
+                             ustrip(u"m", col.c1), ustrip(u"m", col.c2))
+end
+
+"""
+    _owning_cap_column(px, py, columns, struc, cap_m) -> Union{Nothing, Int}
+
+Index of the column whose cap footprint (`cap_m × cap_m`, oriented) contains
+`(px, py)`. When caps overlap (columns closer than the cap apart), the nearest
+column centre wins. `nothing` when the point is in no cap zone.
+"""
+function _owning_cap_column(px, py, columns, struc, cap_m)
+    best = nothing
+    best_d2 = Inf
+    for (ci, col) in enumerate(columns)
+        xy = _column_xy_m(struc.skeleton, col)
+        _in_oriented_rect(px, py, xy[1], xy[2], col_orientation(col), cap_m, cap_m) || continue
+        d2 = (px - xy[1])^2 + (py - xy[2])^2
+        if d2 < best_d2
+            best_d2 = d2
+            best = ci
+        end
+    end
+    return best
+end
+
+"""
+    _assign_and_retag_fixed_patches!(shells, columns, struc, cap, E_slab, t_slab) -> Vector{Tuple{Int,Int}}
+
+Build the fixed-mesh re-tag map and set the seed state before the first solve.
+For every `:col_patch` triangle (the cap-sized fenced zone), record
+`(shell_index, owning_column)`, then carve the current footprint: a triangle
+whose centroid is *outside* the current column becomes ordinary slab
+(`:slab`, `E_slab`, `t_slab`); inside stays `:col_patch` (rigid, `E×factor`).
+"""
+function _assign_and_retag_fixed_patches!(shells, columns, struc, cap, E_slab, t_slab)
+    cap_m = ustrip(u"m", cap)
+    patch_zone = Tuple{Int, Int}[]
+    for (k, tri) in enumerate(shells)
+        tri isa Asap.ShellTri3 || continue
+        tri.id === :col_patch || continue
+        tc = Asap.shell_centroid(tri)
+        ci = _owning_cap_column(tc.x, tc.y, columns, struc, cap_m)
+        ci === nothing && continue
+        push!(patch_zone, (k, ci))
+        if !_point_in_current_col(tc.x, tc.y, columns[ci], struc)
+            tri.id = :slab
+            tri.E = E_slab
+            tri.thickness = t_slab
+        end
+    end
+    return patch_zone
+end
+
+"""
+    _retag_fixed_patches!(cache, columns, struc) -> Nothing
+
+Re-tag the fixed-mesh fenced zone to the *current* column footprints before a
+value-only update. Only the shell `id` is set here; [`_update_and_resolve!`](@ref)'s
+by-`id` loop then applies the patch vs slab modulus. Geometry and node numbering
+are untouched, so the stiffness pattern is reused.
+"""
+function _retag_fixed_patches!(cache::FEAModelCache, columns, struc)
+    shells = cache.model.shell_elements
+    @inbounds for (k, ci) in cache.patch_zone
+        tri = shells[k]
+        ed = cache.element_data[k]
+        tri.id = _point_in_current_col(ed.cx, ed.cy, columns[ci], struc) ? :col_patch : :slab
+    end
+    return nothing
 end
 
 """Clipped drop outline in the column-centre frame. Interior columns stay the full rectangle."""
@@ -280,6 +407,8 @@ function build_slab_shell_mesh(
     id::Symbol = :slab,
     edge_support_type = :free,
     node_map::Union{Nothing, Dict{Int, Asap.Node}} = nothing,
+    fixed_mesh::Bool = false,
+    fixed_mesh_cap::Union{Nothing, Length} = nothing,
 )
     skel = struc.skeleton
 
@@ -312,7 +441,9 @@ function build_slab_shell_mesh(
         drop_panel=drop_panel,
         patch_stiffness_factor=patch_stiffness_factor,
         vertex_set=vertex_set,
-        span_axis=_get_span_axis(slab))
+        span_axis=_get_span_axis(slab),
+        fixed_mesh=fixed_mesh,
+        fixed_mesh_cap=fixed_mesh_cap)
 
     # ─── 4. Interior nodes + conforming nodes along interior cell edges ───
     boundary_set = Set(boundary_vis)
@@ -340,12 +471,21 @@ function build_slab_shell_mesh(
     end
 
     # ─── 5. Refinement edge length ───
-    min_col_dim_m = if !isempty(columns)
-        minimum(min(ustrip(u"m", col.c1), ustrip(u"m", col.c2)) for col in columns)
+    # Fixed mesh: a fine fenced zone (~1 in) around each cap patch, independent
+    # of the current column so growth never changes the mesh. The fine edge
+    # keeps the re-tagged patch boundary close to the true column face (the
+    # 0.15–0.3 m conforming mesh was too coarse to re-tag; deci-202e97fd).
+    # Conforming mesh: refinement follows the smallest column.
+    refine_edge = if fixed_mesh
+        min(0.0254, target_m / 2.0) * u"m"
     else
-        target_m
+        min_col_dim_m = if !isempty(columns)
+            minimum(min(ustrip(u"m", col.c1), ustrip(u"m", col.c2)) for col in columns)
+        else
+            target_m
+        end
+        clamp(min_col_dim_m / 2.0, 0.04, target_m / 2.0) * u"m"
     end
-    refine_edge = clamp(min_col_dim_m / 2.0, 0.04, target_m / 2.0) * u"m"
 
     # ─── 6. Build shell mesh ───
     # Openings cut into a face, plus bays that were never a slab (a core shaft).
@@ -613,6 +753,8 @@ function _build_fea_slab_model(
     edge_beam_l2::Union{Nothing, Length} = nothing,
     edge_beam_c1_avg::Union{Nothing, Length} = nothing,
     q_drop::Pressure = 0.0u"Pa",
+    fixed_mesh::Bool = false,
+    fixed_mesh_cap::Union{Nothing, Length} = nothing,
 )
     skel = struc.skeleton
     shell_section = Asap.ShellSection(uconvert(u"m", h), uconvert(u"Pa", Ecs), ν_concrete)
@@ -623,13 +765,23 @@ function _build_fea_slab_model(
     mesh = build_slab_shell_mesh(struc, slab, columns, shell_section;
         target_edge=target_edge, drop_panel=drop_panel,
         patch_stiffness_factor=patch_stiffness_factor,
-        id=:slab_fea, edge_support_type=edge_dofs)
+        id=:slab_fea, edge_support_type=edge_dofs,
+        fixed_mesh=fixed_mesh, fixed_mesh_cap=fixed_mesh_cap)
     shells = mesh.shells
     node_map = mesh.node_map
     target_edge = mesh.target_edge
 
     # The slab edge is joined to the wall. It is not held in space.
     _, wall_bases = _attach_slab_walls!(shells, struc, slab, shell_section)
+
+    # Fixed mesh: record the cap fenced zone and carve the seed footprint before
+    # the first solve, so the seed analysis is the seed column (not the full cap).
+    patch_zone = Tuple{Int, Int}[]
+    if fixed_mesh && fixed_mesh_cap !== nothing
+        patch_zone = _assign_and_retag_fixed_patches!(
+            shells, columns, struc, fixed_mesh_cap,
+            ustrip(u"Pa", Ecs), ustrip(u"m", h))
+    end
 
     # ─── Column stub frame elements ───
     col_stubs = Dict{Int, Any}()
@@ -751,7 +903,7 @@ function _build_fea_slab_model(
     end
 
     return (model=model, col_stubs=col_stubs, shells=shells,
-            edge_beam_elements=edge_beam_elements)
+            edge_beam_elements=edge_beam_elements, patch_zone=patch_zone)
 end
 
 # =============================================================================
@@ -773,11 +925,21 @@ function _update_and_resolve!(
     edge_beam_l2::Union{Nothing, Length} = nothing,
     edge_beam_c1_avg::Union{Nothing, Length} = nothing,
     q_drop::Pressure = 0.0u"Pa",
+    fixed_mesh::Bool = false,
+    struc = nothing,
 )
     model = cache.model
     t_m = ustrip(u"m", h)
     E_Pa = ustrip(u"Pa", Ecs)
     E_patch_Pa = E_Pa * patch_stiffness_factor
+
+    # Fixed mesh: re-tag the fenced zone to the current column footprints first.
+    # Only shell `id` changes here; the by-`id` loop below applies the modulus.
+    # The mesh, node numbering and stiffness pattern are untouched, so this is a
+    # value-only update (and reuses the symbolic factorization).
+    if fixed_mesh && !isempty(cache.patch_zone) && struc !== nothing
+        _retag_fixed_patches!(cache, columns, struc)
+    end
 
     # Drop panel total depth (if present)
     drop = cache.drop_panel

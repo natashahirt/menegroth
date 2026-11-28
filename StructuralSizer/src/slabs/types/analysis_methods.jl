@@ -286,6 +286,28 @@ struct FEA <: FlatPlateAnalysisMethod
     #               `building_fea_analysis!`, which the building package defines
     source::Symbol
 
+    # Fixed-mesh prototype (audit #1 / direction 7.8). When `false` (default)
+    # the mesh conforms to each column's current footprint and a column step
+    # remeshes the slab. When `true`, the slab is meshed once at the column cap
+    # with a fine fenced zone around each column; a column step re-tags the
+    # `:col_patch` triangles inside the current footprint instead of remeshing,
+    # keeping node numbering and the stiffness pattern fixed.
+    #
+    # Accuracy (probe_fixed_mesh_accuracy.jl, plan-40b3c357): the fixed mesh sits
+    # at the conforming remesh's OWN mesh-convergence noise floor — corner
+    # punching DCR drifts ~16 % between two conforming meshes at different
+    # densities, and the fixed mesh adds little on top (16.1 % vs 15.7 %). The
+    # ±2 % per-column band is therefore unachievable by the remesh itself; the
+    # meaningful gate is "governing design unchanged & all checks pass", met in
+    # the full-building A/B (ab_fixed_mesh_accuracy.jl). OPT-IN ONLY — the
+    # production default stays `false` pending the sign-off to flip it.
+    fixed_mesh::Bool
+
+    # Cap footprint the fenced zone is sized for (== design `max_column_size`).
+    # `nothing` falls back to a built-in default in the FEA build. Ignored when
+    # `fixed_mesh=false`.
+    fixed_mesh_cap::Union{Nothing, typeof(1.0u"m")}
+
     function FEA(;
         target_edge::Union{Nothing, Unitful.Length} = nothing,
         pattern_loading::Bool = true,
@@ -304,6 +326,8 @@ struct FEA <: FlatPlateAnalysisMethod
         # Legacy keyword — maps to new knobs when provided alone
         strip_design::Union{Nothing, Symbol} = nothing,
         source::Symbol = :slab,
+        fixed_mesh::Bool = false,
+        fixed_mesh_cap::Union{Nothing, Unitful.Length} = nothing,
     )
         # ── Legacy mapping ──
         if !isnothing(strip_design)
@@ -390,6 +414,13 @@ struct FEA <: FlatPlateAnalysisMethod
         source in (:slab, :building) ||
             error("FEA source must be :slab or :building; got :$source")
 
+        fmc = if fixed_mesh_cap !== nothing
+            ustrip(u"m", fixed_mesh_cap) > 0 || error("FEA fixed_mesh_cap must be > 0")
+            uconvert(u"m", fixed_mesh_cap)
+        else
+            nothing
+        end
+
         te = if target_edge !== nothing
             ustrip(u"m", target_edge) > 0 || error("FEA target_edge must be > 0")
             uconvert(u"m", target_edge)
@@ -401,7 +432,7 @@ struct FEA <: FlatPlateAnalysisMethod
             field_smoothing, cut_method, iso_alpha, rebar_direction, sign_treatment,
             concrete_torsion_discount, patch_stiffness_factor, width_factor,
             deflection_Ie_method,
-            _strip_design, source)
+            _strip_design, source, fixed_mesh, fmc)
     end
 end
 

@@ -50,6 +50,29 @@ end
 # Trace `ev.data` may be keyed by Symbol or String; try both.
 _d(ev, key) = get(ev.data, key, get(ev.data, string(key), nothing))
 
+"""
+Governing design read straight off the designed structure (not the trace):
+per flat-plate slab, the final total thickness (in) and the sorted
+supporting-column footprints (in). This is the robust "governing design
+unchanged" acceptance signal — it reflects what was actually built.
+"""
+function design_readout(struc)
+    h = Dict{Int, Float64}()
+    cols = Dict{Int, Vector{Tuple{Float64, Float64}}}()
+    for (si, slab) in enumerate(struc.slabs)
+        slab.floor_type in (:flat_plate, :flat_slab) || continue
+        h[si] = round(ustrip(u"inch", StructuralSynthesizer.thickness(slab)); digits = 3)
+        cs = Tuple{Float64, Float64}[]
+        for col in StructuralSynthesizer._get_slab_columns(struc, slab)
+            push!(cs, (round(ustrip(u"inch", col.c1); digits = 2),
+                       round(ustrip(u"inch", col.c2); digits = 2)))
+        end
+        sort!(cs)
+        cols[si] = cs
+    end
+    return (; h, cols)
+end
+
 """Collect, per floor, the design outcome and the slab's punching trace."""
 function run_variant(method, label)
     outcomes = Dict{Int, Any}()
@@ -65,15 +88,20 @@ function run_variant(method, label)
     Asap._N_FACTORIZATIONS[] = 0
     Asap._MESH_RNG_CALLS[] = 0
     err = nothing
+    design = nothing
     t = @elapsed begin
         try
-            with_logger(NullLogger()) do
+            design = with_logger(NullLogger()) do
+                # `restore=true` (default) runs through a DesignSession and does
+                # NOT mutate the caller's `struc`; the designed structure is the
+                # return value (`design.structure`). Capture it for the readout.
                 design_building(struc, params; tc = tc)
             end
         catch e
             err = sprint(showerror, e)[1:min(end, 400)]
         end
     end
+    designed = design === nothing ? struc : design.structure
 
     # Max punching DCR per floor, from the Phase-B slab trace. Takes the LAST
     # (converged) punching_ratios per floor as the as-designed DCR, and also
@@ -100,7 +128,7 @@ function run_variant(method, label)
 
     return (; label, t, err, outcomes, max_dcr, final_dcr,
             factorizations = Asap._N_FACTORIZATIONS[],
-            mesh_rng = Asap._MESH_RNG_CALLS[], struc)
+            mesh_rng = Asap._MESH_RNG_CALLS[], struc = designed)
 end
 
 println("building = $BUILDING, max_iterations = $MAX_ITER, threads = $(Threads.nthreads())")
@@ -134,6 +162,38 @@ for k in floors
             k, sa, sb, da, db, drift, flag)
 end
 
+# Direct design-equivalence: final thickness + column sizes off each designed
+# `struc`. This is the primary "governing design unchanged" sign-off check and
+# does not depend on the Phase-B punching trace (which the discrete-optimizer
+# evaluator buffers away from `tc`, hence the NaN DCR column above).
+function report_design_equivalence(A, B)
+    ra = design_readout(A.struc)
+    rb = design_readout(B.struc)
+    slabs = sort(collect(union(keys(ra.h), keys(rb.h))))
+    println("\nslab | thickness in remesh/fixed | columns | sizes in " *
+            "(remesh" * (isempty(slabs) ? "" : " -> fixed if differ") * ")")
+    equiv = !isempty(slabs)
+    for si in slabs
+        ha = get(ra.h, si, NaN); hb = get(rb.h, si, NaN)
+        ca = get(ra.cols, si, Tuple{Float64, Float64}[])
+        cb = get(rb.cols, si, Tuple{Float64, Float64}[])
+        hmatch = isapprox(ha, hb; atol = 1e-3)
+        cmatch = ca == cb
+        equiv &= hmatch & cmatch
+        @printf("  %3d | %6.3f / %6.3f %-4s | %-3s | %s\n", si, ha, hb,
+                hmatch ? "" : "DIFF", cmatch ? "yes" : "NO",
+                cmatch ? string(ca) : string(ca) * " -> " * string(cb))
+    end
+    println(equiv ?
+        "\nGOVERNING DESIGN UNCHANGED: identical slab thickness + column sizes " *
+        "across both variants (PASS, plan-40b3c357)." :
+        isempty(slabs) ?
+        "\nNO FLAT-PLATE SLABS READ from designed structure (harness/readout bug, not a divergence)." :
+        "\nGOVERNING DESIGN DIFFERS: investigate rows flagged DIFF/NO before sign-off.")
+    return equiv
+end
+
+report_design_equivalence(A, B)
+
 println("\nAcceptance band (plan-40b3c357): punching DCR +/-2 %, moments +/-3 %, " *
-        "governing design unchanged. Face-moment drift + final h/column sizes: " *
-        "extract from each variant's designed `struc` (next refinement).")
+        "governing design unchanged.")

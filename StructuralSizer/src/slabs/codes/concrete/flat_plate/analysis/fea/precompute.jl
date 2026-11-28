@@ -132,6 +132,8 @@ function _build_or_update_fea!(
     edge_beam_l2::Union{Nothing, Length} = nothing,
     edge_beam_c1_avg::Union{Nothing, Length} = nothing,
     q_drop::Pressure = 0.0u"Pa",
+    fixed_mesh::Bool = false,
+    fixed_mesh_cap::Union{Nothing, Length} = nothing,
 )
     split_dl = !isnothing(qD) && !isnothing(qL)
     # `q_drop` is the unfactored drop self-weight. It takes the dead factor of
@@ -144,7 +146,8 @@ function _build_or_update_fea!(
     # mesh was built from. A grown column changes its patch polygon and the
     # refinement edge; rebuild rather than analyze around the old footprint.
     mesh_key = fea_mesh_key(struc, slab, columns;
-                            target_edge=target_edge, drop_panel=drop_panel)
+                            target_edge=target_edge, drop_panel=drop_panel,
+                            fixed_mesh=fixed_mesh, fixed_mesh_cap=fixed_mesh_cap)
     if cache.initialized && cache.mesh_key != mesh_key
         @debug "FEAModelCache" event=:rebuild reason="mesh_key_changed"
         _reset_fea_cache!(cache)
@@ -176,11 +179,13 @@ function _build_or_update_fea!(
             edge_beam_l2=edge_beam_l2,
             edge_beam_c1_avg=edge_beam_c1_avg,
             q_drop=q_drop_u,
+            fixed_mesh=fixed_mesh, fixed_mesh_cap=fixed_mesh_cap,
         )
         cache.model      = fea.model
         cache.col_stubs  = fea.col_stubs
         cache.shells     = fea.shells
         cache.edge_beam_elements = fea.edge_beam_elements
+        cache.patch_zone = fea.patch_zone
         cache.edge_beam_βt = edge_beam_βt
         cache.initialized = true
         cache.drop_panel  = drop_panel
@@ -212,7 +217,8 @@ function _build_or_update_fea!(
                 edge_beam_βt=edge_beam_βt,
                 edge_beam_l2=edge_beam_l2,
                 edge_beam_c1_avg=edge_beam_c1_avg,
-                q_drop=q_drop)
+                q_drop=q_drop,
+                fixed_mesh=fixed_mesh, fixed_mesh_cap=fixed_mesh_cap)
         end
         cache.n_updates += 1
         @debug "FEAModelCache" event=:update
@@ -229,7 +235,8 @@ function _build_or_update_fea!(
                                  patch_stiffness_factor=patch_stiffness_factor,
                                  edge_beam_l2=edge_beam_l2,
                                  edge_beam_c1_avg=edge_beam_c1_avg,
-                                 q_drop=q_drop_u)
+                                 q_drop=q_drop_u,
+                                 fixed_mesh=fixed_mesh, struc=struc)
             qu_restore = max(1.2 * qD + 1.6 * qL, 1.4 * qD)
             U_qu = ustrip(u"Pa", qu) == ustrip(u"Pa", qu_restore) ?
                 copy(cache.model.u) : nothing
@@ -242,7 +249,8 @@ function _build_or_update_fea!(
                                  patch_stiffness_factor=patch_stiffness_factor,
                                  edge_beam_l2=edge_beam_l2,
                                  edge_beam_c1_avg=edge_beam_c1_avg,
-                                 q_drop=q_drop_u)
+                                 q_drop=q_drop_u,
+                                 fixed_mesh=fixed_mesh, struc=struc)
             _precompute_element_data!(cache, cache.model, struc, slab)
         end
     end
